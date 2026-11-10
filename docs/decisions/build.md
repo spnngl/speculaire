@@ -30,6 +30,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `metrics` is a facade, so library crates emit metrics without depending on an exporter. The exporter's default features add its own HTTP listener and a push gateway, which the agent does not use.
   - `aws-lc-rs` is the only crypto provider `sigstore-verify` ships (sigstore-rust 0.16 `crates/sigstore-crypto/Cargo.toml:10-12`), so rustls uses it too and the build image compiles its C code.
   - One artifact works on every distro, and in a scratch image later.
+  - **Measured** (M0 spike 06): `sigstore-verify` 0.16.0 with `aws-lc-rs` builds in `rust:1.99.1-alpine` with dedens' `.cargo/` as a `static-pie linked` binary on aarch64 (7.5 MB unstripped, 32 s clean on 10 CPUs) and on x86_64 (8.4 MB, 1 min 29 s clean, built and run under Docker Desktop's amd64 emulation). There was no C or link failure.
   - Native Alpine builds avoid cross-toolchain drift for C dependencies (rs-coding `musl.md`). dedens rejected QEMU, cross and zigbuild for the same reason (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
