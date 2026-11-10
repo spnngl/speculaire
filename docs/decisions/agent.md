@@ -140,7 +140,9 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Installing the package neither runs `speculaire configure` nor edits containerd's config. The admin runs `configure` once per node (`docs/operations.md` § Install).
   - At startup, the agent stops with an error naming `speculaire configure` when the mirror certificates in `/var/lib/speculaire/mirror/` (D14) are missing.
   - `speculaire check-config` also exits 1 when a `hosts.toml` that `configure` would edit lacks the speculaire entry (D56), and names the file.
+  - `configure` writes each certificate and key to a temporary file in the same directory, sets its mode (0600 for keys), then renames it into place.
 - **Because:**
+  - containerd reads `ca` and `client` on every resolve (D14), so a file written in place can be read half-written. Setting the mode only at creation would keep the mode of a looser file that already exists (M0 spike 04).
   - Editing containerd's config changes every pull on the node, so the admin chooses when, as with `required_plugins`. Removal still runs `unconfigure` (D32), because it must undo what the admin chose to add.
   - Without the certificates the mirror cannot listen (D14). Without the entry, containerd never calls the mirror, so verification starts only at the gate (D22), and every first start waits.
 - **Revisit when:** a packaging runs `configure` for the admin, as the DaemonSet's init container would.

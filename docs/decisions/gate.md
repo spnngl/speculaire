@@ -8,6 +8,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - Each ConnID is an in-memory `tokio::io::duplex` wrapped by `ttrpc`'s `Socket::new`: ConnID 1 feeds a `Listener::new` stream, ConnID 2 feeds `Client::new`. There is no file descriptor and no `socketpair`.
   - Codegen is `ttrpc` features `async` and `prost` (prost 0.13) with `ttrpc-codegen-prost` 0.1, from NRI v0.12.3's `api.proto`; it serves both containerd 2.3 and 2.4.
   - The multiplexer writes frames of at most 4096 payload bytes, because the Go side reads a frame through a 4096-byte buffer and fails with `ENOMEM` on a larger one (`mux.go` `conn.Read`).
+  - It reads like Go's multiplexer at v0.12.3: it closes the trunk on a header length above `maxPayloadSize` (`pkg/net/multiplex/mux.go:141`), and gives each ConnID its own bounded queue, so a stalled connection cannot block the other (`:349-355`).
 - **Because:**
   - No Rust NRI crate exists.
   - An external plugin survives restarts; containerd never restarts a crashed pre-installed plugin.
@@ -22,7 +23,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - the registration sequence (`stub.go:594-646`);
   - the timeouts and event-mask check in `Configure` (`stub.go:701-728`);
   - the table that infers the NRI version from the runtime version (`pkg/api/version.go:35-105`), which D15 needs. The table stops at containerd v2.2.1, so it infers NRI v0.11.0 for 2.3 and 2.4, which selects D15's annotation path;
-  - `Synchronize` split across several requests flagged `More` (`stub.go:741-789`).
+  - `Synchronize` split across several requests flagged `More` (`stub.go:741-789`). The plugin answers each chunk with `More` echoed, and replies with updates only to the last one (v0.12.3 `stub.go:720-744`).
 
   The test oracle (D29) checks our crate against NRI's own runtime side.
 - **Revisit when:**
