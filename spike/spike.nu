@@ -167,7 +167,7 @@ def "main check 01" [minor: string] {
     start-plugin $node "" | ignore
     # Synchronize can trail Configure by seconds just after a containerd restart (seen in CI).
     mut log = ""
-    for _ in 1..30 {
+    for _ in 1..120 {
         $log = ^docker exec $node cat /tmp/nri-spike.log
         if ($log | str contains "Synchronize") { break }
         sleep 500ms
@@ -178,6 +178,11 @@ def "main check 01" [minor: string] {
     let sync = $log | lines | where {|l| $l | str contains "Synchronize" } | get 0? | default ""
     let all = sh-node $node "crictl ps -a -q | wc -l" | str trim
     let running = sh-node $node "crictl ps -q | wc -l" | str trim
+    if ($sync | is-empty) {
+        print "== no Synchronize after 60 s; plugin log, then containerd's NRI lines:"
+        print $log
+        print (sh-node $node "journalctl -u containerd --no-pager -o short-precise | grep -i -E 'nri|plugin|synchron' | tail -40")
+    }
     $r = $r | append (check "Synchronize count" ($sync | str contains $"containers=($running) ") $"($sync); crictl ps -q=($running) -a=($all)")
     let journal = sh-node $node "journalctl -u containerd --no-pager -o cat | grep 'registered as' | tail -1" | lines | str join " | "
     $r = $r | append (check "containerd logs registration" ($journal | str contains "registered as") $journal)
