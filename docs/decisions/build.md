@@ -110,6 +110,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:**
   - these conventions are proven in a sibling Rust project by the same author, and keeping local runs equal to CI removes "works on my machine".
   - **Measured** (M0 spike 00, kind v0.33.0, Docker Desktop on arm64, containerd 2.3.7 and 2.4.2 on `kindest/node:v1.37.0`): a node image that replaces `/usr/local/bin/containerd`, `containerd-shim-runc-v2` and `ctr` with a release tarball, checked against its `sha256`, starts a 3-node cluster. The node ships containerd 2.3.4, NRI enabled with `/var/run/nri/nri.sock`, no `config_path` and `discard_unpacked_layers = true`, so the node image patches the last two (kind `containerdConfigPatches`). A kind node must match the host architecture. systemd 257 in the node runs a unit with every D53 setting (`systemd-analyze security` lists them all), and a static-PIE binary built in `rust:1.99.1-alpine` with dedens' `.cargo/` runs there. Registry config shows in `containerd config dump`, not in `crictl info`.
+  - **Measured in CI** (M0 spike workflow, run 42925541544): the same harness, with spikes 01 and 04, passes on `ubuntu-26.04` and `ubuntu-26.04-arm` against containerd 2.3.7 and 2.4.2, with Docker 29.4.2, 4 CPUs and 15 GiB per runner, in 5 to 7 minutes per leg including the Rust build. Each leg pulls about 8 Docker Hub images anonymously without hitting a rate limit.
 - **Revisit when:** —
 
 ## D28: Dogfood: releases carry what the gate checks
