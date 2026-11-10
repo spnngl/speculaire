@@ -1,0 +1,129 @@
+# Architecture
+
+Spéculaire is one Rust binary for Linux Kubernetes nodes that run containerd. It has five jobs:
+
+1. **Mirror.** Share container image content between nodes, so a layer leaves the upstream registry about once per cluster.
+2. **Distribute artifacts.** Share each image's signatures, attestations and SBOMs between nodes in the same way.
+3. **Gate.** Allow a container to start only when its image has an `Allow` *verdict*. Enforcement happens in an NRI plugin.
+4. **Prewarm.** Pull a configured list of images onto nodes before workloads need them.
+5. **Reflect.** Control-plane nodes run as *reflectors*: they hold the complete content→peer index and answer lookups.
+
+**Scope:**
+- containerd ≥ 2.3, with 2.4+ as the main target (D15);
+- kubeadm clusters (D16);
+- Linux x86_64 and aarch64, on nodes that run a kubelet.
+
+Deployment is a systemd service first, then a Kubernetes DaemonSet.
+
+## Vocabulary
+
+These words have one meaning everywhere: in code, docs, metrics and commits.
+
+| Word | Meaning |
+|---|---|
+| *agent* | The `speculaire agent` process. One runs on every node. |
+| *reflector* | An agent on a control-plane node with `role = "reflector"`. It keeps a *soft-state* index of which nodes hold which digests, and answers lookups (D2). |
+| *soft state* | State that can be rebuilt entirely from agents. It is never persisted and needs no consensus. |
+| *fall through* | The agent answers 404 fast, so containerd moves on to the next `hosts.toml` host or to upstream. This is the failure mode for every distribution error. The mirror never answers 408 or 429, which containerd retries on the same host (v2.3.0 `core/remotes/docker/resolver.go:777-778`). |
+| *registry config* | containerd's own upstream settings: `config.toml` (with `imports`) and the `hosts.toml` tree under `config_path`. The agent reads it and has no registry settings of its own (D17). |
+| *artifact store* | The agent's own content-addressed store for referrer artifacts (signatures, attestations, SBOMs). containerd never pulls these. |
+| *image identity* | The image target digest (index or manifest) that a container is created from. The gate derives it per D15. |
+| *policy match* | The set of policies whose globs match the normalised pod-spec image name (D11). When it is empty, `gate.unmatched` decides (D23). |
+| *verdict* | `Allow`, `Rejected`, `Unverifiable` or `Pending`, for one key `(image identity, matched-policies hash, trust-root hash)` (D20). |
+| *stale verdict* | The previous verdict for an image, still served while re-verification runs after a policy or trust-root change (D21). |
+| *gate* | The NRI `CreateContainer` handler. It only reads local state and never touches the network. |
+| *node identity* | The node name in the kubelet client certificate, `CN=system:node:<name>` (D16). |
+| *withhold, never forge* | The trust rule for peers. A peer can fail to provide content, but cannot get bad bytes accepted, because everything is checked against its digest or its signature. |
+
+## Components
+
+```
+     control-plane nodes                                   worker node
+  ┌──────────────────────────┐                 ┌──────────────────────────────────┐
+  │ agent, role = reflector  │◄──Announce──────┤ agent                            │
+  │  digest → {node} map     │   (one stream   │  ├ mirror   127.0.0.1:7480 ◄─────┼── containerd (hosts.toml, local mTLS)
+  │  prewarm list            │    per member)  │  ├ peer API node-ip:7481 ◄───────┼── other agents (mTLS)
+  │  ├ /metrics node-ip:7482 ◄───────┼── Prometheus (plain HTTP, D42)
+  └──────────────────────────┘───Lookup───────►│  ├ artifact store                │
+        ▲ reflector.url (L4 LB):               │  ├ verifier → verdict cache      │
+        └─ Members discovery only ─────────────┤  └ gate (NRI plugin) ◄──────────┼── containerd NRI socket
+  node links: mTLS with kubelet client certs   └──────────────────────────────────┘
+```
+
+The trust boundaries and the risks we accept are in [`docs/security.md`](docs/security.md).
+
+## Flows
+
+### Pull
+1. containerd requests `GET /v2/<repo>/blobs/<digest>?ns=<registry>` from the local mirror (D14).
+2. The agent sends `Lookup(digest)` to a reflector, hedged to a second one. The reflector returns a shuffled subset of `(node identity, address)` pairs, never including the requester.
+3. The agent races and hedges fetches from the peer API, as Spegel does. It checks that each peer's certificate names the node identity the reflector returned. It streams the bytes to containerd while hashing them (D7).
+   - If the hash doesn't match the digest, the agent aborts and reports the peer.
+   - If a peer dies mid-copy, the agent resumes from the next peer with `Range`.
+   - A `503` from a busy peer moves the agent to the next peer at once (D24).
+4. Any miss, timeout or unreachable reflector makes the agent *fall through*.
+5. containerd commits the blob and emits `/content/create`. The agent announces the new digest to every reflector.
+
+### Verify
+The verifier works asynchronously, so the gate never waits on the network.
+
+1. **Triggers** (D22), earliest first:
+   - the mirror serving or forwarding a manifest by digest;
+   - containerd `/images/create|update` events;
+   - NRI `Synchronize`, which lists the containers already running;
+   - a gate cache miss.
+2. **Discover** referrers for the index digest and the platform manifest digest. Try sources in this order:
+   1. the artifact store;
+   2. peers, through the reflector;
+   3. upstream, using the *registry config* for endpoints, TLS and credentials: the referrers API, then the `sha256-<hex>` fallback tag, then the cosign legacy `.sig` tag. `.att` tags are ignored (D43).
+3. **Store and announce.** Put every artifact in the artifact store and announce it like any other digest.
+4. **Verify offline** with `sigstore-verify` against the trust root, then evaluate every matching policy, including the SBOM rules (D12). Cache the verdict (D20).
+5. **Before a final `Rejected`, try upstream once.** A peer's referrers index is a hint, not content-addressed, so the peer set may be incomplete (*withhold, never forge*).
+6. **On a policy or trust-root change,** re-verify every image in containerd's store in the background, running containers first (D21).
+
+### Gate
+1. NRI `CreateContainer` derives the *image identity* (D15), then checks `gate.exempt` (D18). An exempt container is allowed and counted in metrics.
+2. The gate computes the *policy match*. If it is empty, `gate.unmatched` decides (D23).
+3. The gate looks up the verdict, falling back to a *stale verdict* (D21). `Pending` waits at most `gate.wait` (default 300 ms). The wait is short because the call holds the node's single NRI lock, which every pod and container event shares, and must end well inside containerd's `plugin_request_timeout` (D41).
+4. If the verdict is still `Pending`, the gate denies with "verification pending" and kubelet retries.
+5. **Modes** (`gate.mode`):
+   - `audit` allows, and records the verdict in metrics and the audit log (D37).
+   - `enforce` rejects `Rejected`, `Unverifiable` and `Pending`, each with its own reason.
+6. **Fail-closed:** containerd's `default_validator` with `required_plugins = ["speculaire"]`.
+
+### Prewarm
+1. The reflector config holds the list and pushes it to agents as `Prewarm` on the `Announce` stream (D26).
+2. The reflector assigns waves: a few seed nodes pull from upstream, and the rest pull peer-to-peer.
+3. Agents pull with CRI `PullImage`, which goes through the mirror. They can pin images with the `io.cri-containerd.pinned=pinned` label (containerd v2.3.0 `internal/cri/labels/labels.go:42-45`) so kubelet GC skips them.
+4. Artifacts and verdicts are prewarmed along with the images.
+
+## Layout
+
+Planned. Update a row when its path lands.
+
+| Path | Role |
+|---|---|
+| `crates/speculaire` | The binary: `agent`, `configure`, `unconfigure`, `check-config`, `verify`, `version` |
+| `crates/oci` | Distribution read API, referrers, media types, registry Bearer token auth (on `oci-spec`) |
+| `crates/containerd` | Content source (directory + gRPC fallback), event watch, in-memory copy of the image store, *registry config* parser, preflight |
+| `crates/pki` | kubelet certificate loading and rotation, rustls verifiers (D16), local mirror CA (D14) |
+| `crates/reflect` | Protobuf, reflector server, agent client, membership (D2) |
+| `crates/verify` | Artifact discovery and *artifact store*, sigstore glue, policy, SBOM checks, verdict cache |
+| `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own |
+| `crates/loadgen` | Test-only reflector load generator, never packaged (D33) |
+| `fuzz/` | cargo-fuzz targets of the parsers of outside data |
+| `oracle/` | Go module, test-only: a fake NRI runtime, and upstream's own code for differential tests (D29) |
+| `packaging/` | systemd unit, nfpm config, `config.toml` reference (D30), containerd drop-in examples, later the Helm chart |
+| `e2e/` | kind node image per containerd version, test suites |
+| `bench/` | Benchmarks against Spegel: recipe, node-access pod, policy, results (D35) |
+| `justfile` | The only entry point, for humans and CI (D27) |
+
+## Documents
+
+- [`docs/decisions/`](docs/decisions/README.md): every design choice and its reason (`Dn`), one file per topic, plus an index.
+- [`docs/TODECIDE.md`](docs/TODECIDE.md): open questions, each with a proposed default.
+- [`docs/security.md`](docs/security.md): trust boundaries and accepted risks.
+- [`docs/metrics.md`](docs/metrics.md): every exported metric, with its labels (D34).
+- [`docs/operations.md`](docs/operations.md): turning on `enforce`, break glass, rejection reasons, alerts, upgrade and removal.
+- [`REFERENCES.md`](REFERENCES.md): specs, upstream source and the research notes in `docs/research/`.
+- [`README.md`](README.md) and [`SECURITY.md`](SECURITY.md): for humans; vulnerability reporting and supported versions (D40).
