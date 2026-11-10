@@ -18,5 +18,5 @@ Before any task, read the decisions' index, `docs/decisions/README.md`, then the
 - A breaking change, as D40 defines it, is marked `!` in its commit subject.
 - A new setting goes in `packaging/config.toml` with its default (D30). A new metric goes in `docs/metrics.md`, under the label rules of D34. A new rejection reason or alert goes in `docs/operations.md`.
 - Code ported from another project starts with a comment naming the upstream file and tag, and the first port from a project adds its copyright to `NOTICE` (D25).
-- A change is done when `just check` (the gate, D27) passes.
+- A change is done when `just check` (the check, D27, D48) passes.
 - Commit with the `git-commit` skill, using Conventional Commit subjects (`type(scope)!: description`).

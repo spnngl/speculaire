@@ -3,7 +3,7 @@
 Trust boundaries and accepted risks. Each item names the decision that enforces it. A change that moves a boundary updates this file in the same change.
 
 - **Peers are untrusted for integrity** (*withhold, never forge*):
-  - blobs are checked against their digest (D7);
+  - blobs are checked against their digest, and a peer that sends a wrong one is skipped locally for a while; no node can evict another cluster-wide (D7, D52);
   - artifacts are checked against their digest and signature (D8);
   - TUF metadata authenticates itself, so it can travel P2P (D26).
 - **Peers are authenticated for identity.** Only holders of a kubelet client certificate from the cluster CA can talk to the peer API or a reflector, and a node can only announce content for itself (D16).
@@ -21,6 +21,8 @@ Trust boundaries and accepted risks. Each item names the decision that enforces 
 - **Admins must allow-list the gate's own dependencies.** With `enforce` + `required_plugins`, a stopped agent blocks every container creation on the node, including control-plane static pods. `gate.exempt` (D18) and the NRI tolerate annotation are the escape hatches. Admins configure them before turning on `enforce` (`docs/operations.md`). `unconfigure` refuses to run while `required_plugins` names speculaire (D32).
 - **The tolerate annotation is a pod annotation (accepted).** Anyone who can create a pod can set it, and that pod starts ungated whenever the agent is not registered with NRI (`containerd/nri` `pkg/plugin/annotations.go:40-59`). v1 ships no admission policy to restrict it. The DaemonSet's own pod carries it (D44).
 - **`.att` tags do not count.** Attestations are verified only as Sigstore bundles found as OCI referrers; `.att` and unsigned `.sbom` tags are ignored (D12, D43).
-- **Metrics are readable by anyone on the node network.** `/metrics` is plain HTTP; it holds counts only, no secret and no pod or image label (D34, D42).
+- **A BuildKit SBOM is trusted through the index signature.** It has no signature of its own; it counts only when the index digest that covers it has a passing signature (D12, D49).
+- **Metrics are readable by anyone who can reach the node.** `/metrics` is plain HTTP on every address by default; it holds counts only, no secret and no pod or image label (D34, D42, D45, D50).
 - **A gate timeout lets one container through (accepted).** NRI closes a plugin that misses `plugin_request_timeout` and starts that container ungated; D41 keeps the gate's answer under half the timeout and alerts on it.
-- **The agent runs as root** with a hardened systemd unit, and the unit denies the io_uring syscalls (D4, D27).
+- **The agent runs as root** with no capabilities, a read-only system and a syscall filter that denies io_uring (D4, D53).
+- **The gate cannot be switched off.** No setting disables it, and a containerd with NRI disabled stops startup; `audit` mode is the only way to admit everything, and it stays visible in metrics (D54).

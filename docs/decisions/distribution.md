@@ -19,9 +19,9 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** with `resolve`, a peer could answer a tag with any digest it serves. Without it, tags resolve upstream (a small request) and blobs, the bulk of the bytes, still go P2P.
 - **Revisit when:** users need tag pulls to survive an upstream outage. Then expose `resolve_tags = true`, documented as "trust all nodes".
 
-## D7: Verify blob digests in flight
+## D7: Verify blob digests in flight (amended by D52)
 
-- **Decision:** hash every full-blob response while streaming it; on mismatch, abort and report the peer.
+- **Decision:** hash every full-blob response while streaming it; on mismatch, abort and deny the peer (D52).
 - **Because:** it catches a bad peer early, so it can be reported. Otherwise the error only surfaces at containerd's commit.
 - **Limit:** when containerd itself sends a `Range` request (resuming a download), the agent relays the range unhashed; containerd's commit check is then the only check.
 - **Revisit when:** —
@@ -75,3 +75,17 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - That IP is the one the cluster routes through to reach the control plane, which is the best guess on multi-NIC nodes without asking the admin.
   - Peers check each other by the node name in the certificate (D16), never by IP, so a wrong guess fails as an unreachable peer, which falls through, never as a trust problem.
 - **Revisit when:** users report an interface the guess gets wrong on a common platform; then add that platform's rule.
+
+## D52: A peer that sends a wrong digest is denied locally (amends D7, D37)
+
+- **Decision:** on a digest mismatch (D7), the agent:
+  1. aborts the fetch, counts `speculaire_peer_fetches_total{result="digest_mismatch"}`, and resumes from the next peer;
+  2. skips that node identity in its own lookups for `peer.deny_ttl` (default 10 min, live);
+  3. logs a warning and, with the audit on, writes a `peer` audit event (D37).
+
+  Nothing is sent to the reflector.
+- **Because:**
+  - D2 has no reflector message for it, and one would let any node evict another from the whole cluster.
+  - The bad peer gains nothing either way (*withhold, never forge*); the denial only saves the requester repeated wasted fetches.
+  - A TTL bounds the cost of a false positive, such as a disk fault that is later fixed.
+- **Revisit when:** mismatches from one node show up on many requesters; then add a reflector-side report with a quorum.

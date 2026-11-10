@@ -29,12 +29,12 @@ Shown in `kubectl describe pod` under `CreateContainerError`.
 | `rejected: <detail>` | A signature, attestation or SBOM check failed (D20) | Fix the image; the verdict is final for this policy and trust root |
 | `rejected: attestation <predicateType> missing (.att tags are not supported)` | The attestation exists only as a `.att` tag (D43) | Attest again with a current cosign, which attaches a bundle as a referrer |
 | `unverifiable: <detail>` | Artifacts or the trust root could not be obtained (D17, D20) | Check upstream reachability and credentials; it is retried automatically |
-| `unverifiable: upstream rate limited: <host>` | The registry answered `429`; discovery to that host pauses until its `Retry-After`, at most 1 h (D38) | Add registry credentials, or wait |
+| `unverifiable: upstream rate limited: <host>` | The registry answered `429`, or `503` with `Retry-After`; discovery to that host pauses until its `Retry-After`, at most 1 h (D38) | Add registry credentials, or wait |
 
 ## Logs and audit
 
 - `journalctl -u speculaire` shows the agent's logs, at `warn` and above by default. Change `log.filter` (`EnvFilter` syntax) and reload to see more (D37).
-- Set `audit.enabled = true` and reload to record one `gate` event per container creation and one `verdict` event per changed verdict. Read them with `journalctl -t speculaire-audit` (D37).
+- Set `audit.enabled = true` and reload to record one `gate` event per container creation, one `verdict` event per changed verdict, and one `peer` event per peer denied for a wrong digest (D52). Read them with `journalctl -t speculaire-audit` (D37).
 - Registry credentials and tokens never appear in either.
 
 ## Stopping
@@ -47,10 +47,11 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 
 | Metric | Alert when |
 |---|---|
-| `speculaire_gate_total{mode="enforce",result=~"rejected\|unverifiable\|pending"}` | The rate rises above its usual level |
+| `speculaire_gate_total{mode="enforce",result=~"rejected\|unverifiable\|pending\|unmatched"}` | The rate rises above its usual level |
+| `speculaire_peer_fetches_total{result="digest_mismatch"}` | It increases: a peer sent bytes that do not match their digest; the warning log, and the `peer` audit event if on, name its node (D52) |
 | `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config (D30) |
 | `speculaire_identity_path{path="annotation"}` | It is 1: the node runs containerd 2.3, with its known identity gap (D15) |
-| `speculaire_trust_root_expiry_timestamp_seconds` | Less than 7 days away: once it passes, verdicts become `unverifiable` |
+| `speculaire_trust_root_expiry_timestamp_seconds` | Less than 7 days away: once it passes, new verifications become `unverifiable`; cached verdicts keep serving |
 | `speculaire_p2p_enabled` | 0 for more than 10 min: the node has no kubelet certificate and pulls only from upstream (D16) |
 | `speculaire_reflector_connected` | 0 for any `member` for more than 5 min |
 | `speculaire_nri_connected` | 0 for more than 1 min: with `required_plugins`, container creation is rejected (D41) |

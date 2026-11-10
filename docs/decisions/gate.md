@@ -76,3 +76,9 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The user chose it. Under `required_plugins`, the agent's containers are gated by the plugin they provide, so after a node reboot nothing could start them.
   - The annotation is already the accepted escape hatch for static pods (`docs/security.md`).
 - **Revisit when:** containerd offers a way to exempt a plugin's own pod from validation.
+
+## D54: The gate cannot be turned off
+
+- **Decision:** no setting disables the gate. Startup and `speculaire check-config` refuse a containerd config whose NRI plugin is disabled or closed to external plugins (`disable = true` or `disable_connections = true` under `[plugins.'io.containerd.nri.v1.nri']`, v2.3.7 `internal/nri/config.go:30,42`), and the error names the key. `gate.mode = "audit"` and `gate.exempt` (D18) are the ways to let containers through.
+- **Because:** a node that mirrors but never gates looks protected and is not. `audit` keeps the mirror and the verdicts, and the gap stays visible in `speculaire_gate_total{mode="audit"}`.
+- **Revisit when:** users ask for a mirror-only deployment; then add an explicit `gate.enabled = false` that logs a warning at startup and sets a metric.

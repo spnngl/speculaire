@@ -43,10 +43,10 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `speculaire_verifications_total` | counter | `result` = `allow`\|`rejected`\|`unverifiable`; `trigger` = `manifest`\|`event`\|`synchronize`\|`gate_miss` | Completed verifications (D20, D22) |
+| `speculaire_verifications_total` | counter | `result` = `allow`\|`rejected`\|`unverifiable`; `trigger` = `manifest`\|`event`\|`synchronize`\|`gate_miss`\|`reverify` | Completed verifications (D20, D22); `reverify` follows a policy or trust-root change (D21) |
 | `speculaire_verification_seconds` | histogram | — | Time from trigger to verdict |
 | `speculaire_verdicts` | gauge | `state` = `allow`\|`rejected`\|`unverifiable`\|`pending` | Verdicts in the cache |
-| `speculaire_artifact_fetches_total` | counter | `source` = `peer`\|`upstream`; `upstream`; `result` = `ok`\|`not_found`\|`digest_mismatch`\|`rate_limited`\|`error` | Artifact fetches (D38); `upstream` is empty for peer fetches |
+| `speculaire_artifact_fetches_total` | counter | `source` = `peer`\|`upstream`; `upstream`; `result` = `ok`\|`not_found`\|`digest_mismatch`\|`rate_limited`\|`error` | Artifact fetches (D38); `upstream` is a host with a `hosts.toml` directory, else `other`, and empty for peer fetches (D50) |
 | `speculaire_artifact_store_bytes` | gauge | — | Size of the *artifact store* |
 | `speculaire_trust_root_expiry_timestamp_seconds` | gauge | — | When the current TUF metadata expires, as a Unix time |
 | `speculaire_cache_loads_total` | counter | `result` = `loaded`\|`discarded` | Loads of `/run/speculaire/cache.bin` at startup (D31) |

@@ -17,13 +17,13 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Details: `~/src/github.com/spnngl/agent-skills/skills/kernel/io-uring/`.
 - **Revisit when:** a benchmark shows the agent CPU-bound at serving, at more than 1 core per 10 Gb/s. Then prototype a plaintext-peer `sendfile` path first. Try io_uring only after that, behind a cargo feature with owned buffers, and after reading the io-uring skill.
 
-## D13: Stack and binaries (amended by D34)
+## D13: Stack and binaries (amended by D34, D46)
 
 - **Decision:**
   - **Stack:** Rust edition 2024, tokio (multi-thread), axum/hyper, tonic/prost, `containerd-client` 0.9, `oci-spec`, rustls with the `aws-lc-rs` provider (+ `rcgen` for D14's local certificates), `sd-notify`, `toml`.
   - **Metrics:** the `metrics` 0.24 facade plus `metrics-exporter-prometheus` 0.18 with `default-features = false`. The agent builds the recorder with `build_recorder`, serves `PrometheusHandle::render` from its own axum `/metrics` route, and calls `run_upkeep` on an interval.
   - **Logs:** `tracing` 0.1, `tracing-subscriber` 0.3 (`env-filter`, `json`), `tracing-journald` 0.3.
-  - **Binaries:** static-PIE musl with `mimalloc` (secure mode behind a cargo feature) and `cargo auditable`. They are built natively per architecture inside a digest-pinned `rust:<channel>-alpine`, with no `cross` or `cargo-zigbuild`, and linked with lld through dedens' `.cargo/lld-cc` wrapper (aarch64 static-PIE).
+  - **Binaries:** static-PIE musl with `mimalloc` in secure mode (D46) and `cargo auditable`. They are built natively per architecture inside a digest-pinned `rust:<channel>-alpine`, with no `cross` or `cargo-zigbuild`, and linked with lld through dedens' `.cargo/lld-cc` wrapper (aarch64 static-PIE).
   - Code follows `~/src/github.com/spnngl/agent-skills/skills/rust/rs-coding/SKILL.md`. Lints follow dedens' `[workspace.lints]` (`unsafe_code = "deny"`, clippy `pedantic` plus selected restriction lints).
 - **Because:**
   - This is the stack Dragonfly's Rust client proved at scale.
@@ -33,11 +33,11 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Native Alpine builds avoid cross-toolchain drift for C dependencies (rs-coding `musl.md`). dedens rejected QEMU, cross and zigbuild for the same reason (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13)
+## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50)
 
 - **Decision:**
   - **Catalog:** `docs/metrics.md` lists every metric with its type, labels and meaning. A test renders `/metrics` after the e2e suite and fails if a metric is missing from the catalog, or listed there but never emitted.
-  - **Labels:** only values from a small fixed set, or bounded by config: `member` (a reflector name) and `upstream` (a registry host from the *registry config*). A label never holds a digest, image, repository, namespace, pod or peer node. The one exception is `speculaire_build_info`, whose version labels have a single value per process.
+  - **Labels:** only values from a small fixed set, or bounded by config: `member` (a reflector name) and `upstream` (a registry host named by the *registry config*, else `other`, D50). A label never holds a digest, image, repository, namespace, pod or peer node. The one exception is `speculaire_build_info`, whose version labels have a single value per process.
   - **Naming:** `with_recommended_naming(true)`, base units (`_seconds`, `_bytes`), and no global labels; Prometheus adds `instance`.
   - **Histograms:** every histogram is native. `metrics-exporter-prometheus` gets its `protobuf` feature. All histograms use `set_native_histogram_for_metric(Matcher::Prefix("speculaire_"), NativeHistogramConfig::new(1.1, 160, 1e-6)?)`: schema 3 (buckets about 9% wide, so at most about 4.5% error) and 160 buckets, of which 154 span 100 µs to 60 s.
   - **Exposition:** the axum `/metrics` route negotiates the format the way the exporter's own listener does (`src/exporter/http_listener.rs:167`). For the protobuf `Accept` type it serves `render_protobuf`, and otherwise `render` (text).
@@ -72,15 +72,15 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions
+## D27: CI and release copy dedens' conventions (amended by D48)
 
 - **Decision:**
   - **Workflow:**
     - `just` is the only entry point, and a change is done when `just check` passes.
     - Every CI step calls a `just` recipe.
-    - A single aggregate `gate` job is the only required check.
+    - A single aggregate `required` job is the only required check (D48).
   - **Workflows** (`docs/research/ci-dedens.md` §1 and §6 "Copy as is"). The repo is `spnngl/speculaire`, so they call the reusable workflows in `spnngl/.github` as dedens does:
-    - `ci`: `check`, then `musl` on native amd64/arm64, then `deps` (hack, msrv, minimal-versions, deny), `oracle` (D29) and `e2e`, then `gate`;
+    - `ci`: `check`, then `musl` on native amd64/arm64, then `deps` (hack, msrv, minimal-versions, deny), `oracle` (D29) and `e2e`, then `required`;
     - `lint` (actionlint, zizmor);
     - `commit` (Conventional Commits);
     - `fuzz` (nightly cron);
@@ -120,7 +120,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The project should pass its own gate. dedens ships no SBOM (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D29: Go is a test oracle, never shipped
+## D29: Go is a test oracle, never shipped (amended by D48)
 
 - **Decision:**
   - Production code is pure Rust.
@@ -128,7 +128,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
     - `nri-runtime`: a fake NRI runtime on `pkg/adaptation` (`adaptation.New(name, version, …)`, `adaptation.go:172`). It drives the `nri` crate through registration, `Configure`, a `Synchronize` split into several requests, and `CreateContainer`, with no containerd running.
     - `hosts`, `config`, `reference`, `platform` and `nri-version`: each reads cases as JSON lines on stdin and prints upstream's own result. The sources are, in order: `core/remotes/docker/config`, the config loader, `pkg/reference/docker`, `platforms`, and NRI's `api.InferVersionFromRuntime` (D9).
   - Differential tests feed the same cases to our Rust ports and to the oracle, and require identical output. The cases are containerd's own test cases, the e2e node configs and the fuzz corpus.
-  - `just oracle` builds and runs the oracle inside a digest-pinned `golang:<version>-alpine` image, so no Go is needed on the host. In CI it is the `oracle` job of `ci`, required by `gate`.
+  - `just oracle` builds and runs the oracle inside a digest-pinned `golang:<version>-alpine` image, so no Go is needed on the host. In CI it is the `oracle` job of `ci`, a dependency of `required`.
   - The oracle never appears in release artifacts, packages or images, and no Rust crate depends on it.
 - **Because:**
   - The hosts, config, reference, platform and NRI-version ports must behave exactly like upstream, and an error in reference or platform handling is a security bug (D11, D15). Calling containerd's own code is the only exact check, and a Renovate bump that changes upstream behaviour turns the job red.
@@ -179,3 +179,24 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The user chose this policy.
   - One maintained line matches the project's size; backports would double CI.
 - **Revisit when:** a user needs a longer-lived line; then add an LTS branch with its own CI.
+
+## D46: musl binaries use mimalloc in secure mode, always (amends D13)
+
+- **Decision:** the musl build of `speculaire` uses mimalloc with `MI_SECURE=4` (the `mimalloc` crate's `secure` feature) as its `#[global_allocator]`, through a `[target.'cfg(target_env = "musl")'.dependencies]` entry. Tool builds (Miri, fuzz, mutants) and non-musl builds keep the system allocator. The build image sets `SOURCE_DATE_EPOCH=0`.
+- **Because:**
+  - dedens measured it (dedens D152, D154): no gain for the attacker in any probe case, at 0.89 of the fastest allocator against mallocng's 0.68. A cargo feature would ship two binaries with different safety, and only one of them tested.
+  - mimalloc's `options.c` embeds `__DATE__` and `__TIME__`; without `SOURCE_DATE_EPOCH=0` the reproducible double build (D27) differs.
+- **Cost:** a higher churn peak (dedens: 184 MiB against mallocng's 94) and about 16k lines of C built by `cc`.
+- **Revisit when:** `just bench` (D35) shows the allocator costing more than the 5% release bar.
+
+## D48: The required CI job is `required`; `just check` is the check (amends D27, D29)
+
+- **Decision:** the aggregate CI job that branch protection requires is named `required`. `just check` is called "the check". "Gate" means only the NRI gate (ARCHITECTURE.md § Vocabulary).
+- **Because:** dedens calls both "the gate", which in speculaire is the component that admits containers. One word with two meanings breaks the vocabulary rule in `AGENTS.md`.
+- **Revisit when:** —
+
+## D50: The `upstream` label names only configured registry hosts (amends D34)
+
+- **Decision:** a registry host with its own directory in the `hosts.toml` tree (D17) keeps its name as the `upstream` label value. Every other host is `upstream="other"`. Peer fetches leave the label empty.
+- **Because:** pod authors choose registry hosts, so "a host from the registry config" was not bounded: a pod naming a new host would add series on every node. The `hosts.toml` tree is written by the admin.
+- **Revisit when:** admins need per-host numbers for hosts without a `hosts.toml` directory; the audit log (D37) already names them.

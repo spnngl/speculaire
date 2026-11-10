@@ -43,7 +43,7 @@ These words have one meaning everywhere: in code, docs, metrics and commits.
   │ agent, role = reflector  │◄──Announce──────┤ agent                            │
   │  digest → {node} map     │   (one stream   │  ├ mirror   127.0.0.1:7480 ◄─────┼── containerd (hosts.toml, local mTLS)
   │  prewarm list            │    per member)  │  ├ peer API node-ip:7481 ◄───────┼── other agents (mTLS)
-  │  ├ /metrics node-ip:7482 ◄───────┼── Prometheus (plain HTTP, D42)
+  │  reflector API :7483     │                 │  ├ /metrics :7482 ◄──────────────┼── Prometheus (plain HTTP, D42, D45)
   └──────────────────────────┘───Lookup───────►│  ├ artifact store                │
         ▲ reflector.url (L4 LB):               │  ├ verifier → verdict cache      │
         └─ Members discovery only ─────────────┤  └ gate (NRI plugin) ◄──────────┼── containerd NRI socket
@@ -58,7 +58,7 @@ The trust boundaries and the risks we accept are in [`docs/security.md`](docs/se
 1. containerd requests `GET /v2/<repo>/blobs/<digest>?ns=<registry>` from the local mirror (D14).
 2. The agent sends `Lookup(digest)` to a reflector, hedged to a second one. The reflector returns a shuffled subset of `(node identity, address)` pairs, never including the requester.
 3. The agent races and hedges fetches from the peer API, as Spegel does. It checks that each peer's certificate names the node identity the reflector returned. It streams the bytes to containerd while hashing them (D7).
-   - If the hash doesn't match the digest, the agent aborts and reports the peer.
+   - If the hash doesn't match the digest, the agent aborts and denies that peer locally for `peer.deny_ttl` (D52).
    - If a peer dies mid-copy, the agent resumes from the next peer with `Range`.
    - A `503` from a busy peer moves the agent to the next peer at once (D24).
 4. Any miss, timeout or unreachable reflector makes the agent *fall through*.
@@ -76,6 +76,8 @@ The verifier works asynchronously, so the gate never waits on the network.
    1. the artifact store;
    2. peers, through the reflector;
    3. upstream, using the *registry config* for endpoints, TLS and credentials: the referrers API, then the `sha256-<hex>` fallback tag, then the cosign legacy `.sig` tag. `.att` tags are ignored (D43).
+
+   BuildKit attestation manifests come from the image index itself (D49).
 3. **Store and announce.** Put every artifact in the artifact store and announce it like any other digest.
 4. **Verify offline** with `sigstore-verify` against the trust root, then evaluate every matching policy, including the SBOM rules (D12). Cache the verdict (D20).
 5. **Before a final `Rejected`, try upstream once.** A peer's referrers index is a hint, not content-addressed, so the peer set may be incomplete (*withhold, never forge*).
@@ -84,16 +86,16 @@ The verifier works asynchronously, so the gate never waits on the network.
 ### Gate
 1. NRI `CreateContainer` derives the *image identity* (D15), then checks `gate.exempt` (D18). An exempt container is allowed and counted in metrics.
 2. The gate computes the *policy match*. If it is empty, `gate.unmatched` decides (D23).
-3. The gate looks up the verdict, falling back to a *stale verdict* (D21). `Pending` waits at most `gate.wait` (default 300 ms). The wait is short because the call holds the node's single NRI lock, which every pod and container event shares, and must end well inside containerd's `plugin_request_timeout` (D41).
+3. The gate looks up the verdict, falling back to a *stale verdict* (D21). `Pending` waits at most `gate.wait` (default 300 ms, D47). The wait is short because the call holds the node's single NRI lock, which every pod and container event shares, and must end well inside containerd's `plugin_request_timeout` (D41).
 4. If the verdict is still `Pending`, the gate denies with "verification pending" and kubelet retries.
-5. **Modes** (`gate.mode`):
+5. **Modes** (`gate.mode`, default `audit`; no setting turns the gate off, D54):
    - `audit` allows, and records the verdict in metrics and the audit log (D37).
    - `enforce` rejects `Rejected`, `Unverifiable` and `Pending`, each with its own reason.
 6. **Fail-closed:** containerd's `default_validator` with `required_plugins = ["speculaire"]`.
 
 ### Prewarm
 1. The reflector config holds the list and pushes it to agents as `Prewarm` on the `Announce` stream (D26).
-2. The reflector assigns waves: a few seed nodes pull from upstream, and the rest pull peer-to-peer.
+2. Every member picks the same few seed nodes, which pull from upstream; the rest pull peer-to-peer once the seeds have announced the blobs (D51).
 3. Agents pull with CRI `PullImage`, which goes through the mirror. They can pin images with the `io.cri-containerd.pinned=pinned` label (containerd v2.3.0 `internal/cri/labels/labels.go:42-45`) so kubelet GC skips them.
 4. Artifacts and verdicts are prewarmed along with the images.
 

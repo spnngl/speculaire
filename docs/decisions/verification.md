@@ -26,7 +26,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Decision:**
   - **v1:** a policy can require an SBOM. It passes when either:
     - (a) a signed in-toto attestation whose predicateType is SPDX (`https://spdx.dev/Document`) or CycloneDX (`https://cyclonedx.org/bom`) has the image as subject and an allowed signer; or
-    - (b) the image index carries a BuildKit attestation manifest with such a predicate, and the index digest itself has a passing signature.
+    - (b) the image index carries a BuildKit attestation manifest with such a predicate, and the index digest itself has a passing signature (the one source outside D43's rule, D49).
 
     In both cases the SBOM must parse as SPDX 2.3 JSON or CycloneDX ≥ 1.4 JSON, stay under `sbom.max_size` (default 64 MiB), and list at least one package. Unsigned `.sbom` tags never count.
   - **Later:** package and license rules (a deny-list by purl and version range, a license allow-list), as CEL over a normalised package list.
@@ -110,7 +110,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Revisit when:** —
 
 
-## D43: Attestations count only as Sigstore bundles; `.att` tags are ignored (amends D8, D38)
+## D43: Attestations count only as Sigstore bundles; `.att` tags are ignored (amends D8, D38; amended by D49)
 
 - **Decision:**
   - An attestation counts only as a Sigstore bundle (`application/vnd.dev.sigstore.bundle.v0.3+json`, as cosign v3 and GitHub attestations write it), found as an OCI referrer through the referrers API or the `sha256-<hex>` fallback tag.
@@ -122,3 +122,14 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Older cosign logged `.att` as Rekor `intoto` v0.0.1 entries, which sigstore-rust cannot verify (`docs/research/sigstore-and-referrers.md` §1). Accepting only the newer `.att` entries would make one tag format pass or fail depending on the cosign version that wrote it.
   - It removes the `.att` probe from every verification (D38).
 - **Revisit when:** users need attestations that exist only as `.att` tags, or private GitHub attestations.
+
+## D49: A BuildKit SBOM inside a signed index counts (amends D43)
+
+- **Decision:**
+  - D12(b) is the one exception to D43: an SBOM in a BuildKit attestation manifest of the image index counts, with no Sigstore bundle of its own, when the index digest has a passing signature.
+  - Discovery reads the index already fetched for the pull; it finds the attestation manifest through its `vnd.docker.reference.digest` annotation and fetches it by digest, like any blob.
+  - Any other in-toto statement without a bundle still counts as absent.
+- **Because:**
+  - The index signature covers the attestation manifest's digest, so its content is as authenticated as a bundle (D12).
+  - `docker buildx --sbom=true` images carry no other SBOM, and they are common.
+- **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
