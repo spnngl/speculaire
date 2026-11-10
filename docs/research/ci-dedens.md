@@ -139,7 +139,7 @@ Roots: `dedens/` = `/Users/ldelannoy/src/github.com/spnngl/dedens`. `shared/` = 
 
 | Need | Suggested shape |
 |---|---|
-| **kind e2e matrix** | New `e2e` job in `ci.yml`, listed in `gate.needs`. `matrix: {os: [ubuntu-26.04, ubuntu-26.04-arm], containerd: ["2.3.x", "2.4.x"]}`, `fail-fast: false`. It consumes the musl binary/image built in the same run (as `release.yml:144-161` does), so the shipped artifact is the tested one. Install kind and kubectl by pinned version with a `# renovate:` comment and checksum verification (the pattern of `shared/.github/actions/scan-image/action.yml:63-90`). `just e2e <containerd-version>` is the single entry point, runnable locally with Docker. |
+| **kind e2e matrix** | New `e2e` job in `ci.yml`, listed in `required.needs` (D48). `matrix: {os: [ubuntu-26.04, ubuntu-26.04-arm], containerd: ["2.3.x", "2.4.x"]}`, `fail-fast: false`. It consumes the musl binary/image built in the same run (as `release.yml:144-161` does), so the shipped artifact is the tested one. Install kind and kubectl by pinned version with a `# renovate:` comment and checksum verification (the pattern of `shared/.github/actions/scan-image/action.yml:63-90`). `just e2e <containerd-version>` is the single entry point, runnable locally with Docker. |
 | containerd version control in kind | `kindest/node` images bundle one containerd per k8s release. For 2.3 vs 2.4, build a node image per version (a Dockerfile layer replacing `/usr/local/bin/containerd*` on a digest-pinned `kindest/node`), with Renovate tracking `containerd/containerd` releases. Enable NRI and the mirror `config_path` in the node's containerd config. |
 | e2e assertions | Pull through the mirror from node A, then node B fetches from A (P2P hit), with metrics or logs proving it. NRI gate: admitted vs blocked pod. Restart and upgrade of the daemon. |
 | systemd e2e | Extend the `deb` job: install the deb on a runner with containerd and check the unit's hardening (`systemd-analyze security`), uid and caps, like `release.yml:196-210` |
@@ -149,7 +149,7 @@ Roots: `dedens/` = `/Users/ldelannoy/src/github.com/spnngl/dedens`. `shared/` = 
 
 ### Open questions
 
-- Is Docker preinstalled and is kind usable on `ubuntu-26.04-arm`? Check the runner image.
+- ~~Is Docker preinstalled and is kind usable on `ubuntu-26.04-arm`?~~ Yes (M0 spike CI, run 42925541544, 2026-11-11): `ubuntu-26.04` and `ubuntu-26.04-arm` both ship Docker 29.4.2 with 4 CPUs and 15 GiB, and kind v0.33.0 runs the 3-node 2.3 and 2.4 clusters on both, for spikes 00, 01 and 04.
 - ~~Does containerd 2.3/2.4 in a kind node need `[plugins."io.containerd.nri.v1.nri"]` enabled explicitly?~~ No (M0 spike 00, containerd 2.3.7 and 2.4.2 over `kindest/node:v1.37.0`): NRI is on by default and `/var/run/nri/nri.sock` exists. The node's containerd config does need two patches: `config_path = "/etc/containerd/certs.d"` under the CRI registry table, and `discard_unpacked_layers = false` (the node ships `true`, which D15's preflight rejects). `crictl info` no longer lists the registry config in 2.3.7; use `containerd config dump`.
 - The DaemonSet image needs root/host mounts, which conflicts with dedens' `FROM scratch` + uid 10001 image. Ship one image or two?
-- Does the repo live under `spnngl` (reusable workflows at `@main`) or `spegel-org` (copy the reusable workflows)?
+- ~~Does the repo live under `spnngl` (reusable workflows at `@main`) or `spegel-org` (copy the reusable workflows)?~~ `spnngl`: the repository is `github.com/spnngl/speculaire` (public).
