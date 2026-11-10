@@ -1,0 +1,19 @@
+
+[target.aarch64-unknown-linux-gnu]
+linker = ".cargo/lld-cc"
+
+[target.x86_64-unknown-linux-musl]
+linker = ".cargo/lld-cc"
+rustflags = [
+  "--remap-path-prefix=/src=spike",
+  "--remap-path-prefix=/usr/local/cargo=cargo",
+]
+
+[target.aarch64-unknown-linux-musl]
+linker = ".cargo/lld-cc"
+rustflags = [
+  "-C",
+  "relocation-model=pic",
+  "--remap-path-prefix=/src=spike",
+  "--remap-path-prefix=/usr/local/cargo=cargo",
+]

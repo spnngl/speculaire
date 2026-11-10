@@ -1,0 +1,22 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+containerdConfigPatches:
+  # The node image has no config_path, and sets discard_unpacked_layers = true, which drops layers from the
+  # content store after unpack (D15 preflight refuses it).
+  - |
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+    [plugins."io.containerd.grpc.v1.cri".containerd]
+      discard_unpacked_layers = false
+kubeadmConfigPatches:
+  # Step 03 needs a fast kubelet certificate rotation: the signer caps the lifetime at 10 minutes.
+  - |
+    kind: ClusterConfiguration
+    controllerManager:
+      extraArgs:
+        - name: cluster-signing-duration
+          value: 10m
