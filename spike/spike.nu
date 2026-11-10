@@ -164,7 +164,14 @@ def "main check 01" [minor: string] {
     ^kubectl --context $ctx delete pod ok bad ok2 ok3 ok4 --ignore-not-found --wait=true o+e>| ignore
     sh-node $node "pkill nri-spike; sed -i '/default_validator/,$d' /etc/containerd/config.toml; systemctl restart containerd; sleep 3"
     main put nri-spike $node
-    let log = start-plugin $node ""
+    start-plugin $node "" | ignore
+    # Synchronize can trail Configure by seconds just after a containerd restart (seen in CI).
+    mut log = ""
+    for _ in 1..30 {
+        $log = ^docker exec $node cat /tmp/nri-spike.log
+        if ($log | str contains "Synchronize") { break }
+        sleep 500ms
+    }
     $r = $r | append (check "registered < 5s" ($log | str contains "registered as speculaire-50") ($log | lines | first))
     let configure = $log | lines | where {|l| $l | str contains "Configure" } | get 0? | default ""
     $r = $r | append (check "Configure fields" ($configure | str contains "NRI_version=") $configure)
