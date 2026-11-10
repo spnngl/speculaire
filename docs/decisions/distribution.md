@@ -36,7 +36,13 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - The peer API listens on the node IP, port 7481, with mTLS (D16).
 - **Because:**
   - A plain loopback mirror lets any local process, including any `hostNetwork` pod, read every cached private layer.
-  - containerd's `hosts.toml` supports `ca` and a combined-PEM `client`, and reads them on every resolve (containerd v2.3.0 `core/remotes/docker/config/hosts.go:247-286`).
+  - containerd's `hosts.toml` supports `ca` and a combined-PEM `client`, and reads them on every resolve (containerd v2.3.7 `core/remotes/docker/config/hosts.go:78-79` returns a `RegistryHosts` function that rebuilds each host, `:260` reads `ca`, `:281` loads the `client` pair from one PEM).
+  - **Measured** (M0 spike 04, kind node, containerd 2.3.7, a `hosts.toml` mirror entry with `capabilities = ["pull"]`, `ca`, `client`, `dial_timeout = "200ms"`):
+    - containerd sends the mirror every manifest and blob request of the pull, with the client certificate (`?ns=docker.io` on each URL). A 404 falls through to upstream, and the pull succeeds.
+    - With a blob in the mirror's directory (a 20 MB layer of `nginx:alpine`), that blob answered 200 from the mirror and the other nine requests 404 and went upstream.
+    - A client without a certificate fails the TLS 1.3 handshake.
+    - With the mirror stopped, a pull costs about 40 ms more per image (connection refused; busybox and alpine tags, 2.1 s against 2.07 s with no `hosts.toml`).
+    - After regenerating the CA and certificates and restarting only the mirror, the next pull used them with containerd untouched.
   - **The kubelet client certificate is not used here.** Before the node joins the cluster the file does not exist, and containerd then fails every pull for that registry with "unable to read CERT file". That would break `kubeadm join`'s own image pulls.
   - A root-only local key gives the same protection: an attacker with root can read the content directory anyway.
   - systemd uses host networking, so loopback works. That removes Spegel's NodePort hop and its init-container chicken-and-egg problem.
