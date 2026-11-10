@@ -5,11 +5,19 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 ## D9: Enforcement lives in an NRI external plugin
 
 - **Decision:** the agent connects to `/var/run/nri/nri.sock` as an external NRI plugin. We write our own `nri` workspace crate on `ttrpc` 0.10 plus the NRI multiplexer (8-byte header: ConnID + length).
+  - Each ConnID is an in-memory `tokio::io::duplex` wrapped by `ttrpc`'s `Socket::new`: ConnID 1 feeds a `Listener::new` stream, ConnID 2 feeds `Client::new`. There is no file descriptor and no `socketpair`.
+  - Codegen is `ttrpc` features `async` and `prost` (prost 0.13) with `ttrpc-codegen-prost` 0.1, from NRI v0.12.3's `api.proto`; it serves both containerd 2.3 and 2.4.
+  - The multiplexer writes frames of at most 4096 payload bytes, because the Go side reads a frame through a 4096-byte buffer and fails with `ENOMEM` on a larger one (`mux.go` `conn.Read`).
 - **Because:**
   - No Rust NRI crate exists.
   - An external plugin survives restarts; containerd never restarts a crashed pre-installed plugin.
   - NRI is the only hook that covers every container creation, however the image arrived.
   - The gate only rejects and never adjusts a container. So our NRI subset is small: registration, `Configure`, `Synchronize`, `CreateContainer` returning an error, and `Shutdown`, in about 1.5k lines. The Go helpers for adjustments, field owners, `strip.go` and `UpdateContainers` are not needed.
+  - M0 spike 01 ran this on containerd 2.3.7 (NRI v0.12.0) and 2.4.2 (NRI v0.12.3): the plugin registers in under 10 ms, `Configure` carries `runtime_name=containerd`, `NRI_version=v0.12.0` or `v0.12.3`, `registration_timeout=5000ms`, `request_timeout=2000ms`, and `Synchronize` lists the same containers as `crictl ps -q`.
+  - containerd names the plugin `50-speculaire` (`registered as "50-speculaire"`), but `default_validator.required_plugins` matches the bare name `speculaire`.
+  - A rejection reaches the pod event as `Error: failed to create containerd container: failed to get NRI adjustment for container: rpc error: code = FailedPrecondition desc = speculaire spike: rejected`. With the plugin missing, the event is `... failed to get NRI adjustment for container: validator "00-default-validator" rejected container adjustment, reason: validation error: required plugin "speculaire" not present`. Both leave the pod in `CreateContainerError`, and kubelet retries.
+  - A restarted plugin re-registers without a containerd restart, and the blocked pod then starts. A containerd restart closes the trunk, so the plugin must reconnect.
+  - 2.3.7 sends no `Container.image`; it carries the annotation `io.kubernetes.cri.image-name` (D15). 2.4.2 fills `image.name`, `image.digest` and `image.config_digest`.
 - **Cost:** we rewrite and keep current what the Go stub (`pkg/stub/stub.go`) and the multiplexer (`pkg/net/multiplex/mux.go`) give Go plugins (lines at NRI `main` d817e4e):
   - the registration sequence (`stub.go:594-646`);
   - the timeouts and event-mask check in `Configure` (`stub.go:701-728`);
@@ -17,7 +25,6 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - `Synchronize` split across several requests flagged `More` (`stub.go:741-789`).
 
   The test oracle (D29) checks our crate against NRI's own runtime side.
-- **Risk:** `ttrpc-rust` must serve and call over the multiplexed channels, not over a socket path. The planned bridge maps each ConnID to a `socketpair` (`docs/research/nri-and-verifiers.md` §1.7). The first M0 spike tests it.
 - **Revisit when:**
   - `FailurePolicy.fail_request` ships in a containerd release. Then use it instead of `required_plugins`.
   - A Rust NRI crate appears upstream (for example in `containerd/rust-extensions`). Then adopt it, or offer ours there.
