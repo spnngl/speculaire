@@ -30,13 +30,13 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A bad reload keeps the old config because the gate must keep deciding. Failing closed on a typo would block every container creation on the node.
 - **Revisit when:** —
 
-## D32: `configure` and `unconfigure` change only what speculaire added (amends D14)
+## D32: `configure` and `unconfigure` change only what speculaire added (amends D14; amended by D55, D56)
 
 - **Decision:**
-  - `speculaire configure` edits each `hosts.toml` with a format-preserving TOML editor, so the admin's comments and ordering stay. It recognises its own entries by the mirror address (`https://127.0.0.1:7480` by default).
+  - `speculaire configure` edits each `hosts.toml` with a format-preserving TOML editor, so the admin's comments and ordering stay. It recognises its own entries by their `ca` path (D56).
   - `speculaire unconfigure` replaces `configure --restore`. It runs these steps in order:
     1. If containerd's NRI config lists `speculaire` in `[plugins.'io.containerd.nri.v1.nri'.default_validator] required_plugins`, it stops and prints that key. `--force` skips this check.
-    2. It removes the entries with our mirror address from each `hosts.toml`, and keeps everything else, including edits made after `configure`. It deletes a `hosts.toml` that `configure` created once it is empty.
+    2. It removes its own entries from each `hosts.toml`, and keeps everything else, including edits made after `configure`. It deletes a `hosts.toml` that `configure` created once it is empty.
     3. Only then does it delete `/var/lib/speculaire/mirror/`.
   - Both commands are idempotent.
   - The deb and rpm removal scripts run `speculaire unconfigure` on remove and purge, not on upgrade. If it fails, the removal stops and shows its message.
@@ -45,7 +45,6 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Removing the agent while `required_plugins` still names it blocks every container creation on the node.
   - Restoring backups would undo admin edits made after `configure`.
 - **Revisit when:** —
-
 
 ## D37: Logs through `tracing`, with an opt-in audit log (amends D30; amended by D52)
 
@@ -83,7 +82,6 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - 10 s finishes a 1 GB blob at 1 Gb/s; a bigger transfer resumes elsewhere.
 - **Revisit when:** —
 
-
 ## D42: `/metrics`, `/readyz` and `/livez` listen on `metrics.address`, plain HTTP (amended by D45)
 
 - **Decision:** one HTTP listener serves `/metrics`, `/readyz` and `/livez` on `metrics.address`, port 7482 (default address: D45). It is plain HTTP without authentication, and a restart key (D30).
@@ -100,7 +98,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - node-exporter listens on every address the same way.
 - **Revisit when:** an admin needs the endpoints on one interface only; `metrics.address` already allows it.
 
-## D47: Every setting has a key, a literal default and a reload class (amends D30)
+## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56)
 
 - **Decision:**
   - Each key in `packaging/config.toml` shows a literal default. A default computed at startup is written `"auto"`: `peer.max_uploads` (4 × CPUs, D24) and `peer.address` (D36).
@@ -112,7 +110,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
     - `verify.policy = "/etc/speculaire/policy.yaml"` (D26);
     - `verify.trusted_root = ""`: empty follows the Sigstore public-good root through TUF; a path pins a `trusted_root.json` (D26);
     - `reflector.listen = "[::]:7483"`, and `prewarm.images = []` (image references, D26), both read only with `role = "reflector"`.
-  - **Restart keys:** `role`, `metrics.address`, `reflector.listen`, `peer.address`, `reflector.url`, `reflector.members`, `nri.socket` and certificate paths. Every other key reloads live, including `config.poll_interval`, `shutdown.drain_timeout`, `verify.policy`, `verify.trusted_root` and `prewarm.*`.
+  - **Restart keys:** `role`, `mirror.address` (D56), `metrics.address`, `reflector.listen`, `peer.address`, `reflector.url`, `reflector.members`, `nri.socket` and certificate paths. Every other key reloads live, including `config.poll_interval`, `shutdown.drain_timeout`, `verify.policy`, `verify.trusted_root` and `prewarm.*`.
 - **Because:**
   - D30 makes `packaging/config.toml` the only list of settings, so a key that exists only in prose cannot be checked.
   - A file of commented defaults parses to `Config::default()` whatever the defaults are; uncommenting makes the test compare values.
@@ -135,3 +133,14 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - `@system-service` includes `@aio` and so io_uring (`docs/research/rust-stack.md:39`); D4 needs the explicit deny.
   - The list matches dedens' unit where the two agree (`docs/research/ci-dedens.md:64`).
 - **Revisit when:** a host keeps a file the agent reads under another owner; then add `CAP_DAC_READ_SEARCH` only.
+
+## D55: The admin runs `configure`; the agent refuses to start without it (amends D32)
+
+- **Decision:**
+  - Installing the package neither runs `speculaire configure` nor edits containerd's config. The admin runs `configure` once per node (`docs/operations.md` § Install).
+  - At startup, the agent stops with an error naming `speculaire configure` when the mirror certificates in `/var/lib/speculaire/mirror/` (D14) are missing.
+  - `speculaire check-config` also exits 1 when a `hosts.toml` that `configure` would edit lacks the speculaire entry (D56), and names the file.
+- **Because:**
+  - Editing containerd's config changes every pull on the node, so the admin chooses when, as with `required_plugins`. Removal still runs `unconfigure` (D32), because it must undo what the admin chose to add.
+  - Without the certificates the mirror cannot listen (D14). Without the entry, containerd never calls the mirror, so verification starts only at the gate (D22), and every first start waits.
+- **Revisit when:** a packaging runs `configure` for the admin, as the DaemonSet's init container would.

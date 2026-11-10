@@ -137,7 +137,6 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Rejected:** pure Rust without an oracle. Drift from containerd would stay silent until a user hit it.
 - **Revisit when:** an upstream Rust NRI crate ships its own runtime harness (D9). Then drop `nri-runtime`. Keep the other subcommands while we maintain the ports.
 
-
 ## D35: Benchmarks against Spegel, with the tool Spegel publishes with
 
 - **Decision:**

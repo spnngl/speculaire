@@ -26,10 +26,10 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Limit:** when containerd itself sends a `Range` request (resuming a download), the agent relays the range unhashed; containerd's commit check is then the only check.
 - **Revisit when:** —
 
-## D14: The mirror is TLS with client auth on loopback; the peer API is mTLS on the node IP (amended by D32)
+## D14: The mirror is TLS with client auth on loopback; the peer API is mTLS on the node IP (amended by D32, D56)
 
 - **Decision:**
-  - The mirror listens on `127.0.0.1:7480` (configurable) with TLS and requires a client certificate.
+  - The mirror listens on `127.0.0.1:7480` (`mirror.address`, D56) with TLS and requires a client certificate.
   - `speculaire configure` generates a local CA, a server certificate for `127.0.0.1` and a client certificate for containerd, in `/var/lib/speculaire/mirror/` (root, mode 0600).
   - It writes their paths as `ca` and `client` in each `hosts.toml` mirror entry.
   - The mirror accepts only client certificates signed by that local CA.
@@ -64,12 +64,11 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** in a flash crowd every node finds the same first seed; Spegel has no limit, so one node's uplink becomes the cluster bottleneck.
 - **Revisit when:** a flash-crowd benchmark shows one seed peer saturating. Then add multi-peer `Range` swarming.
 
-
-## D36: The peer address is the local side of the reflector connection (amends D3)
+## D36: The peer address is the local side of the reflector connection (amends D3; amended by D56)
 
 - **Decision:**
   - By default, an agent announces as its peer address the local IP of its `Announce` stream to a member, as returned by `getsockname`, and listens on that IP, port 7481. The address is fixed at startup from the first such stream; the peer API starts listening only then. The load-balancer connection is never used: on a control-plane node that holds the load balancer's virtual IP, its local IP would be that VIP, which moves.
-  - `peer.address` overrides it, for nodes where peers must use another interface.
+  - `peer.address` (`ip:port`, D56) overrides it, for nodes where peers must use another interface.
   - IPv4 and IPv6 work the same way; on a dual-stack node, the family is the one the reflector connection used.
 - **Because:**
   - That IP is the one the cluster routes through to reach the control plane, which is the best guess on multi-NIC nodes without asking the admin.
@@ -89,3 +88,16 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - The bad peer gains nothing either way (*withhold, never forge*); the denial only saves the requester repeated wasted fetches.
   - A TTL bounds the cost of a false positive, such as a disk fault that is later fixed.
 - **Revisit when:** mismatches from one node show up on many requesters; then add a reflector-side report with a quorum.
+
+## D56: `mirror.address` and `peer.address` are `ip:port` settings (amends D14, D32, D36, D47)
+
+- **Decision:**
+  - `mirror.address = "127.0.0.1:7480"`, a restart key (D47). Startup refuses an address that is not loopback. After changing it, the admin runs `speculaire configure` again, then restarts the agent.
+  - `peer.address = "auto"`, or an `ip:port`. `"auto"` is the IP of D36 on port 7481.
+  - `configure` and `unconfigure` recognise their `hosts.toml` entries by the `ca` path under `/var/lib/speculaire/mirror/`, not by address. `configure` rewrites the address of an entry it recognises to the current `mirror.address`.
+- **Because:**
+  - A port taken on a node needs a way out without a new build.
+  - Entries recognised by address are lost once the address changes. `unconfigure` would then leave them in place and delete their certificates, and containerd fails every pull for a registry whose `hosts.toml` names a missing `ca` (D14, D32).
+  - Loopback keeps D14's boundary: only local processes reach the mirror, and the client certificate stops them.
+  - It has the same form as `metrics.address` and `reflector.listen`.
+- **Revisit when:** —

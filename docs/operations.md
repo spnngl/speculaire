@@ -2,12 +2,22 @@
 
 For admins running speculaire on a node. Every setting is listed with its default in `packaging/config.toml` (D30), and every metric in `docs/metrics.md` (D34). Each rejection reason and each alert is listed here; a change that adds one updates this file.
 
+## Install
+
+1. Install the package. It doesn't touch containerd's config (D55).
+2. Run `speculaire configure`. It creates the mirror certificates in `/var/lib/speculaire/mirror/` and adds the mirror entry to each `hosts.toml` (D14, D32).
+3. Start `speculaire.service`. The agent refuses to start without the mirror certificates, with an error naming `speculaire configure` (D55). `/readyz` on port 7482 answers 200 once it is ready (D45).
+4. Continue with "Before turning on `enforce`". The gate starts in `audit` mode (D47).
+
+To move the mirror off port 7480, set `mirror.address` to another loopback `ip:port`, run `speculaire configure` again, then restart the agent (D56).
+
 ## Before turning on `enforce`
 
 1. Run `gate.mode = "audit"` until `speculaire_gate_total{mode="audit"}` shows no `rejected`, `unverifiable` or `unmatched` results you did not expect.
 2. Exempt images that must run without a signature with `gate.exempt` (D18). An exemption needs a running agent; while the agent is stopped, only the toleration annotation of step 3 lets a pod start.
 3. Pick a toleration annotation for the static control-plane pods. Set `tolerate_missing_plugins_annotation` under `[plugins.'io.containerd.nri.v1.nri'.default_validator]`, and add that annotation, set to `"true"`, to each static pod manifest. Without it, a stopped agent keeps the control plane from restarting (`containerd/nri` `plugins/default-validator/default-validator.go:53-65`).
-4. Turn on fail-closed: in the same section, set `enable = true` and `required_plugins = ["speculaire"]`, then restart containerd.
+4. On every node, `speculaire check-config` exits 0. It exits 1 when a `hosts.toml` lacks the mirror entry, so `configure` has not run there or an edit removed it (D55).
+5. Turn on fail-closed: in the same section, set `enable = true` and `required_plugins = ["speculaire"]`, then restart containerd.
 
 ## Break glass: containers do not start
 

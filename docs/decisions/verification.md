@@ -96,7 +96,6 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - `Unverifiable` and `Pending` are short-lived and retried anyway.
 - **Revisit when:** the DaemonSet phase starts. Then keep the file on a `hostPath` under `/run/speculaire`.
 
-
 ## D38: Upstream rate limits pause discovery per registry host (amends D20; amended by D43)
 
 - **Decision:**
@@ -108,7 +107,6 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The user agreed. Retrying sooner than the registry asks only extends the ban, and the ban covers every image on that host, not only the one that hit it.
   - Docker Hub counts manifest `GET`s against its pull limit, but not `HEAD`s. Most images have no fallback or `.sig` tag, so probing with `HEAD` keeps verification from spending the node's pull budget.
 - **Revisit when:** —
-
 
 ## D43: Attestations count only as Sigstore bundles; `.att` tags are ignored (amends D8, D38; amended by D49)
 

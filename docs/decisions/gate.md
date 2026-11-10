@@ -68,7 +68,6 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The whole answer must fit: `gate.wait`, plus the 2.3 snapshot check (D15).
 - **Revisit when:** `FailurePolicy` ships in a containerd release (D9).
 
-
 ## D44: The DaemonSet's own pod carries the tolerate annotation
 
 - **Decision:** the Helm chart installs in `kube-system`, and sets the NRI tolerate annotation chosen in `docs/operations.md` on the agent pod.

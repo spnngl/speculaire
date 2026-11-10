@@ -7,7 +7,7 @@ Trust boundaries and accepted risks. Each item names the decision that enforces 
   - artifacts are checked against their digest and signature (D8);
   - TUF metadata authenticates itself, so it can travel P2P (D26).
 - **Peers are authenticated for identity.** Only holders of a kubelet client certificate from the cluster CA can talk to the peer API or a reflector, and a node can only announce content for itself (D16).
-- **The local mirror is closed to other local processes.** containerd authenticates with a root-only client certificate, so `hostNetwork` pods cannot read cached layers through it (D14).
+- **The local mirror is closed to other local processes.** containerd authenticates with a root-only client certificate, so `hostNetwork` pods cannot read cached layers through it. It listens on loopback only; startup refuses any other `mirror.address` (D14, D56).
 - **Every node verifies for itself.** Verdicts are never shared, and a compromised control plane cannot relax a node's policy (D26).
 - **Saved verdicts are as trusted as memory.** `/run/speculaire` is root-only and cleared at reboot. A file with an unknown version or a bad checksum is discarded, and entries saved under another policy or trust root only serve as stale verdicts (D31).
 - **Secrets never reach a log.** Registry credentials and tokens are `SecretString`s, and HTTP tracing never records headers (D37).
