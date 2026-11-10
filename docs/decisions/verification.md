@@ -127,7 +127,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 
 - **Decision:**
   - D12(b) is the one exception to D43: an SBOM in a BuildKit attestation manifest of the image index counts, with no Sigstore bundle of its own, when the index digest has a passing signature.
-  - Discovery reads the index already fetched for the pull; it finds the attestation manifest through its `vnd.docker.reference.digest` annotation and fetches it by digest, like any blob.
+  - Discovery reads the index from the artifact store, or fetches it by digest when the mirror didn't see it (D22). It finds the attestation manifest through its `vnd.docker.reference.digest` annotation and fetches it by digest, like any blob.
   - Any other in-toto statement without a bundle still counts as absent.
 - **Because:**
   - The index signature covers the attestation manifest's digest, so its content is as authenticated as a bundle (D12).

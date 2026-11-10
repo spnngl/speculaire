@@ -94,7 +94,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 
 ## D45: The health and metrics listener binds `[::]:7482` from startup (amends D42)
 
-- **Decision:** `metrics.address` defaults to `"[::]:7482"`. The listener opens before NRI registration and before any reflector connection. `/livez` answers 200 once it listens; `/readyz` answers 200 once the gate is registered with NRI (D41), and 503 while stopping (D39).
+- **Decision:** `metrics.address` defaults to `"[::]:7482"`. The listener opens before NRI registration and before any reflector connection. `/livez` answers 200 once it listens. `/readyz` answers 200 once every component the agent has started is ready: the config is loaded, the mirror listens, and the gate is registered with NRI (D41). It answers 503 while stopping (D39). A component that a build doesn't have yet adds no condition.
 - **Because:**
   - D42's default, the peer address (D36), exists only after the first `Announce` stream, which needs the kubelet certificate (D16) and a reachable member. A joining node, a node whose members are all down, and every node before reflectors exist would serve no health endpoint and no metrics, exactly when they are needed.
   - node-exporter listens on every address the same way.

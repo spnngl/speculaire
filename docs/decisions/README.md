@@ -53,7 +53,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D43 [verification](verification.md): attestations count only as Sigstore bundles found as OCI referrers; `.att` tags and private GitHub attestations are not supported; `.sig` stays (amends D8, D38; amended by D49)
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation
 
-- D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` follows NRI registration (amends D42)
+- D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror and NRI registration (amends D42)
 - D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13)
 - D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30)
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29)
