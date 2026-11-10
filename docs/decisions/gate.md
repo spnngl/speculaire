@@ -47,9 +47,12 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - CI tests both versions.
 - **Because:**
   - containerd 2.3 vendors NRI v0.12.0, which has `required_plugins` (`default_validator`) but no `Container.image`. That field arrives in NRI v0.12.2; containerd 2.4 vendors v0.12.3 and fills `image.digest` with the CRI image's target digest (v2.4.0 `internal/cri/nri/nri_api_linux.go:973-988`, `internal/cri/server/container_create.go:330`).
-  - containerd 2.3 and 2.4 send their NRI version in `Configure` (NRI v0.12.0 `ConfigureRequest.NRI_version`, from build info); inference covers builds without build info.
+  - containerd 2.3 and 2.4 send their NRI version in `Configure` (NRI v0.12.0 `ConfigureRequest.NRI_version`, from build info); inference covers builds without build info. Spike 01 confirmed it: 2.3.7 sends `v0.12.0` and 2.4.2 sends `v0.12.3`.
   - On 2.3 the annotation is the pod-spec string, possibly a bare tag that can be retagged between CRI resolution and the gate.
-  - In containerd 2.3 the snapshot is prepared before NRI `CreateContainer` runs (`internal/cri/server/container_create.go:363` vs `:435`), so the chain-ID check catches a retag to different layers.
+  - In containerd 2.3 the snapshot is prepared before NRI `CreateContainer` runs (v2.3.7 `internal/cri/server/container_create.go:378` `WithNewSnapshot` vs `:450` `WithContainerAdjustment`, both applied in `NewContainer` at `:462`), so the chain-ID check catches a retag to different layers.
+  - M0 spike 02 measured it on containerd 2.3.7 and 2.4.2 (kind, overlayfs, busybox:1.37, linux/arm64). For 20 pods created at once, every container's snapshot existed in `CreateContainer`, its parent equalled the chain ID computed from the config's `rootfs.diff_ids`, and all pods ran. A snapshot `Stat` took a median of 0.2 ms and at most 3.2 ms; the whole check (image lookup, three blob reads, `Stat`) took at most 12.8 ms, well inside `gate.wait`. No handler deadlocked containerd.
+  - A `hostUsers: false` pod on 2.3.7 (kernel 7.0.14, overlayfs) had the chain ID as its direct parent: overlayfs remaps with idmapped mounts, so there was no remapped snapshot. The extra level stays for snapshotters that remap IDs themselves.
+  - On 2.4.2 `container.image.digest` equalled the image's target digest for all 20 pods.
   - The residual gap is a retag to an image with identical layers but a different config. It is accepted on 2.3 with the warning, and closed on 2.4.
 - **Revisit when:** containerd 2.3 reaches end of life. Then drop the 2.3 path.
 
