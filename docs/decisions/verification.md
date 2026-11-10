@@ -69,7 +69,9 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   2. containerd `/images/create|update` events;
   3. NRI `Synchronize`, for containers already running;
   4. a gate cache miss.
-- **Because:** starting at the manifest fetch lets verification run during the layer download. Otherwise a first start often misses `gate.wait`, is denied as pending, and waits for kubelet's retry delay (about 10 s).
+- **Because:**
+  - starting at the manifest fetch lets verification run during the layer download. Otherwise a first start often misses `gate.wait`, is denied as pending, and waits for kubelet's retry delay (about 10 s).
+  - **Measured** (M0 spike 05, containerd 2.3.7 and 2.4.2, kind): a kubelet pod using `docker.io/library/busybox:1.36` on a node without it made containerd send the mirror `GET /v2/library/busybox/manifests/sha256:<index digest>?ns=docker.io`, then the same path with the node platform's manifest digest, both with the client certificate. It sent no request for the tag, and it asked for the config and layers after those. With both answered 404, the pod reached `Running`. The `ns` query parameter carries the registry host.
 - **Revisit when:** —
 
 ## D26: Policy and trust root are local files
@@ -130,4 +132,5 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Because:**
   - The index signature covers the attestation manifest's digest, so its content is as authenticated as a bundle (D12).
   - `docker buildx --sbom=true` images carry no other SBOM, and they are common.
+  - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.

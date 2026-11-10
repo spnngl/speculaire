@@ -16,7 +16,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 ## D6: Tag resolution is off by default
 
 - **Decision:** the mirror host gets capability `pull` only, never `resolve`.
-- **Because:** with `resolve`, a peer could answer a tag with any digest it serves. Without it, tags resolve upstream (a small request) and blobs, the bulk of the bytes, still go P2P.
+- **Because:** with `resolve`, a peer could answer a tag with any digest it serves. Without it, tags resolve upstream (a small request) and blobs, the bulk of the bytes, still go P2P. Measured on containerd 2.3.7 and 2.4.2: the mirror sees no tag request, only manifests and blobs by digest (D22).
 - **Revisit when:** users need tag pulls to survive an upstream outage. Then expose `resolve_tags = true`, documented as "trust all nodes".
 
 ## D7: Verify blob digests in flight (amended by D52)
