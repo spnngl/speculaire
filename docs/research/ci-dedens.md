@@ -150,6 +150,6 @@ Roots: `dedens/` = `/Users/ldelannoy/src/github.com/spnngl/dedens`. `shared/` = 
 ### Open questions
 
 - Is Docker preinstalled and is kind usable on `ubuntu-26.04-arm`? Check the runner image.
-- Does containerd 2.3/2.4 in a kind node need `[plugins."io.containerd.nri.v1.nri"]` enabled explicitly?
+- ~~Does containerd 2.3/2.4 in a kind node need `[plugins."io.containerd.nri.v1.nri"]` enabled explicitly?~~ No (M0 spike 00, containerd 2.3.7 and 2.4.2 over `kindest/node:v1.37.0`): NRI is on by default and `/var/run/nri/nri.sock` exists. The node's containerd config does need two patches: `config_path = "/etc/containerd/certs.d"` under the CRI registry table, and `discard_unpacked_layers = false` (the node ships `true`, which D15's preflight rejects). `crictl info` no longer lists the registry config in 2.3.7; use `containerd config dump`.
 - The DaemonSet image needs root/host mounts, which conflicts with dedens' `FROM scratch` + uid 10001 image. Ship one image or two?
 - Does the repo live under `spnngl` (reusable workflows at `@main`) or `spegel-org` (copy the reusable workflows)?
