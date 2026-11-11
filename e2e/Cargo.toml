@@ -1,0 +1,12 @@
+[package]
+name = "e2e"
+description = "The e2e suites: kind clusters made by `just e2e-up`, driven through kubectl and docker exec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

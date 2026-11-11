@@ -231,3 +231,19 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Measured** (M1 step 01, PR #3): every job passed in about 5 minutes; the CI aarch64 binary has the SHA-256 of the local `just musl` build (`3058d2cc…3833`), and `required` failed when a throwaway commit failed `check`.
 - **Cost:** the tool versions live in two files; a hand edit to one of them makes local and CI runs differ until Renovate's next pull request.
 - **Revisit when:** the build image is published to a registry, so CI can pull it instead of building it.
+
+## D59: e2e is a Rust test crate on a kind cluster that `just` recipes manage (amends D27)
+
+- **Decision:**
+  - `e2e/` is a workspace crate. Its suites in `e2e/tests/` drive the cluster through `kubectl` and `docker exec`, and every test is `#[ignore]`d: `just check` builds them, and `just e2e-test <minor>` runs them with `--ignored`.
+  - The justfile manages the cluster: `just e2e <minor>` runs `e2e-up`, `e2e-test` and `e2e-down` (on exit, pass or fail). `e2e-up` builds `e2e/node/Containerfile`, starts the cluster `speculaire-<minor without dot>` from `e2e/kind.yaml`, copies the binary of `just musl` to each node, and waits until every node is `Ready`.
+  - The justfile pins one containerd release per supported minor (D40), kind, and kubectl, each with a `# renovate:` comment. `just e2e-tools` downloads kind and kubectl into `target/e2e/`, checking their published SHA-256. The node image patches `discard_unpacked_layers = false` and `config_path` into containerd's config, and its build fails when the patch no longer applies.
+  - The suites' pod image is `e2e::TEST_IMAGE`, pinned by tag and digest.
+- **Because:**
+  - Rust keeps the suites typed, in the language of the code they test, and needs no other runner. `#[ignore]` keeps a suite that cannot run from looking like a pass.
+  - The CI job and a Mac run the same recipe; the musl binary comes from the run's own `musl` job in CI.
+  - Pins let Renovate propose each bump as a pull request that e2e tests; the M0 harness resolved the newest release at run time, so a release could break a run with no change in the repository.
+  - Renovate's presets skip `tests/` directories, so the image constant lives in `e2e/src/lib.rs`.
+  - **Measured** (M1 step 02, Docker Desktop on arm64): `just e2e 2.3` and `just e2e 2.4` each pass in about 45 s from a warm image cache, and exit non-zero when the pod's image digest is wrong; afterwards no `speculaire-*` cluster or container remains. kind's `--wait` covers only the control plane: a worker was not yet `Ready` when the suite started. In CI (PR #4) the four legs pass in 1 to 2 minutes each, with the binary of their run's `musl` job.
+- **Cost:** containerd pulls by digest whatever tag precedes it, so a wrong tag in `TEST_IMAGE` goes unnoticed until Renovate rewrites it.
+- **Revisit when:** a suite needs more than one cluster at a time.
