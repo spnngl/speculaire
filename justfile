@@ -146,8 +146,17 @@ e2e-up runtime version kubernetes="": e2e-tools
         cat e2e/kind.yaml e2e/node/crio/kind-patches.yaml >"$config"
     fi
     kind create cluster --name "$cluster" --image "$image" --config "$config" --wait 180s
+    # The reference config, at log.filter "info" so that a healthy start leaves entries in the journal.
+    agent_config='{{ e2e_dir }}/config.toml'
+    sed 's/^#filter = "warn"$/filter = "info"/' packaging/config.toml >"$agent_config"
+    grep -q '^filter = "info"$' "$agent_config"
+    # The packages' paths: the binary, the unit and the config (D69).
     for node in $(kind get nodes --name "$cluster"); do
-        docker cp "$bin" "$node:/usr/local/bin/speculaire"
+        docker cp "$bin" "$node:/usr/bin/speculaire"
+        docker cp packaging/speculaire.service "$node:/usr/lib/systemd/system/speculaire.service"
+        docker exec "$node" mkdir -p /etc/speculaire
+        docker cp "$agent_config" "$node:/etc/speculaire/config.toml"
+        docker exec "$node" sh -c 'systemctl daemon-reload && systemctl enable --now speculaire'
     done
     # kind's --wait covers the control plane only.
     kubectl --context "kind-$cluster" wait --for=condition=Ready nodes --all --timeout=180s

@@ -46,7 +46,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56)
 - D37 [agent](agent.md): logs through `tracing` to journald or JSON, default `warn`; an audit log of gate decisions and verdict changes, off by default; secrets never logged (amends D30; amended by D52)
 - D38 [verification](verification.md): upstream `429` pauses discovery to that host until `Retry-After`; fallback and `.sig` tags are probed with `HEAD` (amends D20; amended by D43)
-- D39 [agent](agent.md): shutdown withdraws from reflectors, drains for 10 s, saves the cache, and leaves NRI last
+- D39 [agent](agent.md): shutdown withdraws from reflectors, drains for 10 s, saves the cache, and leaves NRI last (amended by D69)
 - D40 [build](build.md): SemVer, `0.x` until `enforce` ships; fixes for the latest minor only; containerd minors from 2.3 while upstream supports them (amended by D63)
 - D41 [gate](gate.md): `gate.wait` stays under half of containerd's `plugin_request_timeout`; a closed NRI connection re-registers at once (amended by D64)
 - D42 [agent](agent.md): `/metrics`, `/readyz` and `/livez` listen on `metrics.address`, port 7482, plain HTTP (amended by D45)
@@ -60,7 +60,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34)
 - D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2)
 - D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37)
-- D53 [agent](agent.md): the systemd unit's hardening, checked by e2e
+- D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69)
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64)
 - D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32)
 - D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47)
@@ -76,5 +76,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32)
 - D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7)
 - D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61)
+- D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53)
 
-Next free number: D69.
+Next free number: D70.

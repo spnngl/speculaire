@@ -16,6 +16,7 @@ humantime.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 mime.workspace = true
+sd-notify.workspace = true
 serde.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
