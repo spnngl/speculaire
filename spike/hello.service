@@ -1,0 +1,35 @@
+[Unit]
+Description=speculaire spike 00 (D53 hardening inside a kind node)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hello
+User=root
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+StateDirectory=speculaire
+RuntimeDirectory=speculaire
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged io_uring_setup io_uring_enter io_uring_register
+SystemCallErrorNumber=EPERM
+LimitNOFILE=524288

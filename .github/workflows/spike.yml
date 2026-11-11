@@ -1,0 +1,65 @@
+# Throwaway spike workflow. It lives on the branches `spike/m0` and `spike/crio`, with the spike code under `spike/`, and
+# is never merged.
+# `push` rather than `workflow_dispatch`, which runs only workflows present on the default branch.
+name: spike
+on:
+  push:
+    branches: [spike/m0, spike/crio]
+permissions:
+  contents: read
+concurrency:
+  group: spike-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  spike:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
+        # M0 steps on containerd with Kubernetes 1.37; CRI-O spike 00 on the 3 newest minors kind ships.
+        leg:
+          - {name: containerd 2.3 k8s 1.37, args: ci all 2.3}
+          - {name: containerd 2.4 k8s 1.37, args: ci all 2.4}
+          - {name: containerd 2.4 k8s 1.36, args: ci 00 2.4 --k8s 1.36}
+          - {name: containerd 2.4 k8s 1.35, args: ci 00 2.4 --k8s 1.35}
+          - {name: cri-o 1.37, args: crio ci 00 1.37}
+          - {name: cri-o 1.36, args: crio ci 00 1.36}
+          - {name: cri-o 1.35, args: crio ci 00 1.35}
+    name: ${{ matrix.leg.name }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      NU_VERSION: "0.116.1"
+      KIND_VERSION: "v0.33.0"
+      KUBECTL_VERSION: "v1.36.1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Show the runner
+        run: |
+          uname -m
+          docker version --format '{{.Server.Version}} {{.Server.Arch}}'
+          nproc; free -g
+      - name: Install nushell, kind and kubectl
+        run: |
+          set -eu
+          bin="$HOME/.local/bin"; mkdir -p "$bin"; cd "$RUNNER_TEMP"
+          arch=$(dpkg --print-architecture)
+          nu="nu-${NU_VERSION}-$(uname -m)-unknown-linux-musl.tar.gz"
+          curl -fsSLO "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${nu}"
+          curl -fsSLO "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/SHA256SUMS"
+          grep " ${nu}\$" SHA256SUMS | sha256sum -c -
+          tar -xzf "$nu" --strip-components=1 -C "$bin" --wildcards '*/nu'
+          curl -fsSLo kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${arch}"
+          echo "$(curl -fsSL "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${arch}.sha256sum" | cut -d' ' -f1)  kind" | sha256sum -c -
+          curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl"
+          echo "$(curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl.sha256")  kubectl" | sha256sum -c -
+          install -m 0755 kind kubectl "$bin/"
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: Run the leg
+        env:
+          ARGS: ${{ matrix.leg.args }}
+        run: |
+          read -ra args <<< "$ARGS"
+          nu spike/spike.nu "${args[@]}"

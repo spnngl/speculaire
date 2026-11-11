@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["hello", "nri-spike", "tls-spike", "mirror-spike"]
+exclude = ["sigstore-spike"]
+
+[profile.release]
+opt-level = "s"
+debug = false
+strip = true

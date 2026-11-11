@@ -1,0 +1,32 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+kubeadmConfigPatches:
+  # kind's kubeadm config names containerd's socket (pkg/cluster/internal/kubeadm/config.go:244,262 at v0.33.0).
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      criSocket: unix:///var/run/crio/crio.sock
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      criSocket: unix:///var/run/crio/crio.sock
+  # M0 step 03's fast kubelet certificate rotation. kind v0.33.0 writes kubeadm v1beta3 below Kubernetes 1.36
+  # (pkg/cluster/internal/kubeadm/config.go:677), where extraArgs is a map; a patch naming its apiVersion
+  # applies to that version only (pkg/internal/patch/resource.go:70).
+  - |
+    apiVersion: kubeadm.k8s.io/v1beta4
+    kind: ClusterConfiguration
+    controllerManager:
+      extraArgs:
+        - name: cluster-signing-duration
+          value: 10m
+  - |
+    apiVersion: kubeadm.k8s.io/v1beta3
+    kind: ClusterConfiguration
+    controllerManager:
+      extraArgs:
+        cluster-signing-duration: 10m
