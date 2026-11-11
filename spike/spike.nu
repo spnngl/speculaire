@@ -460,7 +460,7 @@ def "main check 04" [minor: string] {
     ^docker exec $node crictl pull docker.io/library/hello-world:latest o+e>| ignore
     let log = mirror-log $node
     let held = ^docker exec $node crictl images -q docker.io/library/hello-world:latest | str trim
-    $r = $r | append (check "empty mirror: pull succeeds, 404 with client subject" (($held | is-not-empty) and ($log | is-not-empty) and ($log | all {|l| ($l | str contains "-> 404") and ($l | str contains "subject=[CN=speculaire containerd]") })) ($"($log | length) requests, first: " + ($log | first | default "")))
+    $r = $r | append (check "empty mirror: pull succeeds, 404 with client subject" (($held | is-not-empty) and ($log | is-not-empty) and ($log | all {|l| ($l | str contains "-> 404") and ($l | str contains "subject=[CN=speculaire runtime]") })) ($"($log | length) requests, first: " + ($log | first | default "")))
 
     # A blob the mirror holds is served from it; the rest comes from upstream.
     ^docker exec $peer crictl pull docker.io/library/nginx:alpine o+e>| ignore
@@ -603,12 +603,12 @@ def "main crio check 03" [k8s: string] {
     let ctx = $"kind-($name)"
     let node = $"($name)-worker"
     let arch = match (sh-node $node "uname -m" | str trim) { "aarch64" => "arm64", "x86_64" => "amd64", $a => $a }
-    let digest_ref = $"docker.io/library/busybox@(fill-mirror $node $arch | get index)"
     mut r = []
 
     ^kubectl --context $ctx delete pod -l spike=s03 --ignore-not-found --wait=true o+e>| ignore
     main put mirror-spike $node
     crio-certs $node
+    let digest_ref = $"docker.io/library/busybox@(fill-mirror $node $arch | get index)"
     crio-dropin $node none
 
     # Baseline, then an empty mirror with pull-from-mirror = all.
