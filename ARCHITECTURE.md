@@ -105,14 +105,15 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 
 | Path | Role |
 |---|---|
-| `crates/speculaire` | The binary and its library: `version`, `check-config`, and `agent` with its config (D60), logs (D37) and status listener (D42, D45) today; `configure`, `unconfigure`, `verify` (planned) |
+| `apps/speculaire` | The binary: `version`, `check-config` and `agent` today; `configure`, `unconfigure`, `verify` (planned) (D62) |
+| `apps/loadgen` | Test-only reflector load generator, never packaged (D33) (planned) |
+| `crates/agent` | The agent: config (D60), logs (D37), metrics (D34) and status listener (D42, D45) |
 | `crates/oci` | Distribution read API, referrers, media types, registry Bearer token auth (on `oci-spec`) (planned) |
 | `crates/containerd` | Content source (directory + gRPC fallback), event watch, in-memory copy of the image store, *registry config* parser, preflight (planned) |
 | `crates/pki` | kubelet certificate loading and rotation, rustls verifiers (D16), local mirror CA (D14) (planned) |
 | `crates/reflect` | Protobuf, reflector server, agent client, membership (D2) (planned) |
 | `crates/verify` | Artifact discovery and *artifact store*, sigstore glue, policy, SBOM checks, verdict cache (planned) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
-| `crates/loadgen` | Test-only reflector load generator, never packaged (D33) (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data (planned) |
 | `oracle/` | Go module, test-only: a fake NRI runtime, and upstream's own code for differential tests (D29) (planned) |
 | `packaging/` | `config.toml`, the reference of every setting (D30, D47); systemd unit, nfpm config, containerd drop-in examples, later the Helm chart (planned) |

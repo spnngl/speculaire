@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use speculaire::{agent, config};
+use speculaire_agent::config;
 
 /// P2P image mirror and supply-chain gate for containerd.
 #[derive(Parser)]
@@ -52,7 +52,7 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Agent { config } => agent::run(&config)?,
+        Command::Agent { config } => speculaire_agent::run(&config)?,
         Command::Version => writeln!(std::io::stdout().lock(), "{}", version())?,
         Command::CheckConfig { path } => {
             config::load(&path)?;

@@ -1,0 +1,21 @@
+[package]
+name = "speculaire"
+description = "P2P image mirror and supply-chain gate for containerd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+speculaire-agent.workspace = true
+
+# D46: the global allocator on musl, `src/main.rs`.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc.workspace = true
+
+[lints]
+workspace = true

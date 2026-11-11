@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "e2e"]
+# apps/: binaries; crates/: libraries (D62).
+members = ["apps/*", "crates/*", "e2e"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +13,7 @@ repository = "https://github.com/spnngl/speculaire"
 publish = false
 
 [workspace.dependencies]
+speculaire-agent = { path = "crates/agent" }
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = [
   "http1",

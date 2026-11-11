@@ -1034,13 +1034,21 @@ name = "speculaire"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "clap",
+ "mimalloc",
+ "speculaire-agent",
+]
+
+[[package]]
+name = "speculaire-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
  "http",
  "humantime",
  "metrics",
  "metrics-exporter-prometheus",
- "mimalloc",
  "mime",
  "serde",
  "serde_path_to_error",
