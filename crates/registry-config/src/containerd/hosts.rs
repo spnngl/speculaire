@@ -231,6 +231,9 @@ pub fn parse_hosts_file(base_dir: &Path, text: &str) -> Result<Vec<HostConfig>, 
         )?);
     }
     hosts.push(host_config(&file.server, base_dir, &root, "")?);
+    if hosts.len() > 2 {
+        hosts.swap(0, 1);
+    }
     Ok(hosts)
 }
 
