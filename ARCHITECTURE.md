@@ -125,6 +125,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `bench/` | Benchmarks against Spegel: recipe, node-access pod, policy, results (D35) (planned) |
 | `justfile` | The only entry point, for humans and CI (D27); `just dev <recipe>` runs a recipe in the build image (D57) |
 | `build/Containerfile` | The build image: the musl build and, on macOS, every recipe (D57) |
+| `supply-chain/` | cargo-vet's store: imported audit sets, trusted publishers, exemptions; `just vet` (D71) |
 
 ## Documents
 

@@ -16,6 +16,7 @@ Before any task, read the decisions' index, `docs/decisions/README.md`, then the
 - Hold credentials and tokens in `secrecy::SecretString`, and never log headers (D37). A new audit field goes in D37's event list.
 - A change that could slow pulls runs `just bench` against Spegel before its minor release (D35).
 - A breaking change, as D40 defines it, is marked `!` in its commit subject.
+- A new crate, or a bump that `just vet` rejects, gets an audit, a trust or `just vet-exempt` in the same change (D71).
 - A new setting goes in `packaging/config.toml` with its default (D30). A new metric goes in `docs/metrics.md`, under the label rules of D34. A new rejection reason or alert goes in `docs/operations.md`.
 - Code ported from another project starts with a comment naming the upstream file and tag, and the first port from a project adds its copyright to `NOTICE` (D25).
 - A change is done when `just check` (the check, D27, D48) passes.

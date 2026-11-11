@@ -96,6 +96,17 @@ minimal-versions:
 deny *checks:
     cargo deny check {{ checks }}
 
+# `--locked` reads supply-chain/imports.lock, so it needs no network (D71).
+# Each crate of Cargo.lock is audited by an imported set, published by a trusted publisher, or exempted (cargo-vet)
+vet:
+    cargo vet --locked
+
+# Run on a branch that fails `just vet` after a bump, then commit supply-chain/ (D71).
+# Exempts the crate versions no audit or trust covers, then drops what is no longer needed
+vet-exempt:
+    cargo vet regenerate exemptions
+    cargo vet prune
+
 # Formatting, `go mod verify`, `go vet` and `go test`, then `speculaire-oracle version`. Volumes speculaire-go-mod and
 # speculaire-go-build-<arch> keep the module and build caches. `just musl` never builds it, so no artifact holds it.
 # Build, check and run the Go test oracle (D29) in the pinned Go image
