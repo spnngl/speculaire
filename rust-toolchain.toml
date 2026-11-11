@@ -3,4 +3,5 @@
 # Pinned: a new stable brings new clippy lints, which `-D warnings` turns into errors. Renovate bumps it, with the
 # `rust:<channel>-alpine` tag in build/Containerfile.
 channel = "1.99.1"
-components = ["clippy", "rustfmt"]
+# llvm-tools: `just cov` (D72).
+components = ["clippy", "llvm-tools", "rustfmt"]

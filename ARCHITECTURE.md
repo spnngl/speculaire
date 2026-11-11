@@ -126,6 +126,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `justfile` | The only entry point, for humans and CI (D27); `just dev <recipe>` runs a recipe in the build image (D57) |
 | `build/Containerfile` | The build image: the musl build and, on macOS, every recipe (D57) |
 | `supply-chain/` | cargo-vet's store: imported audit sets, trusted publishers, exemptions; `just vet` (D71) |
+| `.config/nextest.toml` | cargo-nextest's settings for `just check` and `just cov`: hung and leaky tests fail (D72) |
 
 ## Documents
 

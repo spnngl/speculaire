@@ -12,7 +12,7 @@ FROM docker.io/library/rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4
 # `/metrics` (D34).
 RUN apk add --no-cache bash build-base file git lld protobuf-dev
 # rust-toolchain.toml's components; the image's minimal profile lacks them, and rustup would fetch them on every run.
-RUN rustup component add clippy rustfmt
+RUN rustup component add clippy llvm-tools rustfmt
 
 # renovate: datasource=crate depName=just
 ARG JUST_VERSION=1.59.0
@@ -48,9 +48,14 @@ ARG CARGO_HACK_VERSION=0.6.45
 ARG CARGO_DENY_VERSION=0.20.2
 # renovate: datasource=crate depName=cargo-vet
 ARG CARGO_VET_VERSION=0.10.3
+# renovate: datasource=crate depName=cargo-nextest
+ARG CARGO_NEXTEST_VERSION=0.9.151
+# renovate: datasource=crate depName=cargo-llvm-cov
+ARG CARGO_LLVM_COV_VERSION=0.9.1
 # cargo-vet links zlib statically through libz-sys.
 RUN apk add --no-cache zlib-static
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo install --locked taplo-cli@"$TAPLO_VERSION" typos-cli@"$TYPOS_VERSION" \
         cargo-shear@"$CARGO_SHEAR_VERSION" cargo-hack@"$CARGO_HACK_VERSION" cargo-deny@"$CARGO_DENY_VERSION" \
-        cargo-vet@"$CARGO_VET_VERSION"
+        cargo-vet@"$CARGO_VET_VERSION" cargo-nextest@"$CARGO_NEXTEST_VERSION" \
+        cargo-llvm-cov@"$CARGO_LLVM_COV_VERSION"
