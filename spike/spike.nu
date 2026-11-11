@@ -543,9 +543,10 @@ def crio-requests [node: string] {
     mirror-log $node | each {|l| $l | str replace -r ' subject=\[[^\]]*\]' '' | str replace -r '/v2/docker.io/library/' '' | str replace -r 'sha256:([0-9a-f]{12})[0-9a-f]+' 'sha256:$1' }
 }
 
-# Pull after removing every unused image; {ms, ok, out}.
+# Pull after removing exited containers and every unused image; {ms, ok, out}.
+# Exited containers of deleted pods keep their image, and so its layers, until kubelet collects them.
 def fresh-pull [node: string, image: string, creds: string = ""] {
-    sh-node $node "crictl rmi --prune >/dev/null 2>&1; true" | ignore
+    sh-node $node "crictl ps -a -q --state exited | xargs -r crictl rm >/dev/null 2>&1; crictl rmi --prune >/dev/null 2>&1; true" | ignore
     let c = if ($creds | is-empty) { "" } else { $"--creds ($creds) " }
     let start = date now
     let r = ^docker exec $node sh -c $"crictl pull ($c)($image) 2>&1" | complete
