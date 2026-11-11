@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::TARGETS;
+use crate::{TARGETS, values};
 
 /// The seeds of `target`: the files of `seeds/<target>/`, and for `config` the reference file uncommented.
 fn seeds(target: &str) -> Vec<Vec<u8>> {
@@ -81,4 +81,40 @@ fn targets_match_the_shims() {
     let mut names: Vec<&str> = TARGETS.iter().map(|(name, _)| *name).collect();
     names.sort_unstable();
     assert_eq!(shims, names);
+}
+
+/// The dotted names of the keys under `table`, tables themselves left out.
+fn leaves(prefix: &str, table: &toml::Table, names: &mut Vec<String>) {
+    for (key, value) in table {
+        let name = format!("{prefix}{key}");
+        match value {
+            toml::Value::Table(inner) => leaves(&format!("{name}."), inner, names),
+            _ => names.push(name),
+        }
+    }
+}
+
+#[test]
+fn config_values_draws_every_key_of_the_reference() {
+    let table: toml::Table = reference()
+        .parse()
+        .expect("the uncommented reference file is TOML");
+    let mut keys = Vec::new();
+    leaves("", &table, &mut keys);
+    keys.sort();
+    let mut drawn: Vec<&str> = values::KEYS.iter().map(|(key, _)| *key).collect();
+    drawn.sort_unstable();
+    assert_eq!(
+        keys, drawn,
+        "a key was added to or removed from packaging/config.toml"
+    );
+}
+
+#[test]
+fn the_first_literal_of_every_key_parses() {
+    let text: String = values::KEYS
+        .iter()
+        .flat_map(|(key, literals)| [*key, " = ", literals.first().expect("a literal"), "\n"])
+        .collect();
+    speculaire_agent::config::parse(&text).expect("the first literals form a valid config");
 }
