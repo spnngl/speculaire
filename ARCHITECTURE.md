@@ -133,6 +133,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 
 - [`docs/decisions/`](docs/decisions/README.md): every design choice and its reason (`Dn`), one file per topic, plus an index.
 - [`docs/TODECIDE.md`](docs/TODECIDE.md): open questions, each with a proposed default.
+- [`docs/proposals/`](docs/proposals/): designs for unscheduled work, settled with the user but not yet decisions: [federation of swarms](docs/proposals/federation.md).
 - [`docs/security.md`](docs/security.md): trust boundaries and accepted risks.
 - [`docs/metrics.md`](docs/metrics.md): every exported metric, with its labels (D34).
 - [`docs/operations.md`](docs/operations.md): turning on `enforce`, break glass, rejection reasons, alerts, upgrade and removal.

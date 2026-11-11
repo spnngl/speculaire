@@ -8,7 +8,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - The reflectors hold the complete map, so a lookup is one RTT instead of O(log n).
   - The DHT has heavy re-provide churn, and rust-libp2p's kad `MemoryStore` defaults to 1024 keys.
   - A reflector outage degrades to *fall through*, never to a failed pull.
-- **Revisit when:** we need clusters without a stable control plane, or multi-cluster sharing.
+- **Revisit when:** we need clusters without a stable control plane, or multi-cluster sharing (`docs/proposals/federation.md`).
 
 ## D2: Reflector topology and protocol (amended by D33, D51)
 
