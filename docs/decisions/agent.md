@@ -30,7 +30,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A bad reload keeps the old config because the gate must keep deciding. Failing closed on a typo would block every container creation on the node.
 - **Revisit when:** —
 
-## D32: `configure` and `unconfigure` change only what speculaire added (amends D14; amended by D55, D56)
+## D32: `configure` and `unconfigure` change only what speculaire added (amends D14; amended by D55, D56, D66)
 
 - **Decision:**
   - `speculaire configure` edits each `hosts.toml` with a format-preserving TOML editor, so the admin's comments and ordering stay. It recognises its own entries by their `ca` path (D56).
