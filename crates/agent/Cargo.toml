@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+bytesize = "2"
 http.workspace = true
 humantime.workspace = true
 metrics.workspace = true
