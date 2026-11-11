@@ -1,0 +1,10 @@
+# Check https://github.com/betterleaks/betterleaks/blob/main/docs/config.md
+title = "Speculaire"
+minVersion = "1.9.0"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "A throwaway key made for the tests: the oracle tests write it to disk for Go to load. It protects nothing."
+paths = ["""crates/registry-config/tests/data/test-key\\.pem"""]
