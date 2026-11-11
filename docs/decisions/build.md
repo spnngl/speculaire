@@ -204,7 +204,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:** pod authors choose registry hosts, so "a host from the registry config" was not bounded: a pod naming a new host would add series on every node. The `hosts.toml` tree is written by the admin.
 - **Revisit when:** admins need per-host numbers for hosts without a `hosts.toml` directory; the audit log (D37) already names them.
 
-## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58)
+## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58, D62)
 
 - **Decision:**
   - `rust-toolchain.toml` pins stable `1.99.1` with clippy and rustfmt; the justfile pins one nightly, for rustfmt (`rustfmt.toml` uses unstable options) and `-Z` flags. `rust-version` is `1.95`, which `just msrv` checks.
@@ -260,3 +260,12 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `metrics-exporter-prometheus` 0.18.3 `build.rs` runs `prost_build::compile_protos` when the `protobuf` feature is on, so every job that compiles the agent needs `protoc`.
 - **Cost:** once `Configure` fills the versions, the series with empty labels stays exported; the recorder has no call that removes a series.
 - **Revisit when:** M6 sets the versions: drop the empty series, or move the runtime versions to a series of their own.
+
+## D62: Binaries live in `apps/`, libraries in `crates/` (amends D57)
+
+- **Decision:**
+  - `apps/<name>` holds each binary package: `apps/speculaire` (package `speculaire`, the shipped binary) and, later, `apps/loadgen`. A binary package parses arguments and calls libraries; it holds no other logic.
+  - `crates/<name>` holds each library, as package `speculaire-<name>`: `crates/agent` is `speculaire-agent` today.
+  - The binary's integration tests live in `apps/speculaire/tests/`, where Cargo builds the binary for them (`CARGO_BIN_EXE_speculaire`).
+  - `e2e/` and `oracle/` stay at the top level.
+- **Because:** the user asked for libraries and binaries apart. A library holds code a fuzz target, a test or another binary can reuse; a binary-only crate cannot be linked by them.

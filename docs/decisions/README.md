@@ -64,10 +64,11 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup
 - D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32)
 - D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47)
-- D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58)
+- D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62)
 - D58 [build](build.md): CI runs the check on the runner with prebuilt tools, and the musl build in the build image; `ci` jobs land with their content (amends D27, D57)
 - D59 [build](build.md): e2e is a Rust test crate of `#[ignore]`d suites on a kind cluster managed by `just e2e <minor>`, with pinned containerd, kind and kubectl (amends D27)
 - D60 [agent](agent.md): config values parse into types that print back as written; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47)
 - D61 [build](build.md): `speculaire_build_info` exists from startup with empty runtime versions; every build has `protoc` (amends D34)
+- D62 [build](build.md): binaries in `apps/`, libraries in `crates/` as `speculaire-<name>` (amends D57)
 
-Next free number: D62.
+Next free number: D63.

@@ -1,4 +1,4 @@
-//! `speculaire agent`: loads the config, then serves until SIGTERM, reloading on SIGHUP and on file changes (D30).
+//! The agent process: loads the config, then serves until SIGTERM, reloading on SIGHUP and on file changes (D30).
 
 use std::path::Path;
 use std::sync::Arc;

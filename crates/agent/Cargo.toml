@@ -1,6 +1,6 @@
 [package]
-name = "speculaire"
-description = "P2P image mirror and supply-chain gate for containerd"
+name = "speculaire-agent"
+description = "The agent of speculaire: config, logs, metrics and status listener"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,6 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
-clap.workspace = true
 http.workspace = true
 humantime.workspace = true
 metrics.workspace = true
@@ -28,10 +27,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
-
-# D46: the global allocator on musl, `src/main.rs`.
-[target.'cfg(target_env = "musl")'.dependencies]
-mimalloc.workspace = true
 
 [lints]
 workspace = true
