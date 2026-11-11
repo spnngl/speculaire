@@ -1,7 +1,7 @@
 # typos: `just check`.
 [files]
-# Fuzz seeds are misspelt on purpose.
-extend-exclude = ["plan/", "fuzz/seeds/"]
+# Fuzz seeds are misspelt on purpose, and tests/data holds upstream copies as they are.
+extend-exclude = ["plan/", "fuzz/seeds/", "**/tests/data/"]
 
 [default]
 # "ANDed": "AND" in capitals, then a suffix.

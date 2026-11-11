@@ -1,0 +1,13 @@
+server = "mirror.io:5000/prefix/../x//"
+override_path = false
+dial_timeout = "1h30m0.5s"
+
+[host."http://localhost:8080"]
+skip_verify = true
+[host."https://[fe80::1%25eth0]:5000/p%2Fq"]
+capabilities = ["Pull", "RESOLVE"]
+[host."http://localhost:8080".header]
+Authorization = ["Bearer x"]
+[host."https://a.io"]
+client = [["c.cert", "c.key"], "p.pem", ["only.pem", ""]]
+ca = []

@@ -1,0 +1,17 @@
+version = 2
+imports = ["conf.d/*.toml", "/etc/containerd/extra/[a-c]?.toml", "../up.toml"]
+disabled_plugins = ["io.containerd.nri.v1.nri"]
+
+[plugins."io.containerd.grpc.v1.cri".registry]
+  config_path = "/etc/containerd/certs.d:/etc/docker/certs.d"
+  [plugins."io.containerd.grpc.v1.cri".registry.headers]
+    X-Meta = ["a", "b"]
+  [plugins."io.containerd.grpc.v1.cri".registry.configs."reg.io".auth]
+    username = "u"
+    password = "p"
+    auth = "dTpw"
+    identitytoken = "t"
+  [plugins."io.containerd.grpc.v1.cri".registry.auths."https://auth.io"]
+    username = "au"
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+    endpoint = ["https://m.io"]

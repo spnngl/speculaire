@@ -20,7 +20,7 @@ func goList(t *testing.T, module string) string {
 
 func TestVersionPrintsTheSelectedModules(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"version"}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"version"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit %d: %s", code, stderr.String())
 	}
 	var got Versions
@@ -55,7 +55,7 @@ func TestNRIIsTheVersionContainerdRequires(t *testing.T) {
 func TestUsageExitsTwo(t *testing.T) {
 	for _, args := range [][]string{nil, {"versions"}, {"version", "extra"}} {
 		var stdout, stderr bytes.Buffer
-		if code := run(args, &stdout, &stderr); code != 2 || stdout.Len() != 0 {
+		if code := run(args, strings.NewReader(""), &stdout, &stderr); code != 2 || stdout.Len() != 0 {
 			t.Errorf("%q: exit %d, stdout %q", args, code, stdout.String())
 		}
 	}

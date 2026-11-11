@@ -5,5 +5,7 @@ exclude = [
   "**/target/**",
   "plan/**",
   "fuzz/seeds/**",
+  # Copies of containerd's own files, which stay as they are.
+  "**/tests/data/**",
   "supply-chain/**",
 ]

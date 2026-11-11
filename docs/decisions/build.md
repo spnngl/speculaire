@@ -124,7 +124,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The project should pass its own gate. dedens ships no SBOM (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D29: Go is a test oracle, never shipped (amended by D48, D70)
+## D29: Go is a test oracle, never shipped (amended by D48, D70, D79)
 
 - **Decision:**
   - Production code is pure Rust.
@@ -298,7 +298,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** D61's revisit, in M6.
 
 
-## D70: The oracle lands with its pins and `version`; each subcommand lands with the port it checks (amends D29)
+## D70: The oracle lands with its pins and `version`; each subcommand lands with the port it checks (amends D29; amended by D79)
 
 - **Decision:**
   - `oracle/` is the Go module `github.com/spnngl/speculaire/oracle`. M1 ships it with one subcommand, `speculaire-oracle version`, which prints the containerd and NRI versions it links, from its build info, as one JSON line: `{"containerd":"v2.4.2","nri":"v0.12.3"}`.
@@ -312,6 +312,20 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Renovate cannot read containerd's requirement; Go's version selection can, and the test turns any drift red.
 - **Measured (M1 step 07, arm64):** `just oracle` prints `{"containerd":"v2.4.2","nri":"v0.12.3"}`; with `go get github.com/containerd/nri@v0.12.5`, `go test` fails with `github.com/containerd/containerd/v2@v2.4.2 requires NRI "v0.12.3", go.mod selects "v0.12.5"`.
 - **Revisit when:** containerd 2.5 is supported (D40): the oracle moves to the newest minor by hand.
+## D79: `just oracle` runs the Rust differential tests, and the oracle reaches containerd's unexported code (amends D29, D70)
+
+- **Decision:**
+  - `just oracle` builds `speculaire-oracle` into `target/oracle/` and then runs `just oracle-test`, which runs every test target named `oracle` (`cargo test --workspace --test oracle -- --nocapture`) with `SPECULAIRE_ORACLE` set to the binary. The tests run natively on Linux and in the dev image elsewhere (D57), where the static Linux binary of the machine's architecture runs too. The CI job `oracle` installs the pinned Rust toolchain and `protoc` for it.
+  - `speculaire-oracle-harness` (`crates/oracle-harness`) reads the variable: unset, a test skips and says so; set to a missing file, it fails. In the job the recipe sets it, so no test passes by being skipped; `--nocapture` keeps each test's "N cases agree with containerd" line in the log.
+  - `hosts` calls containerd's unexported `parseHostsFile` and `loadHostDir` through `//go:linkname` (with an empty `linkname.s`, so the declarations may lack a body); `config` runs `LoadConfigWithPlugins` and the CRI image service's decoder. Errors are answered as `{"error": ...}`, a panic of containerd's code too: a daemon would have died, which is an error for a config.
+  - The `config` subcommand runs each case 65 times and answers `{"unstable": true}` when the answers differ: containerd's version 1 migration renames plugins through a Go map. A test compares only the cases with a stable answer.
+  - A test mutates every fuzz seed 400 times with a fixed generator (delete, replace or insert a byte of the seed) and sends the results as cases, so the corpus the fuzzers start from gets the differential check on every run.
+- **Because:**
+  - A parser compared with upstream only on the cases someone thought of agrees with upstream on those cases. The mutations found most of the divergences of D78, and cost about a second.
+  - Linking the unexported functions checks the code containerd runs, not a copy of it; the build fails when the symbols move.
+- **Measured (M2 step 00, arm64):** `just oracle` runs both tests in under 2 s once built.
+- **Revisit when:** containerd exports the host config parsers: drop the linkname.
+
 ## D71: cargo-vet gates every crate version of `Cargo.lock` inside `required` (amends D27)
 
 - **Decision:**

@@ -14,6 +14,7 @@ publish = false
 
 [workspace.dependencies]
 speculaire-agent = { path = "crates/agent" }
+speculaire-oracle-harness = { path = "crates/oracle-harness" }
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = [
   "http1",
@@ -30,9 +31,12 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false, fe
 mime = "0.3.18"
 # D39: readiness, stopping and the watchdog.
 sd-notify = "0.5.0"
+# D37: every credential and header value is a `SecretString`: it never prints, in `Debug` or in a log.
+secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_path_to_error = "0.1.20"
+tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = [
   "macros",
@@ -43,6 +47,8 @@ tokio = { version = "1.54.1", features = [
   "time",
 ] }
 toml = "1.2.1"
+# The low-level parser of `toml`: the order of a file's tables, which the typed result does not keep.
+toml_parser = "1.1.5"
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
 tracing = "0.1.44"
 tracing-journald = "0.3.2"
