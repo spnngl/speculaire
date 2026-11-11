@@ -61,7 +61,7 @@ The trust boundaries and the risks we accept are in [`docs/security.md`](docs/se
 2. The agent sends `Lookup(digest)` to a reflector, hedged to a second one. The reflector returns a shuffled subset of `(node identity, address)` pairs, never including the requester.
 3. The agent races and hedges fetches from the peer API, as Spegel does. It checks that each peer's certificate names the node identity the reflector returned. It streams the bytes to the runtime while hashing them (D7).
    - If the hash doesn't match the digest, the agent aborts and denies that peer locally for `peer.deny_ttl` (D52).
-   - If a peer dies mid-copy, the agent resumes from the next peer with `Range`.
+   - If a peer dies mid-copy, or sends nothing for `peer.stall_timeout`, the agent resumes from the next peer with `Range` (D73).
    - A `503` from a busy peer moves the agent to the next peer at once (D24).
 4. Any miss, timeout or unreachable reflector makes the agent *fall through*.
 5. containerd commits the blob and emits `/content/create`. The agent announces the new digest to every reflector.

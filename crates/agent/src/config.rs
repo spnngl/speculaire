@@ -97,6 +97,7 @@ impl Config {
                 Peer {
                     address: peer,
                     max_uploads: _,
+                    stall_timeout: _,
                     deny_ttl: _,
                 },
             blob_cache: BlobCache { max_size: _ },
@@ -361,6 +362,8 @@ pub struct Peer {
     pub address: Restart<PeerAddress>,
     /// How many blob bodies the peer API serves at once (D24).
     pub max_uploads: MaxUploads,
+    /// How long a peer fetch may receive nothing before it moves to the next peer (D73).
+    pub stall_timeout: Interval,
     /// How long a peer that sent a wrong digest is skipped (D52).
     pub deny_ttl: Span,
 }
@@ -370,6 +373,7 @@ impl Default for Peer {
         Self {
             address: Restart(PeerAddress::Auto),
             max_uploads: MaxUploads::Auto,
+            stall_timeout: Interval::from_secs(5),
             deny_ttl: Span::from_secs(600),
         }
     }

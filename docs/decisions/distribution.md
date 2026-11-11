@@ -19,7 +19,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** with `resolve`, a peer could answer a tag with any digest it serves. Without it, tags resolve upstream (a small request) and blobs, the bulk of the bytes, still go P2P. Measured on containerd 2.3.7 and 2.4.2: the mirror sees no tag request, only manifests and blobs by digest (D22).
 - **Revisit when:** users need tag pulls to survive an upstream outage. Then expose `resolve_tags = true`, documented as "trust all nodes".
 
-## D7: Verify blob digests in flight (amended by D52, D67)
+## D7: Verify blob digests in flight (amended by D52, D67, D73)
 
 - **Decision:** hash every full-blob response while streaming it; on mismatch, abort and deny the peer (D52).
 - **Because:** it catches a bad peer early, so it can be reported. Otherwise the error only surfaces at containerd's commit.
@@ -160,3 +160,14 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
     - With the mirror flipping a byte of each blob, it kept nothing, and the pull failed: `parsing image configuration: unexpected EOF (after reconnecting, server did not process a Range: header, status 200)`. CRI-O had asked for the config blob twice.
 - **Cost:** up to `blob_cache.max_size` of disk on each CRI-O node, on top of CRI-O's own storage, and 10 to 18 ms of agent CPU per MB proxied.
 - **Revisit when:** CRI-O or go.podman.io/storage keeps compressed blobs.
+
+## D73: A stalled peer fetch moves to the next peer (amends D7)
+
+- **Decision:**
+  - A peer fetch that receives no bytes for `peer.stall_timeout` (default `"5s"`, live) is aborted and counts `speculaire_peer_fetches_total{result="timeout"}`. The timer restarts with every chunk received, and covers the wait for the response's headers.
+  - The agent then resumes from the next peer with `Range`, as for a peer that dies mid-copy, or falls through when no peer is left.
+  - The stalled peer is not denied: D52 denies only a wrong digest, and a slow node may be busy rather than bad.
+- **Because:**
+  - A peer that keeps its connection open and sends nothing would otherwise hold the runtime's pull until its own timeout, which neither containerd nor CRI-O sets per blob.
+  - A timer on silence, not on the whole transfer, does not penalise a large layer coming at a steady rate.
+- **Revisit when:** M3's suite, which stalls a serving node with `tc qdisc … netem`, shows 5 s too short for a loaded node or too long for a pull.
