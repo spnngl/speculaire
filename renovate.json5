@@ -1,6 +1,7 @@
 // Ported from dedens `renovate.json5` at v0.1.0-131-gfd00747. The shared preset brings cargo, GitHub Actions,
 // Dockerfile digests, rust-toolchain.toml and the `# renovate:` comments of workflows; this file adds the
-// `# renovate:` comments of Containerfiles and of the justfile, and the images of the e2e suites.
+// `# renovate:` comments of Containerfiles and of the justfile, the images of the e2e suites, and the oracle's Go
+// modules.
 {
     "$schema": "https://docs.renovatebot.com/renovate-schema.json",
     // The shared preset at HEAD of main.
@@ -51,6 +52,24 @@
             "matchDepNames": ["containerd/containerd", "cri-o/cri-o", "docker.io/kindest/node"],
             "matchUpdateTypes": ["major", "minor"],
             "enabled": false,
+        },
+        {
+            "description": "The oracle's containerd stays on the newest supported minor (D29); a new minor moves it by hand.",
+            "matchManagers": ["gomod"],
+            "matchDepNames": ["github.com/containerd/containerd/v2"],
+            "matchUpdateTypes": ["major", "minor"],
+            "enabled": false,
+        },
+        {
+            "description": "The oracle's NRI moves only with its containerd: `go mod tidy` raises it to what containerd requires, and the oracle's tests fail when the two differ (D29).",
+            "matchManagers": ["gomod"],
+            "matchDepNames": ["github.com/containerd/nri"],
+            "enabled": false,
+        },
+        {
+            "description": "Run `go mod tidy` after each Go module update, so an indirect requirement follows the direct one.",
+            "matchManagers": ["gomod"],
+            "postUpdateOptions": ["gomodTidy"],
         },
         {
             "description": "A kind release names its node image; kubectl follows the node image's Kubernetes (D59).",
