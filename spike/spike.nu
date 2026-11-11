@@ -627,7 +627,7 @@ def "main crio check 03" [k8s: string] {
     crio-mirror $node
     sh-node $node "crictl rmi --prune >/dev/null 2>&1; true" | ignore
     let o = {spec: {nodeName: $node}} | to json --raw
-    ^kubectl --context $ctx run s03 $"--image=($TEST_IMAGE)" --restart=Never --labels=spike=s03 $"--overrides=($o)" -- sleep 3600 o+e>| ignore
+    ^kubectl --context $ctx run s03 $"--image=($TEST_IMAGE)" --image-pull-policy=Always --restart=Never --labels=spike=s03 $"--overrides=($o)" -- sleep 3600 o+e>| ignore
     let phase = pod-phase $ctx s03 running 90sec
     $r = $r | append (check "all: pod by tag asks the mirror for the tag" ($phase == "running" and (crio-requests $node | any {|l| $l | str contains "manifests/1.37" })) (crio-requests $node | str join ", "))
     ^kubectl --context $ctx delete pod s03 --wait=true o+e>| ignore
