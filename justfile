@@ -33,6 +33,9 @@ kubernetes_newest := "1.37"
 kind_version := "0.33.0"
 # renovate: datasource=github-releases depName=kubernetes/kubernetes
 kubectl_version := "1.37.2"
+# The image that builds and runs the Go oracle (D29).
+# renovate: datasource=docker depName=docker.io/library/golang
+golang := "1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf"
 # `just e2e-tools` downloads kind and kubectl here; the e2e recipes put them first in PATH.
 e2e_dir := justfile_directory() / "target/e2e"
 e2e_path := (e2e_dir / "kind-" + kind_version) + ":" + (e2e_dir / "kubectl-" + kubectl_version)
@@ -88,6 +91,16 @@ minimal-versions:
 # Advisories, licenses, duplicate crates and sources (cargo-deny, deny.toml), or the checks named: just deny advisories
 deny *checks:
     cargo deny check {{ checks }}
+
+# Formatting, `go mod verify`, `go vet` and `go test`, then `speculaire-oracle version`. Volumes speculaire-go-mod and
+# speculaire-go-build-<arch> keep the module and build caches. `just musl` never builds it, so no artifact holds it.
+# Build, check and run the Go test oracle (D29) in the pinned Go image
+oracle:
+    {{ container }} run --rm -v "$(pwd)/oracle:/src" -w /src -v speculaire-go-mod:/go/pkg/mod \
+        -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" docker.io/library/golang:{{ golang }} sh -euc ' \
+            unformatted=$(gofmt -l .); [ -z "$unformatted" ] || { echo "gofmt: $unformatted" >&2; exit 1; }; \
+            go mod verify; go vet ./...; go test ./...; \
+            go build -trimpath -o /tmp/speculaire-oracle .; /tmp/speculaire-oracle version'
 
 # Volumes speculaire-registry and speculaire-dev-<arch> keep the registry and the build between runs.
 # Run a recipe in the dev image (D57), as on macOS: just dev check

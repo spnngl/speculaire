@@ -124,7 +124,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The project should pass its own gate. dedens ships no SBOM (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D29: Go is a test oracle, never shipped (amended by D48)
+## D29: Go is a test oracle, never shipped (amended by D48, D70)
 
 - **Decision:**
   - Production code is pure Rust.
@@ -296,3 +296,19 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The agent runs under containerd or CRI-O (D64), and a `containerd_version` label would sit empty on every CRI-O node.
   - `Configure` names the runtime itself: containerd sends `containerd` (CRI-O spike 01), and CRI-O sends `cri-o` (v1.37.2 `internal/nri/nri.go:121`).
 - **Revisit when:** D61's revisit, in M6.
+
+
+## D70: The oracle lands with its pins and `version`; each subcommand lands with the port it checks (amends D29)
+
+- **Decision:**
+  - `oracle/` is the Go module `github.com/spnngl/speculaire/oracle`. M1 ships it with one subcommand, `speculaire-oracle version`, which prints the containerd and NRI versions it links, from its build info, as one JSON line: `{"containerd":"v2.4.2","nri":"v0.12.3"}`.
+  - D29's subcommands land with the Rust ports they check: `hosts`, `config`, `reference` and `platform` in M2, `nri-runtime` and `nri-version` in M6. The CRI-O ports of M2, `registries.conf` and `certs.d` (D66), get a subcommand on `go.podman.io/image/v5` at the version the newest supported CRI-O requires.
+  - Each subcommand reads cases as JSON lines on stdin and prints one JSON line per case on stdout. The Rust side is a test helper crate in `crates/` (D62) that runs the binary.
+  - `just oracle` runs `gofmt -l`, `go mod verify`, `go vet`, `go test` and `speculaire-oracle version` in the digest-pinned `golang:<version>-alpine` image of the justfile. The CI job `oracle` runs it, needs no other job, and `required` needs it (D48).
+  - The NRI pin moves only with containerd's: Renovate leaves NRI alone and runs `go mod tidy` after a containerd update, which raises NRI to what containerd requires. A test fails when `go mod graph` shows containerd requiring another NRI than the one selected.
+- **Because:**
+  - A subcommand without its port has nothing to compare against, and a test that only runs upstream code checks nothing of ours.
+  - The build info is what the binary links, so `version` cannot disagree with the code the later subcommands call.
+  - Renovate cannot read containerd's requirement; Go's version selection can, and the test turns any drift red.
+- **Measured (M1 step 07, arm64):** `just oracle` prints `{"containerd":"v2.4.2","nri":"v0.12.3"}`; with `go get github.com/containerd/nri@v0.12.5`, `go test` fails with `github.com/containerd/containerd/v2@v2.4.2 requires NRI "v0.12.3", go.mod selects "v0.12.5"`.
+- **Revisit when:** containerd 2.5 is supported (D40): the oracle moves to the newest minor by hand.
