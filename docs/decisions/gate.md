@@ -2,7 +2,7 @@
 
 The NRI enforcement point. Index: `docs/decisions/README.md`.
 
-## D9: Enforcement lives in an NRI external plugin
+## D9: Enforcement lives in an NRI external plugin (amended by D64)
 
 - **Decision:** the agent connects to `/var/run/nri/nri.sock` as an external NRI plugin. We write our own `nri` workspace crate on `ttrpc` 0.10 plus the NRI multiplexer (8-byte header: ConnID + length).
   - Each ConnID is an in-memory `tokio::io::duplex` wrapped by `ttrpc`'s `Socket::new`: ConnID 1 feeds a `Listener::new` stream, ConnID 2 feeds `Client::new`. There is no file descriptor and no `socketpair`.
@@ -70,7 +70,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** sites roll policies out gradually and need to let images that have no policy yet through. Denying by default is the safe side, and the user confirmed `deny` as the default.
 - **Revisit when:** —
 
-## D41: The gate answers inside containerd's NRI timeout, and reconnects at once
+## D41: The gate answers inside containerd's NRI timeout, and reconnects at once (amended by D64)
 
 - **Decision:**
   - Startup and `speculaire check-config` refuse a `gate.wait` at or above half of containerd's `plugin_request_timeout`, read from containerd's `config.toml` and its `imports` (default 2 s). The error names both values.
@@ -88,8 +88,25 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The annotation is already the accepted escape hatch for static pods (`docs/security.md`).
 - **Revisit when:** containerd offers a way to exempt a plugin's own pod from validation.
 
-## D54: The gate cannot be turned off
+## D54: The gate cannot be turned off (amended by D64)
 
 - **Decision:** no setting disables the gate. Startup and `speculaire check-config` refuse a containerd config whose NRI plugin is disabled or closed to external plugins (`disable = true` or `disable_connections = true` under `[plugins.'io.containerd.nri.v1.nri']`, v2.3.7 `internal/nri/config.go:30,42`), and the error names the key. `gate.mode = "audit"` and `gate.exempt` (D18) are the ways to let containers through.
 - **Because:** a node that mirrors but never gates looks protected and is not. `audit` keeps the mirror and the verdicts, and the gap stays visible in `speculaire_gate_total{mode="audit"}`.
 - **Revisit when:** users ask for a mirror-only deployment; then add an explicit `gate.enabled = false` that logs a warning at startup and sets a metric.
+
+## D64: The same NRI plugin gates CRI-O; the agent finds its runtime by its socket (amends D9, D41, D54)
+
+- **Decision:**
+  - **One plugin:** D9's `nri` crate serves containerd and CRI-O with no runtime-specific code in the NRI path. `Configure.NRI_version` may be empty.
+  - **Runtime detection:** startup, `speculaire check-config` and `speculaire configure` connect to `/run/containerd/containerd.sock` and `/var/run/crio/crio.sock`. Exactly one must accept; otherwise they refuse, naming both paths and what each answered. NRI's `Configure.runtime_name` (`containerd` or `cri-o`) must then name the same runtime; on a mismatch the agent logs an error and closes the NRI connection.
+  - **D41 on CRI-O:** `gate.wait` stays under half of `nri_plugin_request_timeout` under `[crio.nri]` (default `"2s"`).
+  - **D54 on CRI-O:** startup and `check-config` refuse `enable_nri = false` or `nri_disable_connections = true` under `[crio.nri]` (v1.37.2 `internal/config/nri/nri.go:15-46`), and the error names the key.
+  - The agent reads CRI-O's settings from `GET /config` on `crio.sock`, which answers the merged TOML of `crio.conf` and `crio.conf.d/` (v1.37.2 `server/inspect.go:140,153`; `crio status config` is its client).
+- **Because:**
+  - **Measured** (CRI-O spike 01, M0b): M0's `nri-spike` binary, unchanged, ran on CRI-O 1.35.10, 1.36.7 and 1.37.2 on arm64. It registers in under 1 ms, and CRI-O logs `plugin "external:50-speculaire[921]" registered as "50-speculaire" (with NRI version unknown)`. `Configure` carries `runtime_name=cri-o`, `runtime_version=1.37.2`, `NRI_version=v0.12.2`, `registration_timeout=5000ms` and `request_timeout=2000ms`; 1.36.7 and 1.35.10 send an empty `NRI_version`. `Synchronize` lists the same containers as `crictl ps -q`.
+  - CRI-O 1.35 and 1.36 vendor NRI v0.11.0, and 1.37 vendors v0.12.2. v0.12.2's `api.proto` is byte-identical to v0.12.3's. v0.11.0's lacks `NRI_version`, `Container.image` and the pod-sandbox events, keeps `CREATE_CONTAINER = 4`, and its `pkg/net/multiplex/mux.go` is identical to v0.12.2's. Unknown fields are skipped by protobuf, so v0.12.3 codegen talks to all three.
+  - CRI-O passes the plugin's message without a wrapper: the pod event is `Error: speculaire spike: rejected`. With the drop-in `[crio.nri.default_validator]` `nri_enable_default_validator = true`, `nri_validator_required_plugins = ["speculaire"]` and the plugin stopped, it is `Error: validator "00-default-validator" rejected container adjustment, reason: validation error: required plugin "speculaire" not present`. Both leave the pod in `CreateContainerError`. A restarted plugin re-registers without a CRI-O restart and the blocked pod starts; a CRI-O restart closes the trunk, and keeps the running containers (`crictl ps -q` unchanged).
+  - CRI-O fills no `Container.image` (v1.37.2 `internal/nri/container.go:53-76`). It names the image in annotations: `io.kubernetes.cri-o.ImageName` (the reference as the pod wrote it), `io.kubernetes.cri-o.Image` and `io.kubernetes.cri-o.ImageRef` (the 64-hex image ID), and `io.kubernetes.cri-o.ImageRepoDigests` (`repo@sha256:…`, comma-separated). D15's CRI-O variant chooses among them.
+  - Probing the sockets needs no setting: the CRI-O node image keeps containerd installed but disabled, and `/run/containerd/` does not exist there. `Configure` cannot decide it alone, because preflight and `configure` run before NRI connects.
+- **Cost:** two runtime configs to read, from a file and its imports for containerd and from an HTTP endpoint for CRI-O.
+- **Revisit when:** CRI-O fills `Container.image`, or a node runs both runtimes.

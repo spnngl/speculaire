@@ -15,9 +15,13 @@ To move the mirror off port 7480, set `mirror.address` to another loopback `ip:p
 
 1. Run `gate.mode = "audit"` until `speculaire_gate_total{mode="audit"}` shows no `rejected`, `unverifiable` or `unmatched` results you did not expect.
 2. Exempt images that must run without a signature with `gate.exempt` (D18). An exemption needs a running agent; while the agent is stopped, only the toleration annotation of step 3 lets a pod start.
-3. Pick a toleration annotation for the static control-plane pods. Set `tolerate_missing_plugins_annotation` under `[plugins.'io.containerd.nri.v1.nri'.default_validator]`, and add that annotation, set to `"true"`, to each static pod manifest. Without it, a stopped agent keeps the control plane from restarting (`containerd/nri` `plugins/default-validator/default-validator.go:53-65`).
+3. Pick a toleration annotation for the static control-plane pods. Set it in the runtime's validator section, and add that annotation, set to `"true"`, to each static pod manifest. Without it, a stopped agent keeps the control plane from restarting (`containerd/nri` `plugins/default-validator/default-validator.go:53-65`).
+   - containerd: `tolerate_missing_plugins_annotation` under `[plugins.'io.containerd.nri.v1.nri'.default_validator]`.
+   - CRI-O: `nri_validator_tolerate_missing_plugins_annotation` under `[crio.nri.default_validator]`, in a file of `/etc/crio/crio.conf.d/`.
 4. On every node, `speculaire check-config` exits 0. It exits 1 when a `hosts.toml` lacks the mirror entry, so `configure` has not run there or an edit removed it (D55).
-5. Turn on fail-closed: in the same section, set `enable = true` and `required_plugins = ["speculaire"]`, then restart containerd.
+5. Turn on fail-closed in the same section, then restart the runtime (D64):
+   - containerd: `enable = true` and `required_plugins = ["speculaire"]`, then `systemctl restart containerd`.
+   - CRI-O: `nri_enable_default_validator = true` and `nri_validator_required_plugins = ["speculaire"]`, then `systemctl restart crio`.
 
 ## Break glass: containers do not start
 
@@ -25,7 +29,7 @@ Work through these steps in order, and stop at the first one that helps.
 
 1. **The gate rejects images it should allow.** Set `gate.mode = "audit"` and run `systemctl reload speculaire`. The mode reloads live (D30), and pods start on kubelet's next retry.
 2. **The agent is down.** Run `systemctl restart speculaire`. If it does not start, run `speculaire check-config` and read `journalctl -u speculaire`.
-3. **The agent cannot be started.** Remove `speculaire` from `required_plugins` and run `systemctl restart containerd`. Running containers survive a containerd restart. New containers then start ungated.
+3. **The agent cannot be started.** Remove `speculaire` from `required_plugins` and run `systemctl restart containerd`; on CRI-O, from `nri_validator_required_plugins`, then `systemctl restart crio`. Running containers survive a runtime restart. New containers then start ungated.
 
 ## Rejection reasons
 
@@ -71,4 +75,4 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 
 - **Support:** only the latest minor release gets fixes (D40).
 - **Upgrade:** one minor at a time, reflectors (control-plane nodes) first, then the other nodes. A reflector accepts the previous protocol version (D2, D40), and verdicts survive the restart in `/run/speculaire` (D31), so nodes can upgrade one at a time.
-- **Removal:** first remove `speculaire` from `required_plugins` and restart containerd. The package's removal script runs `speculaire unconfigure`, which refuses to run while `required_plugins` still names `speculaire` (D32).
+- **Removal:** first remove `speculaire` from `required_plugins` (CRI-O: `nri_validator_required_plugins`) and restart the runtime. The package's removal script runs `speculaire unconfigure`, which refuses to run while `required_plugins` still names `speculaire` (D32).
