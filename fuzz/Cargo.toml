@@ -1,0 +1,51 @@
+# Ported from dedens `fuzz/Cargo.toml` at v0.1.0-131-gfd00747 (D27): a workspace of its own, so that libFuzzer's
+# nightly build never touches the main workspace's lock file.
+[package]
+name = "speculaire-fuzz"
+description = "Fuzz targets: one per parser of outside data"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# One target per parser of outside data. Each file in `fuzz_targets/` is a one-line shim over the function of the
+# same name in `src/`, which `cargo test --lib` also drives on stable with the seeds (`just fuzz-smoke`).
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+speculaire-agent = { path = "../crates/agent" }
+# The serializer of the round trip in `config`; the same version as the workspace's.
+toml = "1.2.1"
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+
+# The workspace's lint tables, copied: this crate is a workspace of its own.
+[lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_docs = "warn"
+unreachable_pub = "warn"
+unnameable_types = "warn"
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+# selected restriction
+allow_attributes_without_reason = "warn"
+clone_on_ref_ptr = "warn"
+dbg_macro = "warn"
+multiple_unsafe_ops_per_block = "warn"
+panic = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unwrap_used = "warn"

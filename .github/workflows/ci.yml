@@ -47,6 +47,11 @@ jobs:
       # The pinned stable and nightly, before rust-cache: its key includes the rustc version.
       - run: just toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # `just check` also builds fuzz/, a workspace of its own.
+          workspaces: |
+            .
+            fuzz
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: taplo@${{ env.TAPLO_VERSION }},typos@${{ env.TYPOS_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
