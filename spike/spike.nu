@@ -112,7 +112,9 @@ def "main down" [] {
 
 # Collect checks: each returns a list of {check, ok, detail}.
 def check [name: string, ok: bool, detail: string] {
-    {check: $name, ok: $ok, detail: ($detail | lines | str join " | " | str substring 0..400)}
+    # A failed check keeps its whole detail.
+    let end = if $ok { 400 } else { 4000 }
+    {check: $name, ok: $ok, detail: ($detail | lines | str join " | " | str substring 0..$end)}
 }
 
 def "main check 00" [minor: string, --k8s: string = "1.37"] {
