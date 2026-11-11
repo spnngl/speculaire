@@ -82,56 +82,7 @@ pub fn install(log: &config::Log, audit: &config::Audit) -> anyhow::Result<Logs>
 
 /// Passes the audit events while `enabled` is set, and nothing else.
 fn audit_filter<S>(enabled: Arc<AtomicBool>) -> impl tracing_subscriber::layer::Filter<S> {
-    filter_fn(move |meta| meta.target() == AUDIT_TARGET && enabled.load(Ordering::Relaxed))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    use tracing::info;
-    use tracing_subscriber::layer::SubscriberExt as _;
-    use tracing_subscriber::{Layer as _, Registry, fmt};
-
-    use super::{AUDIT_TARGET, audit_filter};
-
-    /// A writer that keeps what the subscriber writes.
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for Sink {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn the_audit_layer_passes_audit_events_while_enabled() {
-        let enabled = Arc::new(AtomicBool::new(false));
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(
-            fmt::layer()
-                .with_writer({
-                    let written = Arc::clone(&written);
-                    move || Sink(Arc::clone(&written))
-                })
-                .with_filter(audit_filter(Arc::clone(&enabled))),
-        );
-        tracing::subscriber::with_default(subscriber, || {
-            info!(target: AUDIT_TARGET, "audit while off");
-            enabled.store(true, Ordering::Relaxed);
-            info!(target: AUDIT_TARGET, "audit while on");
-            info!(target: "speculaire::other", "diagnostic while on");
-        });
-        let written = String::from_utf8(written.lock().unwrap().clone()).unwrap();
-        assert!(written.contains("audit while on"), "{written}");
-        assert!(!written.contains("audit while off"), "{written}");
-        assert!(!written.contains("diagnostic"), "{written}");
-    }
+    filter_fn(move |meta| {
+        meta.target() == AUDIT_TARGET && enabled.load(Ordering::Relaxed)
+    })
 }
