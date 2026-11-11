@@ -838,6 +838,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "serde",
+ "zeroize",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -981,7 +991,22 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "speculaire-agent",
+ "speculaire-registry-config",
+ "tempfile",
  "toml",
+]
+
+[[package]]
+name = "speculaire-registry-config"
+version = "0.1.0"
+dependencies = [
+ "secrecy",
+ "serde",
+ "serde_path_to_error",
+ "thiserror",
+ "toml",
+ "toml_parser",
+ "tracing",
 ]
 
 [[package]]
@@ -1019,6 +1044,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys",
@@ -1438,6 +1464,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zmij"

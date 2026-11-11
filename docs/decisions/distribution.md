@@ -49,7 +49,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Ports avoid 5000, which local kind registries commonly use.
 - **Revisit when:** a benchmark shows loopback TLS costing more than 10% of the agent's serving CPU.
 
-## D17: Upstream access reuses containerd's registry config (amended by D66)
+## D17: Upstream access reuses containerd's registry config (amended by D66, D78)
 
 - **Decision:**
   - Artifact discovery, referrers and prewarm resolution reuse containerd's *registry config*, in containerd's own formats.
@@ -63,6 +63,23 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - With `config_path` set, containerd still uses `configs."<host>".auth` as fallback credentials and passes `headers` to its registry authorizers (v2.3.0 `internal/cri/server/images/image_pull.go:105-114`, `:504-507`); setting `mirrors` as well is a startup error (`internal/cri/config/config.go:503-506`). So the agent reads both files, and `configure` edits only `hosts.toml`.
   - Pull secrets travel with each CRI request (`image_pull.go:105-114`) and never reach a file the agent could read.
 - **Revisit when:** users need pull-secret-only images verified. Then add kubelet credential-provider support.
+
+## D78: One `registry-config` crate holds both runtimes' parsers, and reads what containerd reads (amends D17)
+
+- **Decision:**
+  - The *registry config* parsers are one crate, `crates/registry-config` (`speculaire-registry-config`), a module per runtime: `containerd::config` for `config.toml`, `containerd::hosts` for `hosts.toml` and the host directories; CRI-O's module lands with its parser.
+  - It reads versions 1 to 4, what containerd v2.4.2 reads (`version.ConfigVersion` is 4, `version/version.go:41`), not only 2 and 3. A version 1 name (`plugins.cri`) becomes its URI, and below version 4 the image service's section takes `registry` from the CRI plugin's, as `configMigration` does (`plugins/cri/images/plugin.go:181`). A file of a newer version is refused. `imports` merge as `LoadConfigWithPlugins` does: plugin tables merge deep, any other value, an array too, is replaced.
+  - Keys are matched in any case, as go-toml does (`Server`, `CA`). Map keys, host names and plugin names stay exact.
+  - Credentials are not combined by the parser. `registry.configs."<host>".auth` and `registry.auths` (keyed by the host of the URL) give one `Auth` per host; `registry.headers` apply to every registry; each `hosts.toml` host keeps its own `header`. A reader that fetches from a host sends the host's `header`, and uses the `Auth` of that host only to answer a Bearer challenge, as containerd does. Every credential and header value is a `SecretString`; `Debug` prints none (D37).
+  - Keys the parser does not read are ignored, never an error, and never in the typed result: containerd decodes into structs and drops them. A key it does read with the wrong type is an error that names the key and the position, as `ParseError` does (D60). Messages are not containerd's; whether there is an error is.
+  - `parse_hosts_file` and `resolve` are ports of `core/remotes/docker/config/hosts.go` at v2.4.2 (D25), including its quirks: a `client` entry that is a lone string has the host directory as its key, an unreadable `hosts.toml` falls back to the certificate files, an `http` host with TLS settings is tried as `https`, then `http`. The Go standard library calls those files make (`url.Parse`, `path.Clean`, `filepath.Match`, `time.ParseDuration`, `net.SplitHostPort`) are ported at go1.27.4, the Go of the oracle image.
+  - Where containerd is not deterministic, the parser picks one answer: two plugins that a version 1 migration renames to the same URI merge in Go's random map order; the port takes the sorted order, and the differential test skips a case whose upstream answer changes between runs (D79).
+- **Because:**
+  - Both runtimes' configs end in the same questions (which hosts, with what TLS and credentials), and `configure` and the mirror share their answers; one crate keeps the vocabulary and the secrecy rules in one place.
+  - The kind node images ship version 2 configs and containerd 2.4 reads up to 4: a parser limited to 2 and 3 would refuse configs the runtime accepts.
+  - Parsing what the runtime parses, no more, no less, is what makes "whatever containerd can reach, the agent can reach" true (D17).
+- **Measured (M2 step 00, arm64, Docker):** the differential tests send 1199 `hosts` cases and 1266 `config` cases, made of the cases of `hosts_test.go` and the config tests, the e2e node configs, and 400 mutations of each fuzz seed. All 1199 `hosts` cases and the 1250 `config` cases with a stable answer agree with containerd; the 16 others are the random-order merges. `just fuzz containerd_config 60` ran 116575 execs and `just fuzz hosts_toml 60` 495568, with no finding. Divergences the mutations found, now fixed: Go 1.27 `url.Parse` refuses `[` outside a leading IP literal, requires an IPv6 address inside brackets and a single colon in an `http(s)` host; `filepath.Match` no longer checks the rest of a pattern once the name cannot match; go-toml refuses a byte order mark.
+- **Revisit when:** a containerd release changes the loader or `hosts.go` (the oracle's `containerd` pin moves, D70): the differential tests show the difference.
 
 ## D24: Peers apply backpressure
 

@@ -1,0 +1,27 @@
+[package]
+name = "speculaire-registry-config"
+description = "The registry config of the runtimes: containerd's config.toml and hosts.toml, CRI-O's registries.conf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+secrecy.workspace = true
+serde.workspace = true
+serde_path_to_error.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+toml_parser.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+speculaire-oracle-harness.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

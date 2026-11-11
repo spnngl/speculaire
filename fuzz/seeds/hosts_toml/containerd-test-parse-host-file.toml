@@ -1,0 +1,46 @@
+server = "https://test-default.registry"
+ca = "/etc/path/default"
+[header]
+  x-custom-1 = "custom header"
+
+[host."https://mirror.registry"]
+  capabilities = ["pull"]
+  ca = "/etc/certs/mirror.pem"
+  skip_verify = false
+  [host."https://mirror.registry".header]
+    x-custom-2 = ["value1", "value2"]
+
+[host."https://mirror-bak.registry/us"]
+  capabilities = ["pull"]
+  skip_verify = true
+
+[host."http://mirror.registry"]
+  capabilities = ["pull"]
+
+[host."https://test-1.registry"]
+  capabilities = ["pull", "resolve", "push", "referrers"]
+  ca = ["/etc/certs/test-1-ca.pem", "/etc/certs/special.pem"]
+  client = [["/etc/certs/client.cert", "/etc/certs/client.key"],["/etc/certs/client.pem", ""]]
+
+[host."https://test-2.registry"]
+  client = "/etc/certs/client.pem"
+
+[host."https://test-3.registry"]
+  client = ["/etc/certs/client-1.pem", "/etc/certs/client-2.pem"]
+
+[host."https://no-referrers.registry"]
+  capabilities = ["pull", "resolve", "push"]
+  client = ["/etc/certs/client-1.pem", "/etc/certs/client-2.pem"]
+
+[host."https://noncompliantmirror.registry/v2/namespaceprefix"]
+  capabilities = ["pull"]
+  override_path = true
+
+[host."https://noprefixnoncompliant.registry"]
+  override_path = true
+
+[host."https://onlyheader.registry".header]
+  x-custom-1 = "justaheader"
+
+[host."https://dial-timeout.registry"]
+  dial_timeout = "3s"

@@ -248,15 +248,25 @@ vet-exempt:
     cargo vet regenerate exemptions
     cargo vet prune
 
-# Formatting, `go mod verify`, `go vet` and `go test`, then `speculaire-oracle version`. Volumes speculaire-go-mod and
+# Formatting, `go mod verify`, `go vet` and `go test`, then the binary in target/oracle and `speculaire-oracle version`;
+# then the differential tests (`oracle-test`), natively on Linux and in the build image elsewhere, where the Go binary
+# (a static Linux binary of this machine's architecture) also runs. Volumes speculaire-go-mod and
 # speculaire-go-build-<arch> keep the module and build caches. `just musl` never builds it, so no artifact holds it.
-# Build, check and run the Go test oracle (D29) in the pinned Go image
+# Build, check and run the Go test oracle (D29), then the Rust tests that compare with it (D70)
 oracle:
-    {{ container }} run --rm -v "$(pwd)/oracle:/src" -w /src -v speculaire-go-mod:/go/pkg/mod \
+    mkdir -p target/oracle
+    {{ container }} run --rm -v "$(pwd)/oracle:/src" -w /src -v "$(pwd)/target/oracle:/out" -v speculaire-go-mod:/go/pkg/mod \
         -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" docker.io/library/golang:{{ golang }} sh -euc ' \
             unformatted=$(gofmt -l .); [ -z "$unformatted" ] || { echo "gofmt: $unformatted" >&2; exit 1; }; \
             go mod verify; go vet ./...; go test ./...; \
-            go build -trimpath -o /tmp/speculaire-oracle .; /tmp/speculaire-oracle version'
+            go build -trimpath -o /out/speculaire-oracle .; /out/speculaire-oracle version'
+    if [[ "$(uname -s)" == Linux ]]; then {{ just_executable() }} oracle-test; else {{ just_executable() }} dev oracle-test; fi
+
+# The tests that ask target/oracle/speculaire-oracle the cases they run (SPECULAIRE_ORACLE, crates/oracle-harness); the
+# output stays on, so that the log shows each comparison ran and was not skipped.
+[private]
+oracle-test:
+    SPECULAIRE_ORACLE="$(pwd)/target/oracle/speculaire-oracle" cargo test --workspace --test oracle --locked -- --nocapture
 
 # Volumes speculaire-registry and speculaire-dev-<arch> keep the registry and the build between runs.
 # Run a recipe in the dev image (D57), as on macOS: just dev check

@@ -226,12 +226,17 @@ jobs:
           KUBERNETES: ${{ matrix.leg.kubernetes }}
         run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
 
-  # The Go test oracle (D29): built, vetted and tested in the pinned Go image.
+  # The Go test oracle (D29): built, vetted and tested in the pinned Go image, then the Rust differential tests that ask
+  # it (D70) on the runner.
   oracle:
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
+    env:
+      # protoc: the workspace builds the agent, which compiles its .proto at build time (D34).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -240,6 +245,11 @@ jobs:
         with:
           # renovate: datasource=crate depName=just
           just-version: "1.59.0"
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
       - run: just oracle
 
   # The one check the ruleset requires (D48): matrix legs are named after their values, so requiring them would break

@@ -1,0 +1,9 @@
+version = 3
+required_plugins = ["cri"]
+
+[plugins."io.containerd.grpc.v1.cri".registry]
+  config_path = "/legacy"
+[plugins."io.containerd.cri.v1.images".registry]
+  config_path = "/images"
+[plugins.cri.registry.headers]
+  a = ["1"]
