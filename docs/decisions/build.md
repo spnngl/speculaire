@@ -428,5 +428,6 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `just rapx opt`: exit 0, 3 cloning hints (`crates/agent/src/log.rs:49` and `:58`, `crates/agent/src/telemetry.rs:30`), no other category.
   - Planted fault: `Box::into_raw(Box::new([0_u8; 64]))` in a `pub fn`, never freed: `just rapx` printed `Memory Leak detected in function planted_leak`, with the exit code still 0.
   - PR #31 on CI (`rapx` run 43113130790, `ubuntu-26.04`, Z3 from apt): green in 2 min 51 s, the install 102 s (uncached), `check` 27 s, `opt` 2 s; the same 15 warnings and 3 hints as locally, with both sections in the summary. A throwaway docs-only PR (#32, closed) started no `rapx` run.
+  - `workflow_dispatch` on `main` after the merge (run 43115119048): green in 2 min 7 s, the install 76 s, `check` 20 s, `opt` 1 s.
   - Install: building RAPx from source against a Z3 that Homebrew later upgraded left `cargo-rapx` unable to start (`Library not loaded: libz3.5.3.dylib`); `cargo install --force` with the recipe's variables repairs it.
 - **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
