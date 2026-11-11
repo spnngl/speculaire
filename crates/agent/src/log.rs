@@ -87,6 +87,16 @@ fn audit_filter<S>(enabled: Arc<AtomicBool>) -> impl tracing_subscriber::layer::
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[expect(unsafe_code, reason = "planted out-of-bounds read, throwaway")]
+    fn planted_out_of_bounds_read() {
+        let bytes = vec![1_u8; 4];
+        let bytes = std::hint::black_box(bytes);
+        // SAFETY: none, one byte past the allocation on purpose.
+        let past = unsafe { *bytes.as_ptr().add(4) };
+        assert!(past < 2);
+    }
+
     use std::io;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
