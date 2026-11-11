@@ -205,7 +205,8 @@ def hello-and-busybox [ctx: string, worker: string, socket: string] {
     ^kubectl --context $ctx run bb $"--image=($TEST_IMAGE)" --restart=Never -- sleep 3600
     let pod = try { ^kubectl --context $ctx wait --for=condition=Ready pod/bb --timeout=120s; "ready" } catch {|e| $e.msg }
     $r = $r | append (check "busybox Running" ($pod == "ready") $pod)
-    ^kubectl --context $ctx delete pod bb --wait=false
+    # Wait, so a later step does not see the pod's container mid-removal.
+    ^kubectl --context $ctx delete pod bb --wait=true
     $r
 }
 
@@ -242,11 +243,13 @@ def start-plugin [node: string, args: string] {
 const VALIDATOR = {
     containerd: {
         unit: "containerd"
+        listed: "crictl ps -q"
         off: "sed -i '/default_validator/,$d' /etc/containerd/config.toml"
         on: "printf '\\n[plugins.\"io.containerd.nri.v1.nri\".default_validator]\\n  enable = true\\n  required_plugins = [\"speculaire\"]\\n' >> /etc/containerd/config.toml"
     }
     crio: {
         unit: "crio"
+        listed: "crictl ps -q"
         off: "rm -f /etc/crio/crio.conf.d/90-validator.conf"
         on: "printf '[crio.nri.default_validator]\\nnri_enable_default_validator = true\\nnri_validator_required_plugins = [\"speculaire\"]\\n' > /etc/crio/crio.conf.d/90-validator.conf"
     }
@@ -292,7 +295,8 @@ def check-01 [ctx: string, node: string, runtime: string, what: string] {
         print $log
         print (sh-node $node $"journalctl -u ($v.unit) --no-pager -o short-precise | grep -i -E 'nri|plugin|synchron' | tail -40")
     }
-    $r = $r | append (check "Synchronize count" ($sync | str contains $"containers=($running) ") $"($sync); crictl ps -q=($running) -a=($all)")
+    let want = sh-node $node $"($v.listed) | wc -l" | str trim
+    $r = $r | append (check $"Synchronize count = ($v.listed)" ($sync | str contains $"containers=($want) ") $"($sync); crictl ps -q=($running) -a=($all)")
     let journal = sh-node $node $"journalctl -u ($v.unit) --no-pager -o cat | grep 'registered as' | tail -1" | lines | str join " | "
     $r = $r | append (check $"($v.unit) logs registration" ($journal | str contains "registered as") $journal)
 
