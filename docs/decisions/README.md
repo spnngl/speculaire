@@ -14,7 +14,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D4 [build](build.md): no io_uring in v1, and the unit denies its syscalls
 - D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67)
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66)
-- D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67)
+- D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73)
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43)
 - D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
@@ -60,6 +60,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34)
 - D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2)
 - D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37)
+- D73 [distribution](distribution.md): a peer fetch silent for `peer.stall_timeout` moves to the next peer or falls through, without denying the peer (amends D7)
 - D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69)
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64)
 - D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32)
@@ -81,4 +82,4 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D71 [build](build.md): cargo-vet holds every crate version of `Cargo.lock` to an imported audit, a trusted publisher or an exemption, in `deps (deny)` inside `required`; bumps of exempted crates are renewed by hand (amends D27)
 - D72 [build](build.md): the `coverage` job uploads line coverage for the ruleset's `code_coverage` rule and `required` needs it; cargo-nextest runs the tests of `just check` and `just cov`, killing hung tests (amends D27, D48)
 
-Next free number: D73.
+Next free number: D74.

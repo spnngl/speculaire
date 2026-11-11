@@ -57,6 +57,8 @@
 #address = "auto"
 # Blob bodies the peer API serves at once: "auto" is 4 per CPU (D24).
 #max_uploads = "auto"
+# How long a fetch from another peer may receive nothing before it moves to the next peer (D73).
+#stall_timeout = "5s"
 # How long a peer that sent a wrong digest is skipped (D52).
 #deny_ttl = "10m"
 

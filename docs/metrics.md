@@ -16,7 +16,7 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `speculaire_peer_fetches_total` | counter | `result` = `ok`\|`digest_mismatch`\|`busy`\|`timeout`\|`error` | Fetches from other agents (D7, D24) |
+| `speculaire_peer_fetches_total` | counter | `result` = `ok`\|`digest_mismatch`\|`busy`\|`timeout`\|`error` | Fetches from other agents; `timeout` includes a stalled one (D7, D24, D73) |
 | `speculaire_peer_hedges_total` | counter | — | Hedged extra fetches started |
 | `speculaire_peer_uploads_total` | counter | `result` = `served`\|`busy` | Requests served to other agents; `busy` answered `503` (D24) |
 | `speculaire_peer_uploads_in_flight` | gauge | — | Uploads now in progress |
