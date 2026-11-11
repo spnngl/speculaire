@@ -1,2 +1,9 @@
 # Ported from dedens `taplo.toml` at v0.1.0-131-gfd00747 (D57).
-exclude = ["**/Cargo.lock", "**/target/**", "plan/**", "fuzz/seeds/**"]
+# cargo-vet writes supply-chain/ in its own format, and rewrites it on each command.
+exclude = [
+  "**/Cargo.lock",
+  "**/target/**",
+  "plan/**",
+  "fuzz/seeds/**",
+  "supply-chain/**",
+]

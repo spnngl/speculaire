@@ -34,7 +34,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
-- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63)
+- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71)
 - D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a watched file's modification time is at or after the last check; a bad reload keeps the old config (amended by D37, D47)
@@ -78,5 +78,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61)
 - D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53)
 - D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29)
+- D71 [build](build.md): cargo-vet holds every crate version of `Cargo.lock` to an imported audit, a trusted publisher or an exemption, in `deps (deny)` inside `required`; bumps of exempted crates are renewed by hand (amends D27)
 
-Next free number: D71.
+Next free number: D72.

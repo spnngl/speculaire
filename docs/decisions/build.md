@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71)
 
 - **Decision:**
   - **Workflow:**
@@ -312,3 +312,23 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Renovate cannot read containerd's requirement; Go's version selection can, and the test turns any drift red.
 - **Measured (M1 step 07, arm64):** `just oracle` prints `{"containerd":"v2.4.2","nri":"v0.12.3"}`; with `go get github.com/containerd/nri@v0.12.5`, `go test` fails with `github.com/containerd/containerd/v2@v2.4.2 requires NRI "v0.12.3", go.mod selects "v0.12.5"`.
 - **Revisit when:** containerd 2.5 is supported (D40): the oracle moves to the newest minor by hand.
+## D71: cargo-vet gates every crate version of `Cargo.lock` inside `required` (amends D27)
+
+- **Decision:**
+  - `supply-chain/` holds cargo-vet's store. It imports the audit sets of mozilla, google, bytecode-alliance, zcash, isrg and embark-studios, trusts the nine crates.io publishers those sets already trust (dtolnay, cuviper, epage, kennykerr, BurntSushi, Amanieu, alexcrichton, seanmonstar, sunfishcode), and exempts the rest. Every crate is held to cargo-vet's default, `safe-to-deploy`.
+  - `just vet` runs `cargo vet --locked`, which reads `imports.lock` and needs no network. In CI it is a step of the `deps (deny)` job, so `required` needs it without a job of its own.
+  - A pull request that adds a crate, or bumps one that no audit or trust covers, fails `deps (deny)`. Its author, or for a Renovate update its reviewer, runs `just vet-exempt` on the branch and commits `supply-chain/`, or writes an audit or a trust instead.
+  - Only the main workspace is vetted. `fuzz/` and `oracle/` run in CI and never ship.
+  - `supply-chain/` is left in cargo-vet's format: taplo skips it, because cargo-vet rewrites it on each command.
+  - cargo-vet is pinned, with one renovate depName, in `ci.yml` and in the dev stage of `build/Containerfile` (D58).
+- **Because:**
+  - Each new crate, and each new version nobody vouched for, becomes a decision a person makes in review, not a line Renovate adds.
+  - Trusting the publishers the imported sets already trust lets their releases through without an exemption per bump: 63 fewer exemptions to renew.
+  - An exemption covers one version, so a Renovate bump of an exempted crate fails until someone renews it. A workflow could renew it, but its pushes start CI only with a write token, which is a secret this repository does not hold.
+- **Cost:**
+  - A bump of one of the 72 exempted crates needs `just vet-exempt` by hand.
+  - Each trust ends one year after it was written (2027-11-11): renew them with `cargo vet trust --all <user>` before then, or `just vet` fails.
+- **Measured (2026-11-11, cargo-vet 0.10.3):**
+  - `cargo vet init` exempts 164 crates; the six imports leave 135 exempted; the nine trusts then 72 exempted and 92 fully audited.
+  - A new dependency (`bytesize 2.7.0`) fails with `bytesize:2.7.0 missing ["safe-to-deploy"]` and passes after `just vet-exempt`; `bytes` moved from an exempted 1.12.1 to 1.12.0 fails the same way; `itoa` (dtolnay) moved from 1.0.19 to 1.0.18 passes unchanged.
+- **Revisit when:** exemption renewals pass one a week, or the repository gains a write token for automation.

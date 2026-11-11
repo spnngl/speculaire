@@ -105,6 +105,8 @@ jobs:
       CARGO_HACK_VERSION: "0.6.45"
       # renovate: datasource=crate depName=cargo-deny
       CARGO_DENY_VERSION: "0.20.2"
+      # renovate: datasource=crate depName=cargo-vet
+      CARGO_VET_VERSION: "0.10.3"
       # protoc: the protobuf exposition of `/metrics` compiles its .proto at build time (D34).
       # renovate: datasource=github-releases depName=protocolbuffers/protobuf
       PROTOC_VERSION: "36.2"
@@ -123,10 +125,13 @@ jobs:
           key: ${{ matrix.recipe }}
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-hack@${{ env.CARGO_HACK_VERSION }},cargo-deny@${{ env.CARGO_DENY_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
+          tool: cargo-hack@${{ env.CARGO_HACK_VERSION }},cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-vet@${{ env.CARGO_VET_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
       - env:
           RECIPE: ${{ matrix.recipe }}
         run: just "$RECIPE"
+      # cargo-vet rides on the `deny` leg rather than a job of its own, for the runner budget (D71).
+      - if: matrix.recipe == 'deny'
+        run: just vet
 
   # The suites on a kind cluster per leg of D63's matrix, natively on each architecture, with the binary this run built
   # (D27).
