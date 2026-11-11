@@ -27,6 +27,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "config_values"
+path = "fuzz_targets/config_values.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 
 # The workspace's lint tables, copied: this crate is a workspace of its own.

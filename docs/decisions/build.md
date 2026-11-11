@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75)
 
 - **Decision:**
   - **Workflow:**
@@ -369,4 +369,23 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Measured (2026-11-11, cargo-mutants 27.1.0, macOS arm64):**
   - The workspace lists 142 mutants; 19 are `e2e/` and 2 are excluded, so 121 are tested (72 of them in the config values).
   - Without `test_workspace`: 44 missed of 123. With it, before new tests: 29 missed, 71 caught, 23 unviable. After the new tests: 98 caught, 23 unviable, 0 missed, 0 timeouts, in 13 minutes (baseline: 4 s build and 2 s test).
+  - PR #24 on CI: `plan`, `stale`, one shard (3 mutants: 2 caught, 1 unviable, 40 s of tests in a 66 s job) and `summary` green. A throwaway PR (#25) planted two faults: a pattern matching nothing turned `stale` red, naming it (`exclude_re matches no mutant: 'nowhere\.rs...'`); a removed test of `audit_filter` turned `shard (0)` red with `MISSED log.rs:86:39: replace && with || in audit_filter` and `log.rs:86:23: replace == with != in audit_filter` (run 43104969323), both in the `missed.txt` that `summary` prints. A throwaway docs-only PR (#26) started `ci`, `betterleaks` and `conventional-commits`, and no `mutants` run. The throwaways are closed.
 - **Revisit when:** a shard nears its 350 minutes, the missed mutants pile up unread (then put `mutants` in `required`), or a hung test counts as caught too easily.
+
+## D75: A second fuzz target writes config files from the keys (amends D27)
+
+- **Decision:**
+  - `config_values` fuzzes `config::parse` with a TOML document that `fuzz/src/values.rs` writes from the fuzzer's bytes. `KEYS` lists every key of `packaging/config.toml`, each with literals its parser accepts, first, and literals it refuses. A draw takes about one key in eight, as a dotted key of the root table, with a literal or a string of raw bytes. The document goes through the round trip of `config`, now `round_trip`, shared by both targets.
+  - `config` stays for raw bytes: TOML's syntax errors, and text no list foresaw.
+  - `arbitrary` comes from `libfuzzer-sys`, which re-exports it, so `fuzz/` gains no dependency and `speculaire-agent` gains no `arbitrary`, no feature and no `Arbitrary` derive.
+  - `just check` holds `KEYS` to the reference file: a smoke test fails when a key of `packaging/config.toml` has no entry or an entry names no key, and another when the first literals of all keys do not parse. The target has two seeds, all zeros (the first literal of every key) and a counting pattern.
+- **Because:**
+  - Raw bytes rarely spell a value a parser accepts, so the `config` target stopped at the first refusal: in M1 `just fuzz config 60` (about 730 000 runs, with the dictionary) missed every panic planted after the parse, such as `prewarm.seeds >= 10`.
+  - A `Config` derived from `arbitrary` would hold only values that parse, and never reach the parsers' errors.
+  - A list keeps the generator readable; the unit test keeps it in step with the file.
+- **Cost:** a key's literals are written by hand, and a new value type needs its own. A document names a key once, so it never tests a repeated key (the `config` target does).
+- **Measured (2026-11-11, cargo-fuzz 0.13.2, macOS arm64, `just fuzz <target> 300`, `cargo fuzz coverage`):**
+  - Line coverage of `speculaire-agent` after a 5-minute run, `config` corpus (3 358 817 runs, 3 879 inputs) and `config_values` corpus (1 621 597 runs, 1 540 inputs): `crates/agent/src/config/value.rs` 81.98 % (40 of 222 lines missed) and 89.19 % (24 missed); `crates/agent/src/config.rs` 60.87 % (72 of 184 missed) and 58.15 % (77 missed).
+  - What `config_values` adds: a pinned trusted root, a reflector URL, their printing, a zero interval's refusal, a log filter's refusal. What it loses against `config`: the TOML syntax error's position. What neither reaches, being no part of `parse` or its round trip: the accessors (`get`, `as_str`, `env_filter`), `keep_restart_keys`, `load`, and `ParseError`'s `Display`.
+  - A panic planted after the parse (`prewarm.seeds >= 10` in `round_trip`): `config_values` finds it in 10 s, 11 s and 12 s of three runs on a fresh corpus without its seeds, and in 2 s with them (the counting seed reaches it); `config` found nothing in 300 s (one run, 2 775 933 runs).
+- **Revisit when:** a target's coverage stops growing before its parsers' last lines, or `KEYS` falls behind its smoke test too often.

@@ -11,6 +11,7 @@
 
 #[cfg(test)]
 mod smoke;
+mod values;
 
 use speculaire_agent::config;
 
@@ -18,7 +19,7 @@ use speculaire_agent::config;
 pub type Entry = fn(&[u8]);
 
 /// Every target by name; `fuzz_targets/<name>.rs` and this list stay in step (checked by the smoke test).
-pub const TARGETS: &[(&str, Entry)] = &[("config", config)];
+pub const TARGETS: &[(&str, Entry)] = &[("config", config), ("config_values", config_values)];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
 ///
@@ -28,9 +29,25 @@ pub const TARGETS: &[(&str, Entry)] = &[("config", config)];
 ///
 /// When parsing panics, or a parsed config does not survive the round trip.
 pub fn config(data: &[u8]) {
-    let Ok(text) = std::str::from_utf8(data) else {
-        return;
-    };
+    if let Ok(text) = std::str::from_utf8(data) {
+        round_trip(text);
+    }
+}
+
+/// The agent's config file, written from its keys: a few of them, each with a literal that its parser accepts or
+/// refuses, or a string of raw bytes. `config` reaches the values that raw bytes seldom spell (D75).
+///
+/// # Panics
+///
+/// As [`config`].
+pub fn config_values(data: &[u8]) {
+    if let Ok(text) = values::document(data) {
+        round_trip(&text);
+    }
+}
+
+/// Parses `text`, and a config that parses must print to text that parses back to it.
+fn round_trip(text: &str) {
     let Ok(parsed) = config::parse(text) else {
         return;
     };
