@@ -1,8 +1,7 @@
 name: ci
 
-# The check (`just check`), the musl binaries, the dependency checks and e2e, on each pull request and each push to
-# main; `required` is the one check the ruleset requires (D27, D48). `oracle` joins `required.needs` when it lands
-# (D58). Jobs ported from dedens `.github/workflows/ci.yml` at v0.1.0-131-gfd00747.
+# The check (`just check`), the musl binaries, the dependency checks, the oracle and e2e, on each pull request and
+# each push to main; `required` is the one check the ruleset requires (D27, D48). Jobs ported from dedens `.github/workflows/ci.yml` at v0.1.0-131-gfd00747.
 on:
   push:
     branches:
@@ -175,11 +174,27 @@ jobs:
           KUBERNETES: ${{ matrix.leg.kubernetes }}
         run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
 
+  # The Go test oracle (D29): built, vetted and tested in the pinned Go image.
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - run: just oracle
+
   # The one check the ruleset requires (D48): matrix legs are named after their values, so requiring them would break
   # whenever a matrix changes.
   required:
     if: always()
-    needs: [check, musl, deps, e2e]
+    needs: [check, musl, deps, oracle, e2e]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
@@ -189,9 +204,11 @@ jobs:
           CHECK: ${{ needs.check.result }}
           MUSL: ${{ needs.musl.result }}
           DEPS: ${{ needs.deps.result }}
+          ORACLE: ${{ needs.oracle.result }}
           E2E: ${{ needs.e2e.result }}
         run: |
           [ "$CHECK" = success ] || { echo "::error::check: $CHECK"; exit 1; }
           [ "$MUSL" = success ] || { echo "::error::musl: $MUSL"; exit 1; }
           [ "$DEPS" = success ] || { echo "::error::deps: $DEPS"; exit 1; }
+          [ "$ORACLE" = success ] || { echo "::error::oracle: $ORACLE"; exit 1; }
           [ "$E2E" = success ] || { echo "::error::e2e: $E2E"; exit 1; }
