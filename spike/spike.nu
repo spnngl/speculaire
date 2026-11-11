@@ -605,7 +605,8 @@ def "main crio check 03" [k8s: string] {
     let arch = match (sh-node $node "uname -m" | str trim) { "aarch64" => "arm64", "x86_64" => "amd64", $a => $a }
     mut r = []
 
-    ^kubectl --context $ctx delete pod -l spike=s03 --ignore-not-found --wait=true o+e>| ignore
+    # Earlier steps leave pods running busybox; their layers would be reused instead of pulled.
+    ^kubectl --context $ctx delete pod --all --wait=true o+e>| ignore
     main put mirror-spike $node
     crio-certs $node
     let digest_ref = $"docker.io/library/busybox@(fill-mirror $node $arch | get index)"
