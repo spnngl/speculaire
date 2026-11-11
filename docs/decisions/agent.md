@@ -65,7 +65,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A separate filter keeps a `log.filter` change from silently dropping the audit trail.
 - **Revisit when:** someone needs OpenTelemetry traces or log export; add `tracing-opentelemetry` as a layer behind a cargo feature.
 
-## D39: Shutdown withdraws first, drains, saves, and leaves NRI last
+## D39: Shutdown withdraws first, drains, saves, and leaves NRI last (amended by D69)
 
 - **Decision:** on SIGTERM, the agent:
   1. sends `STOPPING=1` to systemd, and `/readyz` returns 503;
@@ -117,7 +117,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Restart keys are those that open sockets or define who the agent is; changing them live would leave peers or containerd holding stale addresses.
 - **Revisit when:** —
 
-## D53: The systemd unit's hardening
+## D53: The systemd unit's hardening (amended by D69)
 
 - **Decision:** the unit runs the agent as root and sets:
   - `NoNewPrivileges=yes`, `CapabilityBoundingSet=` (empty), `AmbientCapabilities=` (empty);
@@ -165,3 +165,17 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Comparing serialized TOML catches what D47's test cannot: a file with a key missing still parses to the default.
   - `serde_path_to_error` gives the dotted key; `toml` alone names only the last segment (`unmached`).
 - **Revisit when:** —
+
+
+## D69: The unit is `Type=notify`, with a 30 s watchdog, and restarts on failure (amends D39, D53)
+
+- **Decision:**
+  - `packaging/speculaire.service` runs `/usr/bin/speculaire agent` with `Type=notify`, `ExecReload=/bin/kill -HUP $MAINPID` (D30), `Restart=on-failure`, `WatchdogSec=30s` and `TimeoutStopSec=20s` (D39), `RuntimeDirectoryMode=0700` and `RuntimeDirectoryPreserve=yes` (D31), and D53's settings. It starts after `network-online.target`, `containerd.service` and `crio.service`, whichever exist.
+  - The agent sends `READY=1` once its status listener is open, `STOPPING=1` first on SIGTERM (D39, step 1), and `WATCHDOG=1` every half of `WATCHDOG_USEC` from a task of its tokio runtime. Outside systemd, without `NOTIFY_SOCKET`, it sends nothing.
+  - e2e (D27) installs the unit, the binary and `packaging/config.toml` at the packages' paths on every node of every leg (D63), with `log.filter = "info"` so the journal holds entries to check, and runs the suites against the running unit.
+- **Because:**
+  - `Type=notify` makes `systemctl start` wait for the listener, so a unit that cannot bind fails its start instead of running half-started.
+  - A runtime whose worker threads all block stops scheduling the ping task; systemd then kills it with SIGABRT and `Restart=on-failure` starts it again. 30 s is well past any pause the agent should have, and short against the 15 min of a pod that waits on a blocked gate.
+  - Ordering after the runtime units starts the agent once the sockets it reads exist; `After=` on a missing unit is a no-op.
+- **Measured (M1 step 06, `just e2e containerd 2.4 1.37` and `just e2e crio 1.37`, arm64):** the unit is active on every node with `Type=notify` and `WatchdogUSec=30s`; `systemd-analyze security` reports D53's settings set, except `SystemCallFilter=~@resources`, `RestrictAddressFamilies=~AF_UNIX` and `RestrictAddressFamilies=~AF_(INET|INET6)`, which D53 leaves open; removing `ProtectClock=` and `WatchdogSec=` from one node failed the suite; `systemctl stop` exits 0 in under a second; `/run/speculaire` survives a restart; the journal holds the agent's fields with tracing-journald's `F_` prefix, such as `F_ADDRESS=[::]:7482`.
+- **Revisit when:** a component holds a thread for longer than the watchdog allows by design.

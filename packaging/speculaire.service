@@ -1,0 +1,52 @@
+# The agent as a system service (D39, D53). Ported from dedens `deploy/packages/dedensd.service` at
+# v0.1.0-131-gfd00747, with D53's settings.
+[Unit]
+Description=Spéculaire image mirror and gate
+Documentation=https://github.com/spnngl/speculaire
+Wants=network-online.target
+After=network-online.target containerd.service crio.service
+
+[Service]
+# The agent sends READY=1 once /readyz answers 200, STOPPING=1 on SIGTERM, and a watchdog ping every
+# WatchdogSec/2 from its runtime, so a stalled runtime is killed and restarted (D39).
+Type=notify
+ExecStart=/usr/bin/speculaire agent
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+WatchdogSec=30s
+TimeoutStopSec=20s
+# Root without capabilities: the runtime and NRI sockets, the content directory and the kubelet key are root's (D53).
+User=root
+# /var/lib/speculaire and /run/speculaire. The run directory outlives a restart (D31).
+StateDirectory=speculaire
+RuntimeDirectory=speculaire
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+LimitNOFILE=524288
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# @system-service includes io_uring (D4).
+SystemCallFilter=~@privileged io_uring_setup io_uring_enter io_uring_register
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

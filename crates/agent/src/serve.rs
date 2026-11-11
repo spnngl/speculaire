@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{self, Config};
 use crate::log::{self, Logs};
 use crate::status::{self, Status};
-use crate::telemetry;
+use crate::{systemd, telemetry};
 
 /// Runs the agent with the config at `path`.
 ///
@@ -51,6 +51,8 @@ async fn serve(path: &Path, mut config: Config, logs: Logs) -> anyhow::Result<()
         }
     });
     info!(%address, "status listener open");
+    systemd::watchdog();
+    systemd::ready();
 
     let mut hangup = signal(SignalKind::hangup()).context("handling SIGHUP")?;
     let mut terminate = signal(SignalKind::terminate()).context("handling SIGTERM")?;
@@ -87,6 +89,7 @@ async fn serve(path: &Path, mut config: Config, logs: Logs) -> anyhow::Result<()
     }
 
     // D39, step 1. Steps 2 to 6 arrive with the mirror, peers, reflector, cache and gate.
+    systemd::stopping();
     status.stop();
     info!("stopping");
     // An error means the server already ended; its result says why.

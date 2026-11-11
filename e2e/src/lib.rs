@@ -120,7 +120,8 @@ impl Cluster {
             concat!(
                 r"jsonpath={range .items[*]}{.metadata.name} ",
                 r#"{.status.conditions[?(@.type=="Ready")].status} "#,
-                r#"{.status.nodeInfo.containerRuntimeVersion} {.status.nodeInfo.kubeletVersion}{"\n"}{end}"#,
+                r#"{.status.nodeInfo.containerRuntimeVersion} {.status.nodeInfo.kubeletVersion} "#,
+                r#"{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}"#,
             ),
         ])?;
         Ok(out
@@ -132,6 +133,7 @@ impl Cluster {
                     ready: fields.next()? == "True",
                     runtime: fields.next()?.to_owned(),
                     kubelet: fields.next()?.to_owned(),
+                    address: fields.next()?.to_owned(),
                 })
             })
             .collect())
@@ -149,6 +151,8 @@ pub struct Node {
     pub runtime: String,
     /// Its `kubeletVersion`, such as `v1.37.0`.
     pub kubelet: String,
+    /// Its `InternalIP`, on kind's Docker network.
+    pub address: String,
 }
 
 /// A command that could not start or exited non-zero.

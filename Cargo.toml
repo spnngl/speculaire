@@ -28,7 +28,10 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false, fe
   "protobuf",
 ] }
 mime = "0.3.18"
+# D39: readiness, stopping and the watchdog.
+sd-notify = "0.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 serde_path_to_error = "0.1.20"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = [
