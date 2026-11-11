@@ -39,6 +39,7 @@ Shown in `kubectl describe pod` under `CreateContainerError`.
 |---|---|---|
 | `verification pending` | The verdict was not ready within `gate.wait` (D22) | None; kubelet retries. Investigate if it persists |
 | `image identity mismatch` | On containerd 2.3, the image name no longer resolves to the container's snapshot (D15) | Check for a retag between pull and create |
+| `unverifiable: image ID is not a config digest` | On CRI-O, the image ID matches no verified manifest's config digest, as with `insecure_allow_unpredictable_image_contents = "true"` in `storage.conf` (D65) | Remove that option and pull the image again |
 | `unmatched` | No policy matches the image, and `gate.unmatched = "deny"` (D23) | Add a policy, or exempt the image |
 | `rejected: <detail>` | A signature, attestation or SBOM check failed (D20) | Fix the image; the verdict is final for this policy and trust root |
 | `rejected: attestation <predicateType> missing (.att tags are not supported)` | The attestation exists only as a `.att` tag (D43) | Attest again with a current cosign, which attaches a bundle as a referrer |
