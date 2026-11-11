@@ -1,6 +1,6 @@
 // Ported from dedens `renovate.json5` at v0.1.0-131-gfd00747. The shared preset brings cargo, GitHub Actions,
 // Dockerfile digests, rust-toolchain.toml and the `# renovate:` comments of workflows; this file adds the
-// `# renovate:` comments of Containerfiles.
+// `# renovate:` comments of Containerfiles and of the justfile, and the images of the e2e suites.
 {
     "$schema": "https://docs.renovatebot.com/renovate-schema.json",
     // The shared preset at HEAD of main.
@@ -14,12 +14,45 @@
                 "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\s*\\nARG [A-Z_]+=(?<currentValue>\\S+)",
             ],
         },
+        {
+            "customType": "regex",
+            "description": "Versions in the justfile, annotated with a `# renovate:` comment on the line above.",
+            "managerFilePatterns": ["/(^|/)justfile$/"],
+            "matchStrings": [
+                "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\s*\\n[a-z0-9_]+ := \"(?<currentValue>[^\"]+)\"",
+            ],
+            "extractVersionTemplate": "^v?(?<version>.*)$",
+        },
+        {
+            "customType": "regex",
+            "description": "Images of the e2e suites, pinned by tag and digest.",
+            "managerFilePatterns": ["/(^|/)e2e/src/[^/]+\\.rs$/"],
+            "matchStrings": ["\"(?<depName>docker\\.io/[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[0-9a-f]{64})\""],
+            "datasourceTemplate": "docker",
+        },
     ],
     "packageRules": [
         {
             "description": "The toolchain pin (the rust-toolchain manager's `rust`) and the build image's tag move together (D57).",
             "matchDepNames": ["rust", "docker.io/library/rust"],
             "groupName": "rust",
+        },
+        {
+            "description": "Each containerd pin of the justfile stays on its minor: e2e covers every supported minor (D40, D59).",
+            "matchDepNames": ["containerd/containerd"],
+            "matchCurrentVersion": "/^2\\.3\\./",
+            "allowedVersions": "/^2\\.3\\./",
+        },
+        {
+            "description": "Each containerd pin of the justfile stays on its minor: e2e covers every supported minor (D40, D59).",
+            "matchDepNames": ["containerd/containerd"],
+            "matchCurrentVersion": "/^2\\.4\\./",
+            "allowedVersions": "/^2\\.4\\./",
+        },
+        {
+            "description": "A kind release names its node image; kubectl follows the node image's Kubernetes (D59).",
+            "matchDepNames": ["kubernetes-sigs/kind", "docker.io/kindest/node", "kubernetes/kubernetes"],
+            "groupName": "kind",
         },
     ],
 }

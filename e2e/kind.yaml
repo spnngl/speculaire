@@ -1,0 +1,15 @@
+# The e2e cluster (D27): one control plane and two workers. `just e2e-up <minor>` passes the node image.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+kubeadmConfigPatches:
+  # kubelet client certificates live 10 minutes, so suites see a rotation within minutes (M0 spike 03, D16).
+  - |
+    kind: ClusterConfiguration
+    controllerManager:
+      extraArgs:
+        - name: cluster-signing-duration
+          value: 10m

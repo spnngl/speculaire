@@ -116,7 +116,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data (planned) |
 | `oracle/` | Go module, test-only: a fake NRI runtime, and upstream's own code for differential tests (D29) (planned) |
 | `packaging/` | systemd unit, nfpm config, `config.toml` reference (D30), containerd drop-in examples, later the Helm chart (planned) |
-| `e2e/` | kind node image per containerd version, test suites (planned) |
+| `e2e/` | kind node image per containerd version, cluster config, and the suites: a Rust test crate run by `just e2e <minor>` (D59) |
 | `bench/` | Benchmarks against Spegel: recipe, node-access pod, policy, results (D35) (planned) |
 | `justfile` | The only entry point, for humans and CI (D27); `just dev <recipe>` runs a recipe in the build image (D57) |
 | `build/Containerfile` | The build image: the musl build and, on macOS, every recipe (D57) |

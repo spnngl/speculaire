@@ -1,7 +1,7 @@
 name: ci
 
-# The check (`just check`), the musl binaries and the dependency checks, on each pull request and each push to main;
-# `required` is the one check the ruleset requires (D27, D48). `e2e` and `oracle` join `required.needs` when they land
+# The check (`just check`), the musl binaries, the dependency checks and e2e, on each pull request and each push to
+# main; `required` is the one check the ruleset requires (D27, D48). `oracle` joins `required.needs` when it lands
 # (D58). Jobs ported from dedens `.github/workflows/ci.yml` at v0.1.0-131-gfd00747.
 on:
   push:
@@ -118,11 +118,51 @@ jobs:
           RECIPE: ${{ matrix.recipe }}
         run: just "$RECIPE"
 
+  # The suites on a kind cluster per containerd minor, natively on each architecture, with the binary this run built
+  # (D27).
+  e2e:
+    needs: musl
+    strategy:
+      fail-fast: false
+      matrix:
+        containerd: ["2.3", "2.4"]
+        platform:
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: speculaire-${{ matrix.platform.target }}
+          path: target/musl/${{ matrix.platform.target }}
+      # Artifacts drop the executable bit.
+      - env:
+          TARGET: ${{ matrix.platform.target }}
+        run: chmod +x "target/musl/$TARGET/speculaire"
+      # The pinned stable, before rust-cache: its key includes the rustc version.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - env:
+          CONTAINERD: ${{ matrix.containerd }}
+        run: just e2e "$CONTAINERD"
+
   # The one check the ruleset requires (D48): matrix legs are named after their values, so requiring them would break
   # whenever a matrix changes.
   required:
     if: always()
-    needs: [check, musl, deps]
+    needs: [check, musl, deps, e2e]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
@@ -132,7 +172,9 @@ jobs:
           CHECK: ${{ needs.check.result }}
           MUSL: ${{ needs.musl.result }}
           DEPS: ${{ needs.deps.result }}
+          E2E: ${{ needs.e2e.result }}
         run: |
           [ "$CHECK" = success ] || { echo "::error::check: $CHECK"; exit 1; }
           [ "$MUSL" = success ] || { echo "::error::musl: $MUSL"; exit 1; }
           [ "$DEPS" = success ] || { echo "::error::deps: $DEPS"; exit 1; }
+          [ "$E2E" = success ] || { echo "::error::e2e: $E2E"; exit 1; }
