@@ -33,7 +33,7 @@
 #images = []
 
 [nri]
-# containerd's NRI socket (D9). Restart.
+# The runtime's NRI socket, the same path on containerd and CRI-O (D9, D64). Restart.
 #socket = "/var/run/nri/nri.sock"
 
 [verify]

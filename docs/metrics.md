@@ -6,7 +6,7 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `speculaire_mirror_requests_total` | counter | `kind` = `manifest`\|`blob`\|`referrers`; `result` = `served`\|`fall_through`\|`error` | Requests from containerd to the local mirror |
+| `speculaire_mirror_requests_total` | counter | `kind` = `manifest`\|`blob`\|`referrers`; `result` = `served`\|`fall_through`\|`error` | Requests from the runtime to the local mirror |
 | `speculaire_mirror_bytes_total` | counter | `source` = `local`\|`peer`\|`upstream` | Bytes served to the runtime; `upstream` only on CRI-O (D66) |
 | `speculaire_blob_cache_bytes` | gauge | — | Size of the *blob cache*, on CRI-O (D67) |
 | `speculaire_blob_cache_evictions_total` | counter | — | Blobs evicted from the *blob cache* above `blob_cache.max_size` (D67) |
@@ -60,13 +60,13 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 | `speculaire_gate_total` | counter | `mode` = `audit`\|`enforce`; `result` = `allow`\|`rejected`\|`unverifiable`\|`pending`\|`unmatched`\|`exempt`; `stale` = `true`\|`false` | Gate decisions (D18, D21, D23) |
 | `speculaire_gate_seconds` | histogram | `path` = `nri`\|`annotation` | `CreateContainer` handling time (target: p99 under 5 ms on a cached verdict) |
 | `speculaire_identity_path` | gauge | `path` = `nri`\|`annotation` | 1 for the image-identity path in use (D15) |
-| `speculaire_nri_connected` | gauge | — | 1 while registered with containerd's NRI (D41) |
+| `speculaire_nri_connected` | gauge | — | 1 while registered with the runtime's NRI (D41, D64) |
 
 ## Process
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `speculaire_build_info` | gauge | `version`, `containerd_version`, `nri_version` | Always 1 |
+| `speculaire_build_info` | gauge | `version`, `runtime` = `containerd`\|`cri-o`, `runtime_version`, `nri_version` | Always 1; the last three are empty until NRI's `Configure` (D68) |
 | `speculaire_config_reload_failures_total` | counter | — | Reloads rejected; the previous config is still in use (D30) |
 
 Memory, CPU and file descriptors come from node-exporter and systemd (D34).

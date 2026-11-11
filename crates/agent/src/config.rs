@@ -31,13 +31,13 @@ pub struct Config {
     pub identity: Identity,
     /// `[gate]`: the NRI admission gate.
     pub gate: Gate,
-    /// `[nri]`: the connection to containerd's NRI (D9).
+    /// `[nri]`: the connection to the runtime's NRI (D9, D64).
     pub nri: Nri,
     /// `[verify]`: signature verification (D26, D21).
     pub verify: Verify,
     /// `[sbom]`: SBOM attestations (D12).
     pub sbom: Sbom,
-    /// `[mirror]`: the local registry mirror containerd pulls through (D14).
+    /// `[mirror]`: the local registry mirror the runtime pulls through (D14, D66).
     pub mirror: Mirror,
     /// `[peer]`: the peer API other nodes fetch from (D3).
     pub peer: Peer,
@@ -271,7 +271,7 @@ pub struct Exempt {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Nri {
-    /// containerd's NRI socket (D9).
+    /// The runtime's NRI socket (D9, D64).
     pub socket: Restart<Absolute>,
 }
 

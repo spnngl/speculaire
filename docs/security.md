@@ -7,7 +7,7 @@ Trust boundaries and accepted risks. Each item names the decision that enforces 
   - artifacts are checked against their digest and signature (D8);
   - TUF metadata authenticates itself, so it can travel P2P (D26).
 - **Peers are authenticated for identity.** Only holders of a kubelet client certificate from the cluster CA can talk to the peer API or a reflector, and a node can only announce content for itself (D16).
-- **The local mirror is closed to other local processes.** containerd authenticates with a root-only client certificate, so `hostNetwork` pods cannot read cached layers through it. It listens on loopback only; startup refuses any other `mirror.address` (D14, D56).
+- **The local mirror is closed to other local processes.** The runtime authenticates with a root-only client certificate, so `hostNetwork` pods cannot read cached layers through it. It listens on loopback only; startup refuses any other `mirror.address` (D14, D56).
 - **Pod pull secrets never reach the agent.** On CRI-O the mirror never answers 401, because CRI-O would then send it the pull's credentials, which belong to the upstream registry. It resolves tags only at upstream, with the node's own credentials, never from peers (D6, D66).
 - **On CRI-O the agent is in every pull's path.** CRI-O takes an image whole from the mirror once it serves the manifest, so the agent relays what it fetches from upstream; when the agent is down, CRI-O pulls from upstream (D66). It keeps a blob in its *blob cache*, and so serves it to peers, only once its digest matches; it holds back the last chunk until then, so CRI-O never receives a whole wrong blob (D67).
 - **Every node verifies for itself.** Verdicts are never shared, and a compromised control plane cannot relax a node's policy (D26).
@@ -28,4 +28,4 @@ Trust boundaries and accepted risks. Each item names the decision that enforces 
 - **Metrics are readable by anyone who can reach the node.** `/metrics` is plain HTTP on every address by default; it holds counts only, no secret and no pod or image label (D34, D42, D45, D50).
 - **A gate timeout lets one container through (accepted).** NRI closes a plugin that misses `plugin_request_timeout` and starts that container ungated; D41 keeps the gate's answer under half the timeout and alerts on it.
 - **The agent runs as root** with no capabilities, a read-only system and a syscall filter that denies io_uring (D4, D53).
-- **The gate cannot be switched off.** No setting disables it, and a containerd with NRI disabled stops startup; `audit` mode is the only way to admit everything, and it stays visible in metrics (D54).
+- **The gate cannot be switched off.** No setting disables it, and a runtime with NRI disabled stops startup (D64); `audit` mode is the only way to admit everything, and it stays visible in metrics (D54).

@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use speculaire_agent::config;
 
-/// P2P image mirror and supply-chain gate for containerd.
+/// P2P image mirror and supply-chain gate for containerd and CRI-O.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
