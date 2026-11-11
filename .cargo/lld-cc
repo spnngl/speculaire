@@ -1,0 +1,29 @@
+#!/bin/sh
+# Ported from dedens `.cargo/lld-cc` at v0.1.0-131-gfd00747 (D13).
+# `cc` linking with lld: Rust's own (its `gcc-ld/ld.lld`, found next to the `rust-lld` rustc puts first in the
+# linker's PATH), else the system's. On Alpine the system's: Rust's lld has no zlib, and Alpine's `crt*.o`
+# carry zlib-compressed debug sections (`apk add lld`; `cc` fails with "cannot find 'ld.lld'" without it).
+if [ ! -e /etc/alpine-release ] && rust_lld="$(command -v rust-lld)"; then
+    set -- "-B$(dirname "$rust_lld")/gcc-ld" "$@"
+fi
+# rustc's target spec of aarch64-unknown-linux-musl lacks `static-position-independent-executables`, so it
+# links `-static -no-pie` with `crt1.o`, at a fixed address. x86_64's static-pie link names `rcrt1.o`,
+# `crtbeginS.o`, `crtendS.o` and `-static-pie`: made here for aarch64, built with `relocation-model=pic`.
+for arg; do
+    case $arg in
+    */self-contained/crt1.o)
+        for arg; do
+            shift
+            case $arg in
+            */self-contained/crt1.o) arg="${arg%crt1.o}rcrt1.o" ;;
+            */self-contained/crtbegin.o) arg="${arg%crtbegin.o}crtbeginS.o" ;;
+            */self-contained/crtend.o) arg="${arg%crtend.o}crtendS.o" ;;
+            -no-pie) arg=-static-pie ;;
+            esac
+            set -- "$@" "$arg"
+        done
+        break
+        ;;
+    esac
+done
+exec cc -fuse-ld=lld "$@"

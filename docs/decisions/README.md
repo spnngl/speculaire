@@ -20,13 +20,13 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node
-- D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46)
+- D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56)
 - D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3
 - D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists
 - D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable`
 - D18 [gate](gate.md): `gate.exempt` is explicit and empty by default
-- D19 [build](build.md): the dev loop is Docker on macOS plus CI on native runners
+- D19 [build](build.md): the dev loop is Docker on macOS plus CI on native runners (amended by D57)
 - D20 [verification](verification.md): `Verdict` has four states; `Unverifiable` is retried, `Rejected` is final (amended by D31, D38)
 - D21 [verification](verification.md): stale verdicts keep serving during re-verification, for up to `verify.stale_max` (amended by D31)
 - D22 [verification](verification.md): verification starts at the manifest fetch
@@ -64,5 +64,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup
 - D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32)
 - D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47)
+- D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19)
 
-Next free number: D57.
+Next free number: D58.

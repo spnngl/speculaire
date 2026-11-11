@@ -1,0 +1,6 @@
+# Ported from dedens `clippy.toml` at v0.1.0-131-gfd00747 (D13).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true

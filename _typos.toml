@@ -1,0 +1,15 @@
+# typos: `just check`.
+[files]
+extend-exclude = ["plan/"]
+
+[default]
+# "ANDed": "AND" in capitals, then a suffix.
+extend-ignore-re = ["\\bANDed\\b"]
+
+[default.extend-words]
+# Azure Kubernetes Service.
+AKS = "AKS"
+# The in-toto Rekor entry type.
+intoto = "intoto"
+# D30's example of a misspelt key.
+unmached = "unmached"
