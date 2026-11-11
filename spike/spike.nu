@@ -295,13 +295,18 @@ def "main crio check 02" [k8s: string] {
 
 # Config digest of an image's platform manifest, from Docker Hub.
 def config-digest [repo: string, tag: string, arch: string] {
+    (platform-manifest $repo $tag $arch).config.digest
+}
+
+# An image's platform manifest for linux/<arch>, from Docker Hub.
+def platform-manifest [repo: string, tag: string, arch: string] {
     let tok = http get $"https://auth.docker.io/token?service=registry.docker.io&scope=repository:($repo):pull" | get token
     let accept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
     let h = {Authorization: $"Bearer ($tok)", Accept: $accept}
     let base = $"https://registry-1.docker.io/v2/($repo)/manifests"
     let idx = http get -H $h $"($base)/($tag)" | decode utf-8 | from json
     let m = $idx.manifests | where {|x| $x.platform.architecture == $arch and $x.platform.os == "linux" } | first
-    (http get -H $h $"($base)/($m.digest)" | decode utf-8 | from json).config.digest
+    http get -H $h $"($base)/($m.digest)" | decode utf-8 | from json
 }
 
 # Step 01, per runtime: how to drop the default_validator, turn it on, and which unit logs NRI.
@@ -526,8 +531,10 @@ def crio-dropin [node: string, mode: string, --no-reload] {
 }
 
 # New certificates, copied where CRI-O reads them: ca.crt, client.cert, client.key.
-def crio-certs [node: string] {
-    sh-node $node $"mirror-spike certs > /dev/null && mkdir -p '($CRIO_CERTS)' ($MIRROR_DIR)/blobs ($MIRROR_DIR)/manifests && cp ($MIRROR_DIR)/ca.crt ($MIRROR_DIR)/client.cert ($MIRROR_DIR)/client.key '($CRIO_CERTS)/'" | ignore
+# With an IP, the server certificate also names it, so other nodes can use this mirror as their upstream.
+def crio-certs [node: string, ip: string = ""] {
+    let san = if ($ip | is-empty) { "" } else { $"MIRROR_SERVER_IP=($ip) " }
+    sh-node $node $"($san)mirror-spike certs > /dev/null && mkdir -p '($CRIO_CERTS)' ($MIRROR_DIR)/blobs ($MIRROR_DIR)/manifests && cp ($MIRROR_DIR)/ca.crt ($MIRROR_DIR)/client.cert ($MIRROR_DIR)/client.key '($CRIO_CERTS)/'" | ignore
 }
 
 # (Re)start the mirror with an empty log; `challenge` answers 401 to requests without credentials.
@@ -709,6 +716,115 @@ def "main crio check 03" [k8s: string] {
     report $r $"CRI-O ($k8s) step 03"
 }
 
+# CRI-O spike 04: the own blob cache, filled by the mirror proxying misses.
+const CACHE_IMAGE = "docker.io/library/nginx:alpine"
+
+# CPU time a process has used, in ticks of 10 ms (utime + stime).
+def ticks [node: string, process: string] {
+    sh-node $node ("awk '{print $14 + $15}' /proc/$(pgrep -o -x " + $process + ")/stat") | str trim | into int
+}
+
+# (Re)start the mirror in proxy mode with an empty log; `vars` are extra environment assignments.
+def proxy-mirror [node: string, vars: string = ""] {
+    sh-node $node "pkill mirror-spike; sleep 0.5; true" | ignore
+    ^docker exec -d $node sh -c $"MIRROR_PROXY=1 ($vars) mirror-spike serve > /tmp/mirror.log 2>&1"
+    sleep 1sec
+}
+
+# The mirror's error lines: failed connections, such as a blob whose digest did not match.
+def mirror-errors [node: string] {
+    ^docker exec $node cat /tmp/mirror.log | lines | where {|l| $l | str starts-with "connection" } | each {|l| $l | str replace -r 'sha256:([0-9a-f]{12})[0-9a-f]+' 'sha256:$1' }
+}
+
+# Layer digests the cache directory holds.
+def cached-layers [node: string, layers: list] {
+    let files = sh-node $node $"ls ($MIRROR_DIR)/blobs" | lines
+    $layers | where {|l| ($l.digest | str replace ':' '-') in $files }
+}
+
+# A cold pull of CACHE_IMAGE: {ms, ok, out, crio, mirror} with CPU ticks; the mirror is restarted with an empty cache first when proxying.
+def cold-pull [node: string, proxied: bool] {
+    if $proxied {
+        empty-mirror $node
+        proxy-mirror $node
+    }
+    let c0 = ticks $node crio
+    let p = fresh-pull $node $CACHE_IMAGE
+    let mirror = if $proxied { ticks $node mirror-spike } else { 0 }
+    $p | insert crio ((ticks $node crio) - $c0) | insert mirror $mirror
+}
+
+# CRI-O spike 04: CRI-O keeps no compressed blobs; what a proxying cache costs; one node's cache as another's upstream;
+# a blob corrupted in flight.
+def "main crio check 04" [k8s: string] {
+    let name = crio-cluster $k8s
+    let ctx = $"kind-($name)"
+    let node = $"($name)-worker"
+    let other = $"($name)-worker2"
+    let arch = match (sh-node $node "uname -m" | str trim) { "aarch64" => "arm64", "x86_64" => "amd64", $a => $a }
+    let layers = (platform-manifest library/nginx alpine $arch).layers | select digest size
+    let compressed = $layers | get size | math sum
+    mut r = []
+
+    ^kubectl --context $ctx delete pod --all --wait=true o+e>| ignore
+    let ip = ^docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $node | str trim
+    for n in [$node $other] { main put mirror-spike $n }
+    crio-certs $node $ip
+    crio-certs $other
+
+    # Direct pulls; then look for a stored file whose SHA-256 is a layer's compressed digest.
+    crio-dropin $node none
+    let direct = [(cold-pull $node false) (cold-pull $node false)]
+    let finds = $layers | each {|l| $"find /var/lib/containers/storage -type f -size ($l.size)c -exec sha256sum {} + 2>/dev/null" } | str join "; "
+    let candidates = sh-node $node $"($finds); true" | lines | parse "{sum}  {file}"
+    let hits = $candidates | where {|s| ("sha256:" + $s.sum) in ($layers | get digest) }
+    $r = $r | append (check "storage holds no compressed layer" (($direct | all {|p| $p.ok }) and ($hits | is-empty)) $"($layers | length) layers, ($candidates | length) same-size files hashed, ($hits | length) match")
+
+    # Cold pulls through the proxying mirror, then a warm one from its cache.
+    crio-dropin $node all
+    let proxied = [(cold-pull $node true) (cold-pull $node true)]
+    let kept = cached-layers $node $layers
+    let cache_bytes = sh-node $node $"du -sb ($MIRROR_DIR)/blobs | cut -f1" | str trim | into int
+    let fill = crio-requests $node
+    $r = $r | append (check "proxy fills the cache with every layer" (($proxied | all {|p| $p.ok }) and ($kept | length) == ($layers | length)) $"cache ($cache_bytes) bytes, layers ($compressed) bytes; ($fill | str join ', ')")
+    proxy-mirror $node
+    let warm = fresh-pull $node $CACHE_IMAGE
+    let served = crio-requests $node
+    $r = $r | append (check "warm pull is served from the cache" ($warm.ok and ($served | all {|l| not ($l | str contains "proxied") })) ($served | str join ", "))
+    let unpacked = sh-node $node "crictl images -o json" | from json | get images | where {|i| $i.repoTags | any {|t| $t | str contains "nginx:alpine" } } | get size.0? | default "?"
+    let ms = {|ps| $ps | get ms | str join "/" }
+    let cpu = {|ps, k| $ps | get $k | each {|t| $t * 10 } | str join "/" }
+    $r = $r | append (check "cold pull costs (2 runs; ms, CPU ms)" true $"direct ((do $ms $direct)) ms, crio CPU ((do $cpu $direct crio)); proxied ((do $ms $proxied)) ms, crio CPU ((do $cpu $proxied crio)), mirror CPU ((do $cpu $proxied mirror)); warm ($warm.ms) ms; disk: cache ($cache_bytes), image unpacked ($unpacked)")
+
+    # The second node's mirror takes the first node's cache as its upstream.
+    let ca = ^docker exec $node cat $"($MIRROR_DIR)/ca.crt"
+    $ca | ^docker exec -i $other sh -c "cat > /tmp/up-ca.crt"
+    let client = ^docker exec $node cat $"($MIRROR_DIR)/client.pem"
+    $client | ^docker exec -i $other sh -c "cat > /tmp/up-client.pem"
+    proxy-mirror $node "MIRROR_ADDR=0.0.0.0:7480"
+    crio-dropin $other all
+    proxy-mirror $other $"MIRROR_UPSTREAM=https://($ip):7480 MIRROR_UPSTREAM_CA=/tmp/up-ca.crt MIRROR_UPSTREAM_CLIENT=/tmp/up-client.pem"
+    let chained = fresh-pull $other $CACHE_IMAGE
+    let first = crio-requests $node
+    let second = crio-requests $other
+    $r = $r | append (check "second node pulls from the first node's cache only" ($chained.ok and ($first | is-not-empty) and ($first | all {|l| ($l | str ends-with "-> 200") })) $"first: ($first | str join ', '); second: ($second | str join ', '); errors: ((mirror-errors $other) | str join ', ') ($chained.out)")
+    crio-dropin $other none
+    sh-node $other "pkill mirror-spike; true" | ignore
+
+    # A blob corrupted in flight.
+    empty-mirror $node
+    proxy-mirror $node "MIRROR_CORRUPT=1"
+    let bad = fresh-pull $node $CACHE_IMAGE
+    let tries = crio-requests $node | where {|l| $l | str contains "/blobs/" }
+    let errors = mirror-errors $node
+    $r = $r | append (check $"corrupted blob not kept; pull (if $bad.ok { 'succeeds' } else { 'fails' })" ((cached-layers $node $layers | is-empty) and ($errors | is-not-empty)) $"($bad.out); blob requests ($tries | length): ($tries | str join ', '); errors: ($errors | first 3 | str join ', ')")
+
+    crio-dropin $node none
+    sh-node $node "pkill mirror-spike; true" | ignore
+    empty-mirror $node
+    report $r $"CRI-O ($k8s) step 04"
+}
+
 def "main ci" [step: string, minor: string, --k8s: string = "1.37"] {
     let steps = if $step == "all" { ["00" "01" "04"] } else { [$step] }
     main up $minor --k8s $k8s
@@ -731,7 +847,7 @@ def "main ci" [step: string, minor: string, --k8s: string = "1.37"] {
 
 # A CRI-O CI leg; `all` runs the CRI-O spikes written so far.
 def "main crio ci" [step: string, k8s: string] {
-    let steps = if $step == "all" { ["00" "01" "02" "03"] } else { [$step] }
+    let steps = if $step == "all" { ["00" "01" "02" "03" "04"] } else { [$step] }
     main crio up $k8s
     main build
     try {
@@ -741,6 +857,7 @@ def "main crio ci" [step: string, k8s: string] {
                 "01" => { main crio check 01 $k8s }
                 "02" => { main crio check 02 $k8s }
                 "03" => { main crio check 03 $k8s }
+                "04" => { main crio check 04 $k8s }
                 _ => { error make {msg: $"no CRI-O checks for step ($s)"} }
             }
         }
