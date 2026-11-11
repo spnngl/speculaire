@@ -1,0 +1,25 @@
+// Ported from dedens `renovate.json5` at v0.1.0-131-gfd00747. The shared preset brings cargo, GitHub Actions,
+// Dockerfile digests, rust-toolchain.toml and the `# renovate:` comments of workflows; this file adds the
+// `# renovate:` comments of Containerfiles.
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    // The shared preset at HEAD of main.
+    "extends": ["github>spnngl/.github:renovate.default.json5"],
+    "customManagers": [
+        {
+            "customType": "regex",
+            "description": "Tool versions in Containerfiles, annotated with a `# renovate:` comment on the line above an `ARG`.",
+            "managerFilePatterns": ["/(^|/)Containerfile$/"],
+            "matchStrings": [
+                "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\s*\\nARG [A-Z_]+=(?<currentValue>\\S+)",
+            ],
+        },
+    ],
+    "packageRules": [
+        {
+            "description": "The toolchain pin (the rust-toolchain manager's `rust`) and the build image's tag move together (D57).",
+            "matchDepNames": ["rust", "docker.io/library/rust"],
+            "groupName": "rust",
+        },
+    ],
+}

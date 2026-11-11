@@ -1,0 +1,38 @@
+# Ported from dedens `.github/workflows/codeql.yml` at v0.1.0-131-gfd00747.
+name: codeql
+
+# CodeQL's security queries over the Rust sources: weekly and manual, outside `required`. Alerts go to the
+# repository's Security tab.
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # Uploads the results to the Security tab.
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # The stable of rust-toolchain.toml: the extractor reads `cargo metadata`.
+      - run: rustup toolchain install
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: rust
+          # The extractor reads the sources without building them.
+          build-mode: none
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:rust

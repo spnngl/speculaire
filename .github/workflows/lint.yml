@@ -1,0 +1,26 @@
+# Ported from dedens `.github/workflows/lint.yml` at v0.1.0-131-gfd00747.
+name: lint-workflows
+
+# actionlint and zizmor on the workflows and actions when a pull request or a push to main changes them; configured
+# by .github/actionlint.yaml and .github/zizmor.yml.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/**"
+  pull_request:
+    paths:
+      - ".github/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  lint:
+    permissions:
+      contents: read
+    uses: spnngl/.github/.github/workflows/lint-workflows.yml@main

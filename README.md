@@ -2,7 +2,7 @@
 
 A peer-to-peer container image mirror and supply-chain gate for containerd, written in Rust.
 
-> **Status:** design only. Nothing is implemented or released yet; do not run this anywhere.
+> **Status:** early development. Nothing is released yet; do not run this anywhere.
 
 ## What it does
 

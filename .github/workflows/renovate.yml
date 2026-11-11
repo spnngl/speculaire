@@ -1,0 +1,27 @@
+# Ported from dedens `.github/workflows/renovate.yml` at v0.1.0-131-gfd00747.
+name: renovate
+
+# Validates renovate.json5 when a pull request or a push to main changes it or this workflow.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - renovate.json5
+      - .github/workflows/renovate.yml
+  pull_request:
+    paths:
+      - renovate.json5
+      - .github/workflows/renovate.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  renovate:
+    permissions:
+      contents: read
+    uses: spnngl/.github/.github/workflows/renovate.yml@main

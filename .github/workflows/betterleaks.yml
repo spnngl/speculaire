@@ -1,0 +1,20 @@
+# Ported from dedens `.github/workflows/betterleaks.yml` at v0.1.0-131-gfd00747.
+# Secret scanning of the git history, on each pull request and by hand; findings in code scanning.
+name: betterleaks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  betterleaks:
+    permissions:
+      contents: read
+      security-events: write
+    uses: spnngl/.github/.github/workflows/betterleaks.yml@main
