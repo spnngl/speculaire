@@ -58,7 +58,8 @@ check: (rustfmt "--check")
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
     cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --locked
-    cargo test --workspace --all-features --locked
+    cargo nextest run --workspace --all-features --locked
+    cargo test --doc --workspace --all-features --locked
     just fuzz-smoke
 
 # Format Rust (pinned nightly rustfmt) and TOML.
@@ -95,6 +96,24 @@ minimal-versions:
 # Advisories, licenses, duplicate crates and sources (cargo-deny, deny.toml), or the checks named: just deny advisories
 deny *checks:
     cargo deny check {{ checks }}
+
+# `e2e` runs only against a kind cluster, so it is left out; CI uploads the report of
+# `just cov --cobertura --output-path target/cobertura.xml` (D72).
+# Line coverage of the workspace's tests, a summary unless arguments ask for a report
+cov *args="--summary-only":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The pinned stable's own cargo and rustc first: llvm-tools belongs to that toolchain.
+    rustc="$(rustup which rustc)"
+    export PATH="$(dirname "$rustc"):$PATH"
+    # In the build image the host is musl, whose rustflags remap /src and /usr/local/cargo for release binaries
+    # (.cargo/config.toml). Cargo appends these after them, and rustc applies the last match: the report keeps the
+    # real paths, which it needs to tell the workspace from its dependencies.
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    if [[ $host == *-musl ]]; then
+        export "CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<< "$host")_RUSTFLAGS=--remap-path-prefix=/src=/src --remap-path-prefix=/usr/local/cargo=/usr/local/cargo"
+    fi
+    cargo llvm-cov nextest --workspace --exclude e2e --all-features --locked {{ args }}
 
 # `--locked` reads supply-chain/imports.lock, so it needs no network (D71).
 # Each crate of Cargo.lock is audited by an imported set, published by a trusted publisher, or exempted (cargo-vet)

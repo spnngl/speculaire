@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72)
 
 - **Decision:**
   - **Workflow:**
@@ -192,7 +192,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** a higher churn peak (dedens: 184 MiB against mallocng's 94) and about 16k lines of C built by `cc`.
 - **Revisit when:** `just bench` (D35) shows the allocator costing more than the 5% release bar.
 
-## D48: The required CI job is `required`; `just check` is the check (amends D27, D29)
+## D48: The required CI job is `required`; `just check` is the check (amends D27, D29; amended by D72)
 
 - **Decision:** the aggregate CI job that branch protection requires is named `required`. `just check` is called "the check". "Gate" means only the NRI gate (ARCHITECTURE.md § Vocabulary).
 - **Because:** dedens calls both "the gate", which in speculaire is the component that admits containers. One word with two meanings breaks the vocabulary rule in `AGENTS.md`.
@@ -333,3 +333,21 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - A new dependency (`bytesize 2.7.0`) fails with `bytesize:2.7.0 missing ["safe-to-deploy"]` and passes after `just vet-exempt`; `bytes` moved from an exempted 1.12.1 to 1.12.0 fails the same way; `itoa` (dtolnay) moved from 1.0.19 to 1.0.18 passes unchanged.
   - In CI, PR #20's `deps (deny)` passes; a throwaway PR adding `bytesize` fails it on `just vet`, with the same message.
 - **Revisit when:** exemption renewals pass one a week, or the repository gains a write token for automation.
+
+## D72: Coverage gates through `required`, and nextest runs the tests (amends D27, D48)
+
+- **Decision:**
+  - `just cov` runs `cargo llvm-cov nextest` on the workspace without `e2e`, whose code runs only against a kind cluster. It prints a summary, or writes the report its arguments ask for. `rust-toolchain.toml` lists `llvm-tools`. `apps/speculaire/tests/agent.rs` counts the binary it starts.
+  - The CI job `coverage` writes `just cov --cobertura --output-path target/cobertura.xml` and uploads it with `actions/upload-code-coverage` (label `code-coverage/llvm-cov`). It runs on pull requests, which it checks out at their head commit, and on pushes to `main`, which give the ruleset's `code_coverage` rule its baseline. It is the only job with `code-quality: write`, and `required` needs it.
+  - A failed upload fails the job, as the action does by default. The action skips pull requests from forks, so the rule sees no data for them; that is accepted while speculaire takes no fork pull request.
+  - cargo-nextest runs the tests of `just check` and `just cov`, configured in `.config/nextest.toml`: a test still running after 2 minutes is killed with its process group, and a test whose child still holds the test's stdout or stderr 500 ms after it ends fails. `cargo test --doc` covers doctests, which nextest skips. `e2e/` keeps `cargo test`, which runs its test binaries one after another.
+  - In the build image, `just cov` cancels the path remapping of the musl rustflags (D46), which would hide from llvm-cov which files are the workspace's.
+- **Because:**
+  - The `code_coverage` rule does not wait for an upload: unless `required` waits for `coverage`, a pull request could merge before its coverage is known.
+  - A job of its own keeps `code-quality: write` away from the tools `check` installs.
+  - The rule compares the pull request's head with `main`, so the report's lines must be the head's, not those of the merge commit.
+  - A hung test otherwise holds the job until its 30-minute timeout, without saying which test hangs.
+- **Measured (2026-11-11):**
+  - 87.50 % of lines and 85.22 % of regions, on macOS and in the build image alike.
+  - A planted test spawning `sleep` with the test's stdout ends `LEAK-FAIL`.
+- **Revisit when:** the first pull request from a fork arrives.

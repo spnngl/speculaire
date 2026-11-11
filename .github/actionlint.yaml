@@ -3,3 +3,9 @@ self-hosted-runner:
   labels:
     - ubuntu-26.04
     - ubuntu-26.04-arm
+
+# `code-quality`, for actions/upload-code-coverage, is newer than actionlint's list of permission scopes.
+paths:
+  .github/workflows/ci.yml:
+    ignore:
+      - 'unknown permission scope "code-quality"'

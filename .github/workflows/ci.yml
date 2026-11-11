@@ -33,6 +33,8 @@ jobs:
       TYPOS_VERSION: "1.51.1"
       # renovate: datasource=crate depName=cargo-shear
       CARGO_SHEAR_VERSION: "1.14.0"
+      # renovate: datasource=crate depName=cargo-nextest
+      CARGO_NEXTEST_VERSION: "0.9.151"
       # protoc: the protobuf exposition of `/metrics` compiles its .proto at build time (D34).
       # renovate: datasource=github-releases depName=protocolbuffers/protobuf
       PROTOC_VERSION: "36.2"
@@ -54,8 +56,46 @@ jobs:
             fuzz
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: taplo@${{ env.TAPLO_VERSION }},typos@${{ env.TYPOS_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
+          tool: taplo@${{ env.TAPLO_VERSION }},typos@${{ env.TYPOS_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
       - run: just check
+
+  # Line coverage for the ruleset's `code_coverage` rule: pushes to main upload the baseline, pull requests the
+  # coverage it compares. The rule does not wait for an upload, so `required` needs this job (D72).
+  coverage:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      code-quality: write
+    env:
+      # renovate: datasource=crate depName=cargo-nextest
+      CARGO_NEXTEST_VERSION: "0.9.151"
+      # renovate: datasource=crate depName=cargo-llvm-cov
+      CARGO_LLVM_COV_VERSION: "0.9.1"
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
+    steps:
+      # The pull request's head, not the merge commit: the report's lines must be the head's.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-llvm-cov@${{ env.CARGO_LLVM_COV_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
+      - run: just cov --cobertura --output-path target/cobertura.xml
+      # Pull requests from forks get no upload: the action skips them.
+      - uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1.4.4
+        with:
+          file: target/cobertura.xml
+          language: Rust
+          label: code-coverage/llvm-cov
 
   # The static-PIE binaries we ship, natively on each architecture in the build image (D13, D57). `just musl` fails
   # unless the binary is static-pie and carries its cargo-auditable list. Later jobs (e2e) take the artifact.
@@ -204,7 +244,7 @@ jobs:
   # whenever a matrix changes.
   required:
     if: always()
-    needs: [check, musl, deps, oracle, e2e]
+    needs: [check, coverage, musl, deps, oracle, e2e]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
@@ -212,12 +252,14 @@ jobs:
       - name: Every job passed
         env:
           CHECK: ${{ needs.check.result }}
+          COVERAGE: ${{ needs.coverage.result }}
           MUSL: ${{ needs.musl.result }}
           DEPS: ${{ needs.deps.result }}
           ORACLE: ${{ needs.oracle.result }}
           E2E: ${{ needs.e2e.result }}
         run: |
           [ "$CHECK" = success ] || { echo "::error::check: $CHECK"; exit 1; }
+          [ "$COVERAGE" = success ] || { echo "::error::coverage: $COVERAGE"; exit 1; }
           [ "$MUSL" = success ] || { echo "::error::musl: $MUSL"; exit 1; }
           [ "$DEPS" = success ] || { echo "::error::deps: $DEPS"; exit 1; }
           [ "$ORACLE" = success ] || { echo "::error::oracle: $ORACLE"; exit 1; }
