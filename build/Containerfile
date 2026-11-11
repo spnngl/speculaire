@@ -46,6 +46,11 @@ ARG CARGO_SHEAR_VERSION=1.14.0
 ARG CARGO_HACK_VERSION=0.6.45
 # renovate: datasource=crate depName=cargo-deny
 ARG CARGO_DENY_VERSION=0.20.2
+# renovate: datasource=crate depName=cargo-vet
+ARG CARGO_VET_VERSION=0.10.3
+# cargo-vet links zlib statically through libz-sys.
+RUN apk add --no-cache zlib-static
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo install --locked taplo-cli@"$TAPLO_VERSION" typos-cli@"$TYPOS_VERSION" \
-        cargo-shear@"$CARGO_SHEAR_VERSION" cargo-hack@"$CARGO_HACK_VERSION" cargo-deny@"$CARGO_DENY_VERSION"
+        cargo-shear@"$CARGO_SHEAR_VERSION" cargo-hack@"$CARGO_HACK_VERSION" cargo-deny@"$CARGO_DENY_VERSION" \
+        cargo-vet@"$CARGO_VET_VERSION"

@@ -24,7 +24,7 @@ The workspace denies `unsafe_code` and has no hand-written concurrent structure 
 | cargo-audit | covered | cargo-deny reads the same RustSec database (dedens D141 rejected it). |
 | cargo-udeps | covered | cargo-shear in `just check`. |
 | cargo-auditable | covered | `just musl` (D57). |
-| cargo-vet | adopt | Each dependency is audited by a trusted party or exempted, and a new crate needs one or the other, inside `required`. cargo-vet 0.10.3 on `main` (2026-11-11): `cargo vet init` exempts 164 crates; importing the mozilla, google, bytecode-alliance, zcash, isrg and embark-studios sets (`registry.toml` in the cargo-vet repository) then `cargo vet prune` leaves 27 fully audited, 2 partially, 135 exempted. `--locked` reads `imports.lock` and needs no network. `fuzz/` has its own `Cargo.lock`. |
+| cargo-vet | adopt | Each dependency is audited by a trusted party or exempted, and a new crate needs one or the other, inside `required`. cargo-vet 0.10.3 on `main` (2026-11-11): `cargo vet init` exempts 164 crates; importing the mozilla, google, bytecode-alliance, zcash, isrg and embark-studios sets (`registry.toml` in the cargo-vet repository) then `cargo vet prune` leaves 27 fully audited, 2 partially, 135 exempted; trusting the nine publishers those sets trust leaves 92 fully audited, 72 exempted (D71). `--locked` reads `imports.lock` and needs no network. `fuzz/` has its own `Cargo.lock`. |
 | cargo-geiger, cargo-scan | skip | Report `unsafe` in dependencies without a decision to hang on the report. |
 | MIRAI, Rudra, MirChecker, Yuga, redpen | skip | Unmaintained since 2024–2025 or pinned to old nightlies. |
 | Prusti, Creusot, Verus, flux, Aeneas, hax | skip | Full verification: specifications cost more than the risk they remove here. |
