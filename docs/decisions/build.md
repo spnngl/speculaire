@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63)
 
 - **Decision:**
   - **Workflow:**
@@ -169,7 +169,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** the real-cluster tier needs a cluster that can be dedicated to it for a few hours each minor release, and the privileged node pods need cluster-admin.
 - **Revisit when:** `spegel-org/benchmark` stops being maintained; then fork it into `bench/`.
 
-## D40: SemVer, fixes for the latest minor only
+## D40: SemVer, fixes for the latest minor only (amended by D63)
 
 - **Decision:**
   - **Versions:** SemVer. Releases stay `0.x` until the gate ships `enforce`; in `0.x`, a breaking change bumps the minor. A breaking change is one that removes or renames a setting, a CLI command or flag, or a metric, or drops a protocol version or a containerd minor.
@@ -232,7 +232,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** the tool versions live in two files; a hand edit to one of them makes local and CI runs differ until Renovate's next pull request.
 - **Revisit when:** the build image is published to a registry, so CI can pull it instead of building it.
 
-## D59: e2e is a Rust test crate on a kind cluster that `just` recipes manage (amends D27)
+## D59: e2e is a Rust test crate on a kind cluster that `just` recipes manage (amends D27; amended by D63)
 
 - **Decision:**
   - `e2e/` is a workspace crate. Its suites in `e2e/tests/` drive the cluster through `kubectl` and `docker exec`, and every test is `#[ignore]`d: `just check` builds them, and `just e2e-test <minor>` runs them with `--ignored`.
@@ -269,3 +269,22 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The binary's integration tests live in `apps/speculaire/tests/`, where Cargo builds the binary for them (`CARGO_BIN_EXE_speculaire`).
   - `e2e/` and `oracle/` stay at the top level.
 - **Because:** the user asked for libraries and binaries apart. A library holds code a fuzz target, a test or another binary can reuse; a binary-only crate cannot be linked by them.
+
+## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59)
+
+- **Decision:**
+  - **Runtimes:** containerd and CRI-O. cri-dockerd has no NRI, so the gate cannot run there.
+  - **Support window** (replaces D40's Kubernetes bullet): the 3 newest Kubernetes minors kind ships, 1.35, 1.36 and 1.37 with kind v0.33.0. On each, the containerd minors of D40, and the CRI-O minor equal to the Kubernetes minor. Dropping a Kubernetes or CRI-O minor is a breaking change (D40).
+  - **Matrix,** each leg on `ubuntu-26.04` and `ubuntu-26.04-arm`, 14 legs: containerd 2.3 and 2.4 on Kubernetes 1.37; containerd 2.4 on 1.36 and 1.35; CRI-O 1.37, 1.36 and 1.35, each on its own Kubernetes minor. Every supported containerd minor runs on the newest Kubernetes; the newest containerd runs on the older ones.
+  - **Node images:** one per runtime release and Kubernetes minor, `FROM` the digest-pinned `kindest/node` of that minor. containerd's image is D59's. CRI-O's installs CRI-O's static bundle (`cri-o.<arch>.v<version>.tar.gz`, checked against its `.sha256sum`) with the bundle's `install` script, which also points `/etc/crictl.yaml` at CRI-O; it disables containerd's unit, keeping containerd installed because kind's entrypoint rewrites containerd's config at every boot; and a drop-in sets `default_runtime = "runc"`.
+  - **Cluster config:** CRI-O's kind config sets `criSocket: unix:///var/run/crio/crio.sock` for init and join. Every `kubeadmConfigPatches` entry names its `apiVersion`, with a `v1beta4` and a `v1beta3` variant, because kind v0.33.0 writes `v1beta3` below Kubernetes 1.36 (`pkg/cluster/internal/kubeadm/config.go:677`), where `extraArgs` is a map, and applies a patch naming an `apiVersion` only to that version (`pkg/internal/patch/resource.go:70`).
+  - **Recipes:** `just e2e <runtime> <version> [<kubernetes minor>]`, with `<runtime>` `containerd` or `crio`. containerd's Kubernetes minor defaults to the newest; CRI-O's is its own. The justfile pins one release per runtime minor and one `kindest/node` digest per Kubernetes minor, each with a `# renovate:` comment.
+- **Because:**
+  - The user asked for every CRI runtime, tested on the Kubernetes versions speculaire supports.
+  - CRI-O's minor follows Kubernetes', so one CRI-O leg per Kubernetes minor covers both. D40's "newest Kubernetes only" leaned on speculaire talking to containerd alone; CRI-O ties the runtime to the Kubernetes minor.
+  - crun, the bundle's default runtime, reaches systemd's cgroup manager through D-Bus, which a kind node does not run: with it, kubeadm times out and CRI-O logs `Container creation error: cannot open sd-bus: No such file or directory`. runc uses `/run/systemd/private`, as under kind's containerd.
+  - **Measured** (CRI-O spike 00, M0b): on Docker Desktop arm64, a CRI-O cluster is created in 37 to 39 s and every node turns `Ready` with runtime `cri-o://<version>`; kind's `--wait` again covered the control plane only, so the harness waits for every node. `hello` (M0 step 00) runs under every D53 setting and connects to `/var/run/crio/crio.sock` and `/var/run/nri/nri.sock`; a busybox pod runs. `crio status config` shows NRI on by default: `enable_nri = true`, `nri_listen = "/var/run/nri/nri.sock"`, `nri_plugin_registration_timeout = "5s"`, `nri_plugin_request_timeout = "2s"`, `nri_disable_connections = false`, default validator off. containerd 2.4 on Kubernetes 1.35 and 1.36 passes M0's step 00 checks. In CI (run 42999583274 of the throwaway branch `spike/crio`), the 14 legs passed on the first push, in 3.5 to 6.8 minutes each, CRI-O clusters created in 41 to 54 s.
+- **Cost:**
+  - 14 legs where D59 had 4.
+  - `kind load` imports through containerd, so CRI-O nodes pull every image from its registry, kind's control-plane images included: each CRI-O leg depends on `registry.k8s.io` and on the test image's registry.
+- **Revisit when:** kind ships a new Kubernetes minor (the oldest leaves the window), kind ships a CRI-O node image, or a containerd minor reaches its upstream end of life.
