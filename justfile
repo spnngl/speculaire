@@ -44,10 +44,11 @@ e2e_path := (e2e_dir / "kind-" + kind_version) + ":" + (e2e_dir / "kubectl-" + k
 default:
     @just --list
 
-# Install the pinned stable (rust-toolchain.toml) and the pinned nightly's rustfmt.
+# Install the pinned stable (rust-toolchain.toml) and the pinned nightly's rustfmt and standard library sources
+# (`just careful`).
 toolchains:
     rustup toolchain install
-    rustup toolchain install {{ nightly }} --profile minimal --component rustfmt
+    rustup toolchain install {{ nightly }} --profile minimal --component rustfmt,rust-src
 
 # The check of every change (D48): format, spelling, unused dependencies, lint, docs, tests, the fuzz smoke tests.
 check: (rustfmt "--check")
@@ -187,6 +188,24 @@ mutants-stale:
         fi
     done <<< "$globs"
     exit "$stale"
+
+# Ported from dedens `justfile` at v0.1.0-131-gfd00747 (D144 there; D76 here).
+# The workspace's tests on a standard library built with its debug assertions and UB checks (cargo-careful, pinned
+# nightly, D76), under a sanitizer when given: just careful address; one package's alone when named: just careful
+# address speculaire-agent. On glibc Linux only: macOS cannot link the sanitized builds, and the musl build image (D57)
+# has neither the ASan runtime nor the C runtime objects of a rebuilt standard library. Own target dir. Outside
+# `just check`.
+careful sanitizer="" package="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The pinned nightly's own cargo and rustc first: cargo-careful builds the standard library with them. The host's
+    # target is named: cargo-careful defaults to the one it was built for, which on musl breaks AddressSanitizer.
+    rustc="$(rustup which --toolchain {{ nightly }} rustc)"
+    export PATH="$(dirname "$rustc"):$PATH" CARGO_TARGET_DIR=target/careful
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    # No leak check: a leak is no memory error, and the threads still alive at exit would report.
+    export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}"
+    cargo careful test --target "$host" {{ if sanitizer == "" { "" } else { "-Zcareful-sanitizer=" + sanitizer } }} {{ if package == "" { "--workspace --exclude e2e" } else { "-p " + package } }} --all-features --locked
 
 # `--locked` reads supply-chain/imports.lock, so it needs no network (D71).
 # Each crate of Cargo.lock is audited by an imported set, published by a trusted publisher, or exempted (cargo-vet)

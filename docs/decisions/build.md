@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76)
 
 - **Decision:**
   - **Workflow:**
@@ -388,4 +388,25 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Line coverage of `speculaire-agent` after a 5-minute run, `config` corpus (3 358 817 runs, 3 879 inputs) and `config_values` corpus (1 621 597 runs, 1 540 inputs): `crates/agent/src/config/value.rs` 81.98 % (40 of 222 lines missed) and 89.19 % (24 missed); `crates/agent/src/config.rs` 60.87 % (72 of 184 missed) and 58.15 % (77 missed).
   - What `config_values` adds: a pinned trusted root, a reflector URL, their printing, a zero interval's refusal, a log filter's refusal. What it loses against `config`: the TOML syntax error's position. What neither reaches, being no part of `parse` or its round trip: the accessors (`get`, `as_str`, `env_filter`), `keep_restart_keys`, `load`, and `ParseError`'s `Display`.
   - A panic planted after the parse (`prewarm.seeds >= 10` in `round_trip`): `config_values` finds it in 10 s, 11 s and 12 s of three runs on a fresh corpus without its seeds, and in 2 s with them (the counting seed reaches it); `config` found nothing in 300 s (one run, 2 775 933 runs).
+  - The `fuzz` workflow, dispatched on PR #27's branch (run 43106442458): `targets` and one job per target, `fuzz (config)` and `fuzz (config_values)`, green in 6 minutes each.
 - **Revisit when:** a target's coverage stops growing before its parsers' last lines, or `KEYS` falls behind its smoke test too often.
+
+## D76: cargo-careful runs the tests under AddressSanitizer on each pull request, in one job (amends D27)
+
+- **Decision:**
+  - `just careful [sanitizer] [package]` runs `cargo careful test` on the pinned nightly (`nightly`), with its own target dir `target/careful` and no leak check (`detect_leaks=0`: a leak is no memory error). It names the host target, as `just fuzz` does (dedens D141). Without a package it runs `--workspace --exclude e2e`: every package but `e2e`, which needs a kind cluster. `fuzz/` is not a member; `just check` replays its seeds (D27).
+  - `.github/workflows/deep.yml` has one job, `careful`, running `just careful address` on `ubuntu-26.04`, on pull requests that change a Rust file, a manifest, `Cargo.lock`, `rust-toolchain.toml`, the justfile or the workflow. It is informational, outside `required`.
+  - cargo-careful is pinned in `deep.yml` (`CARGO_CAREFUL_VERSION`, with a renovate depName). `just toolchains` adds `rust-src` to the nightly, for the standard library rebuild.
+  - The musl allocator's `secure` feature (D46) is out of scope: careful builds for the host's glibc target, with no mimalloc.
+  - It runs on glibc Linux only, and not in `just dev` (D57): the build image is musl, where a sanitized sysroot refuses a static libc (`sanitizer is incompatible with statically linked libc`), and without `crt-static` the ASan runtime (`librustc-nightly_rt.asan.a`) is missing for the musl target. A rebuilt sysroot there lacks the C runtime objects too, with no sanitizer (`cannot open crt1.o`). macOS cannot link the sanitized builds. The image gains no cargo-careful.
+- **Because:**
+  - AddressSanitizer sees what the tests of safe code cannot: an out-of-bounds read or use after free behind `unsafe` in a dependency, or the unsafe code D27's `deny(unsafe_code)` will one day allow. The standard library's debug assertions check the preconditions of `unsafe` functions that a release build skips.
+  - One job, not dedens' one per package: the whole run takes under 2 minutes, and a job per package costs a runner each of the 20. Revisit at 20 minutes.
+  - Informational, so that a nightly bump that breaks the sanitizer cannot block a merge.
+- **Cost:** C dependencies (aws-lc-rs, mimalloc) are not instrumented. No local run on macOS or in `just dev`: reproduce on a glibc Linux or in a `rust:bookworm` container with `just toolchains` and cargo-careful 0.4.10.
+- **Measured (2026-11-11, cargo-careful 0.4.10, `nightly-2026-10-26`):**
+  - `just careful address` on a glibc container (aarch64): 26 tests, all pass, no report. PR #28 on CI: `deep` run 43110216779, `careful` green in 91 s (the `just careful address` step 55 s, uncached, the sysroot rebuild included).
+  - Planted fault: a `*bytes.as_ptr().add(4)` read one byte past a 4-byte `Vec`, in a test with `#[expect(unsafe_code, reason)]`, on a throwaway PR (#29, closed): `careful` red in run 43110331343 with `ERROR: AddressSanitizer: heap-buffer-overflow`. `get_unchecked(4)` would stop earlier, on the standard library's own precondition check, with no ASan report.
+  - A throwaway docs-only PR (#30, closed) started no `deep` run.
+  - `just dev careful address` cannot pass: the failures above, seen on aarch64 Alpine. The Done-when item of the plan names it; it is not met, and the decision above is the observed outcome.
+- **Revisit when:** the job passes 20 minutes (then one job per package, as dedens does), a nightly bump breaks the sanitized build twice in a row, or the build image gains a glibc stage.
