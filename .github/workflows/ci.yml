@@ -1,0 +1,138 @@
+name: ci
+
+# The check (`just check`), the musl binaries and the dependency checks, on each pull request and each push to main;
+# `required` is the one check the ruleset requires (D27, D48). `e2e` and `oracle` join `required.needs` when they land
+# (D58). Jobs ported from dedens `.github/workflows/ci.yml` at v0.1.0-131-gfd00747.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# A new push to a pull request cancels its running checks; each commit on main gets its own run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Each job grants only what it needs.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # On the runner, with prebuilt tools at build/Containerfile's versions (D58).
+  check:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # renovate: datasource=crate depName=taplo-cli
+      TAPLO_VERSION: "0.10.0"
+      # renovate: datasource=crate depName=typos-cli
+      TYPOS_VERSION: "1.51.1"
+      # renovate: datasource=crate depName=cargo-shear
+      CARGO_SHEAR_VERSION: "1.14.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      # The pinned stable and nightly, before rust-cache: its key includes the rustc version.
+      - run: just toolchains
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: taplo@${{ env.TAPLO_VERSION }},typos@${{ env.TYPOS_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
+      - run: just check
+
+  # The static-PIE binaries we ship, natively on each architecture in the build image (D13, D57). `just musl` fails
+  # unless the binary is static-pie and carries its cargo-auditable list. Later jobs (e2e) take the artifact.
+  musl:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - env:
+          TARGET: ${{ matrix.target }}
+        run: just musl "$TARGET"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: speculaire-${{ matrix.target }}
+          path: target/musl/${{ matrix.target }}/speculaire
+          if-no-files-found: error
+          retention-days: 7
+
+  # Build matrix and dependency checks: platform-independent, Linux only.
+  deps:
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: [hack, msrv, minimal-versions, deny]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # renovate: datasource=crate depName=cargo-hack
+      CARGO_HACK_VERSION: "0.6.45"
+      # renovate: datasource=crate depName=cargo-deny
+      CARGO_DENY_VERSION: "0.20.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      # The pinned nightly also serves `-Z direct-minimal-versions`.
+      - run: just toolchains
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.recipe }}
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-hack@${{ env.CARGO_HACK_VERSION }},cargo-deny@${{ env.CARGO_DENY_VERSION }}
+      - env:
+          RECIPE: ${{ matrix.recipe }}
+        run: just "$RECIPE"
+
+  # The one check the ruleset requires (D48): matrix legs are named after their values, so requiring them would break
+  # whenever a matrix changes.
+  required:
+    if: always()
+    needs: [check, musl, deps]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job passed
+        env:
+          CHECK: ${{ needs.check.result }}
+          MUSL: ${{ needs.musl.result }}
+          DEPS: ${{ needs.deps.result }}
+        run: |
+          [ "$CHECK" = success ] || { echo "::error::check: $CHECK"; exit 1; }
+          [ "$MUSL" = success ] || { echo "::error::musl: $MUSL"; exit 1; }
+          [ "$DEPS" = success ] || { echo "::error::deps: $DEPS"; exit 1; }

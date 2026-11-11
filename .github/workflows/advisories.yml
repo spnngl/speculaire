@@ -1,0 +1,40 @@
+# Ported from dedens `.github/workflows/advisories.yml` at v0.1.0-131-gfd00747.
+name: advisories
+
+# RustSec advisories published against crates no pull request touches, daily and by hand: ci.yml's `deny` job sees
+# them on pull requests only.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Each job grants only what it needs.
+permissions: {}
+
+jobs:
+  advisories:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      # renovate: datasource=crate depName=cargo-deny
+      CARGO_DENY_VERSION: "0.20.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      # The stable of rust-toolchain.toml: cargo-deny reads `cargo metadata`.
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
+      - run: just deny advisories

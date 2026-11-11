@@ -1,0 +1,25 @@
+# Ported from dedens `.github/workflows/commit.yml` at v0.1.0-131-gfd00747.
+# Every commit of a pull request follows Conventional Commits (AGENTS.md, "Rules"): checked when the pull request
+# opens, gets commits or is edited.
+name: conventional-commits
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  check:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: spnngl/.github/.github/workflows/conventional-commits.yml@main

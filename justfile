@@ -69,8 +69,9 @@ dev *recipe:
         -v "speculaire-dev-{{ arch() }}:/target" -e CARGO_TARGET_DIR=/target localhost/speculaire-dev just {{ recipe }}
 
 # The static-PIE musl binary of this machine's architecture, with its dependency list embedded by cargo-auditable
-# (D13, D46), in target/musl/<target>/speculaire: just musl aarch64-unknown-linux-musl. Volumes speculaire-registry
-# and speculaire-musl-<arch> keep the registry and the build between runs.
+# (D13, D46), in target/musl/<target>/speculaire: just musl aarch64-unknown-linux-musl. The recipe fails unless the
+# binary is static-pie and carries that list. Volumes speculaire-registry and speculaire-musl-<arch> keep the registry
+# and the build between runs.
 musl target:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -83,5 +84,8 @@ musl target:
     {{ container }} run --rm -v "$(pwd):/src:ro" -v "$(pwd)/target/musl/{{ target }}:/out" \
         -v speculaire-registry:/usr/local/cargo/registry -v "speculaire-musl-{{ arch() }}:/target" \
         -e CARGO_TARGET_DIR=/target localhost/speculaire-build \
-        sh -c 'cargo auditable build --release --locked --target "$1" -p speculaire && cp "/target/$1/release/speculaire" /out/' \
+        sh -c 'cargo auditable build --release --locked --target "$1" -p speculaire \
+            && cp "/target/$1/release/speculaire" /out/ \
+            && rust-audit-info /out/speculaire | grep -q "\"name\":\"speculaire\"" \
+            && file /out/speculaire | tee /dev/stderr | grep -q "static-pie linked"' \
         sh "{{ target }}"

@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://www.schemastore.org/zizmor.json
+
+rules:
+  # actionlint rejects the `$/...` self-repository syntax.
+  self-repository:
+    disable: true
+  # spnngl/.github workflows are called at `@main` on purpose: they ship to every repository at once.
+  unpinned-uses:
+    config:
+      policies:
+        "spnngl/*": ref-pin

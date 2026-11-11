@@ -204,7 +204,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:** pod authors choose registry hosts, so "a host from the registry config" was not bounded: a pod naming a new host would add series on every node. The `hosts.toml` tree is written by the admin.
 - **Revisit when:** admins need per-host numbers for hosts without a `hosts.toml` directory; the audit log (D37) already names them.
 
-## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19)
+## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58)
 
 - **Decision:**
   - `rust-toolchain.toml` pins stable `1.99.1` with clippy and rustfmt; the justfile pins one nightly, for rustfmt (`rustfmt.toml` uses unstable options) and `-Z` flags. `rust-version` is `1.95`, which `just msrv` checks.
@@ -217,3 +217,17 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `1.95` is dedens' `rust-version`: the shipped binary is built with the pin, so the MSRV only bounds the std APIs the code uses (`clippy::incompatible_msrv`).
   - **Measured** (M1 step 00, Docker Desktop on arm64): `just dev check`, `just hack`, `just msrv`, `just minimal-versions` and `just deny` pass; `just musl aarch64-unknown-linux-musl` gives a `static-pie linked` binary that runs in a `scratch` image, lists its 23 crates through `rust-audit-info`, holds no machine path, and has the same SHA-256 from two clean target directories.
 - **Revisit when:** a contributor builds on a machine without a container engine.
+
+## D58: CI runs the check on the runner, and the musl build in the build image (amends D27, D57)
+
+- **Decision:**
+  - The `check` and `deps` jobs of `ci` run their recipes on the runner, with the pinned toolchains (`just toolchains`), `Swatinem/rust-cache`, and tools from `taiki-e/install-action` at `build/Containerfile`'s versions. The `musl` jobs run `just musl` in the build image.
+  - Each tool version carries a `# renovate:` comment with the same `depName` in both files, so one Renovate pull request bumps both.
+  - `just musl` fails unless the binary is `static-pie linked` and carries its cargo-auditable list.
+  - A `ci` job lands with the M1 step that gives it content, and joins `required.needs` then: `e2e` in step 02, `oracle` in step 06. The `fuzz` workflow lands with the first fuzz target (step 07).
+- **Because:**
+  - The dev image compiles its tools from source: about four minutes on every run without a layer cache, against seconds for prebuilt binaries. dedens runs its `check` the same way.
+  - A job without content passes and so proves nothing in `required`.
+  - **Measured** (M1 step 01, PR #3): every job passed in about 5 minutes; the CI aarch64 binary has the SHA-256 of the local `just musl` build (`3058d2cc…3833`), and `required` failed when a throwaway commit failed `check`.
+- **Cost:** the tool versions live in two files; a hand edit to one of them makes local and CI runs differ until Renovate's next pull request.
+- **Revisit when:** the build image is published to a registry, so CI can pull it instead of building it.
