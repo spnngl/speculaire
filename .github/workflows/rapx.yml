@@ -1,0 +1,76 @@
+# Ported from dedens `.github/workflows/rapx.yml` at v0.1.0-131-gfd00747 (D16 there; D27, D77 here).
+name: rapx
+
+# RAPx static analysis on each pull request that changes Rust and every week, outside `required` (D77). Findings go to
+# the job summary; a failure usually means the pinned RAPx and nightly (justfile) need a bump, and the weekly run
+# catches a nightly or dependency change no pull request made.
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - Cargo.lock
+      - justfile
+      - .github/workflows/rapx.yml
+
+# A new push to a pull request cancels its running analysis; other runs finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  # protoc: the protobuf exposition of `/metrics` compiles its .proto at build time (D34).
+  # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+  PROTOC_VERSION: "36.2"
+
+jobs:
+  rapx:
+    runs-on: ubuntu-26.04
+    # Building RAPx from source, uncached, takes most of it.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Z3
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libz3-dev
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
+      # Caches ~/.cargo/bin, so `rapx-install` skips the build until the pin changes.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: . -> target/rapx
+          key: rapx-${{ hashFiles('justfile') }}
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - run: just rapx-install
+      # `shell: bash` adds pipefail: a failed analysis stays red through `tee`.
+      - name: Use-after-free, double free, leaks
+        shell: bash
+        run: |
+          {
+            echo '## RAPx check'
+            echo '```'
+            just rapx 2>&1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Optimization hints
+        shell: bash
+        run: |
+          {
+            echo '## RAPx opt'
+            echo '```'
+            just rapx opt 2>&1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

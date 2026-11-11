@@ -34,7 +34,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
-- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76)
+- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77)
 - D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a watched file's modification time is at or after the last check; a bad reload keeps the old config (amended by D37, D47)
@@ -84,5 +84,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D74 [build](build.md): cargo-mutants tests the diff of each pull request in up to 4 shards, outside `required`; every package's tests run for each mutant, a hang killed by nextest counts as caught, one change is excluded (amends D27)
 - D75 [build](build.md): a second fuzz target, `config_values`, writes config files from the keys with literals each parser accepts or refuses, so the round trip reaches the values raw bytes seldom spell (amends D27)
 - D76 [build](build.md): cargo-careful runs the workspace's tests under AddressSanitizer on each pull request, in one job on glibc Linux, outside `required` (amends D27)
+- D77 [build](build.md): RAPx analyses the workspace on each pull request that changes Rust and every week, outside `required`; the dev image gains no RAPx (amends D27)
 
-Next free number: D77.
+Next free number: D78.
