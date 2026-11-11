@@ -12,6 +12,7 @@ test_workspace = true
 # matching; a function made generic matches with or without its parameters. `just mutants-stale` lists the patterns
 # that match nothing.
 exclude_re = [
+  'nowhere\.rs:\d+:\d+: replace nothing in nothing$',
   # A poll that starts at once, not a period after the agent starts or the interval changes, finds nothing: the file was
   # written before `last_check` was taken, and the polls after it fall on the same instants.
   'serve\.rs:\d+:\d+: replace \+ with - in serve$',
