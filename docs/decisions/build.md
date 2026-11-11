@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77)
 
 - **Decision:**
   - **Workflow:**
@@ -410,3 +410,23 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - A throwaway docs-only PR (#30, closed) started no `deep` run.
   - `just dev careful address` cannot pass: the failures above, seen on aarch64 Alpine. The Done-when item of the plan names it; it is not met, and the decision above is the observed outcome.
 - **Revisit when:** the job passes 20 minutes (then one job per package, as dedens does), a nightly bump breaks the sanitized build twice in a row, or the build image gains a glibc stage.
+
+## D77: RAPx analyses the workspace on each pull request and every week, outside `required` (amends D27)
+
+- **Decision:**
+  - `just rapx-install` builds RAPx at `rapx_rev` (dedens' commit of RAPx's main, with its fix for async closures, safer-rust/RAPx#319, in no release yet) on the pinned `nightly`, with the nightly's `rustc-dev`, `rust-src` and `llvm-tools-preview`, and Z3 (Homebrew on macOS, `libz3-dev` on Linux). `just rapx [args]` runs `cargo rapx`, by default `check -f -m` (use-after-free, double free, leaks); `just rapx opt` gives optimization hints. Its own target dir, `target/rapx`: RAPx runs `cargo clean --workspace` before each analysis.
+  - `.github/workflows/rapx.yml` runs on a Monday cron, on `workflow_dispatch`, and on pull requests that change a Rust file, a manifest, `Cargo.lock`, the justfile or the workflow. One job, `rapx`, puts the `check` and the `opt` output in its summary. A new push cancels the PR's run. It is outside `required`.
+  - `rapx_rev` and `nightly` move together, by hand: RAPx builds on rustc internals.
+  - `build/Containerfile`'s dev stage gains no RAPx: it needs Z3 and `rustc-dev` on a pinned nightly, and a local run is `just rapx-install` once.
+- **Because:**
+  - A run costs a few minutes (dedens: 3 to 5), and `Box::into_raw` and `mem::forget` leak without `unsafe`, which `deny(unsafe_code)` cannot see.
+  - The weekly run catches a nightly or dependency change no pull request made.
+  - Outside `required`, a nightly bump that breaks RAPx cannot block a merge.
+- **Cost:** `rapx` exits 0 on findings (it fails only when it cannot run), so a red job means a pin to bump, never a finding; findings are read in the summary. Here they are false positives so far.
+- **Measured (2026-11-11, RAPx 0.7.65 at `8d9d0a2`, `nightly-2026-10-26`, macOS arm64):**
+  - `just rapx`: exit 0 in 13 s once built, with each of the three packages (`speculaire-agent`, `e2e`, `speculaire`) checked. 15 warnings, all in safe code that expands macros or async state machines: 8 double frees and 3 use-after-frees reported in "no symbol available" at `crates/agent/src/serve.rs` and `systemd.rs` (`ping.tick().await`), 4 dangling pointers in clap's `update_from_arg_matches_mut` (`apps/speculaire/src/main.rs:23`) and `reload`. The workspace has no `unsafe`, so none is real.
+  - `just rapx opt`: exit 0, 3 cloning hints (`crates/agent/src/log.rs:49` and `:58`, `crates/agent/src/telemetry.rs:30`), no other category.
+  - Planted fault: `Box::into_raw(Box::new([0_u8; 64]))` in a `pub fn`, never freed: `just rapx` printed `Memory Leak detected in function planted_leak`, with the exit code still 0.
+  - PR #31 on CI (`rapx` run 43113130790, `ubuntu-26.04`, Z3 from apt): green in 2 min 51 s, the install 102 s (uncached), `check` 27 s, `opt` 2 s; the same 15 warnings and 3 hints as locally, with both sections in the summary. A throwaway docs-only PR (#32, closed) started no `rapx` run.
+  - Install: building RAPx from source against a Z3 that Homebrew later upgraded left `cargo-rapx` unable to start (`Library not loaded: libz3.5.3.dylib`); `cargo install --force` with the recipe's variables repairs it.
+- **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
