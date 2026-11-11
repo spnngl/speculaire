@@ -27,6 +27,7 @@ These words have one meaning everywhere: in code, docs, metrics and commits.
 | *fall through* | The agent answers 404 fast, so containerd moves on to the next `hosts.toml` host or to upstream. This is the failure mode for every distribution error. The mirror never answers 408 or 429, which containerd retries on the same host (v2.3.0 `core/remotes/docker/resolver.go:777-778`). On CRI-O only a 404 on the manifest falls through, and the whole image then comes from upstream (D66). |
 | *registry config* | containerd's own upstream settings: `config.toml` (with `imports`) and the `hosts.toml` tree under `config_path`. The agent reads it and has no registry settings of its own (D17). On CRI-O: `registries.conf` and its drop-ins, `certs.d` and the auth file (D66). |
 | *artifact store* | The agent's own content-addressed store for referrer artifacts (signatures, attestations, SBOMs). containerd never pulls these. |
+| *blob cache* | On CRI-O, the agent's own content-addressed store of the manifests and blobs its mirror served. CRI-O keeps no compressed blobs, so peers read from it (D67). |
 | *image identity* | The image target digest (index or manifest) that a container is created from; on CRI-O, the image ID, which is the config digest of its platform manifest. The gate derives it per D15 and D65. |
 | *policy match* | The set of policies whose globs match the normalised pod-spec image name (D11); on CRI-O, any name of the image (D65). When it is empty, `gate.unmatched` decides (D23). |
 | *verdict* | `Allow`, `Rejected`, `Unverifiable` or `Pending`, for one key `(image identity, matched-policies hash, trust-root hash)` (D20). |
@@ -63,6 +64,8 @@ The trust boundaries and the risks we accept are in [`docs/security.md`](docs/se
    - A `503` from a busy peer moves the agent to the next peer at once (D24).
 4. Any miss, timeout or unreachable reflector makes the agent *fall through*.
 5. containerd commits the blob and emits `/content/create`. The agent announces the new digest to every reflector.
+
+On CRI-O, the mirror also fetches what peers lack from upstream, and keeps each blob it serves in the *blob cache* once its digest matches; it announces what it keeps (D66, D67).
 
 ### Verify
 The verifier works asynchronously, so the gate never waits on the network.
