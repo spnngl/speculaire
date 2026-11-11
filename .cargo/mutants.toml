@@ -1,0 +1,21 @@
+# Ported from dedens `.cargo/mutants.toml` at v0.1.0-131-gfd00747 (D103 there; D27, D74 here).
+#
+# cargo-mutants: run with `just mutants` or `just mutants-diff`, never bare.
+# Test with every feature, so no test behind a feature goes unseen.
+all_features = true
+# nextest, as `just check` (D72): a test that hangs on a mutant is killed after 2 minutes and counts as caught.
+test_tool = "nextest"
+# Every package's tests run for each mutant: `apps/speculaire/tests/agent.rs` starts the binary and is what sees
+# `crates/agent/src/serve.rs` and `systemd.rs`, which that package's own tests never reach (D74).
+test_workspace = true
+# Mutants no test can observe. Matched by file, change and function, never by line, so an edit elsewhere keeps them
+# matching; a function made generic matches with or without its parameters. `just mutants-stale` lists the patterns
+# that match nothing.
+exclude_re = [
+  # A poll that starts at once, not a period after the agent starts or the interval changes, finds nothing: the file was
+  # written before `last_check` was taken, and the polls after it fall on the same instants.
+  'serve\.rs:\d+:\d+: replace \+ with - in serve$',
+]
+# `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run. `fuzz/` is a workspace of its own,
+# which cargo-mutants never lists.
+exclude_globs = ["e2e/**"]
