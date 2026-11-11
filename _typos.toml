@@ -1,6 +1,7 @@
 # typos: `just check`.
 [files]
-extend-exclude = ["plan/"]
+# Fuzz seeds are misspelt on purpose.
+extend-exclude = ["plan/", "fuzz/seeds/"]
 
 [default]
 # "ANDed": "AND" in capitals, then a suffix.

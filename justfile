@@ -49,26 +49,30 @@ toolchains:
     rustup toolchain install
     rustup toolchain install {{ nightly }} --profile minimal --component rustfmt
 
-# The check of every change (D48): format, spelling, unused dependencies, lint, docs, tests.
+# The check of every change (D48): format, spelling, unused dependencies, lint, docs, tests, the fuzz smoke tests.
 check: (rustfmt "--check")
     taplo fmt --check
     typos
     cargo shear --locked --deny-warnings
+    cargo shear --locked --deny-warnings fuzz
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --locked
     cargo test --workspace --all-features --locked
+    just fuzz-smoke
 
 # Format Rust (pinned nightly rustfmt) and TOML.
 fmt: rustfmt
     taplo fmt
 
-# `cargo fmt` of the workspace with the pinned nightly's rustfmt.
+# `cargo fmt` of the workspace and fuzz/ with the pinned nightly's rustfmt.
 [private]
 rustfmt *args:
     #!/usr/bin/env bash
     set -euo pipefail
     rustfmt="$(rustup which --toolchain {{ nightly }} rustfmt)"
     RUSTFMT="$rustfmt" cargo fmt --all {{ args }}
+    RUSTFMT="$rustfmt" cargo fmt --manifest-path fuzz/Cargo.toml {{ args }}
 
 # Every feature combination of every crate builds (cargo-hack).
 hack:
@@ -255,3 +259,50 @@ e2e-tools:
     fetch '{{ e2e_dir }}/kind-{{ kind_version }}' kind "$kind/kind-$os-$arch" "$kind/kind-$os-$arch.sha256sum"
     kubectl="https://dl.k8s.io/release/v{{ kubectl_version }}/bin/$os/$arch/kubectl"
     fetch '{{ e2e_dir }}/kubectl-{{ kubectl_version }}' kubectl "$kubectl" "$kubectl.sha256"
+
+
+# Derived from packaging/config.toml: the file with its keys uncommented, in fuzz/target/seeds/config, and a token
+# dictionary of its tables, keys and quoted strings, so that libFuzzer can write `mode = "enforce"`.
+[private]
+fuzz-seeds:
+    mkdir -p fuzz/target/seeds/config
+    sed 's/^#\([a-z]\)/\1/' packaging/config.toml >fuzz/target/seeds/config/reference.toml
+    grep -ohE '^\[[a-z_.]+\]|^#?[a-z_]+ =|"[^"]*"' packaging/config.toml | sed 's/^#//' | sort -u | \
+        sed 's/\\/\\\\/g; s/"/\\"/g; s/.*/"&"/' >fuzz/target/config.dict
+
+# The pinned nightly's cargo and rustc go first in PATH: cargo-fuzz needs `-Z` flags, and rustup's proxies would pick
+# the stable of rust-toolchain.toml. The host's target is named: cargo-fuzz defaults to the one it was built for.
+# libFuzzer writes to fuzz/corpus/<target>; fuzz/seeds/<target> and the derived seeds only seed it.
+# Fuzz one target with libFuzzer (pinned nightly, cargo-fuzz), in `fork` processes when given: just fuzz config 60
+fuzz target="config" seconds="300" fork="0": fuzz-seeds
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustc="$(rustup which --toolchain {{ nightly }} rustc)"
+    export PATH="$(dirname "$rustc"):$PATH"
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    cd fuzz
+    mkdir -p "corpus/{{ target }}" "seeds/{{ target }}" "target/seeds/{{ target }}"
+    cargo fuzz run --target "$host" {{ target }} "corpus/{{ target }}" "seeds/{{ target }}" "target/seeds/{{ target }}" \
+        -- -max_total_time={{ seconds }} -fork={{ fork }} $(test -f target/{{ target }}.dict && echo -dict=target/{{ target }}.dict)
+
+# Shrink a target's corpus to the inputs that add coverage (libFuzzer's `-merge=1`).
+fuzz-cmin target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustc="$(rustup which --toolchain {{ nightly }} rustc)"
+    export PATH="$(dirname "$rustc"):$PATH"
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    cd fuzz
+    cargo fuzz cmin --target "$host" {{ target }} "corpus/{{ target }}"
+
+# Every fuzz target for `seconds` each, in turn (the nightly `fuzz` workflow runs them in parallel).
+fuzz-all seconds="60":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for target in $(basename -s .rs fuzz/fuzz_targets/*.rs); do
+        just fuzz "$target" {{ seconds }}
+    done
+
+# Replay every target's seeds, their truncations and bit flips on stable (part of `just check`).
+fuzz-smoke:
+    cargo test --manifest-path fuzz/Cargo.toml --lib --locked
