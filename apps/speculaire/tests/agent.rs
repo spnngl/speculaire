@@ -7,6 +7,7 @@
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,18 +30,24 @@ struct Agent {
 impl Agent {
     /// Starts the agent on a free port with `extra` appended to its config.
     fn start(extra: &str) -> Self {
+        Self::start_with_env(extra, &[])
+    }
+
+    /// As [`Agent::start`], with `env` added to the agent's environment.
+    fn start_with_env(extra: &str, env: &[(&str, &str)]) -> Self {
         let port = free_port();
         let config = scratch_file();
-        let agent = Self::spawn(port, config, extra);
+        let agent = Self::spawn(port, config, extra, env);
         wait_until(|| get(port, "/livez", "").is_some_and(|r| r.status == 200));
         agent
     }
 
-    fn spawn(port: u16, config: PathBuf, extra: &str) -> Self {
+    fn spawn(port: u16, config: PathBuf, extra: &str, env: &[(&str, &str)]) -> Self {
         write_config(&config, port, extra);
         let mut child = Command::new(env!("CARGO_BIN_EXE_speculaire"))
             .args(["agent", "--config"])
             .arg(&config)
+            .envs(env.iter().copied())
             .env_remove("JOURNAL_STREAM")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -117,6 +124,38 @@ impl Drop for Agent {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.config);
+    }
+}
+
+/// The socket systemd listens on for a `Type=notify` unit, named by `NOTIFY_SOCKET` (D69).
+struct Notifications {
+    socket: UnixDatagram,
+    path: PathBuf,
+}
+
+impl Notifications {
+    fn bind() -> Self {
+        let path = scratch_file().with_extension("sock");
+        let socket = UnixDatagram::bind(&path).unwrap();
+        socket.set_read_timeout(Some(WAIT)).unwrap();
+        Self { socket, path }
+    }
+
+    fn path(&self) -> &str {
+        self.path.to_str().unwrap()
+    }
+
+    /// The next message, waiting up to `WAIT`.
+    fn next(&self) -> String {
+        let mut message = [0; 64];
+        let len = self.socket.recv(&mut message).expect("a notification");
+        String::from_utf8(message[..len].to_vec()).unwrap()
+    }
+}
+
+impl Drop for Notifications {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -233,7 +272,7 @@ fn a_healthy_start_is_ready_and_logs_nothing_below_warn() {
 #[test]
 fn an_invalid_config_stops_startup_before_the_listener_opens() {
     let port = free_port();
-    let mut agent = Agent::spawn(port, scratch_file(), "[gate]\nunmached = \"deny\"\n");
+    let mut agent = Agent::spawn(port, scratch_file(), "[gate]\nunmached = \"deny\"\n", &[]);
     let line = agent.line(&["gate.unmached"]);
     assert!(line.starts_with("error: invalid config"), "{line}");
     let status = wait_exit(&mut agent.child);
@@ -338,4 +377,51 @@ fn every_exported_metric_is_in_the_catalog() {
         missing.is_empty(),
         "exported but not in docs/metrics.md: {missing:?}"
     );
+}
+
+#[test]
+fn the_agent_tells_systemd_when_it_is_ready_and_when_it_stops() {
+    let notifications = Notifications::bind();
+    let agent = Agent::start_with_env("", &[("NOTIFY_SOCKET", notifications.path())]);
+    assert_eq!(notifications.next(), "READY=1\n");
+    let (status, _) = agent.stop();
+    assert!(status.success(), "{status}");
+    // No `WATCHDOG_USEC`: no pings in between.
+    assert_eq!(notifications.next(), "STOPPING=1\n");
+}
+
+#[test]
+fn the_watchdog_is_pinged_every_half_of_its_timeout() {
+    let notifications = Notifications::bind();
+    let _agent = Agent::start_with_env(
+        "",
+        &[
+            ("NOTIFY_SOCKET", notifications.path()),
+            ("WATCHDOG_USEC", "1000000"),
+        ],
+    );
+    let mut pings = Vec::new();
+    while pings.len() < 3 {
+        if notifications.next() == "WATCHDOG=1\n" {
+            pings.push(Instant::now());
+        }
+    }
+    // The first ping is at once, then one every 0.5 s: the third comes after 1 s, not after the 4 s of a ping
+    // every timeout.
+    let spread = pings[2] - pings[0];
+    assert!(spread < Duration::from_millis(2500), "{spread:?}");
+}
+
+#[test]
+fn a_new_poll_interval_applies_to_the_next_poll() {
+    let mut agent = Agent::start("[config]\npoll_interval = \"1h\"\n");
+    let fast = "[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n";
+    agent.rewrite(fast);
+    agent.signal("HUP");
+    agent.line(&[r#""level":"DEBUG""#, "config reloaded"]);
+    // Only a poll at the new interval sees this: the old one is an hour. The pause puts the write past the reload's
+    // start even when the kernel's coarse file clock dates it a few milliseconds early.
+    std::thread::sleep(Duration::from_millis(100));
+    agent.rewrite(fast);
+    agent.line(&[r#""level":"DEBUG""#, "config reloaded"]);
 }

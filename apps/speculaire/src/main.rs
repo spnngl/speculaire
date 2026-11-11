@@ -80,10 +80,23 @@ fn version() -> String {
 mod tests {
     use clap::CommandFactory;
 
-    use super::Cli;
+    use super::{Cli, version};
 
     #[test]
     fn cli_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn version_names_the_package_and_the_platform() {
+        let line = version();
+        let prefix = format!(
+            "speculaire {} {}-{}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+        );
+        assert!(line.starts_with(&prefix), "{line}");
+        assert_eq!(line.ends_with("-musl"), cfg!(target_env = "musl"), "{line}");
     }
 }

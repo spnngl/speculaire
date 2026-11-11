@@ -85,11 +85,11 @@ mod tests {
     use std::sync::Arc;
 
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
     use metrics_exporter_prometheus::PrometheusBuilder;
     use tower::ServiceExt as _;
 
-    use super::{Status, router};
+    use super::{Status, router, wants_protobuf};
 
     async fn get(status: &Arc<Status>, path: &str) -> StatusCode {
         let request = Request::get(path).body(Body::empty()).unwrap();
@@ -98,6 +98,22 @@ mod tests {
             .await
             .unwrap()
             .status()
+    }
+
+    #[test]
+    fn only_an_accept_naming_protobuf_wants_protobuf() {
+        let accepting = |accept: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT, HeaderValue::from_static(accept));
+            wants_protobuf(&headers)
+        };
+        assert!(accepting("application/vnd.google.protobuf"));
+        assert!(accepting("application/x-protobuf"));
+        assert!(accepting("text/plain, application/x-protobuf;q=0.5"));
+        assert!(!accepting("application/json"));
+        assert!(!accepting("text/x-protobuf"));
+        assert!(!accepting("text/plain"));
+        assert!(!wants_protobuf(&HeaderMap::new()));
     }
 
     #[tokio::test]

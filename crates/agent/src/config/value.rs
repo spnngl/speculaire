@@ -522,6 +522,69 @@ mod tests {
         for s in ["", "https://reflector.example:7483", "https://10.0.0.1"] {
             assert_eq!(s.parse::<ReflectorUrl>().unwrap().to_string(), s);
         }
+        for s in ["auto", "10.0.0.1:7481", "[::1]:7481"] {
+            assert_eq!(s.parse::<PeerAddress>().unwrap().to_string(), s);
+        }
+        for s in ["", "/etc/speculaire/trusted_root.json"] {
+            assert_eq!(s.parse::<TrustedRoot>().unwrap().to_string(), s);
+        }
+        for s in ["node-1", "a.b-c.d0", "123"] {
+            assert_eq!(s.parse::<NodeName>().unwrap().to_string(), s);
+        }
+    }
+
+    #[test]
+    fn values_hold_what_was_written() {
+        assert_eq!("64MiB".parse::<ByteSize>().unwrap().get(), 64 << 20);
+        assert_eq!("auto".parse::<PeerAddress>().ok(), Some(PeerAddress::Auto));
+        assert_eq!(
+            "10.0.0.1:7481".parse::<PeerAddress>().ok(),
+            Some(PeerAddress::Fixed("10.0.0.1:7481".parse().unwrap()))
+        );
+        assert_eq!(
+            "".parse::<TrustedRoot>().ok(),
+            Some(TrustedRoot::PublicGood)
+        );
+        assert_eq!(
+            "/etc/root.json".parse::<TrustedRoot>().ok(),
+            Some(TrustedRoot::Pinned(Absolute::new("/etc/root.json")))
+        );
+        assert_eq!("".parse::<ReflectorUrl>().unwrap().get(), None);
+        let url = "https://reflector.example:7483"
+            .parse::<ReflectorUrl>()
+            .unwrap();
+        assert_eq!(
+            url.get().and_then(http::Uri::host),
+            Some("reflector.example")
+        );
+        assert_eq!("node-1".parse::<NodeName>().unwrap().as_str(), "node-1");
+    }
+
+    #[test]
+    fn max_uploads_reads_auto_or_a_positive_integer() {
+        assert_eq!(
+            MaxUploads::try_from(Raw::Text("auto".to_owned())).ok(),
+            Some(MaxUploads::Auto)
+        );
+        assert!(MaxUploads::try_from(Raw::Text("many".to_owned())).is_err());
+        assert_eq!(
+            MaxUploads::try_from(Raw::Number(8)).ok(),
+            Some(MaxUploads::Fixed(NonZeroU32::new(8).unwrap()))
+        );
+        assert!(MaxUploads::try_from(Raw::Number(0)).is_err());
+        assert!(MaxUploads::try_from(Raw::Number(-1)).is_err());
+    }
+
+    #[test]
+    fn node_names_hold_to_rfc_1123_lengths() {
+        let label = "a".repeat(63);
+        assert!(label.parse::<NodeName>().is_ok());
+        assert!("a".repeat(64).parse::<NodeName>().is_err());
+        // Three labels of 63, one of 61 and three dots: 253 bytes, the longest a name may be.
+        let longest = [label.as_str(), &label, &label, &"a".repeat(61)].join(".");
+        assert_eq!(longest.len(), 253);
+        assert!(longest.parse::<NodeName>().is_ok());
+        assert!(format!("{longest}a").parse::<NodeName>().is_err());
     }
 
     #[test]
@@ -540,9 +603,13 @@ mod tests {
         ] {
             assert!(s.parse::<ReflectorUrl>().is_err(), "{s}");
         }
-        for s in ["", "Node-1", "-node", "node_1", "a..b"] {
+        for s in ["", "Node-1", "-node", "node-", "node_1", "a..b"] {
             assert!(s.parse::<NodeName>().is_err(), "{s}");
         }
         assert!("info,[".parse::<LogFilter>().is_err());
+        for s in ["auto2", "10.0.0.1", ":7481"] {
+            assert!(s.parse::<PeerAddress>().is_err(), "{s}");
+        }
+        assert!("relative/root.json".parse::<TrustedRoot>().is_err());
     }
 }
