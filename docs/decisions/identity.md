@@ -2,7 +2,7 @@
 
 Who may talk to whom between nodes. Index: `docs/decisions/README.md`.
 
-## D16: mTLS identity is the kubelet client certificate
+## D16: mTLS identity is the kubelet client certificate (amended by D60)
 
 - **Decision:**
   - Each agent and reflector loads `/var/lib/kubelet/pki/kubelet-client-current.pem` (certificate and key in one file). It trusts the cluster CA, kubeadm's `/etc/kubernetes/pki/ca.crt`. Both paths are configurable; kubeadm is the only supported layout.

@@ -98,7 +98,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - node-exporter listens on every address the same way.
 - **Revisit when:** an admin needs the endpoints on one interface only; `metrics.address` already allows it.
 
-## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56)
+## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56, D60)
 
 - **Decision:**
   - Each key in `packaging/config.toml` shows a literal default. A default computed at startup is written `"auto"`: `peer.max_uploads` (4 × CPUs, D24) and `peer.address` (D36).
@@ -146,3 +146,22 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Editing containerd's config changes every pull on the node, so the admin chooses when, as with `required_plugins`. Removal still runs `unconfigure` (D32), because it must undo what the admin chose to add.
   - Without the certificates the mirror cannot listen (D14). Without the entry, containerd never calls the mirror, so verification starts only at the gate (D22), and every first start waits.
 - **Revisit when:** a packaging runs `configure` for the admin, as the DaemonSet's init container would.
+
+## D60: Config values parse into types, and the remaining keys get names (amends D16, D47)
+
+- **Decision:**
+  - Keys the decisions left unnamed, with their defaults:
+    - `role = "agent"`, or `"reflector"` (D2);
+    - `identity.certificate = "/var/lib/kubelet/pki/kubelet-client-current.pem"` and `identity.ca = "/etc/kubernetes/pki/ca.crt"`, D16's paths;
+    - `reflector.url = ""`, meaning no reflector and no peers, or an `https://host[:port]` URL with no path;
+    - `reflector.members = []`, a list of `{ node = "<node name>", address = "<ip:port>" }`.
+  - **Value syntax:** durations are strings that `humantime` reads (`"300ms"`, `"10m"`); sizes are strings with a binary unit (`"64MiB"`; `B`, `KiB`, `MiB`, `GiB`, `TiB`); paths are absolute; `config.poll_interval` is longer than zero; `peer.max_uploads` and `prewarm.seeds` are at least 1; `log.filter` must parse as an `EnvFilter`. Each value parses once into a type that prints back as written. `gate.exempt.images` and `prewarm.images` stay strings until the gate compiles its globs and the reflector resolves its references.
+  - The reload class lives in the type: each restart key (D47) is a `Restart<T>`.
+  - `check-config` reports the file, line, column and dotted key, such as `line 22, column 1: gate.unmached: unknown field`. It checks the file alone until the agent reads containerd's config (D41, D54) and the policy and trust root (D26).
+  - Two tests hold `packaging/config.toml` to the code: the uncommented file parses to `Config::default()` (D47), and its TOML equals `Config::default()` serialized, so a key missing from the file fails. A third fails when ARCHITECTURE.md, `docs/*.md` or `docs/decisions/*.md` names a dotted key in backticks that the file lacks; `docs/TODECIDE.md` is skipped, because its keys are not decided.
+- **Because:**
+  - Parsing at the boundary keeps an invalid value from reaching the agent, and the type's `Display` is what the reference file shows, so the second test compares literals.
+  - A path relative to the agent's working directory would depend on how it was started.
+  - Comparing serialized TOML catches what D47's test cannot: a file with a key missing still parses to the default.
+  - `serde_path_to_error` gives the dotted key; `toml` alone names only the last segment (`unmached`).
+- **Revisit when:** —

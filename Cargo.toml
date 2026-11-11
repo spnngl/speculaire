@@ -12,7 +12,18 @@ repository = "https://github.com/spnngl/speculaire"
 publish = false
 
 [workspace.dependencies]
+anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+http = "1.5.0"
+humantime = "2.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_path_to_error = "0.1.20"
+thiserror = "2.0.21"
+toml = "1.2.1"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+  "env-filter",
+  "std",
+] }
 # D46: the global allocator of the musl binaries, `MI_SECURE=4` (guard pages, randomised and encoded free lists).
 mimalloc = { version = "0.1.52", features = ["secure"] }
 
