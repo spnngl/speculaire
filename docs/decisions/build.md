@@ -34,7 +34,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Native Alpine builds avoid cross-toolchain drift for C dependencies (rs-coding `musl.md`). dedens rejected QEMU, cross and zigbuild for the same reason (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50)
+## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50, D61)
 
 - **Decision:**
   - **Catalog:** `docs/metrics.md` lists every metric with its type, labels and meaning. A test renders `/metrics` after the e2e suite and fails if a metric is missing from the catalog, or listed there but never emitted.
@@ -247,3 +247,16 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Measured** (M1 step 02, Docker Desktop on arm64): `just e2e 2.3` and `just e2e 2.4` each pass in about 45 s from a warm image cache, and exit non-zero when the pod's image digest is wrong; afterwards no `speculaire-*` cluster or container remains. kind's `--wait` covers only the control plane: a worker was not yet `Ready` when the suite started. In CI (PR #4) the four legs pass in 1 to 2 minutes each, with the binary of their run's `musl` job.
 - **Cost:** containerd pulls by digest whatever tag precedes it, so a wrong tag in `TEST_IMAGE` goes unnoticed until Renovate rewrites it.
 - **Revisit when:** a suite needs more than one cluster at a time.
+
+
+## D61: `speculaire_build_info` exists from startup, and every build has `protoc` (amends D34)
+
+- **Decision:**
+  - `speculaire_build_info` is set when the recorder is installed, with `containerd_version=""` and `nri_version=""`. NRI's `Configure` fills both (D9, M6).
+  - `protoc` comes from Alpine's `protobuf-dev` in the build image, and from `taiki-e/install-action` at a Renovate-tracked release in the runner jobs of `ci` (D58).
+  - `deny.toml` allows BSD-3-Clause (`matchit`, axum's router) and Zlib (`foldhash`, through `prost-build`).
+- **Because:**
+  - The version is the first thing to read when the gate never registers, and that is when `Configure` never came.
+  - `metrics-exporter-prometheus` 0.18.3 `build.rs` runs `prost_build::compile_protos` when the `protobuf` feature is on, so every job that compiles the agent needs `protoc`.
+- **Cost:** once `Configure` fills the versions, the series with empty labels stays exported; the recorder has no call that removes a series.
+- **Revisit when:** M6 sets the versions: drop the empty series, or move the runtime versions to a series of their own.

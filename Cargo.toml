@@ -13,15 +13,39 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+axum = { version = "0.8.9", default-features = false, features = [
+  "http1",
+  "tokio",
+] }
 clap = { version = "4.6.7", features = ["derive"] }
 http = "1.5.0"
 humantime = "2.4.0"
+metrics = "0.24.6"
+# D34: no HTTP listener or push gateway of its own; `protobuf` for native histograms.
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = [
+  "protobuf",
+] }
+mime = "0.3.18"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_path_to_error = "0.1.20"
 thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
 toml = "1.2.1"
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
+tracing = "0.1.44"
+tracing-journald = "0.3.2"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
   "env-filter",
+  "fmt",
+  "json",
+  "registry",
   "std",
 ] }
 # D46: the global allocator of the musl binaries, `MI_SECURE=4` (guard pages, randomised and encoded free lists).

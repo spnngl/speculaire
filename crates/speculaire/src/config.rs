@@ -55,6 +55,98 @@ pub struct Config {
     pub shutdown: Shutdown,
 }
 
+impl Config {
+    /// Puts back the running value of every restart key (D47) that `self` changes, and returns their names.
+    ///
+    /// The destructuring names every key, so a new key does not compile until it is classed here.
+    pub fn keep_restart_keys(&mut self, running: &Self) -> Vec<&'static str> {
+        fn keep<T: Clone + PartialEq>(
+            kept: &mut Vec<&'static str>,
+            key: &'static str,
+            new: &mut Restart<T>,
+            old: &Restart<T>,
+        ) {
+            if new != old {
+                new.clone_from(old);
+                kept.push(key);
+            }
+        }
+        let Self {
+            role,
+            config: Files { poll_interval: _ },
+            identity: Identity { certificate, ca },
+            gate:
+                Gate {
+                    mode: _,
+                    wait: _,
+                    unmatched: _,
+                    exempt: _,
+                },
+            nri: Nri { socket },
+            verify:
+                Verify {
+                    policy: _,
+                    trusted_root: _,
+                    stale_max: _,
+                },
+            sbom: Sbom { max_size: _ },
+            mirror: Mirror { address: mirror },
+            peer:
+                Peer {
+                    address: peer,
+                    max_uploads: _,
+                    deny_ttl: _,
+                },
+            metrics: Metrics { address: metrics },
+            reflector:
+                Reflector {
+                    url,
+                    members,
+                    listen,
+                },
+            prewarm: Prewarm {
+                images: _,
+                seeds: _,
+            },
+            log: Log { filter: _ },
+            audit: Audit { enabled: _ },
+            shutdown: Shutdown { drain_timeout: _ },
+        } = self;
+        let mut kept = Vec::new();
+        keep(&mut kept, "role", role, &running.role);
+        keep(
+            &mut kept,
+            "identity.certificate",
+            certificate,
+            &running.identity.certificate,
+        );
+        keep(&mut kept, "identity.ca", ca, &running.identity.ca);
+        keep(&mut kept, "nri.socket", socket, &running.nri.socket);
+        keep(&mut kept, "mirror.address", mirror, &running.mirror.address);
+        keep(&mut kept, "peer.address", peer, &running.peer.address);
+        keep(
+            &mut kept,
+            "metrics.address",
+            metrics,
+            &running.metrics.address,
+        );
+        keep(&mut kept, "reflector.url", url, &running.reflector.url);
+        keep(
+            &mut kept,
+            "reflector.members",
+            members,
+            &running.reflector.members,
+        );
+        keep(
+            &mut kept,
+            "reflector.listen",
+            listen,
+            &running.reflector.listen,
+        );
+        kept
+    }
+}
+
 /// A key that only a restart applies (D47): a reload keeps the running value and logs a warning.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(transparent)]
@@ -555,6 +647,16 @@ mod tests {
             missing.is_empty(),
             "keys missing from packaging/config.toml: {missing:#?}"
         );
+    }
+
+    #[test]
+    fn a_reload_keeps_restart_keys_and_takes_live_ones() {
+        let running = Config::default();
+        let mut new =
+            parse("[metrics]\naddress = \"127.0.0.1:9000\"\n[log]\nfilter = \"debug\"\n").unwrap();
+        assert_eq!(new.keep_restart_keys(&running), ["metrics.address"]);
+        assert_eq!(new.metrics, running.metrics);
+        assert_eq!(new.log.filter.as_str(), "debug");
     }
 
     #[test]

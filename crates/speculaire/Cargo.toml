@@ -10,14 +10,24 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
 http.workspace = true
 humantime.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+mime.workspace = true
 serde.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 toml.workspace = true
+tracing.workspace = true
+tracing-journald.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
 
 # D46: the global allocator on musl, `src/main.rs`.
 [target.'cfg(target_env = "musl")'.dependencies]

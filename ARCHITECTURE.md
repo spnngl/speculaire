@@ -105,7 +105,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 
 | Path | Role |
 |---|---|
-| `crates/speculaire` | The binary and its library: `version`, `check-config` and `config` (D60) today; `agent`, `configure`, `unconfigure`, `verify` (planned) |
+| `crates/speculaire` | The binary and its library: `version`, `check-config`, and `agent` with its config (D60), logs (D37) and status listener (D42, D45) today; `configure`, `unconfigure`, `verify` (planned) |
 | `crates/oci` | Distribution read API, referrers, media types, registry Bearer token auth (on `oci-spec`) (planned) |
 | `crates/containerd` | Content source (directory + gRPC fallback), event watch, in-memory copy of the image store, *registry config* parser, preflight (planned) |
 | `crates/pki` | kubelet certificate loading and rotation, rustls verifiers (D16), local mirror CA (D14) (planned) |

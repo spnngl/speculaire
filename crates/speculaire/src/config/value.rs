@@ -467,19 +467,32 @@ impl LogFilter {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The `EnvFilter` it describes.
+    ///
+    /// # Panics
+    ///
+    /// Never: [`FromStr`] built it from a string that parses.
+    #[must_use]
+    pub fn env_filter(&self) -> tracing_subscriber::EnvFilter {
+        env_filter(&self.0).expect("a LogFilter parses: FromStr checked it")
+    }
+}
+
+fn env_filter(
+    s: &str,
+) -> Result<tracing_subscriber::EnvFilter, tracing_subscriber::filter::ParseError> {
+    tracing_subscriber::EnvFilter::builder().parse(s)
 }
 
 impl FromStr for LogFilter {
     type Err = InvalidValue;
     fn from_str(s: &str) -> Result<Self, InvalidValue> {
-        tracing_subscriber::EnvFilter::builder()
-            .parse(s)
-            .map(|_| Self(s.to_owned()))
-            .map_err(|e| {
-                InvalidValue(format!(
-                    "expected an EnvFilter directive such as \"warn\", found {s:?}: {e}"
-                ))
-            })
+        env_filter(s).map(|_| Self(s.to_owned())).map_err(|e| {
+            InvalidValue(format!(
+                "expected an EnvFilter directive such as \"warn\", found {s:?}: {e}"
+            ))
+        })
     }
 }
 

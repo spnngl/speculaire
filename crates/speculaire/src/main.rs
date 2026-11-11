@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use speculaire::config;
+use speculaire::{agent, config};
 
 /// P2P image mirror and supply-chain gate for containerd.
 #[derive(Parser)]
@@ -22,6 +22,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the agent until SIGTERM; SIGHUP reloads the config.
+    Agent {
+        /// The config file.
+        #[arg(long, default_value = config::DEFAULT_PATH)]
+        config: PathBuf,
+    },
     /// Print the version and the platform this binary was built for.
     Version,
     /// Check a config file without starting the agent: exit 0 when it is valid, 1 otherwise.
@@ -46,6 +52,7 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> anyhow::Result<()> {
     match command {
+        Command::Agent { config } => agent::run(&config)?,
         Command::Version => writeln!(std::io::stdout().lock(), "{}", version())?,
         Command::CheckConfig { path } => {
             config::load(&path)?;

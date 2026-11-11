@@ -8,8 +8,9 @@
 FROM docker.io/library/rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build
 
 # lld: Alpine's own, see `.cargo/lld-cc`; build-base: mimalloc's C (D46); bash: the justfile's shell; file: `just musl`
-# checks the binary is static-pie.
-RUN apk add --no-cache bash build-base file git lld
+# checks the binary is static-pie; protobuf-dev: protoc and its well-known types, for the protobuf exposition of
+# `/metrics` (D34).
+RUN apk add --no-cache bash build-base file git lld protobuf-dev
 # rust-toolchain.toml's components; the image's minimal profile lacks them, and rustup would fetch them on every run.
 RUN rustup component add clippy rustfmt
 
