@@ -238,6 +238,65 @@ def start-plugin [node: string, args: string] {
     ^docker exec $node sh -c ("rm -f /tmp/nri-spike.log; (nri-spike " + $args + " > /tmp/nri-spike.log 2>&1 &); sleep 2; cat /tmp/nri-spike.log")
 }
 
+# CRI-O spike 02: CRI-O's ImageRef annotation in NRI equals the config digest of the platform manifest,
+# for 20 pods at once and a pod with hostUsers: false.
+def "main crio check 02" [k8s: string] {
+    let name = crio-cluster $k8s
+    let ctx = $"kind-($name)"
+    let node = $"($name)-worker"
+    let arch = match (sh-node $node "uname -m" | str trim) { "aarch64" => "arm64", "x86_64" => "amd64", $a => $a }
+    let want = config-digest library/busybox "1.37" $arch
+    mut r = []
+
+    ^kubectl --context $ctx delete pod -l spike=s02 --ignore-not-found --wait=true o+e>| ignore
+    main put nri-spike $node
+    start-plugin $node "" | ignore
+    let pods = 0..19 | each {|i| $"p($i)" } | append "userns"
+    for p in $pods {
+        let spec = if $p == "userns" { {nodeName: $node, hostUsers: false} } else { {nodeName: $node} }
+        let o = {spec: $spec} | to json --raw
+        ^kubectl --context $ctx run $p $"--image=($TEST_IMAGE)" --restart=Never --labels=spike=s02 $"--overrides=($o)" -- sleep 3600 o+e>| ignore
+    }
+    let ready = try { ^kubectl --context $ctx wait --for=condition=Ready pod -l spike=s02 --timeout=180s o+e>| ignore; "ready" } catch {|e| $e.msg }
+    $r = $r | append (check "21 pods Running" ($ready == "ready") $ready)
+    let log = ^docker exec $node cat /tmp/nri-spike.log | lines | where {|l| $l | str contains "CreateContainer pod=default/" }
+    let refs = $pods | each {|p|
+        let line = $log | where {|l| $l | str contains $"CreateContainer pod=default/($p) " } | get 0? | default ""
+        {pod: $p, ref: ($line | parse -r '"io.kubernetes.cri-o.ImageRef": "(?<v>[0-9a-f]{64})"' | get v.0? | default "")}
+    }
+    let bad = $refs | where {|x| $"sha256:($x.ref)" != $want }
+    $r = $r | append (check "ImageRef = config digest" ($bad | is-empty) $"want ($want); mismatched: ($bad | get pod | str join ' ')")
+    let uid = ^kubectl --context $ctx exec userns -- cat /proc/self/uid_map | str trim
+    # uid_map "0 <host uid> <count>": a host uid other than 0 means a user namespace.
+    let host = $uid | split row -r '\s+' | get 1? | default "0"
+    $r = $r | append (check "userns pod is user-namespaced" ($host != "0") $"uid_map: ($uid)")
+
+    ^kubectl --context $ctx delete pod -l spike=s02 --wait=true o+e>| ignore
+    sh-node $node "pkill nri-spike; true"
+
+    # The image store's images.json changes before crictl returns from a pull or a removal.
+    let lag = sh-node $node 'f=/var/lib/containers/storage/overlay-images/images.json; i=docker.io/library/busybox:1.36; crictl pull $i >/dev/null; e=$(date +%s.%N); m=$(stat -c %.9Y $f); crictl rmi $i >/dev/null; e2=$(date +%s.%N); m2=$(stat -c %.9Y $f); echo "$e $m $e2 $m2"' | split row ' ' | into float
+    let pull = $lag.0 - $lag.1
+    let rmi = $lag.2 - $lag.3
+    $r = $r | append (check "images.json written by pull and rmi" ($pull >= 0 and $pull < 1 and $rmi >= 0 and $rmi < 1) $"seconds from write to return: pull ($pull), rmi ($rmi)")
+
+    # pinned_images in a drop-in, applied by SIGHUP, keeps the image through a prune.
+    let pin = sh-node $node 'crictl pull docker.io/library/nginx:alpine >/dev/null; printf "[crio.image]\npinned_images = [\"docker.io/library/nginx:alpine\"]\n" > /etc/crio/crio.conf.d/91-pinned.conf; systemctl reload crio; sleep 2; crictl rmi --prune >/dev/null 2>&1; crictl images -q docker.io/library/nginx:alpine | wc -l; rm /etc/crio/crio.conf.d/91-pinned.conf; systemctl reload crio' | str trim
+    $r = $r | append (check "pinned image survives prune" ($pin == "1") $"images left: ($pin)")
+    report $r $"step 02 on CRI-O ($CRIO | get $k8s)"
+}
+
+# Config digest of an image's platform manifest, from Docker Hub.
+def config-digest [repo: string, tag: string, arch: string] {
+    let tok = http get $"https://auth.docker.io/token?service=registry.docker.io&scope=repository:($repo):pull" | get token
+    let accept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+    let h = {Authorization: $"Bearer ($tok)", Accept: $accept}
+    let base = $"https://registry-1.docker.io/v2/($repo)/manifests"
+    let idx = http get -H $h $"($base)/($tag)" | decode utf-8 | from json
+    let m = $idx.manifests | where {|x| $x.platform.architecture == $arch and $x.platform.os == "linux" } | first
+    (http get -H $h $"($base)/($m.digest)" | decode utf-8 | from json).config.digest
+}
+
 # Step 01, per runtime: how to drop the default_validator, turn it on, and which unit logs NRI.
 # containerd: append to its config; CRI-O: a drop-in (CRI-O spike 01).
 const VALIDATOR = {
@@ -465,7 +524,7 @@ def "main ci" [step: string, minor: string, --k8s: string = "1.37"] {
 
 # A CRI-O CI leg; `all` runs the CRI-O spikes written so far.
 def "main crio ci" [step: string, k8s: string] {
-    let steps = if $step == "all" { ["00" "01"] } else { [$step] }
+    let steps = if $step == "all" { ["00" "01" "02"] } else { [$step] }
     main crio up $k8s
     main build
     try {
@@ -473,6 +532,7 @@ def "main crio ci" [step: string, k8s: string] {
             match $s {
                 "00" => { main crio check 00 $k8s }
                 "01" => { main crio check 01 $k8s }
+                "02" => { main crio check 02 $k8s }
                 _ => { error make {msg: $"no CRI-O checks for step ($s)"} }
             }
         }
