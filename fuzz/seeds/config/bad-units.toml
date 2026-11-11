@@ -1,0 +1,4 @@
+[verify]
+stale_max = "1 fortnight"
+[sbom]
+max_size = "64MB"

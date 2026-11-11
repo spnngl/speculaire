@@ -118,7 +118,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/reflect` | Protobuf, reflector server, agent client, membership (D2) (planned) |
 | `crates/verify` | Artifact discovery and *artifact store*, sigstore glue, policy, SBOM checks, verdict cache (planned) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
-| `fuzz/` | cargo-fuzz targets of the parsers of outside data (planned) |
+| `fuzz/` | cargo-fuzz targets of the parsers of outside data, a workspace of its own, run by `just fuzz <target>` and nightly; `just check` replays their seeds on stable (D27). M1 holds `config` |
 | `oracle/` | Go module, test-only: a fake NRI runtime, and upstream's own code for differential tests (D29) (planned) |
 | `packaging/` | `config.toml`, the reference of every setting (D30, D47); systemd unit, nfpm config, runtime drop-in examples, later the Helm chart (planned) |
 | `e2e/` | kind node image per runtime (`node/containerd/`, `node/crio/`), cluster config, and the suites: a Rust test crate run by `just e2e <runtime> <version> [<kubernetes minor>]` (D59, D63) |

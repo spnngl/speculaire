@@ -1,0 +1,91 @@
+# Ported from dedens `.github/workflows/fuzz.yml` at v0.1.0-131-gfd00747 (D27).
+name: fuzz
+
+# Pinned nightly with real libFuzzer, scheduled and manual: each target in a job of its own. Pull requests run the
+# stable smoke tests in ci.yml (`just check`).
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+# One run at a time: the next waits, so each starts from the corpora the last one saved.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Each job grants only what it needs.
+permissions: {}
+
+jobs:
+  # The targets, one per file of fuzz/fuzz_targets/, as a JSON list for the matrix.
+  targets:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: list
+        run: echo "targets=$(basename -s .rs fuzz/fuzz_targets/*.rs | jq -Rnc '[inputs]')" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: targets
+    strategy:
+      # A crash stops its own target only.
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.targets) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+      # renovate: datasource=crate depName=cargo-fuzz
+      CARGO_FUZZ_VERSION: "0.13.2"
+      # protoc: the protobuf exposition of `/metrics` compiles its .proto at build time (D34).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - run: just toolchains
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-fuzz@${{ env.CARGO_FUZZ_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
+      # Each run grows its target's corpus from the last one: a key per run, restored from the newest.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz for five minutes on every core, from the corpus and the seeds
+        id: fuzz
+        run: just fuzz "$TARGET" 300 "$(nproc)"
+      # After a crash too: the inputs found before it stay.
+      - name: Keep only the inputs that add coverage
+        if: always() && steps.fuzz.conclusion != 'skipped'
+        run: just fuzz-cmin "$TARGET"
+      - if: always() && steps.fuzz.conclusion != 'skipped'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      - name: Keep the crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
