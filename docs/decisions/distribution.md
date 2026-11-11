@@ -13,7 +13,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** this is Spegel's proven path, and it is the cheapest one.
 - **Revisit when:** —
 
-## D6: Tag resolution is off by default
+## D6: Tag resolution is off by default (amended by D66)
 
 - **Decision:** the mirror host gets capability `pull` only, never `resolve`.
 - **Because:** with `resolve`, a peer could answer a tag with any digest it serves. Without it, tags resolve upstream (a small request) and blobs, the bulk of the bytes, still go P2P. Measured on containerd 2.3.7 and 2.4.2: the mirror sees no tag request, only manifests and blobs by digest (D22).
@@ -26,7 +26,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Limit:** when containerd itself sends a `Range` request (resuming a download), the agent relays the range unhashed; containerd's commit check is then the only check.
 - **Revisit when:** —
 
-## D14: The mirror is TLS with client auth on loopback; the peer API is mTLS on the node IP (amended by D32, D56)
+## D14: The mirror is TLS with client auth on loopback; the peer API is mTLS on the node IP (amended by D32, D56, D66)
 
 - **Decision:**
   - The mirror listens on `127.0.0.1:7480` (`mirror.address`, D56) with TLS and requires a client certificate.
@@ -49,7 +49,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Ports avoid 5000, which local kind registries commonly use.
 - **Revisit when:** a benchmark shows loopback TLS costing more than 10% of the agent's serving CPU.
 
-## D17: Upstream access reuses containerd's registry config
+## D17: Upstream access reuses containerd's registry config (amended by D66)
 
 - **Decision:**
   - Artifact discovery, referrers and prewarm resolution reuse containerd's *registry config*, in containerd's own formats.
@@ -107,3 +107,34 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Loopback keeps D14's boundary: only local processes reach the mirror, and the client certificate stops them.
   - It has the same form as `metrics.address` and `reflector.listen`.
 - **Revisit when:** —
+
+## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32)
+
+- **Decision:**
+  - `speculaire configure` writes `/etc/containers/registries.conf.d/99-speculaire.conf`. For each registry it mirrors, the file holds one `[[registry]]` that copies the admin's effective entry for that prefix (`location`, `insecure`, `blocked`, its mirrors) and puts first `[[registry.mirror]] location = "<mirror.address>/<registry host>"` with `pull-from-mirror = "all"`.
+  - It writes the mirror's `ca.crt`, `client.cert` and `client.key` to `/etc/containers/certs.d/<mirror.address>/`, each by temporary file and rename (D55).
+  - After writing or removing the drop-in, `configure` and `unconfigure` run `systemctl reload crio`. `unconfigure` removes the drop-in, reloads, then deletes the certificates (D32). Both recognise their files by path.
+  - `check-config` exits 1 when a mirrored registry's effective entry, after every drop-in, lacks the mirror first or differs from the admin's entry in another field. `configure` rewrites it.
+  - The mirror answers `GET /v2/` with 200, and never answers 401.
+  - A manifest request by tag: the mirror resolves the tag itself at upstream, with the node's registry config, never from peers (D6). It then serves that manifest, and the manifests and blobs below it, from peers or upstream. When it cannot resolve the tag, for example because upstream answers 401 to an image that needs a pod pull secret, it answers 404, and CRI-O pulls the whole image from upstream.
+  - Once the mirror has served a manifest, it serves every blob below it, from peers, then upstream.
+  - Upstream access on CRI-O (D17) reads `/etc/containers/registries.conf` and its drop-ins, skipping its own; per-host certificates in `/etc/containers/certs.d/`, then `/etc/docker/certs.d/`; and credentials from `global_auth_file`, else the files go.podman.io/image reads for root, starting with `/run/containers/0/auth.json`.
+  - Verification starts when the mirror resolves a tag or serves a manifest (D22).
+- **Because:**
+  - CRI-O takes the manifest and every blob of an image from the first source that serves the manifest (go.podman.io/image v5.40.0 `docker/docker_image_src.go:56-165`). It has no per-request fallback like containerd's `hosts.toml`.
+  - A later `[[registry]]` with the same prefix replaces an earlier one whole, and drop-ins load in file-name order (v5.40.0 `pkg/sysregistriesv2/system_registries_v2.go:933-942`). Hence the late name and the copied fields.
+  - CRI-O reads drop-ins only on SIGHUP: `auto_reload_registries` is false by default in 1.35, 1.36 and 1.37 (v1.37.2 `pkg/config/config.go:769-772`, watcher `server/server.go:1193-1245`).
+  - go.podman.io/image searches `certs.d` directories for each new client (`docker/docker_client.go:150-193`).
+  - Resolving tags at upstream keeps D6's guarantee: no peer can answer a tag.
+  - **Measured** (CRI-O spike 03, M0b, CRI-O 1.35.10, 1.36.7 and 1.37.2, locally on arm64 and in CI run 43021182508 on amd64 and arm64):
+    - With `pull-from-mirror = "all"`, `crictl pull` and a kubelet pod by tag sent the mirror `GET /v2/`, then `GET /v2/docker.io/library/busybox/manifests/1.37`, the tag, with the client certificate. On a 404 the whole pull went upstream and succeeded.
+    - With `digest-only`, a pull by tag sent the mirror nothing, and a pull by digest sent it the manifest by digest. Kubelet pulls most images by tag, so `digest-only` would bypass the mirror for them.
+    - A mirror holding the index by tag, the platform manifest, the config and the layer served all four, and CRI-O fetched nothing upstream. A blob already in CRI-O's storage was not requested.
+    - A mirror holding all but the layer failed the pull: `reading blob sha256:…: fetching blob: StatusCode: 404`.
+    - A client without a certificate failed the handshake (`peer sent no certificates`).
+    - Regenerated certificates were used by the next pull, with no reload of CRI-O.
+    - A drop-in written without reload changed nothing. After `systemctl reload crio`, the journal logged `Applied new registry configuration` and pulls went to the mirror. After removal and reload, they did not.
+    - With `crictl pull --creds`, CRI-O sent the mirror no `Authorization` header. After a 401 with a Basic challenge, it sent those credentials, meant for `docker.io`, to the mirror as Basic.
+    - Neither the drop-in with an empty mirror nor a stopped mirror (connection refused) cost more than the noise of pulling from Docker Hub. Median of three pulls of `busybox:1.37`, without the drop-in, with an empty mirror, with the mirror stopped: 1520, 1482 and 1525 ms locally; within 65 ms of each other on every leg of the CI run. Earlier CI runs scattered by up to 760 ms either way.
+- **Cost:** on CRI-O the agent sits in the path of every pull from a mirrored registry, and relays what it fetches from upstream. When it is down, CRI-O pulls from upstream.
+- **Revisit when:** CRI-O gains a per-blob fallback across sources.

@@ -5,7 +5,7 @@ For admins running speculaire on a node. Every setting is listed with its defaul
 ## Install
 
 1. Install the package. It doesn't touch containerd's config (D55).
-2. Run `speculaire configure`. It creates the mirror certificates in `/var/lib/speculaire/mirror/` and adds the mirror entry to each `hosts.toml` (D14, D32).
+2. Run `speculaire configure`. It creates the mirror certificates in `/var/lib/speculaire/mirror/` and adds the mirror entry to each `hosts.toml` (D14, D32). On CRI-O it writes `/etc/containers/registries.conf.d/99-speculaire.conf` and the certificates in `/etc/containers/certs.d/127.0.0.1:7480/`, then reloads CRI-O (D66).
 3. Start `speculaire.service`. The agent refuses to start without the mirror certificates, with an error naming `speculaire configure` (D55). `/readyz` on port 7482 answers 200 once it is ready (D45).
 4. Continue with "Before turning on `enforce`". The gate starts in `audit` mode (D47).
 
@@ -18,7 +18,7 @@ To move the mirror off port 7480, set `mirror.address` to another loopback `ip:p
 3. Pick a toleration annotation for the static control-plane pods. Set it in the runtime's validator section, and add that annotation, set to `"true"`, to each static pod manifest. Without it, a stopped agent keeps the control plane from restarting (`containerd/nri` `plugins/default-validator/default-validator.go:53-65`).
    - containerd: `tolerate_missing_plugins_annotation` under `[plugins.'io.containerd.nri.v1.nri'.default_validator]`.
    - CRI-O: `nri_validator_tolerate_missing_plugins_annotation` under `[crio.nri.default_validator]`, in a file of `/etc/crio/crio.conf.d/`.
-4. On every node, `speculaire check-config` exits 0. It exits 1 when a `hosts.toml` lacks the mirror entry, so `configure` has not run there or an edit removed it (D55).
+4. On every node, `speculaire check-config` exits 0. It exits 1 when a `hosts.toml` lacks the mirror entry, so `configure` has not run there or an edit removed it (D55). On CRI-O it exits 1 when a later drop-in overrides speculaire's entry for a registry, or the admin changed their entry since `configure`; run `configure` again (D66).
 5. Turn on fail-closed in the same section, then restart the runtime (D64):
    - containerd: `enable = true` and `required_plugins = ["speculaire"]`, then `systemctl restart containerd`.
    - CRI-O: `nri_enable_default_validator = true` and `nri_validator_required_plugins = ["speculaire"]`, then `systemctl restart crio`.
