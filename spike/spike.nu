@@ -268,8 +268,8 @@ def "main crio check 02" [k8s: string] {
     $r = $r | append (check "ImageRef = config digest" ($bad | is-empty) $"want ($want); mismatched: ($bad | get pod | str join ' ')")
     let uid = try { ^kubectl --context $ctx exec userns -- cat /proc/self/uid_map | str trim } catch {|e|
         let state = ^kubectl --context $ctx get pod userns -o jsonpath='{.status.containerStatuses[0].state}' | str trim
-        let events = ^kubectl --context $ctx get events --field-selector involvedObject.name=userns -o jsonpath='{range .items[*]}{.reason}: {.message}{"\n"}{end}' | lines | last 3 | str join " | "
-        $"0 0 exec failed: ($e.msg); state ($state); events ($events)"
+        let tail = $state | str substring (($state | str length) - 350)..
+        $"0 0 exec failed; state …($tail)"
     }
     # uid_map "0 <host uid> <count>": a host uid other than 0 means a user namespace.
     let host = $uid | split row -r '\s+' | get 1? | default "0"
