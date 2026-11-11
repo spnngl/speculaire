@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74)
 
 - **Decision:**
   - **Workflow:**
@@ -352,3 +352,21 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - A planted test spawning `sleep` with the test's stdout ends `LEAK-FAIL`.
   - In PR #22, the upload failed with `Coverage upload failed (HTTP 404): Not Found` on `PUT /repos/spnngl/speculaire/code-coverage/report`, with Code Quality enabled and no code coverage setting in the repository's settings.
 - **Revisit when:** the upload API accepts this repository's reports: make a failed upload fail the job again, and check that a pull request lowering coverage is blocked. Or when the first pull request from a fork arrives.
+
+## D74: cargo-mutants tests the diff of each pull request, in shards, outside `required` (amends D27)
+
+- **Decision:**
+  - `just mutants` runs cargo-mutants on a worktree of `HEAD`, with `.cargo/mutants.toml`: nextest as the test tool (D72), every feature, every package's tests for each mutant (`test_workspace`), `e2e/**` excluded. `fuzz/` is a workspace of its own, which cargo-mutants never lists, so it needs no glob (`just mutants-stale` reports one as matching no file). `just mutants-diff` limits the run to the mutants of a diff against `origin/main`; `just mutants-stale` fails on an exclusion that matches no mutant, naming it.
+  - `test_workspace` is on because `apps/speculaire/tests/agent.rs` starts the binary and is what sees `serve.rs` and `systemd.rs`: their package's own tests reach neither.
+  - `--timeout 240` stays dedens' value. The slowest killed mutant took 11 s in its test phase. A hang is killed by nextest after 2 minutes (D72), before cargo-mutants' 240 s, so it counts as caught: a change that hangs a test is an observed change. No `mutants` nextest profile.
+  - One change is excluded, with its reason in the file: `+` to `-` in `serve`'s two `Instant::now() + period`, whose polls start at once and find nothing, because the file was written before `last_check` was taken.
+  - `.github/workflows/mutants.yml` runs on pull requests that touch Rust sources, `Cargo.lock`, the cargo-mutants or nextest settings, the workflow or the justfile. `plan` lists the diff's mutants and splits them in up to 4 shards of about 40, `stale` runs `just mutants-stale`, each `shard` runs its part without a baseline, and `summary` writes the missed and timed-out mutants on the run's page. It is not in `required`.
+  - cargo-mutants is pinned in `mutants.yml`, with a renovate depName; cargo-nextest's pin is that of `ci.yml`.
+- **Because:**
+  - A mutant no test notices is a line no test checks. Run on the diff, the cost grows with the change, not with the workspace.
+  - 4 shards, not dedens' 8: the account runs 20 jobs at once, and `ci.yml` starts about 31.
+  - Outside `required`, a slow or flaky shard cannot block a merge; the summary still shows each missed mutant.
+- **Measured (2026-11-11, cargo-mutants 27.1.0, macOS arm64):**
+  - The workspace lists 142 mutants; 19 are `e2e/` and 2 are excluded, so 121 are tested (72 of them in the config values).
+  - Without `test_workspace`: 44 missed of 123. With it, before new tests: 29 missed, 71 caught, 23 unviable. After the new tests: 98 caught, 23 unviable, 0 missed, 0 timeouts, in 13 minutes (baseline: 4 s build and 2 s test).
+- **Revisit when:** a shard nears its 350 minutes, the missed mutants pile up unread (then put `mutants` in `required`), or a hung test counts as caught too easily.

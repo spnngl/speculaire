@@ -119,6 +119,75 @@ cov *report:
         cargo llvm-cov report {{ report }}
     fi
 
+# Ported from dedens `justfile` at v0.1.0-131-gfd00747 (D103, D142, D168 there; D74 here).
+# Mutation testing (cargo-mutants, settings in .cargo/mutants.toml, needs cargo-nextest), outside `required`. `args`
+# go to cargo-mutants: `just mutants -p speculaire-agent`; add `--iterate` to test only what the last run did not
+# catch. Tests the committed HEAD in its own worktree, target/mutants/tree, one run at a time: `--in-place` edits
+# files, and a killed run can leave a mutant applied, so the tree is reset first. Builds in target/mutants/target,
+# results in target/mutants/mutants.out.
+[positional-arguments]
+mutants *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="$(pwd)/target/mutants"
+    tree="$out/tree"
+    mkdir -p "$out"
+    if ! mkdir "$out/lock" 2>/dev/null; then
+        echo "another run holds $out/lock: wait for it, or remove the lock if none runs" >&2
+        exit 1
+    fi
+    trap 'rmdir "$out/lock"' EXIT
+    head="$(git rev-parse HEAD)"
+    git worktree prune
+    if [[ -e "$tree/.git" ]]; then
+        git -C "$tree" checkout --quiet --force --detach "$head"
+    else
+        git worktree add --quiet --detach "$tree" "$head"
+    fi
+    cd "$tree"
+    CARGO_TARGET_DIR="$out/target" cargo mutants --in-place --timeout 240 --output "$out" "$@"
+
+# Mutation testing of the code changed since the branch left `base` (`--in-diff`): minutes, where `just mutants`
+# takes longer. `args` as for `just mutants`: just mutants-diff origin/main --iterate
+[positional-arguments]
+mutants-diff base="origin/main" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shift
+    mkdir -p target/mutants
+    git diff "{{ base }}...HEAD" > target/mutants/branch.diff
+    {{ just_executable() }} mutants --in-diff "$(pwd)/target/mutants/branch.diff" "$@"
+
+# The exclusions of .cargo/mutants.toml that match no mutant or file (D74), each listed, failing if any. Mutants are
+# listed without the configuration, with no build, and without colours, which CI's `CARGO_TERM_COLOR=always` would
+# put in the names. Perl matches the names: `--re` keeps every field deletion. The list is taken first, so a failing
+# cargo-mutants stops the recipe rather than leaving every pattern unmatched.
+mutants-stale:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    patterns="$(taplo get -f .cargo/mutants.toml exclude_re)"
+    globs="$(taplo get -f .cargo/mutants.toml exclude_globs)"
+    names="$(cargo mutants --list --no-config --colors=never)"
+    stale=0
+    printf '%s\n' "$names" | perl -e '
+        chomp(my @names = <STDIN>);
+        my $stale = 0;
+        for my $re (split /\n/, shift) {
+            next if grep { /$re/ } @names;
+            print "exclude_re matches no mutant: \x27$re\x27\n";
+            $stale = 1;
+        }
+        exit $stale;
+    ' "$patterns" || stale=1
+    while IFS= read -r glob; do
+        found="$(cargo mutants --list-files --no-config --colors=never --file="$glob")"
+        if [[ -z "$found" ]]; then
+            echo "exclude_globs matches no file: '$glob'"
+            stale=1
+        fi
+    done <<< "$globs"
+    exit "$stale"
+
 # `--locked` reads supply-chain/imports.lock, so it needs no network (D71).
 # Each crate of Cargo.lock is audited by an imported set, published by a trusted publisher, or exempted (cargo-vet)
 vet:
