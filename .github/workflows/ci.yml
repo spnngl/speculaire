@@ -34,6 +34,9 @@ jobs:
       TYPOS_VERSION: "1.51.1"
       # renovate: datasource=crate depName=cargo-shear
       CARGO_SHEAR_VERSION: "1.14.0"
+      # protoc: the protobuf exposition of `/metrics` compiles its .proto at build time (D34).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,7 +50,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: taplo@${{ env.TAPLO_VERSION }},typos@${{ env.TYPOS_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
+          tool: taplo@${{ env.TAPLO_VERSION }},typos@${{ env.TYPOS_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
       - run: just check
 
   # The static-PIE binaries we ship, natively on each architecture in the build image (D13, D57). `just musl` fails
@@ -98,6 +101,9 @@ jobs:
       CARGO_HACK_VERSION: "0.6.45"
       # renovate: datasource=crate depName=cargo-deny
       CARGO_DENY_VERSION: "0.20.2"
+      # protoc: the protobuf exposition of `/metrics` compiles its .proto at build time (D34).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -113,7 +119,7 @@ jobs:
           key: ${{ matrix.recipe }}
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-hack@${{ env.CARGO_HACK_VERSION }},cargo-deny@${{ env.CARGO_DENY_VERSION }}
+          tool: cargo-hack@${{ env.CARGO_HACK_VERSION }},cargo-deny@${{ env.CARGO_DENY_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
       - env:
           RECIPE: ${{ matrix.recipe }}
         run: just "$RECIPE"
