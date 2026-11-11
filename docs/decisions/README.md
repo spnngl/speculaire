@@ -23,7 +23,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56)
 - D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3
-- D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists
+- D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60)
 - D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable`
 - D18 [gate](gate.md): `gate.exempt` is explicit and empty by default
 - D19 [build](build.md): the dev loop is Docker on macOS plus CI on native runners (amended by D57)
@@ -54,7 +54,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation
 - D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror and NRI registration (amends D42)
 - D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13)
-- D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56)
+- D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60)
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29)
 - D49 [verification](verification.md): a BuildKit SBOM inside a signed index is D43's one exception (amends D43)
 - D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34)
@@ -67,5 +67,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58)
 - D58 [build](build.md): CI runs the check on the runner with prebuilt tools, and the musl build in the build image; `ci` jobs land with their content (amends D27, D57)
 - D59 [build](build.md): e2e is a Rust test crate of `#[ignore]`d suites on a kind cluster managed by `just e2e <minor>`, with pinned containerd, kind and kubectl (amends D27)
+- D60 [agent](agent.md): config values parse into types that print back as written; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47)
 
-Next free number: D60.
+Next free number: D61.

@@ -5,7 +5,12 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
 use clap::{Parser, Subcommand};
+use speculaire::config;
 
 /// P2P image mirror and supply-chain gate for containerd.
 #[derive(Parser)]
@@ -19,12 +24,34 @@ struct Cli {
 enum Command {
     /// Print the version and the platform this binary was built for.
     Version,
+    /// Check a config file without starting the agent: exit 0 when it is valid, 1 otherwise.
+    ///
+    /// This release checks the file itself; checks of the policy and trust root it names arrive with verification.
+    CheckConfig {
+        /// The config file.
+        #[arg(default_value = config::DEFAULT_PATH)]
+        path: PathBuf,
+    },
 }
 
-fn main() {
-    match Cli::parse().command {
-        Command::Version => println!("{}", version()),
+fn main() -> ExitCode {
+    match run(Cli::parse().command) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
     }
+}
+
+fn run(command: Command) -> anyhow::Result<()> {
+    match command {
+        Command::Version => writeln!(std::io::stdout().lock(), "{}", version())?,
+        Command::CheckConfig { path } => {
+            config::load(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// The line `speculaire version` prints: name, version, architecture and OS, then `-musl` for a static build.

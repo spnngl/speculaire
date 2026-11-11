@@ -105,7 +105,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 
 | Path | Role |
 |---|---|
-| `crates/speculaire` | The binary: `version` today; `agent`, `configure`, `unconfigure`, `check-config`, `verify` (planned) |
+| `crates/speculaire` | The binary and its library: `version`, `check-config` and `config` (D60) today; `agent`, `configure`, `unconfigure`, `verify` (planned) |
 | `crates/oci` | Distribution read API, referrers, media types, registry Bearer token auth (on `oci-spec`) (planned) |
 | `crates/containerd` | Content source (directory + gRPC fallback), event watch, in-memory copy of the image store, *registry config* parser, preflight (planned) |
 | `crates/pki` | kubelet certificate loading and rotation, rustls verifiers (D16), local mirror CA (D14) (planned) |
@@ -115,7 +115,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/loadgen` | Test-only reflector load generator, never packaged (D33) (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data (planned) |
 | `oracle/` | Go module, test-only: a fake NRI runtime, and upstream's own code for differential tests (D29) (planned) |
-| `packaging/` | systemd unit, nfpm config, `config.toml` reference (D30), containerd drop-in examples, later the Helm chart (planned) |
+| `packaging/` | `config.toml`, the reference of every setting (D30, D47); systemd unit, nfpm config, containerd drop-in examples, later the Helm chart (planned) |
 | `e2e/` | kind node image per containerd version, cluster config, and the suites: a Rust test crate run by `just e2e <minor>` (D59) |
 | `bench/` | Benchmarks against Spegel: recipe, node-access pod, policy, results (D35) (planned) |
 | `justfile` | The only entry point, for humans and CI (D27); `just dev <recipe>` runs a recipe in the build image (D57) |

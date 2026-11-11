@@ -1,0 +1,91 @@
+# Spéculaire agent config: /etc/speculaire/config.toml, or the file given by --config (D30).
+#
+# Every key is listed here, commented, at its default (D47); uncomment a key to change it.
+# `speculaire check-config [path]` checks a file without starting the agent.
+# The agent reloads this file on SIGHUP and when it changes, except the keys marked "Restart" (D47).
+# Durations read like "300ms", "10m" or "1h"; sizes like "64MiB".
+
+# "agent", or "reflector" on control-plane nodes (D2). Restart.
+#role = "agent"
+
+[config]
+# How often the agent checks its files for changes (D30).
+#poll_interval = "10s"
+
+[identity]
+# The kubelet client certificate and its key, in one PEM file (D16). Restart.
+#certificate = "/var/lib/kubelet/pki/kubelet-client-current.pem"
+# The cluster CA (D16). Restart.
+#ca = "/etc/kubernetes/pki/ca.crt"
+
+[gate]
+# "audit" allows every container and logs what "enforce" would reject (ARCHITECTURE.md § Gate, D54).
+#mode = "audit"
+# How long container creation waits for a pending verdict (D41).
+#wait = "300ms"
+# "deny", or "allow" to start images that no policy matches without a check (D23).
+#unmatched = "deny"
+
+[gate.exempt]
+# Namespaces whose containers the gate allows, by exact name (D18).
+#namespaces = []
+# Images the gate allows: globs on the normalised pod-spec image name (D18).
+#images = []
+
+[nri]
+# containerd's NRI socket (D9). Restart.
+#socket = "/var/run/nri/nri.sock"
+
+[verify]
+# The policy file (D26).
+#policy = "/etc/speculaire/policy.yaml"
+# "" follows the Sigstore public-good root through TUF; a path pins a trusted_root.json (D26).
+#trusted_root = ""
+# How long a stale verdict keeps serving during re-verification (D21).
+#stale_max = "1h"
+
+[sbom]
+# The largest SBOM the agent reads (D12).
+#max_size = "64MiB"
+
+[mirror]
+# Where the mirror listens, loopback only; run `speculaire configure` after a change (D56). Restart.
+#address = "127.0.0.1:7480"
+
+[peer]
+# "auto" is the local IP of the reflector connection on port 7481; or an ip:port (D36, D56). Restart.
+#address = "auto"
+# Blob bodies the peer API serves at once: "auto" is 4 per CPU (D24).
+#max_uploads = "auto"
+# How long a peer that sent a wrong digest is skipped (D52).
+#deny_ttl = "10m"
+
+[metrics]
+# Where /metrics, /readyz and /livez listen, plain HTTP (D42, D45). Restart.
+#address = "[::]:7482"
+
+[reflector]
+# The reflectors' L4 load balancer, such as "https://reflector.example:7483"; "" turns peers off (D2). Restart.
+#url = ""
+# Every reflector, the same list on each: [{ node = "cp-1", address = "10.0.0.1:7483" }] (D2). Restart.
+#members = []
+# Where a reflector serves agents; read only with role = "reflector" (D47). Restart.
+#listen = "[::]:7483"
+
+[prewarm]
+# Image references every node pulls ahead of use; read only with role = "reflector" (D47).
+#images = []
+# How many agents pull each image from upstream before the others pull from peers (D51).
+#seeds = 2
+
+[log]
+# Which diagnostic events reach the log, in EnvFilter syntax (D37).
+#filter = "warn"
+
+[audit]
+# Whether audit events are written, whatever log.filter says (D37).
+#enabled = false
+
+[shutdown]
+# How long in-flight transfers may finish after SIGTERM (D39).
+#drain_timeout = "10s"
