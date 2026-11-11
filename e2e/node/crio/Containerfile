@@ -1,0 +1,23 @@
+# The CRI-O node image of the e2e suites (D63): a kindest/node running a CRI-O release instead of containerd.
+# `just e2e-up crio <minor>` passes NODE (the digest-pinned kindest/node of the same Kubernetes minor) and RELEASE.
+# Ported from the CRI-O spike harness (D63, Measured).
+ARG NODE
+
+FROM docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 AS download
+ARG RELEASE
+ARG TARGETARCH
+RUN apk add --no-cache curl
+WORKDIR /download
+RUN f="cri-o.${TARGETARCH}.v${RELEASE}.tar.gz" \
+    && u="https://storage.googleapis.com/cri-o/artifacts" \
+    && curl -fsSLO "$u/$f" && curl -fsSLO "$u/$f.sha256sum" \
+    && sha256sum -c "$f.sha256sum" && tar -xzf "$f"
+
+FROM ${NODE}
+COPY --from=download /download/cri-o /tmp/cri-o
+# The bundle's install script is bash; it also points crictl and /etc/crictl.yaml at CRI-O, and ships its bridge CNI
+# config disabled, so kindnet stays the network. kind's entrypoint rewrites containerd's config at every boot, so
+# containerd stays installed, only disabled.
+RUN cd /tmp/cri-o && bash ./install && rm -rf /tmp/cri-o ~/.crio-install \
+    && systemctl disable containerd && systemctl enable crio
+COPY 20-runc.conf /etc/crio/crio.conf.d/20-runc.conf

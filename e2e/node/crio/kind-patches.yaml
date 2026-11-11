@@ -1,0 +1,11 @@
+  # Appended to e2e/kind.yaml's kubeadmConfigPatches by `just e2e-up crio`. kind's kubeadm config names containerd's
+  # socket (pkg/cluster/internal/kubeadm/config.go:244,262 at v0.33.0); these patches carry no apiVersion, so they
+  # apply to v1beta3 and v1beta4 alike.
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      criSocket: unix:///var/run/crio/crio.sock
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      criSocket: unix:///var/run/crio/crio.sock

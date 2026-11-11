@@ -9,11 +9,26 @@ nightly := "nightly-2026-10-26"
 # The container engine of `dev` and `musl`: `SPECULAIRE_CONTAINER=podman just dev check`.
 container := env("SPECULAIRE_CONTAINER", "docker")
 
-# The e2e pins (D27, D59): one containerd release per supported minor (D40), kind, and the kubectl of kind's node image.
+# The e2e pins (D27, D59, D63): one release per supported runtime minor (D40), one node image per Kubernetes minor
+# kind ships, kind, and the kubectl of the newest node image. Renovate moves each pin within its minor.
 # renovate: datasource=github-releases depName=containerd/containerd
 containerd_2_3 := "2.3.7"
 # renovate: datasource=github-releases depName=containerd/containerd
 containerd_2_4 := "2.4.2"
+# renovate: datasource=github-releases depName=cri-o/cri-o
+crio_1_35 := "1.35.10"
+# renovate: datasource=github-releases depName=cri-o/cri-o
+crio_1_36 := "1.36.7"
+# renovate: datasource=github-releases depName=cri-o/cri-o
+crio_1_37 := "1.37.2"
+# renovate: datasource=docker depName=docker.io/kindest/node
+node_1_35 := "v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0"
+# renovate: datasource=docker depName=docker.io/kindest/node
+node_1_36 := "v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed"
+# renovate: datasource=docker depName=docker.io/kindest/node
+node_1_37 := "v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+# The Kubernetes minor of a containerd cluster when `just e2e` names none.
+kubernetes_newest := "1.37"
 # renovate: datasource=github-releases depName=kubernetes-sigs/kind
 kind_version := "0.33.0"
 # renovate: datasource=github-releases depName=kubernetes/kubernetes
@@ -103,50 +118,96 @@ musl target:
         sh "{{ target }}"
 
 # Needs Docker, and the binary of `just musl <arch>-unknown-linux-musl`, which it installs on each node.
-# Build the node image, start the cluster, run the suites, delete the cluster (D27): just e2e 2.4
-e2e minor: e2e-tools
+# Build the node image, start the cluster, run the suites, delete the cluster (D63): just e2e crio 1.37
+e2e runtime version kubernetes="": e2e-tools
     #!/usr/bin/env bash
     set -euo pipefail
-    trap '{{ just_executable() }} e2e-down {{ minor }}' EXIT
-    {{ just_executable() }} e2e-up {{ minor }}
-    {{ just_executable() }} e2e-test {{ minor }}
+    trap '{{ just_executable() }} e2e-down {{ runtime }} {{ version }} {{ quote(kubernetes) }}' EXIT
+    {{ just_executable() }} e2e-up {{ runtime }} {{ version }} {{ quote(kubernetes) }}
+    {{ just_executable() }} e2e-test {{ runtime }} {{ version }} {{ quote(kubernetes) }}
 
-# Build the node image and start the cluster `speculaire-<minor without dot>`, for debugging: just e2e-up 2.4.
-e2e-up minor: e2e-tools
+# Build the node image and start the cluster, for debugging: just e2e-up containerd 2.4 1.35
+e2e-up runtime version kubernetes="": e2e-tools
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{ e2e_path }}:$PATH"
-    containerd='{{ if minor == "2.3" { containerd_2_3 } else if minor == "2.4" { containerd_2_4 } else { error("e2e: the minor is 2.3 or 2.4") } }}'
+    eval "$({{ just_executable() }} e2e-cluster {{ runtime }} {{ version }} {{ quote(kubernetes) }})"
     bin='target/musl/{{ arch() }}-unknown-linux-musl/speculaire'
     if [[ ! -x "$bin" ]]; then
         echo "e2e: no $bin: run just musl {{ arch() }}-unknown-linux-musl" >&2
         exit 1
     fi
-    image="localhost/speculaire-node:$containerd"
-    docker build --quiet --build-arg "CONTAINERD_VERSION=$containerd" -t "$image" -f e2e/node/Containerfile e2e/node >/dev/null
-    kind create cluster --name 'speculaire-{{ replace(minor, ".", "") }}' --image "$image" --config e2e/kind.yaml --wait 180s
-    for node in $(kind get nodes --name 'speculaire-{{ replace(minor, ".", "") }}'); do
+    image="localhost/speculaire-node:{{ runtime }}-$release-k$kubernetes"
+    docker build --quiet --build-arg "NODE=docker.io/kindest/node:$node" --build-arg "RELEASE=$release" -t "$image" \
+        -f 'e2e/node/{{ runtime }}/Containerfile' 'e2e/node/{{ runtime }}' >/dev/null
+    config=e2e/kind.yaml
+    if [[ '{{ runtime }}' == crio ]]; then
+        config='{{ e2e_dir }}/kind-crio.yaml'
+        cat e2e/kind.yaml e2e/node/crio/kind-patches.yaml >"$config"
+    fi
+    kind create cluster --name "$cluster" --image "$image" --config "$config" --wait 180s
+    for node in $(kind get nodes --name "$cluster"); do
         docker cp "$bin" "$node:/usr/local/bin/speculaire"
     done
     # kind's --wait covers the control plane only.
-    kubectl --context 'kind-speculaire-{{ replace(minor, ".", "") }}' wait --for=condition=Ready nodes --all --timeout=180s
+    kubectl --context "kind-$cluster" wait --for=condition=Ready nodes --all --timeout=180s
 
-# Run the suites against the cluster of `just e2e-up <minor>`; arguments go to the test binary: just e2e-test 2.4 a_pod_runs
-e2e-test minor *args:
-    PATH="{{ e2e_path }}:$PATH" SPECULAIRE_E2E_CLUSTER='speculaire-{{ replace(minor, ".", "") }}' \
-        SPECULAIRE_E2E_CONTAINERD='{{ if minor == "2.3" { containerd_2_3 } else if minor == "2.4" { containerd_2_4 } else { error("e2e: the minor is 2.3 or 2.4") } }}' \
+# Run the suites against the cluster of `just e2e-up`; arguments go to the test binary: just e2e-test crio 1.37 '' a_pod_runs
+e2e-test runtime version kubernetes="" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$({{ just_executable() }} e2e-cluster {{ runtime }} {{ version }} {{ quote(kubernetes) }})"
+    PATH="{{ e2e_path }}:$PATH" SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' \
+        SPECULAIRE_E2E_RELEASE="$release" SPECULAIRE_E2E_KUBERNETES="$kubernetes" \
         cargo test -p e2e --locked -- --ignored {{ args }}
 
-# Delete the e2e cluster of a minor, or every e2e cluster: just e2e-down
-e2e-down minor="":
+# Delete the e2e cluster `just e2e-up` made with the same arguments, or every e2e cluster: just e2e-down
+e2e-down runtime="" version="" kubernetes="":
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{ e2e_path }}:$PATH"
-    for cluster in $(kind get clusters 2>/dev/null); do
-        if [[ "$cluster" == 'speculaire-{{ replace(minor, ".", "") }}'* ]]; then
-            kind delete cluster --name "$cluster"
+    prefix=speculaire-
+    if [[ -n '{{ runtime }}' ]]; then
+        eval "$({{ just_executable() }} e2e-cluster {{ runtime }} {{ version }} {{ quote(kubernetes) }})"
+        prefix="$cluster"
+    fi
+    for c in $(kind get clusters 2>/dev/null); do
+        if [[ "$c" == "$prefix"* ]]; then
+            kind delete cluster --name "$c"
         fi
     done
+
+# Print the shell variables of an e2e cluster: `release`, `kubernetes`, `node` (the kindest/node tag and digest) and
+# `cluster`. CRI-O runs on its own Kubernetes minor; containerd on the one named, by default the newest (D63).
+[private]
+e2e-cluster runtime version kubernetes="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case '{{ runtime }} {{ version }}' in
+        'containerd 2.3') release='{{ containerd_2_3 }}' ;;
+        'containerd 2.4') release='{{ containerd_2_4 }}' ;;
+        'crio 1.35') release='{{ crio_1_35 }}' ;;
+        'crio 1.36') release='{{ crio_1_36 }}' ;;
+        'crio 1.37') release='{{ crio_1_37 }}' ;;
+        *) echo 'e2e: no {{ runtime }} {{ version }}: containerd 2.3 or 2.4, or crio 1.35, 1.36 or 1.37' >&2; exit 1 ;;
+    esac
+    kubernetes='{{ kubernetes }}'
+    if [[ '{{ runtime }}' == crio ]]; then
+        if [[ -n "$kubernetes" && "$kubernetes" != '{{ version }}' ]]; then
+            echo 'e2e: CRI-O {{ version }} runs on Kubernetes {{ version }} only' >&2
+            exit 1
+        fi
+        kubernetes='{{ version }}'
+    fi
+    kubernetes="${kubernetes:-{{ kubernetes_newest }}}"
+    case "$kubernetes" in
+        1.35) node='{{ node_1_35 }}' ;;
+        1.36) node='{{ node_1_36 }}' ;;
+        1.37) node='{{ node_1_37 }}' ;;
+        *) echo "e2e: no Kubernetes $kubernetes: 1.35, 1.36 or 1.37" >&2; exit 1 ;;
+    esac
+    printf 'release=%s\nkubernetes=%s\nnode=%s\ncluster=%s\n' "$release" "$kubernetes" "$node" \
+        "speculaire-{{ runtime }}{{ replace(version, ".", "") }}-k${kubernetes//./}"
 
 # Download the pinned kind and kubectl into target/e2e, checking their published SHA-256.
 e2e-tools:

@@ -1,19 +1,20 @@
-# The kind node image of the e2e suites (D27): the pinned kindest/node with its containerd replaced by a release, and
-# the two settings speculaire needs patched in. Built by `just e2e-up <minor>`, which passes CONTAINERD_VERSION.
+# The containerd node image of the e2e suites (D59, D63): a kindest/node with its containerd replaced by a release,
+# and the two settings speculaire needs patched in. `just e2e-up containerd <minor> [<kubernetes minor>]` passes NODE
+# (the digest-pinned kindest/node of the Kubernetes minor) and RELEASE.
 # Ported from the M0 spike harness (D27, Measured).
+ARG NODE
 
 FROM docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 AS download
-ARG CONTAINERD_VERSION
+ARG RELEASE
 ARG TARGETARCH
 RUN apk add --no-cache curl
 WORKDIR /download
-RUN f="containerd-${CONTAINERD_VERSION}-linux-${TARGETARCH}.tar.gz" \
-    && u="https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}" \
+RUN f="containerd-${RELEASE}-linux-${TARGETARCH}.tar.gz" \
+    && u="https://github.com/containerd/containerd/releases/download/v${RELEASE}" \
     && curl -fsSLO "$u/$f" && curl -fsSLO "$u/$f.sha256sum" \
     && sha256sum -c "$f.sha256sum" && mkdir out && tar -xzf "$f" -C out
 
-# kind v0.33.0's node image: renovate.json5 moves it with kind's version.
-FROM docker.io/kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+FROM ${NODE}
 # The node keeps containerd in /usr/local/bin; the tarball's bin/ has the same names.
 COPY --from=download /download/out/bin/containerd /download/out/bin/containerd-shim-runc-v2 /download/out/bin/ctr \
     /usr/local/bin/

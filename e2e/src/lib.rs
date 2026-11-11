@@ -1,7 +1,7 @@
-//! The cluster the e2e suites run against, made by `just e2e-up <minor>` (D27).
+//! The cluster the e2e suites run against, made by `just e2e-up <runtime> <version> [<kubernetes minor>]` (D27, D63).
 //!
 //! Suites live in `tests/`, each test `#[ignore]`d so that `just check` builds them without a cluster;
-//! `just e2e-test <minor>` runs them with `--ignored`. They drive the cluster through `kubectl` and `docker exec`:
+//! `just e2e-test` runs them with `--ignored`. They drive the cluster through `kubectl` and `docker exec`:
 //! kind names each node's container after the node.
 
 use std::fmt;
@@ -10,10 +10,32 @@ use std::process::Command;
 /// The image of the suites' plain pods, pinned by digest; Renovate moves it (renovate.json5, which skips `tests/`).
 pub const TEST_IMAGE: &str = "docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec";
 
-/// The cluster named by `just e2e-test` in `SPECULAIRE_E2E_CLUSTER` and `SPECULAIRE_E2E_CONTAINERD`.
+/// The CRI runtime of every node of the cluster (D63).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Runtime {
+    /// containerd, with a node image of `e2e/node/containerd/`.
+    Containerd,
+    /// CRI-O, with a node image of `e2e/node/crio/`.
+    Crio,
+}
+
+impl Runtime {
+    /// The prefix of the node's `containerRuntimeVersion`, as kubelet reports it.
+    #[must_use]
+    pub fn scheme(self) -> &'static str {
+        match self {
+            Self::Containerd => "containerd",
+            Self::Crio => "cri-o",
+        }
+    }
+}
+
+/// The cluster named by `just e2e-test` in the `SPECULAIRE_E2E_*` variables.
 pub struct Cluster {
     context: String,
-    containerd: String,
+    runtime: Runtime,
+    release: String,
+    kubernetes: String,
 }
 
 impl Cluster {
@@ -29,19 +51,39 @@ impl Cluster {
     )]
     pub fn from_env() -> Self {
         let var = |name: &str| {
-            std::env::var(name)
-                .unwrap_or_else(|_| panic!("{name} is unset: run the suites with just e2e <minor>"))
+            std::env::var(name).unwrap_or_else(|_| {
+                panic!("{name} is unset: run the suites with just e2e <runtime> <version>")
+            })
+        };
+        let runtime = match var("SPECULAIRE_E2E_RUNTIME").as_str() {
+            "containerd" => Runtime::Containerd,
+            "crio" => Runtime::Crio,
+            other => panic!("SPECULAIRE_E2E_RUNTIME is {other:?}, not containerd or crio"),
         };
         Self {
             context: format!("kind-{}", var("SPECULAIRE_E2E_CLUSTER")),
-            containerd: var("SPECULAIRE_E2E_CONTAINERD"),
+            runtime,
+            release: var("SPECULAIRE_E2E_RELEASE"),
+            kubernetes: var("SPECULAIRE_E2E_KUBERNETES"),
         }
     }
 
-    /// The containerd release the node image runs, such as `2.4.2`.
+    /// The runtime every node runs.
     #[must_use]
-    pub fn containerd(&self) -> &str {
-        &self.containerd
+    pub fn runtime(&self) -> Runtime {
+        self.runtime
+    }
+
+    /// The runtime release the node image runs, such as `2.4.2` or `1.37.2`.
+    #[must_use]
+    pub fn release(&self) -> &str {
+        &self.release
+    }
+
+    /// The Kubernetes minor of the node image, such as `1.37`.
+    #[must_use]
+    pub fn kubernetes(&self) -> &str {
+        &self.kubernetes
     }
 
     /// Runs `kubectl` against the cluster's context and returns its stdout.
@@ -65,7 +107,7 @@ impl Cluster {
         run(Command::new("docker").arg("exec").arg(node).args(command))
     }
 
-    /// Every node with its `Ready` condition.
+    /// Every node with its `Ready` condition and versions.
     ///
     /// # Errors
     ///
@@ -75,14 +117,22 @@ impl Cluster {
             "get",
             "nodes",
             "-o",
-            r#"jsonpath={range .items[*]}{.metadata.name} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}"#,
+            concat!(
+                r"jsonpath={range .items[*]}{.metadata.name} ",
+                r#"{.status.conditions[?(@.type=="Ready")].status} "#,
+                r#"{.status.nodeInfo.containerRuntimeVersion} {.status.nodeInfo.kubeletVersion}{"\n"}{end}"#,
+            ),
         ])?;
         Ok(out
             .lines()
-            .filter_map(|line| line.split_once(' '))
-            .map(|(name, ready)| Node {
-                name: name.to_owned(),
-                ready: ready == "True",
+            .filter_map(|line| {
+                let mut fields = line.split(' ');
+                Some(Node {
+                    name: fields.next()?.to_owned(),
+                    ready: fields.next()? == "True",
+                    runtime: fields.next()?.to_owned(),
+                    kubelet: fields.next()?.to_owned(),
+                })
             })
             .collect())
     }
@@ -95,6 +145,10 @@ pub struct Node {
     pub name: String,
     /// Whether its `Ready` condition is `True`.
     pub ready: bool,
+    /// Its `containerRuntimeVersion`, such as `cri-o://1.37.2`.
+    pub runtime: String,
+    /// Its `kubeletVersion`, such as `v1.37.0`.
+    pub kubelet: String,
 }
 
 /// A command that could not start or exited non-zero.
