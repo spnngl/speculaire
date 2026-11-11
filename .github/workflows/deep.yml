@@ -1,0 +1,56 @@
+# Ported from dedens `.github/workflows/deep.yml` at v0.1.0-131-gfd00747 (D144 there; D27, D76 here).
+name: deep
+
+# The slow checks of each pull request, informational and outside `required` as `mutants.yml` is (D48): `careful` runs
+# the tests on a checked standard library under AddressSanitizer (`just careful address`, D76).
+on:
+  pull_request:
+    # Only what can change what the tests do.
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - Cargo.lock
+      - rust-toolchain.toml
+      - justfile
+      - .github/workflows/deep.yml
+
+# A new push cancels the running check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Each job grants only what it needs.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # One job for every package but `e2e`, which needs a kind cluster (D76).
+  careful:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      # renovate: datasource=crate depName=cargo-careful
+      CARGO_CAREFUL_VERSION: "0.4.10"
+      # protoc: the protobuf exposition of `/metrics` compiles its .proto at build time (D34).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - run: just toolchains
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: . -> target/careful
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-careful@${{ env.CARGO_CAREFUL_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
+      - run: just careful address
