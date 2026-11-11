@@ -1,0 +1,2 @@
+# Ported from dedens `taplo.toml` at v0.1.0-131-gfd00747 (D57).
+exclude = ["Cargo.lock", "target/**", "plan/**"]

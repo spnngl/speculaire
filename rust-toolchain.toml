@@ -1,0 +1,6 @@
+# Ported from dedens `rust-toolchain.toml` at v0.1.0-131-gfd00747 (D57).
+[toolchain]
+# Pinned: a new stable brings new clippy lints, which `-D warnings` turns into errors. Renovate bumps it, with the
+# `rust:<channel>-alpine` tag in build/Containerfile.
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]

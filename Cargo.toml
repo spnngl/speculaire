@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# D57: the oldest stable `just msrv` checks; the build itself uses rust-toolchain.toml's pin.
+rust-version = "1.95"
+license = "Apache-2.0"
+repository = "https://github.com/spnngl/speculaire"
+publish = false
+
+[workspace.dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+# D46: the global allocator of the musl binaries, `MI_SECURE=4` (guard pages, randomised and encoded free lists).
+mimalloc = { version = "0.1.52", features = ["secure"] }
+
+# Ported from dedens `Cargo.toml` at v0.1.0-131-gfd00747 (D13): the same lints, without dedens' own cfgs.
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_docs = "warn"
+unreachable_pub = "warn"
+unnameable_types = "warn"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+# selected restriction
+allow_attributes_without_reason = "warn"
+clone_on_ref_ptr = "warn"
+dbg_macro = "warn"
+multiple_unsafe_ops_per_block = "warn"
+panic = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

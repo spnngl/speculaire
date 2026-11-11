@@ -1,0 +1,30 @@
+# Ported from dedens `.cargo/config.toml` at v0.1.0-131-gfd00747 (D13).
+#
+# The Linux targets link with lld through `linker`, which `RUSTFLAGS` in the environment (cargo-fuzz) does not replace
+# as it does `rustflags`. x86_64-unknown-linux-gnu has no entry: rustc links with its own lld there by default (1.90),
+# as long as no `linker` is set for it. The macOS targets have none either.
+
+# rustc's default there is GNU ld through `cc`.
+[target.aarch64-unknown-linux-gnu]
+linker = ".cargo/lld-cc"
+
+# The static musl binaries, and in the build image the host's own: proc macros and build scripts link here too, with
+# the system's lld (`lld-cc`). x86_64 links static-pie by default; aarch64 does not (rustc's target spec): `lld-cc`
+# links it so, from position-independent code. The paths of the workspace and of CARGO_HOME in the build image are
+# remapped, so that no path of the machine is in a release binary (D46); set here, not in RUSTFLAGS, which would
+# replace them.
+[target.x86_64-unknown-linux-musl]
+linker = ".cargo/lld-cc"
+rustflags = [
+  "--remap-path-prefix=/src=speculaire",
+  "--remap-path-prefix=/usr/local/cargo=cargo",
+]
+
+[target.aarch64-unknown-linux-musl]
+linker = ".cargo/lld-cc"
+rustflags = [
+  "-C",
+  "relocation-model=pic",
+  "--remap-path-prefix=/src=speculaire",
+  "--remap-path-prefix=/usr/local/cargo=cargo",
+]
