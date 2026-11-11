@@ -337,9 +337,9 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 ## D72: Coverage gates through `required`, and nextest runs the tests (amends D27, D48)
 
 - **Decision:**
-  - `just cov` runs `cargo llvm-cov nextest` on the workspace without `e2e`, whose code runs only against a kind cluster. It prints a summary, or writes the report its arguments ask for. `rust-toolchain.toml` lists `llvm-tools`. `apps/speculaire/tests/agent.rs` counts the binary it starts.
+  - `just cov` runs `cargo llvm-cov nextest` on the workspace without `e2e`, whose code runs only against a kind cluster. It prints a summary, and writes the report its arguments ask for. `rust-toolchain.toml` lists `llvm-tools`. `apps/speculaire/tests/agent.rs` counts the binary it starts.
   - The CI job `coverage` writes `just cov --cobertura --output-path target/cobertura.xml` and uploads it with `actions/upload-code-coverage` (label `code-coverage/llvm-cov`). It runs on pull requests, which it checks out at their head commit, and on pushes to `main`, which give the ruleset's `code_coverage` rule its baseline. It is the only job with `code-quality: write`, and `required` needs it.
-  - A failed upload fails the job, as the action does by default. The action skips pull requests from forks, so the rule sees no data for them; that is accepted while speculaire takes no fork pull request.
+  - A failed upload only warns (`fail-on-error: false`): the upload API answers 404 to this repository, a personal account's, so the rule gets no report and blocks nothing. The job still runs every test under instrumentation and logs the summary. The action skips pull requests from forks, which would also give the rule no data.
   - cargo-nextest runs the tests of `just check` and `just cov`, configured in `.config/nextest.toml`: a test still running after 2 minutes is killed with its process group, and a test whose child still holds the test's stdout or stderr 500 ms after it ends fails. `cargo test --doc` covers doctests, which nextest skips. `e2e/` keeps `cargo test`, which runs its test binaries one after another.
   - In the build image, `just cov` cancels the path remapping of the musl rustflags (D46), which would hide from llvm-cov which files are the workspace's.
 - **Because:**
@@ -350,4 +350,5 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Measured (2026-11-11):**
   - 87.50 % of lines and 85.22 % of regions, on macOS and in the build image alike.
   - A planted test spawning `sleep` with the test's stdout ends `LEAK-FAIL`.
-- **Revisit when:** the first pull request from a fork arrives.
+  - In PR #22, the upload failed with `Coverage upload failed (HTTP 404): Not Found` on `PUT /repos/spnngl/speculaire/code-coverage/report`, with Code Quality enabled and no code coverage setting in the repository's settings.
+- **Revisit when:** the upload API accepts this repository's reports: make a failed upload fail the job again, and check that a pull request lowering coverage is blocked. Or when the first pull request from a fork arrives.

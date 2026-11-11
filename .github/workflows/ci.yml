@@ -59,8 +59,8 @@ jobs:
           tool: taplo@${{ env.TAPLO_VERSION }},typos@${{ env.TYPOS_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
       - run: just check
 
-  # Line coverage for the ruleset's `code_coverage` rule: pushes to main upload the baseline, pull requests the
-  # coverage it compares. The rule does not wait for an upload, so `required` needs this job (D72).
+  # Line coverage, in the log and for the ruleset's `code_coverage` rule: pushes to main upload the baseline, pull
+  # requests the coverage it compares. The rule does not wait for an upload, so `required` needs this job (D72).
   coverage:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -90,12 +90,14 @@ jobs:
         with:
           tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-llvm-cov@${{ env.CARGO_LLVM_COV_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
       - run: just cov --cobertura --output-path target/cobertura.xml
-      # Pull requests from forks get no upload: the action skips them.
+      # Pull requests from forks get no upload: the action skips them. The upload API answers 404 to this repository
+      # (D72): a failed upload warns, until it accepts reports.
       - uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1.4.4
         with:
           file: target/cobertura.xml
           language: Rust
           label: code-coverage/llvm-cov
+          fail-on-error: false
 
   # The static-PIE binaries we ship, natively on each architecture in the build image (D13, D57). `just musl` fails
   # unless the binary is static-pie and carries its cargo-auditable list. Later jobs (e2e) take the artifact.
