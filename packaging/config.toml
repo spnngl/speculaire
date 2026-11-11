@@ -60,6 +60,10 @@
 # How long a peer that sent a wrong digest is skipped (D52).
 #deny_ttl = "10m"
 
+[blob_cache]
+# On CRI-O, the size above which the least recently served blobs are evicted (D67).
+#max_size = "20GiB"
+
 [metrics]
 # Where /metrics, /readyz and /livez listen, plain HTTP (D42, D45). Restart.
 #address = "[::]:7482"

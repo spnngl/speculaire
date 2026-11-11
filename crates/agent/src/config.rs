@@ -41,6 +41,8 @@ pub struct Config {
     pub mirror: Mirror,
     /// `[peer]`: the peer API other nodes fetch from (D3).
     pub peer: Peer,
+    /// `[blob_cache]`: the blobs the mirror keeps on CRI-O, which keeps none itself (D67).
+    pub blob_cache: BlobCache,
     /// `[metrics]`: the `/metrics`, `/readyz` and `/livez` listener (D42).
     pub metrics: Metrics,
     /// `[reflector]`: where agents find reflectors, and how a reflector serves them (D2).
@@ -97,6 +99,7 @@ impl Config {
                     max_uploads: _,
                     deny_ttl: _,
                 },
+            blob_cache: BlobCache { max_size: _ },
             metrics: Metrics { address: metrics },
             reflector:
                 Reflector {
@@ -314,6 +317,22 @@ impl Default for Sbom {
     fn default() -> Self {
         Self {
             max_size: ByteSize::mebibytes(64),
+        }
+    }
+}
+
+/// `[blob_cache]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlobCache {
+    /// The size above which the least recently served blobs are evicted (D67).
+    pub max_size: ByteSize,
+}
+
+impl Default for BlobCache {
+    fn default() -> Self {
+        Self {
+            max_size: ByteSize::mebibytes(20 << 10),
         }
     }
 }
