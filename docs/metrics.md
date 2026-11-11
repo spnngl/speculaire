@@ -7,7 +7,9 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `speculaire_mirror_requests_total` | counter | `kind` = `manifest`\|`blob`\|`referrers`; `result` = `served`\|`fall_through`\|`error` | Requests from containerd to the local mirror |
-| `speculaire_mirror_bytes_total` | counter | `source` = `local`\|`peer` | Bytes served to containerd |
+| `speculaire_mirror_bytes_total` | counter | `source` = `local`\|`peer`\|`upstream` | Bytes served to the runtime; `upstream` only on CRI-O (D66) |
+| `speculaire_blob_cache_bytes` | gauge | — | Size of the *blob cache*, on CRI-O (D67) |
+| `speculaire_blob_cache_evictions_total` | counter | — | Blobs evicted from the *blob cache* above `blob_cache.max_size` (D67) |
 | `speculaire_mirror_first_byte_seconds` | histogram | `kind` | Time from request to first byte, or to the 404 of a *fall through* |
 
 ## Peers

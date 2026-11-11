@@ -7,7 +7,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** Spegel assumes every peer listens on the same port as the local one (`docs/research/spegel.md` §3), which breaks mixed configurations.
 - **Revisit when:** —
 
-## D5: Serve blobs from containerd's content directory
+## D5: Serve blobs from containerd's content directory (amended by D67)
 
 - **Decision:** read `/var/lib/containerd/io.containerd.content.v1.content/blobs/` directly (read-only), with a gRPC `Content.Read` fallback.
 - **Because:** this is Spegel's proven path, and it is the cheapest one.
@@ -19,7 +19,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** with `resolve`, a peer could answer a tag with any digest it serves. Without it, tags resolve upstream (a small request) and blobs, the bulk of the bytes, still go P2P. Measured on containerd 2.3.7 and 2.4.2: the mirror sees no tag request, only manifests and blobs by digest (D22).
 - **Revisit when:** users need tag pulls to survive an upstream outage. Then expose `resolve_tags = true`, documented as "trust all nodes".
 
-## D7: Verify blob digests in flight (amended by D52)
+## D7: Verify blob digests in flight (amended by D52, D67)
 
 - **Decision:** hash every full-blob response while streaming it; on mismatch, abort and deny the peer (D52).
 - **Because:** it catches a bad peer early, so it can be reported. Otherwise the error only surfaces at containerd's commit.
@@ -138,3 +138,25 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
     - Neither the drop-in with an empty mirror nor a stopped mirror (connection refused) cost more than the noise of pulling from Docker Hub. Median of three pulls of `busybox:1.37`, without the drop-in, with an empty mirror, with the mirror stopped: 1520, 1482 and 1525 ms locally; within 65 ms of each other on every leg of the CI run. Earlier CI runs scattered by up to 760 ms either way.
 - **Cost:** on CRI-O the agent sits in the path of every pull from a mirrored registry, and relays what it fetches from upstream. When it is down, CRI-O pulls from upstream.
 - **Revisit when:** CRI-O gains a per-blob fallback across sources.
+
+## D67: On CRI-O, the agent serves from its own blob cache, which the mirror fills (amends D5, D7)
+
+- **Decision:**
+  - On CRI-O, the *blob cache* `/var/lib/speculaire/blobs/` replaces D5's content directory. It holds, by digest, every manifest and blob the mirror served to CRI-O. The peer API and the mirror read from it.
+  - The mirror fills it with what it fetches for CRI-O, from peers or upstream (D66). It streams each blob to CRI-O and to a temporary file at once while hashing it (D7), and holds back the last chunk until the digest matches. On a match it sends the chunk and keeps the file by rename. On a mismatch it deletes the file and closes the connection without the chunk, so CRI-O never receives a whole wrong blob, then treats the peer as D52 says.
+  - A `Range` request for a blob the cache holds is served from the file. Any other `Range` request is relayed unhashed, as on containerd (D7's limit).
+  - `blob_cache.max_size` (default `"20GiB"`, live) bounds it. Above the bound, the agent evicts the least recently served blobs first, and the blobs of images in CRI-O's image list (D65) last.
+  - The agent announces each digest it keeps and withdraws each digest it evicts. At startup it deletes leftover temporary files and announces the rest.
+  - `peer.max_uploads` (D24) bounds uploads from the cache as it does from containerd's content directory.
+- **Because:**
+  - CRI-O keeps no compressed blob: a layer keeps its compressed digest and size, and a tar-split of its uncompressed diff (go.podman.io/storage v1.63.0 `layers.go`). Peers need the compressed bytes, by digest.
+  - Filling while serving costs CRI-O's pull nothing and fetches each blob once. Fetching again after CRI-O's pull would double upstream traffic.
+  - go.podman.io/image resumes a short body with `Range: bytes=<offset>-`, and fails when the answer is not a matching `206` (v5.40.0 `docker/body_reader.go:139-190`). A wrong blob then ends in a failed pull, which kubelet retries with back-off, and D52 sends the retry to another peer.
+  - **Measured** (CRI-O spike 04, M0b, CRI-O 1.35.10, 1.36.7 and 1.37.2, 1.37.2 locally on arm64 and all three in CI run 43032258229 on amd64 and arm64):
+    - After a direct pull of `nginx:alpine` (8 layers, 26.3 MB compressed, 64.0 MB unpacked), no file in `/var/lib/containers/storage` of a layer's compressed size had its digest.
+    - Two cold pulls each, direct, then through a proxying mirror with an empty cache. Locally: 2219 and 2023 ms direct, 2080 and 2017 ms proxied; CRI-O CPU 420 and 410 ms direct, 390 and 390 ms proxied; mirror CPU 250 and 240 ms. In CI, proxying added 20 to 560 ms to a pull of 1.0 to 1.9 s, CRI-O CPU did not grow, and the mirror used 260 to 460 ms of CPU. A warm pull from the cache took 603 ms locally and 703 to 1034 ms in CI. The cache held 26.3 MB: the layers, the config and two manifests.
+    - Early CI runs stalled at the end of a response until the mirror flushed its TLS stream after each one: tokio-rustls 0.26.6 returns from a write with the tail still buffered when the socket is full (`src/common/mod.rs:278-312`).
+    - A second node, whose mirror took the first node's mirror as its upstream over mTLS, pulled the image; the first node served every request from its cache and fetched nothing.
+    - With the mirror flipping a byte of each blob, it kept nothing, and the pull failed: `parsing image configuration: unexpected EOF (after reconnecting, server did not process a Range: header, status 200)`. CRI-O had asked for the config blob twice.
+- **Cost:** up to `blob_cache.max_size` of disk on each CRI-O node, on top of CRI-O's own storage, and 10 to 18 ms of agent CPU per MB proxied.
+- **Revisit when:** CRI-O or go.podman.io/storage keeps compressed blobs.
