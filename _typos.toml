@@ -9,6 +9,8 @@ extend-ignore-re = ["\\bANDed\\b"]
 [default.extend-words]
 # Azure Kubernetes Service.
 AKS = "AKS"
+# hax, the Rust verification toolchain.
+hax = "hax"
 # The in-toto Rekor entry type.
 intoto = "intoto"
 # D30's example of a misspelt key.

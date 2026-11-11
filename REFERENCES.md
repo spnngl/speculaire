@@ -11,6 +11,7 @@ Notes with file:line citations into upstream code, taken at the versions below. 
 - [`docs/research/sigstore-and-referrers.md`](docs/research/sigstore-and-referrers.md): sigstore-rs vs sigstore-rust matrix, cosign storage formats and media types, referrers API rules, offline cache contents, policy shapes. **Read before** working on artifact discovery, verification or the policy.
 - [`docs/research/nri-and-verifiers.md`](docs/research/nri-and-verifiers.md): NRI hooks, reject semantics, image fields, timeouts and failure policy, wire protocol, bindir verifier contract, gate vs verifier comparison. **Read before** working on the `nri` crate or the gate, or revisiting D9/D10/D15.
 - [`docs/research/ci-dedens.md`](docs/research/ci-dedens.md): dedens' justfile, workflows, release pipeline, and what to copy or change. **Read before** touching the justfile, `.github/` or packaging.
+- [`docs/research/checkers.md`](docs/research/checkers.md): verdicts on testing and analysis tools (Awesome-Rust-Checker, dedens) and blessed.rs crates, each adopted now, at a named trigger, or skipped. **Read before** adding a check, a workflow, or a crate.
 
 ## Upstream
 
