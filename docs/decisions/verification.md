@@ -12,7 +12,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The GitHub *release* attestation (`in-toto.io/attestation/release/v0.2`, a v0.3 bundle with an RFC 3161 timestamp and no log entry) is rejected: `bundle must have an inclusion proof`. We don't use it.
 - **Revisit when:** —
 
-## D11: Policy shape and image matching
+## D11: Policy shape and image matching (amended by D65)
 
 - **Decision:**
   - The policy is a file shaped like `ClusterImagePolicy`. *authorities* pass if any one passes; *attestations* pass only if all do. v1 conditions are predicateType presence plus the SBOM checks in D12; CEL comes later.
@@ -40,7 +40,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Vulnerability data changes daily while the image does not, which breaks verdicts cached per digest. A vulnerability database on every node is also heavy, and makes nodes disagree.
 - **Revisit when:** users ask for content rules (CEL) or for vulnerability gating (that needs verdict expiry).
 
-## D20: Verdict model (amended by D31, D38)
+## D20: Verdict model (amended by D31, D38, D65)
 
 - **Decision:**
   - `enum Verdict { Allow, Rejected { reason }, Unverifiable { reason, retry_at }, Pending }`.
@@ -54,7 +54,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The policy is part of the key because one digest can match different policies under different names (D11).
 - **Revisit when:** —
 
-## D21: Old verdicts keep serving while the policy or trust root changes (amended by D31)
+## D21: Old verdicts keep serving while the policy or trust root changes (amended by D31, D65)
 
 - **Decision:**
   - When the policy file or the trust root changes, the agent re-verifies every image in containerd's store in the background, running containers first.
@@ -64,7 +64,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Cost:** a tightened policy takes effect after re-verification (normally seconds), not instantly.
 - **Revisit when:** —
 
-## D22: Verification starts at the manifest fetch
+## D22: Verification starts at the manifest fetch (amended by D65)
 
 - **Decision:** triggers, earliest first:
   1. the mirror serving or forwarding `GET /v2/<repo>/manifests/<digest>` (containerd fetches manifests by digest through the mirror, even when it resolved the tag upstream, D6);

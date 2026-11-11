@@ -27,8 +27,8 @@ These words have one meaning everywhere: in code, docs, metrics and commits.
 | *fall through* | The agent answers 404 fast, so containerd moves on to the next `hosts.toml` host or to upstream. This is the failure mode for every distribution error. The mirror never answers 408 or 429, which containerd retries on the same host (v2.3.0 `core/remotes/docker/resolver.go:777-778`). |
 | *registry config* | containerd's own upstream settings: `config.toml` (with `imports`) and the `hosts.toml` tree under `config_path`. The agent reads it and has no registry settings of its own (D17). |
 | *artifact store* | The agent's own content-addressed store for referrer artifacts (signatures, attestations, SBOMs). containerd never pulls these. |
-| *image identity* | The image target digest (index or manifest) that a container is created from. The gate derives it per D15. |
-| *policy match* | The set of policies whose globs match the normalised pod-spec image name (D11). When it is empty, `gate.unmatched` decides (D23). |
+| *image identity* | The image target digest (index or manifest) that a container is created from; on CRI-O, the image ID, which is the config digest of its platform manifest. The gate derives it per D15 and D65. |
+| *policy match* | The set of policies whose globs match the normalised pod-spec image name (D11); on CRI-O, any name of the image (D65). When it is empty, `gate.unmatched` decides (D23). |
 | *verdict* | `Allow`, `Rejected`, `Unverifiable` or `Pending`, for one key `(image identity, matched-policies hash, trust-root hash)` (D20). |
 | *stale verdict* | The previous verdict for an image, still served while re-verification runs after a policy or trust-root change (D21). |
 | *gate* | The NRI `CreateContainer` handler. It only reads local state and never touches the network. |
@@ -69,7 +69,7 @@ The verifier works asynchronously, so the gate never waits on the network.
 
 1. **Triggers** (D22), earliest first:
    - the mirror serving or forwarding a manifest by digest;
-   - containerd `/images/create|update` events;
+   - containerd `/images/create|update` events, or a change of CRI-O's `images.json` (D65);
    - NRI `Synchronize`, which lists the containers already running;
    - a gate cache miss.
 2. **Discover** referrers for the index digest and the platform manifest digest. Try sources in this order:
@@ -81,10 +81,10 @@ The verifier works asynchronously, so the gate never waits on the network.
 3. **Store and announce.** Put every artifact in the artifact store and announce it like any other digest.
 4. **Verify offline** with `sigstore-verify` against the trust root, then evaluate every matching policy, including the SBOM rules (D12). Cache the verdict (D20).
 5. **Before a final `Rejected`, try upstream once.** A peer's referrers index is a hint, not content-addressed, so the peer set may be incomplete (*withhold, never forge*).
-6. **On a policy or trust-root change,** re-verify every image in containerd's store in the background, running containers first (D21).
+6. **On a policy or trust-root change,** re-verify every image in the runtime's image store in the background, running containers first (D21).
 
 ### Gate
-1. NRI `CreateContainer` derives the *image identity* (D15), then checks `gate.exempt` (D18). An exempt container is allowed and counted in metrics.
+1. NRI `CreateContainer` derives the *image identity* (D15, D65), then checks `gate.exempt` (D18). An exempt container is allowed and counted in metrics.
 2. The gate computes the *policy match*. If it is empty, `gate.unmatched` decides (D23).
 3. The gate looks up the verdict, falling back to a *stale verdict* (D21). `Pending` waits at most `gate.wait` (default 300 ms, D47). The wait is short because the call holds the node's single NRI lock, which every pod and container event shares, and must end well inside containerd's `plugin_request_timeout` (D41).
 4. If the verdict is still `Pending`, the gate denies with "verification pending" and kubelet retries.
@@ -96,7 +96,7 @@ The verifier works asynchronously, so the gate never waits on the network.
 ### Prewarm
 1. The reflector config holds the list and pushes it to agents as `Prewarm` on the `Announce` stream (D26).
 2. Every member picks the same few seed nodes, which pull from upstream; the rest pull peer-to-peer once the seeds have announced the blobs (D51).
-3. Agents pull with CRI `PullImage`, which goes through the mirror. They can pin images with the `io.cri-containerd.pinned=pinned` label (containerd v2.3.0 `internal/cri/labels/labels.go:42-45`) so kubelet GC skips them.
+3. Agents pull with CRI `PullImage`, which goes through the mirror. They can pin images with the `io.cri-containerd.pinned=pinned` label (containerd v2.3.0 `internal/cri/labels/labels.go:42-45`) so kubelet GC skips them. CRI-O has no such label, and the agent does not pin there (D65).
 4. Artifacts and verdicts are prewarmed along with the images.
 
 ## Layout
