@@ -1,6 +1,6 @@
 # Architecture
 
-Spéculaire is one Rust binary for Linux Kubernetes nodes that run containerd. It has five jobs:
+Spéculaire is one Rust binary for Linux Kubernetes nodes that run containerd or CRI-O, the CRI runtimes. It has five jobs:
 
 1. **Mirror.** Share container image content between nodes, so a layer leaves the upstream registry about once per cluster.
 2. **Distribute artifacts.** Share each image's signatures, attestations and SBOMs between nodes in the same way.
@@ -9,7 +9,7 @@ Spéculaire is one Rust binary for Linux Kubernetes nodes that run containerd. I
 5. **Reflect.** Control-plane nodes run as *reflectors*: they hold the complete content→peer index and answer lookups.
 
 **Scope:**
-- containerd ≥ 2.3, with 2.4+ as the main target (D15);
+- containerd ≥ 2.3, with 2.4+ as the main target (D15), and CRI-O at the 3 newest Kubernetes minors kind ships, 1.35 to 1.37 today (D63, D40);
 - kubeadm clusters (D16);
 - Linux x86_64 and aarch64, on nodes that run a kubelet.
 
@@ -26,7 +26,7 @@ These words have one meaning everywhere: in code, docs, metrics and commits.
 | *soft state* | State that can be rebuilt entirely from agents. It is never persisted and needs no consensus. |
 | *fall through* | The agent answers 404 fast, so containerd moves on to the next `hosts.toml` host or to upstream. This is the failure mode for every distribution error. The mirror never answers 408 or 429, which containerd retries on the same host (v2.3.0 `core/remotes/docker/resolver.go:777-778`). On CRI-O only a 404 on the manifest falls through, and the whole image then comes from upstream (D66). |
 | *registry config* | containerd's own upstream settings: `config.toml` (with `imports`) and the `hosts.toml` tree under `config_path`. The agent reads it and has no registry settings of its own (D17). On CRI-O: `registries.conf` and its drop-ins, `certs.d` and the auth file (D66). |
-| *artifact store* | The agent's own content-addressed store for referrer artifacts (signatures, attestations, SBOMs). containerd never pulls these. |
+| *artifact store* | The agent's own content-addressed store for referrer artifacts (signatures, attestations, SBOMs). The runtime never pulls these. |
 | *blob cache* | On CRI-O, the agent's own content-addressed store of the manifests and blobs its mirror served. CRI-O keeps no compressed blobs, so peers read from it (D67). |
 | *image identity* | The image target digest (index or manifest) that a container is created from; on CRI-O, the image ID, which is the config digest of its platform manifest. The gate derives it per D15 and D65. |
 | *policy match* | The set of policies whose globs match the normalised pod-spec image name (D11); on CRI-O, any name of the image (D65). When it is empty, `gate.unmatched` decides (D23). |
@@ -42,12 +42,13 @@ These words have one meaning everywhere: in code, docs, metrics and commits.
      control-plane nodes                                   worker node
   ┌──────────────────────────┐                 ┌──────────────────────────────────┐
   │ agent, role = reflector  │◄──Announce──────┤ agent                            │
-  │  digest → {node} map     │   (one stream   │  ├ mirror   127.0.0.1:7480 ◄─────┼── containerd (hosts.toml, local mTLS)
+  │  digest → {node} map     │   (one stream   │  ├ mirror   127.0.0.1:7480 ◄─────┼── runtime (hosts.toml or registries.conf.d, local mTLS)
   │  prewarm list            │    per member)  │  ├ peer API node-ip:7481 ◄───────┼── other agents (mTLS)
   │  reflector API :7483     │                 │  ├ /metrics :7482 ◄──────────────┼── Prometheus (plain HTTP, D42, D45)
   └──────────────────────────┘───Lookup───────►│  ├ artifact store                │
         ▲ reflector.url (L4 LB):               │  ├ verifier → verdict cache      │
-        └─ Members discovery only ─────────────┤  └ gate (NRI plugin) ◄──────────┼── containerd NRI socket
+        │                                      │  ├ blob cache (CRI-O)            │
+        └─ Members discovery only ─────────────┤  └ gate (NRI plugin) ◄──────────┼── runtime NRI socket
   node links: mTLS with kubelet client certs   └──────────────────────────────────┘
 ```
 
@@ -58,7 +59,7 @@ The trust boundaries and the risks we accept are in [`docs/security.md`](docs/se
 ### Pull
 1. containerd requests `GET /v2/<repo>/blobs/<digest>?ns=<registry>` from the local mirror (D14).
 2. The agent sends `Lookup(digest)` to a reflector, hedged to a second one. The reflector returns a shuffled subset of `(node identity, address)` pairs, never including the requester.
-3. The agent races and hedges fetches from the peer API, as Spegel does. It checks that each peer's certificate names the node identity the reflector returned. It streams the bytes to containerd while hashing them (D7).
+3. The agent races and hedges fetches from the peer API, as Spegel does. It checks that each peer's certificate names the node identity the reflector returned. It streams the bytes to the runtime while hashing them (D7).
    - If the hash doesn't match the digest, the agent aborts and denies that peer locally for `peer.deny_ttl` (D52).
    - If a peer dies mid-copy, the agent resumes from the next peer with `Range`.
    - A `503` from a busy peer moves the agent to the next peer at once (D24).
@@ -94,7 +95,7 @@ The verifier works asynchronously, so the gate never waits on the network.
 5. **Modes** (`gate.mode`, default `audit`; no setting turns the gate off, D54):
    - `audit` allows, and records the verdict in metrics and the audit log (D37).
    - `enforce` rejects `Rejected`, `Unverifiable` and `Pending`, each with its own reason.
-6. **Fail-closed:** containerd's `default_validator` with `required_plugins = ["speculaire"]`.
+6. **Fail-closed:** the runtime's default validator requires the plugin: containerd's `required_plugins = ["speculaire"]`, CRI-O's `nri_validator_required_plugins` (D64).
 
 ### Prewarm
 1. The reflector config holds the list and pushes it to agents as `Prewarm` on the `Announce` stream (D26).
@@ -112,15 +113,15 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `apps/loadgen` | Test-only reflector load generator, never packaged (D33) (planned) |
 | `crates/agent` | The agent: config (D60), logs (D37), metrics (D34) and status listener (D42, D45) |
 | `crates/oci` | Distribution read API, referrers, media types, registry Bearer token auth (on `oci-spec`) (planned) |
-| `crates/containerd` | Content source (directory + gRPC fallback), event watch, in-memory copy of the image store, *registry config* parser, preflight (planned) |
+| `crates/runtime` | containerd and CRI-O, one module each: content source (containerd's directory + gRPC fallback, or the *blob cache*), image events, in-memory copy of the image store, *registry config* parser, preflight (planned) |
 | `crates/pki` | kubelet certificate loading and rotation, rustls verifiers (D16), local mirror CA (D14) (planned) |
 | `crates/reflect` | Protobuf, reflector server, agent client, membership (D2) (planned) |
 | `crates/verify` | Artifact discovery and *artifact store*, sigstore glue, policy, SBOM checks, verdict cache (planned) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data (planned) |
 | `oracle/` | Go module, test-only: a fake NRI runtime, and upstream's own code for differential tests (D29) (planned) |
-| `packaging/` | `config.toml`, the reference of every setting (D30, D47); systemd unit, nfpm config, containerd drop-in examples, later the Helm chart (planned) |
-| `e2e/` | kind node image per containerd version, cluster config, and the suites: a Rust test crate run by `just e2e <minor>` (D59) |
+| `packaging/` | `config.toml`, the reference of every setting (D30, D47); systemd unit, nfpm config, runtime drop-in examples, later the Helm chart (planned) |
+| `e2e/` | kind node image per runtime version, cluster config, and the suites: a Rust test crate run by `just e2e <minor>` (D59); containerd only until the CRI-O matrix of D63 lands |
 | `bench/` | Benchmarks against Spegel: recipe, node-access pod, policy, results (D35) (planned) |
 | `justfile` | The only entry point, for humans and CI (D27); `just dev <recipe>` runs a recipe in the build image (D57) |
 | `build/Containerfile` | The build image: the musl build and, on macOS, every recipe (D57) |

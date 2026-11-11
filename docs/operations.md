@@ -4,7 +4,7 @@ For admins running speculaire on a node. Every setting is listed with its defaul
 
 ## Install
 
-1. Install the package. It doesn't touch containerd's config (D55).
+1. Install the package. It doesn't touch the runtime's config (D55).
 2. Run `speculaire configure`. It creates the mirror certificates in `/var/lib/speculaire/mirror/` and adds the mirror entry to each `hosts.toml` (D14, D32). On CRI-O it writes `/etc/containers/registries.conf.d/99-speculaire.conf` and the certificates in `/etc/containers/certs.d/127.0.0.1:7480/`, then reloads CRI-O (D66).
 3. Start `speculaire.service`. The agent refuses to start without the mirror certificates, with an error naming `speculaire configure` (D55). `/readyz` on port 7482 answers 200 once it is ready (D45).
 4. Continue with "Before turning on `enforce`". The gate starts in `audit` mode (D47).

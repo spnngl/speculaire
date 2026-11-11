@@ -17,7 +17,11 @@ Notes with file:line citations into upstream code, taken at the versions below. 
 | Repo | Version read | Use for |
 |---|---|---|
 | `containerd/containerd` | v2.3.0, v2.4.x, main | CRI create path, registry config, `hosts.toml`, content store, NRI wiring |
-| `containerd/nri` | v0.12.0 (containerd 2.3), v0.12.3 (2.4), main | plugin protocol, `Container` fields, `default_validator` |
+| `containerd/nri` | v0.11.0 (CRI-O 1.35, 1.36), v0.12.0 (containerd 2.3), v0.12.2 (CRI-O 1.37), v0.12.3 (2.4), main | plugin protocol, `Container` fields, `default_validator` |
+| `cri-o/cri-o` | v1.37.2, v1.36.7, v1.35.10 | NRI wiring and config (`internal/nri`, `internal/config/nri`), container create and its annotations (D64, D65), image store and pinning, `registries.conf` reload (D66); read the modules below under its `vendor/` |
+| `go.podman.io/image/v5` | v5.40.0 (CRI-O v1.37.2) | `registries.conf` mirrors, `certs.d`, auth files, one source per image, `Range` resume (D66, D67) |
+| `go.podman.io/storage` | v1.63.0 (CRI-O v1.37.2) | image ID, `images.json`, layers without compressed blobs (D65, D67) |
+| `kubernetes-sigs/kind` | v0.33.0 | node image, kubeadm config versions, the CRI-O node of the e2e harness (D63) |
 | `opencontainers/distribution-spec` | main | mirror and peer API endpoints, referrers API, conformance tests |
 | `opencontainers/image-spec` | main | manifests, indexes, `subject`, `artifactType` |
 | `opencontainers/runtime-spec` | main | the OCI spec NRI adjusts |
