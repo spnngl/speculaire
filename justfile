@@ -99,8 +99,8 @@ deny *checks:
 
 # `e2e` runs only against a kind cluster, so it is left out; CI uploads the report of
 # `just cov --cobertura --output-path target/cobertura.xml` (D72).
-# Line coverage of the workspace's tests, a summary unless arguments ask for a report
-cov *args="--summary-only":
+# Line coverage of the workspace's tests: a summary, and the report arguments ask for
+cov *report:
     #!/usr/bin/env bash
     set -euo pipefail
     # The pinned stable's own cargo and rustc first: llvm-tools belongs to that toolchain.
@@ -113,7 +113,11 @@ cov *args="--summary-only":
     if [[ $host == *-musl ]]; then
         export "CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<< "$host")_RUSTFLAGS=--remap-path-prefix=/src=/src --remap-path-prefix=/usr/local/cargo=/usr/local/cargo"
     fi
-    cargo llvm-cov nextest --workspace --exclude e2e --all-features --locked {{ args }}
+    cargo llvm-cov nextest --no-report --workspace --exclude e2e --all-features --locked
+    cargo llvm-cov report --summary-only
+    if [[ -n "{{ report }}" ]]; then
+        cargo llvm-cov report {{ report }}
+    fi
 
 # `--locked` reads supply-chain/imports.lock, so it needs no network (D71).
 # Each crate of Cargo.lock is audited by an imported set, published by a trusted publisher, or exempted (cargo-vet)
