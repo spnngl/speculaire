@@ -238,6 +238,9 @@ async fn connection(mut tls: Tls, store: &Store) -> Result<()> {
         .unwrap_or_default();
     let mut buf = Vec::new();
     loop {
+        // tokio-rustls may hold the end of the last response in rustls's buffer when the socket
+        // was full; without a flush the client waits for it forever (seen in CI, never locally).
+        tls.flush().await?;
         let head_end = loop {
             if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                 break p + 4;

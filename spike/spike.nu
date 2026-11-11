@@ -790,11 +790,11 @@ def "main crio check 04" [k8s: string] {
     let kept = cached-layers $node $layers
     let cache_bytes = sh-node $node $"du -sb ($MIRROR_DIR)/blobs | cut -f1" | str trim | into int
     let fill = crio-requests $node
-    $r = $r | append (check "proxy fills the cache with every layer" (($proxied | all {|p| $p.ok }) and ($kept | length) == ($layers | length)) $"cache ($cache_bytes) bytes, layers ($compressed) bytes; ($fill | str join ', ')")
+    $r = $r | append (check "proxy fills the cache with every layer" (($proxied | all {|p| $p.ok }) and ($kept | length) == ($layers | length)) $"pulls: ($proxied | get out | str join ' / '); cache ($cache_bytes) bytes, layers ($compressed) bytes; ($fill | str join ', ')")
     proxy-mirror $node
     let warm = fresh-pull $node $CACHE_IMAGE
     let served = crio-requests $node
-    $r = $r | append (check "warm pull is served from the cache" ($warm.ok and ($served | all {|l| not ($l | str contains "proxied") })) ($served | str join ", "))
+    $r = $r | append (check "warm pull is served from the cache" ($warm.ok and ($served | all {|l| not ($l | str contains "proxied") })) $"($warm.out); ($served | str join ', ')")
     let unpacked = sh-node $node "crictl images -o json" | from json | get images | where {|i| $i.repoTags | any {|t| $t | str contains "nginx:alpine" } } | get size.0? | default "?"
     let ms = {|ps| $ps | get ms | str join "/" }
     let cpu = {|ps, k| $ps | get $k | each {|t| $t * 10 } | str join "/" }
