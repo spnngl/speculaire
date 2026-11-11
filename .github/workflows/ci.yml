@@ -143,6 +143,10 @@ jobs:
         with:
           # renovate: datasource=crate depName=just
           just-version: "1.59.0"
+      # The pinned stable, before rust-cache: its key includes the rustc version.
+      - run: rustup toolchain install
+      # Before the artifact: restoring a cache replaces target/.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: speculaire-${{ matrix.platform.target }}
@@ -151,9 +155,6 @@ jobs:
       - env:
           TARGET: ${{ matrix.platform.target }}
         run: chmod +x "target/musl/$TARGET/speculaire"
-      # The pinned stable, before rust-cache: its key includes the rustc version.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - env:
           CONTAINERD: ${{ matrix.containerd }}
         run: just e2e "$CONTAINERD"
