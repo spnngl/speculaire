@@ -103,7 +103,7 @@ struct Upstream {
 impl Upstream {
     fn from_env() -> Result<Self> {
         let base = std::env::var("MIRROR_UPSTREAM").unwrap_or_else(|_| "https://registry-1.docker.io".into());
-        let mut builder = reqwest::Client::builder();
+        let mut builder = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10)).read_timeout(std::time::Duration::from_secs(60));
         if let Ok(ca) = std::env::var("MIRROR_UPSTREAM_CA") {
             builder = builder.add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(ca)?)?);
         }

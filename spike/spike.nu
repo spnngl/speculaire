@@ -300,13 +300,13 @@ def config-digest [repo: string, tag: string, arch: string] {
 
 # An image's platform manifest for linux/<arch>, from Docker Hub.
 def platform-manifest [repo: string, tag: string, arch: string] {
-    let tok = http get $"https://auth.docker.io/token?service=registry.docker.io&scope=repository:($repo):pull" | get token
+    let tok = http get --max-time 60sec $"https://auth.docker.io/token?service=registry.docker.io&scope=repository:($repo):pull" | get token
     let accept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
     let h = {Authorization: $"Bearer ($tok)", Accept: $accept}
     let base = $"https://registry-1.docker.io/v2/($repo)/manifests"
-    let idx = http get -H $h $"($base)/($tag)" | decode utf-8 | from json
+    let idx = http get --max-time 60sec -H $h $"($base)/($tag)" | decode utf-8 | from json
     let m = $idx.manifests | where {|x| $x.platform.architecture == $arch and $x.platform.os == "linux" } | first
-    http get -H $h $"($base)/($m.digest)" | decode utf-8 | from json
+    http get --max-time 60sec -H $h $"($base)/($m.digest)" | decode utf-8 | from json
 }
 
 # Step 01, per runtime: how to drop the default_validator, turn it on, and which unit logs NRI.
@@ -556,7 +556,7 @@ def fresh-pull [node: string, image: string, creds: string = ""] {
     sh-node $node "crictl ps -a -q --state exited | xargs -r crictl rm >/dev/null 2>&1; crictl rmi --prune >/dev/null 2>&1; true" | ignore
     let c = if ($creds | is-empty) { "" } else { $"--creds ($creds) " }
     let start = date now
-    let r = ^docker exec $node sh -c $"crictl pull ($c)($image) 2>&1" | complete
+    let r = ^docker exec $node sh -c $"timeout 180 crictl pull ($c)($image) 2>&1" | complete
     {ms: (((date now) - $start) / 1ms | math round), ok: ($r.exit_code == 0), out: ($r.stdout | str trim | lines | last | default "" | str substring 0..300)}
 }
 
@@ -574,19 +574,19 @@ def save-manifest [dir: string, reference: string, raw: binary, media: string] {
 # the config and the layers, all but the largest layer when told. Returns the digests.
 def fill-mirror [node: string, arch: string, --skip-layer] {
     let repo = "library/busybox"
-    let tok = http get $"https://auth.docker.io/token?service=registry.docker.io&scope=repository:($repo):pull" | get token
+    let tok = http get --max-time 60sec $"https://auth.docker.io/token?service=registry.docker.io&scope=repository:($repo):pull" | get token
     let accept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
     let h = {Authorization: $"Bearer ($tok)", Accept: $accept}
     let base = $"https://registry-1.docker.io/v2/($repo)"
     let dir = mktemp -d
     mkdir $"($dir)/manifests" $"($dir)/blobs"
-    let idx_raw = http get -H $h $"($base)/manifests/1.37" | into binary
+    let idx_raw = http get --max-time 60sec -H $h $"($base)/manifests/1.37" | into binary
     let index = "sha256:" + ($idx_raw | hash sha256)
     let idx = $idx_raw | decode utf-8 | from json
     save-manifest $dir "1.37" $idx_raw $idx.mediaType
     save-manifest $dir $index $idx_raw $idx.mediaType
     let manifest = $idx.manifests | where {|x| $x.platform.architecture == $arch and $x.platform.os == "linux" } | first | get digest
-    let m_raw = http get -H $h $"($base)/manifests/($manifest)" | into binary
+    let m_raw = http get --max-time 60sec -H $h $"($base)/manifests/($manifest)" | into binary
     let m = $m_raw | decode utf-8 | from json
     save-manifest $dir $manifest $m_raw $m.mediaType
     let layer = $m.layers | sort-by size | last | get digest
@@ -772,6 +772,7 @@ def "main crio check 04" [k8s: string] {
     crio-certs $node $ip
     crio-certs $other
 
+    print $"(date now | format date %T) 04: direct pulls"
     # Direct pulls; then look for a stored file whose SHA-256 is a layer's compressed digest.
     crio-dropin $node none
     let direct = [(cold-pull $node false) (cold-pull $node false)]
@@ -780,6 +781,7 @@ def "main crio check 04" [k8s: string] {
     let hits = $candidates | where {|s| ("sha256:" + $s.sum) in ($layers | get digest) }
     $r = $r | append (check "storage holds no compressed layer" (($direct | all {|p| $p.ok }) and ($hits | is-empty)) $"($layers | length) layers, ($candidates | length) same-size files hashed, ($hits | length) match")
 
+    print $"(date now | format date %T) 04: proxied pulls"
     # Cold pulls through the proxying mirror, then a warm one from its cache.
     crio-dropin $node all
     let proxied = [(cold-pull $node true) (cold-pull $node true)]
@@ -796,6 +798,7 @@ def "main crio check 04" [k8s: string] {
     let cpu = {|ps, k| $ps | get $k | each {|t| $t * 10 } | str join "/" }
     $r = $r | append (check "cold pull costs (2 runs; ms, CPU ms)" true $"direct ((do $ms $direct)) ms, crio CPU ((do $cpu $direct crio)); proxied ((do $ms $proxied)) ms, crio CPU ((do $cpu $proxied crio)), mirror CPU ((do $cpu $proxied mirror)); warm ($warm.ms) ms; disk: cache ($cache_bytes), image unpacked ($unpacked)")
 
+    print $"(date now | format date %T) 04: second node"
     # The second node's mirror takes the first node's cache as its upstream.
     let ca = ^docker exec $node cat $"($MIRROR_DIR)/ca.crt"
     $ca | ^docker exec -i $other sh -c "cat > /tmp/up-ca.crt"
@@ -811,6 +814,7 @@ def "main crio check 04" [k8s: string] {
     crio-dropin $other none
     sh-node $other "pkill mirror-spike; true" | ignore
 
+    print $"(date now | format date %T) 04: corrupted blob"
     # A blob corrupted in flight.
     empty-mirror $node
     proxy-mirror $node "MIRROR_CORRUPT=1"
