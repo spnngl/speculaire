@@ -806,6 +806,7 @@ def "main crio check 04" [k8s: string] {
     $client | ^docker exec -i $other sh -c "cat > /tmp/up-client.pem"
     proxy-mirror $node "MIRROR_ADDR=0.0.0.0:7480"
     crio-dropin $other all
+    empty-mirror $other
     proxy-mirror $other $"MIRROR_UPSTREAM=https://($ip):7480 MIRROR_UPSTREAM_CA=/tmp/up-ca.crt MIRROR_UPSTREAM_CLIENT=/tmp/up-client.pem"
     let chained = fresh-pull $other $CACHE_IMAGE
     let first = crio-requests $node
@@ -813,6 +814,7 @@ def "main crio check 04" [k8s: string] {
     $r = $r | append (check "second node pulls from the first node's cache only" ($chained.ok and ($first | is-not-empty) and ($first | all {|l| ($l | str ends-with "-> 200") })) $"first: ($first | str join ', '); second: ($second | str join ', '); errors: ((mirror-errors $other) | str join ', ') ($chained.out)")
     crio-dropin $other none
     sh-node $other "pkill mirror-spike; true" | ignore
+    empty-mirror $other
 
     print $"(date now | format date %T) 04: corrupted blob"
     # A blob corrupted in flight.
