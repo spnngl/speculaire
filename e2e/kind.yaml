@@ -1,4 +1,5 @@
-# The e2e cluster (D27): one control plane and two workers. `just e2e-up <minor>` passes the node image.
+# The e2e cluster (D27, D63): one control plane and two workers. `just e2e-up` passes the node image, and on CRI-O
+# appends e2e/node/crio/kind-patches.yaml, so `kubeadmConfigPatches` stays the last key.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -6,10 +7,19 @@ nodes:
   - role: worker
   - role: worker
 kubeadmConfigPatches:
-  # kubelet client certificates live 10 minutes, so suites see a rotation within minutes (M0 spike 03, D16).
+  # kubelet client certificates live 10 minutes, so suites see a rotation within minutes (M0 spike 03, D16). kind
+  # v0.33.0 writes kubeadm v1beta3 below Kubernetes 1.36 (pkg/cluster/internal/kubeadm/config.go:677), where
+  # extraArgs is a map; a patch naming its apiVersion applies to that version only (pkg/internal/patch/resource.go:70).
   - |
+    apiVersion: kubeadm.k8s.io/v1beta4
     kind: ClusterConfiguration
     controllerManager:
       extraArgs:
         - name: cluster-signing-duration
           value: 10m
+  - |
+    apiVersion: kubeadm.k8s.io/v1beta3
+    kind: ClusterConfiguration
+    controllerManager:
+      extraArgs:
+        cluster-signing-duration: 10m

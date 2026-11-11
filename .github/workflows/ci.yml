@@ -124,14 +124,22 @@ jobs:
           RECIPE: ${{ matrix.recipe }}
         run: just "$RECIPE"
 
-  # The suites on a kind cluster per containerd minor, natively on each architecture, with the binary this run built
+  # The suites on a kind cluster per leg of D63's matrix, natively on each architecture, with the binary this run built
   # (D27).
   e2e:
+    name: e2e (${{ matrix.leg.runtime }} ${{ matrix.leg.version }}, kubernetes ${{ matrix.leg.kubernetes }}, ${{ matrix.platform.os }})
     needs: musl
     strategy:
       fail-fast: false
       matrix:
-        containerd: ["2.3", "2.4"]
+        leg:
+          - { runtime: containerd, version: "2.3", kubernetes: "1.37" }
+          - { runtime: containerd, version: "2.4", kubernetes: "1.37" }
+          - { runtime: containerd, version: "2.4", kubernetes: "1.36" }
+          - { runtime: containerd, version: "2.4", kubernetes: "1.35" }
+          - { runtime: crio, version: "1.37", kubernetes: "1.37" }
+          - { runtime: crio, version: "1.36", kubernetes: "1.36" }
+          - { runtime: crio, version: "1.35", kubernetes: "1.35" }
         platform:
           - os: ubuntu-26.04
             target: x86_64-unknown-linux-musl
@@ -162,8 +170,10 @@ jobs:
           TARGET: ${{ matrix.platform.target }}
         run: chmod +x "target/musl/$TARGET/speculaire"
       - env:
-          CONTAINERD: ${{ matrix.containerd }}
-        run: just e2e "$CONTAINERD"
+          RUNTIME: ${{ matrix.leg.runtime }}
+          VERSION: ${{ matrix.leg.version }}
+          KUBERNETES: ${{ matrix.leg.kubernetes }}
+        run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
 
   # The one check the ruleset requires (D48): matrix legs are named after their values, so requiring them would break
   # whenever a matrix changes.

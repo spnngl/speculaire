@@ -19,9 +19,18 @@
             "description": "Versions in the justfile, annotated with a `# renovate:` comment on the line above.",
             "managerFilePatterns": ["/(^|/)justfile$/"],
             "matchStrings": [
-                "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\s*\\n[a-z0-9_]+ := \"(?<currentValue>[^\"]+)\"",
+                "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\s*\\n[a-z0-9_]+ := \"(?<currentValue>[^\"@]+)\"",
             ],
             "extractVersionTemplate": "^v?(?<version>.*)$",
+        },
+        {
+            "customType": "regex",
+            "description": "Images in the justfile, pinned by tag and digest, annotated with a `# renovate:` comment on the line above.",
+            "managerFilePatterns": ["/(^|/)justfile$/"],
+            "matchStrings": [
+                "# renovate: datasource=docker depName=(?<depName>\\S+)\\s*\\n[a-z0-9_]+ := \"(?<currentValue>[^\"@]+)@(?<currentDigest>sha256:[0-9a-f]{64})\"",
+            ],
+            "datasourceTemplate": "docker",
         },
         {
             "customType": "regex",
@@ -38,16 +47,10 @@
             "groupName": "rust",
         },
         {
-            "description": "Each containerd pin of the justfile stays on its minor: e2e covers every supported minor (D40, D59).",
-            "matchDepNames": ["containerd/containerd"],
-            "matchCurrentVersion": "/^2\\.3\\./",
-            "allowedVersions": "/^2\\.3\\./",
-        },
-        {
-            "description": "Each containerd pin of the justfile stays on its minor: e2e covers every supported minor (D40, D59).",
-            "matchDepNames": ["containerd/containerd"],
-            "matchCurrentVersion": "/^2\\.4\\./",
-            "allowedVersions": "/^2\\.4\\./",
+            "description": "Each runtime and node image pin of the justfile stays on its minor: e2e covers every supported minor, and a new minor changes the matrix by hand (D40, D63).",
+            "matchDepNames": ["containerd/containerd", "cri-o/cri-o", "docker.io/kindest/node"],
+            "matchUpdateTypes": ["major", "minor"],
+            "enabled": false,
         },
         {
             "description": "A kind release names its node image; kubectl follows the node image's Kubernetes (D59).",
