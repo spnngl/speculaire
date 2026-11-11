@@ -237,19 +237,44 @@ def start-plugin [node: string, args: string] {
     ^docker exec $node sh -c ("rm -f /tmp/nri-spike.log; (nri-spike " + $args + " > /tmp/nri-spike.log 2>&1 &); sleep 2; cat /tmp/nri-spike.log")
 }
 
+# Step 01, per runtime: how to drop the default_validator, turn it on, and which unit logs NRI.
+# containerd: append to its config; CRI-O: a drop-in (CRI-O spike 01).
+const VALIDATOR = {
+    containerd: {
+        unit: "containerd"
+        off: "sed -i '/default_validator/,$d' /etc/containerd/config.toml"
+        on: "printf '\\n[plugins.\"io.containerd.nri.v1.nri\".default_validator]\\n  enable = true\\n  required_plugins = [\"speculaire\"]\\n' >> /etc/containerd/config.toml"
+    }
+    crio: {
+        unit: "crio"
+        off: "rm -f /etc/crio/crio.conf.d/90-validator.conf"
+        on: "printf '[crio.nri.default_validator]\\nnri_enable_default_validator = true\\nnri_validator_required_plugins = [\"speculaire\"]\\n' > /etc/crio/crio.conf.d/90-validator.conf"
+    }
+}
+
 # Step 01: NRI plugin over our mux, then the default_validator with required_plugins.
 def "main check 01" [minor: string] {
     let name = cluster-name $minor
-    let ctx = $"kind-($name)"
-    let node = $"($name)-worker"
+    check-01 $"kind-($name)" $"($name)-worker" containerd $"containerd ($minor)"
+}
+
+# CRI-O spike 01: M0's step 01 checks, unchanged plugin, on CRI-O.
+def "main crio check 01" [k8s: string] {
+    let name = crio-cluster $k8s
+    check-01 $"kind-($name)" $"($name)-worker" crio $"CRI-O ($CRIO | get $k8s)"
+}
+
+def check-01 [ctx: string, node: string, runtime: string, what: string] {
+    let v = $VALIDATOR | get $runtime
+    let restart = $"systemctl restart ($v.unit); sleep 3"
     mut r = []
 
     # Idempotent: drop pods and a default_validator left by an earlier run.
     ^kubectl --context $ctx delete pod ok bad ok2 ok3 ok4 --ignore-not-found --wait=true o+e>| ignore
-    sh-node $node "pkill nri-spike; sed -i '/default_validator/,$d' /etc/containerd/config.toml; systemctl restart containerd; sleep 3"
+    sh-node $node $"pkill nri-spike; ($v.off); ($restart)"
     main put nri-spike $node
     start-plugin $node "" | ignore
-    # Synchronize can trail Configure by seconds just after a containerd restart (seen in CI).
+    # Synchronize can trail Configure by seconds just after a runtime restart (seen in CI).
     mut log = ""
     for _ in 1..120 {
         $log = ^docker exec $node cat /tmp/nri-spike.log
@@ -263,23 +288,30 @@ def "main check 01" [minor: string] {
     let all = sh-node $node "crictl ps -a -q | wc -l" | str trim
     let running = sh-node $node "crictl ps -q | wc -l" | str trim
     if ($sync | is-empty) {
-        print "== no Synchronize after 60 s; plugin log, then containerd's NRI lines:"
+        print $"== no Synchronize after 60 s; plugin log, then ($v.unit)'s NRI lines:"
         print $log
-        print (sh-node $node "journalctl -u containerd --no-pager -o short-precise | grep -i -E 'nri|plugin|synchron' | tail -40")
+        print (sh-node $node $"journalctl -u ($v.unit) --no-pager -o short-precise | grep -i -E 'nri|plugin|synchron' | tail -40")
     }
     $r = $r | append (check "Synchronize count" ($sync | str contains $"containers=($running) ") $"($sync); crictl ps -q=($running) -a=($all)")
-    let journal = sh-node $node "journalctl -u containerd --no-pager -o cat | grep 'registered as' | tail -1" | lines | str join " | "
-    $r = $r | append (check "containerd logs registration" ($journal | str contains "registered as") $journal)
+    let journal = sh-node $node $"journalctl -u ($v.unit) --no-pager -o cat | grep 'registered as' | tail -1" | lines | str join " | "
+    $r = $r | append (check $"($v.unit) logs registration" ($journal | str contains "registered as") $journal)
 
     run-pod $ctx $node ok ""
     $r = $r | append (check "plain pod Running" ((pod-phase $ctx ok running 60sec) == "running") "pod ok")
+    # What the runtime puts in the NRI Container: the image field and the annotations naming the image (D15).
+    let create = ^docker exec $node cat /tmp/nri-spike.log | lines | where {|l| $l | str contains "CreateContainer pod=default/ok " } | get 0? | default ""
+    let image = $create | parse -r 'image=(?<v>"[^"]*")' | get v.0? | default "?"
+    let names = $create | parse -r '(?<kv>"[^"]*[Ii]mage[^"]*": "[^"]*")' | get kv | str join ", "
+    $r = $r | append (check "Container image fields" ($create | is-not-empty) $"image=($image); annotations: ($names)")
     run-pod $ctx $node bad "spike/reject=true"
     let bad = pod-phase $ctx bad running 20sec
     let event = ^kubectl --context $ctx describe pod bad | lines | where {|l| $l | str contains "speculaire spike: rejected" } | get 0? | default "" | str trim
     $r = $r | append (check "labelled pod rejected" ($bad != "running" and ($event | is-not-empty)) $event)
 
-    # default_validator: restarting containerd drops the plugin, so start it again.
-    sh-node $node "printf '\n[plugins.\"io.containerd.nri.v1.nri\".default_validator]\n  enable = true\n  required_plugins = [\"speculaire\"]\n' >> /etc/containerd/config.toml; systemctl restart containerd; sleep 3"
+    # default_validator: restarting the runtime closes the trunk, so the plugin exits; start it again.
+    sh-node $node $"($v.on); ($restart)"
+    let alive = sh-node $node "pgrep -c nri-spike; true" | str trim
+    $r = $r | append (check "runtime restart closes the trunk" ($alive == "0") $"nri-spike processes after restart: ($alive)")
     start-plugin $node "" | ignore
     run-pod $ctx $node ok2 ""
     $r = $r | append (check "validator: plugin present, pod runs" ((pod-phase $ctx ok2 running 60sec) == "running") "pod ok2")
@@ -289,16 +321,15 @@ def "main check 01" [minor: string] {
     let rejection = ^kubectl --context $ctx describe pod ok3 | lines | where {|l| $l | str contains "not present" } | get 0? | default "" | str trim
     $r = $r | append (check "validator: plugin stopped, pod rejected" ($down != "running" and ($rejection | is-not-empty)) $rejection)
     start-plugin $node "" | ignore
-    $r = $r | append (check "plugin restart, blocked pod recovers" ((pod-phase $ctx ok3 running 90sec) == "running") "pod ok3, no containerd restart")
+    $r = $r | append (check "plugin restart, blocked pod recovers" ((pod-phase $ctx ok3 running 90sec) == "running") $"pod ok3, no ($v.unit) restart")
     run-pod $ctx $node ok4 ""
     $r = $r | append (check "plugin restart, new pod runs" ((pod-phase $ctx ok4 running 60sec) == "running") "pod ok4")
 
     # Leave the node as found, so later steps run without the plugin.
     ^kubectl --context $ctx delete pod ok bad ok2 ok3 ok4 --ignore-not-found --wait=false o+e>| ignore
-    sh-node $node "pkill nri-spike; sed -i '/default_validator/,$d' /etc/containerd/config.toml; systemctl restart containerd; sleep 3"
+    sh-node $node $"pkill nri-spike; ($v.off); ($restart)"
 
-    print ($r | each {|c| $"($c.ok): ($c.check): ($c.detail)" } | str join "\n")
-    if ($r | any {|c| not $c.ok }) { error make {msg: $"step 01 failed on ($minor)"} }
+    report $r $"step 01 on ($what)"
 }
 
 
@@ -428,12 +459,23 @@ def "main ci" [step: string, minor: string, --k8s: string = "1.37"] {
     main down
 }
 
-# A CRI-O CI leg; only step 00 so far.
+# A CRI-O CI leg; `all` runs the CRI-O spikes written so far.
 def "main crio ci" [step: string, k8s: string] {
-    if $step != "00" { error make {msg: $"no CRI-O checks for step ($step)"} }
+    let steps = if $step == "all" { ["00" "01"] } else { [$step] }
     main crio up $k8s
     main build
-    try { main crio check 00 $k8s } catch {|e| main crio down; error make {msg: $e.msg} }
+    try {
+        for s in $steps {
+            match $s {
+                "00" => { main crio check 00 $k8s }
+                "01" => { main crio check 01 $k8s }
+                _ => { error make {msg: $"no CRI-O checks for step ($s)"} }
+            }
+        }
+    } catch {|e|
+        main crio down
+        error make {msg: $e.msg}
+    }
     main crio down
 }
 

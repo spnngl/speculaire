@@ -22,9 +22,9 @@ jobs:
           - {name: containerd 2.4 k8s 1.37, args: ci all 2.4}
           - {name: containerd 2.4 k8s 1.36, args: ci 00 2.4 --k8s 1.36}
           - {name: containerd 2.4 k8s 1.35, args: ci 00 2.4 --k8s 1.35}
-          - {name: cri-o 1.37, args: crio ci 00 1.37}
-          - {name: cri-o 1.36, args: crio ci 00 1.36}
-          - {name: cri-o 1.35, args: crio ci 00 1.35}
+          - {name: cri-o 1.37, args: crio ci all 1.37}
+          - {name: cri-o 1.36, args: crio ci all 1.36}
+          - {name: cri-o 1.35, args: crio ci all 1.35}
     name: ${{ matrix.leg.name }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
