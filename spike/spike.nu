@@ -509,6 +509,204 @@ def "main check 04" [minor: string] {
 
 # Everything a CI leg does for one step.
 # `all` runs 00, 01 and 04 (04 covers 05) on one cluster; 02, 03 and 06 are manual.
+# CRI-O spike 03: the TLS mirror through a registries.conf.d drop-in.
+const CRIO_DROPIN = "/etc/containers/registries.conf.d/50-speculaire.conf"
+const CRIO_CERTS = "/etc/containers/certs.d/127.0.0.1:7480"
+const MIRROR_DIR = "/var/lib/speculaire/mirror"
+
+# Write the drop-in with this pull-from-mirror mode, or remove it for "none"; then reload CRI-O unless told not to.
+def crio-dropin [node: string, mode: string, --no-reload] {
+    if $mode == "none" {
+        sh-node $node $"rm -f ($CRIO_DROPIN)" | ignore
+    } else {
+        let conf = $"[[registry]]\nprefix = \"docker.io\"\nlocation = \"docker.io\"\n\n[[registry.mirror]]\nlocation = \"127.0.0.1:7480/docker.io\"\npull-from-mirror = \"($mode)\"\n"
+        $conf | ^docker exec -i $node sh -c $"cat > ($CRIO_DROPIN)"
+    }
+    if not $no_reload { sh-node $node "systemctl reload crio" | ignore }
+}
+
+# New certificates, copied where CRI-O reads them: ca.crt, client.cert, client.key.
+def crio-certs [node: string] {
+    sh-node $node $"mirror-spike certs > /dev/null && mkdir -p '($CRIO_CERTS)' ($MIRROR_DIR)/blobs ($MIRROR_DIR)/manifests && cp ($MIRROR_DIR)/ca.crt ($MIRROR_DIR)/client.cert ($MIRROR_DIR)/client.key '($CRIO_CERTS)/'" | ignore
+}
+
+# (Re)start the mirror with an empty log; `challenge` answers 401 to requests without credentials.
+def crio-mirror [node: string, challenge: bool = false] {
+    sh-node $node "pkill mirror-spike; sleep 0.5; true" | ignore
+    let prefix = if $challenge { "MIRROR_CHALLENGE=1 " } else { "" }
+    ^docker exec -d $node sh -c $"($prefix)mirror-spike serve > /tmp/mirror.log 2>&1"
+    sleep 1sec
+}
+
+# The mirror's request lines, shortened to `METHOD path auth -> status`.
+def crio-requests [node: string] {
+    mirror-log $node | each {|l| $l | str replace -r ' subject=\[[^\]]*\]' '' | str replace -r '/v2/docker.io/library/' '' | str replace -r 'sha256:([0-9a-f]{12})[0-9a-f]+' 'sha256:$1' }
+}
+
+# Pull after removing every unused image; {ms, ok, out}.
+def fresh-pull [node: string, image: string, creds: string = ""] {
+    sh-node $node "crictl rmi --prune >/dev/null 2>&1; true" | ignore
+    let c = if ($creds | is-empty) { "" } else { $"--creds ($creds) " }
+    let start = date now
+    let r = ^docker exec $node sh -c $"crictl pull ($c)($image) 2>&1" | complete
+    {ms: (((date now) - $start) / 1ms | math round), ok: ($r.exit_code == 0), out: ($r.stdout | str trim | lines | last | default "" | str substring 0..300)}
+}
+
+def median-pull [node: string, image: string] {
+    1..3 | each { fresh-pull $node $image | get ms } | math median
+}
+
+def save-manifest [dir: string, reference: string, raw: binary, media: string] {
+    let name = $reference | str replace ':' '-'
+    $raw | save -f $"($dir)/manifests/($name)"
+    $media | save -f $"($dir)/manifests/($name).type"
+}
+
+# Fill the node's mirror with busybox:1.37 for its platform: the index by tag and digest, the platform manifest,
+# the config and the layers, all but the largest layer when told. Returns the digests.
+def fill-mirror [node: string, arch: string, --skip-layer] {
+    let repo = "library/busybox"
+    let tok = http get $"https://auth.docker.io/token?service=registry.docker.io&scope=repository:($repo):pull" | get token
+    let accept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+    let h = {Authorization: $"Bearer ($tok)", Accept: $accept}
+    let base = $"https://registry-1.docker.io/v2/($repo)"
+    let dir = mktemp -d
+    mkdir $"($dir)/manifests" $"($dir)/blobs"
+    let idx_raw = http get -H $h $"($base)/manifests/1.37" | into binary
+    let index = "sha256:" + ($idx_raw | hash sha256)
+    let idx = $idx_raw | decode utf-8 | from json
+    save-manifest $dir "1.37" $idx_raw $idx.mediaType
+    save-manifest $dir $index $idx_raw $idx.mediaType
+    let manifest = $idx.manifests | where {|x| $x.platform.architecture == $arch and $x.platform.os == "linux" } | first | get digest
+    let m_raw = http get -H $h $"($base)/manifests/($manifest)" | into binary
+    let m = $m_raw | decode utf-8 | from json
+    save-manifest $dir $manifest $m_raw $m.mediaType
+    let layer = $m.layers | sort-by size | last | get digest
+    let blobs = $m.layers | get digest | prepend $m.config.digest | where {|d| not ($skip_layer and $d == $layer) }
+    for d in $blobs {
+        ^curl -sfL -H $"Authorization: Bearer ($tok)" -o $"($dir)/blobs/($d | str replace ':' '-')" $"($base)/blobs/($d)"
+    }
+    sh-node $node $"rm -rf ($MIRROR_DIR)/manifests ($MIRROR_DIR)/blobs" | ignore
+    ^docker cp $"($dir)/manifests" $"($node):($MIRROR_DIR)/manifests"
+    ^docker cp $"($dir)/blobs" $"($node):($MIRROR_DIR)/blobs"
+    rm -r $dir
+    {index: $index, manifest: $manifest, layer: $layer}
+}
+
+def empty-mirror [node: string] {
+    sh-node $node $"rm -rf ($MIRROR_DIR)/manifests/* ($MIRROR_DIR)/blobs/*" | ignore
+}
+
+# CRI-O spike 03: what the mirror sees from CRI-O, and what CRI-O does when the mirror lacks content or is down.
+def "main crio check 03" [k8s: string] {
+    let name = crio-cluster $k8s
+    let ctx = $"kind-($name)"
+    let node = $"($name)-worker"
+    let arch = match (sh-node $node "uname -m" | str trim) { "aarch64" => "arm64", "x86_64" => "amd64", $a => $a }
+    let digest_ref = $"docker.io/library/busybox@(fill-mirror $node $arch | get index)"
+    mut r = []
+
+    ^kubectl --context $ctx delete pod -l spike=s03 --ignore-not-found --wait=true o+e>| ignore
+    main put mirror-spike $node
+    crio-certs $node
+    crio-dropin $node none
+
+    # Baseline, then an empty mirror with pull-from-mirror = all.
+    empty-mirror $node
+    let base_ms = median-pull $node $TEST_IMAGE
+    crio-dropin $node all
+    crio-mirror $node
+    let p = fresh-pull $node $TEST_IMAGE
+    let seen = crio-requests $node
+    let subject = mirror-log $node | where {|l| $l | str contains "manifests/1.37" } | get 0? | default "" | parse -r 'subject=\[(?<s>[^\]]*)\]' | get s.0? | default ""
+    $r = $r | append (check "all: tag pull asks the mirror for the tag" ($p.ok and ($seen | any {|l| $l | str contains "manifests/1.37" })) $"subject=($subject); ($seen | str join ', ')")
+    let empty_ms = median-pull $node $TEST_IMAGE
+
+    # A pod by tag goes through kubelet's PullImage the same way.
+    crio-mirror $node
+    sh-node $node "crictl rmi --prune >/dev/null 2>&1; true" | ignore
+    let o = {spec: {nodeName: $node}} | to json --raw
+    ^kubectl --context $ctx run s03 $"--image=($TEST_IMAGE)" --restart=Never --labels=spike=s03 $"--overrides=($o)" -- sleep 3600 o+e>| ignore
+    let phase = pod-phase $ctx s03 running 90sec
+    $r = $r | append (check "all: pod by tag asks the mirror for the tag" ($phase == "running" and (crio-requests $node | any {|l| $l | str contains "manifests/1.37" })) (crio-requests $node | str join ", "))
+    ^kubectl --context $ctx delete pod s03 --wait=true o+e>| ignore
+
+    # digest-only: tags skip the mirror, digests reach it.
+    crio-dropin $node digest-only
+    crio-mirror $node
+    let t = fresh-pull $node $TEST_IMAGE
+    let tag_seen = crio-requests $node
+    $r = $r | append (check "digest-only: tag pull skips the mirror" ($t.ok and ($tag_seen | all {|l| not ($l | str contains "manifests") })) ($tag_seen | str join ", "))
+    crio-mirror $node
+    let d = fresh-pull $node $digest_ref
+    let dig_seen = crio-requests $node
+    $r = $r | append (check "digest-only: digest pull reaches the mirror" ($d.ok and ($dig_seen | any {|l| $l | str contains "manifests/sha256:" })) ($dig_seen | str join ", "))
+
+    # The mirror holds everything: CRI-O takes the manifest and every blob from it.
+    let held = fill-mirror $node $arch
+    crio-dropin $node all
+    crio-mirror $node
+    let f = fresh-pull $node $TEST_IMAGE
+    let full_seen = crio-requests $node
+    $r = $r | append (check "held image comes from the mirror only" ($f.ok and ($full_seen | any {|l| $l | str contains $"blobs/($held.layer | str substring 0..18)" }) and ($full_seen | all {|l| not ($l | str ends-with "404") or ($l | str contains "/v2/ ") })) ($full_seen | str join ", "))
+
+    # The mirror holds the manifests but not the largest layer.
+    let partial = fill-mirror $node $arch --skip-layer
+    crio-mirror $node
+    let m = fresh-pull $node $TEST_IMAGE
+    $r = $r | append (check $"missing layer: pull (if $m.ok { 'falls back' } else { 'fails' })" true $"($m.out); mirror: (crio-requests $node | str join ', ')")
+    empty-mirror $node
+
+    # The mirror is down: connection refused on 127.0.0.1.
+    sh-node $node "pkill mirror-spike; true" | ignore
+    let down_ms = median-pull $node $TEST_IMAGE
+    $r = $r | append (check "pull timings (median of 3, ms)" true $"no drop-in ($base_ms), empty mirror ($empty_ms), mirror stopped ($down_ms)")
+
+    # No client certificate: the handshake fails.
+    crio-mirror $node
+    let curl = sh-node $node $"curl -s --cacert ($MIRROR_DIR)/ca.crt https://127.0.0.1:7480/v2/ -o /dev/null; echo $?" | str trim
+    let hs = mirror-log $node | where {|l| $l | str contains "handshake" } | get 0? | default ""
+    $r = $r | append (check "curl without client certificate fails" ($curl != "0" and ($hs | is-not-empty)) $"curl exit ($curl); ($hs)")
+
+    # New certificates, no CRI-O restart or reload.
+    crio-certs $node
+    crio-mirror $node
+    let n = fresh-pull $node $TEST_IMAGE
+    let regen = crio-requests $node
+    $r = $r | append (check "regenerated certificates used without reload" ($n.ok and ($regen | any {|l| $l | str contains "manifests/1.37" }) and ($regen | all {|l| not ($l | str contains "handshake") })) ($regen | str join ", "))
+
+    # Drop-in changes: written without reload, then reloaded, then removed.
+    crio-dropin $node none
+    crio-dropin $node all --no-reload
+    crio-mirror $node
+    fresh-pull $node $TEST_IMAGE | ignore
+    let unreloaded = crio-requests $node | length
+    let since = sh-node $node "date -u '+%Y-%m-%d %H:%M:%S'" | str trim
+    sh-node $node "systemctl reload crio" | ignore
+    let applied = sh-node $node $"journalctl -u crio --no-pager -o cat --since '($since)' | grep -c 'Applied new registry configuration'; true" | str trim
+    fresh-pull $node $TEST_IMAGE | ignore
+    let reloaded = crio-requests $node | length
+    crio-dropin $node none
+    crio-mirror $node
+    fresh-pull $node $TEST_IMAGE | ignore
+    let removed = crio-requests $node | length
+    $r = $r | append (check "drop-in takes effect on reload only" ($unreloaded == 0 and $applied != "0" and $reloaded > 0 and $removed == 0) $"requests: written ($unreloaded), reloaded ($reloaded) with ($applied) journal line, removed ($removed)")
+
+    # Credentials: what reaches the mirror with and without a 401 challenge.
+    crio-dropin $node all
+    crio-mirror $node
+    fresh-pull $node $TEST_IMAGE "spike:not-a-secret" | ignore
+    let plain = crio-requests $node
+    crio-mirror $node true
+    let c = fresh-pull $node $TEST_IMAGE "spike:not-a-secret"
+    let challenged = crio-requests $node
+    $r = $r | append (check "credentials reach the mirror" true $"no challenge: ($plain | str join ', '); challenge: ($challenged | str join ', '); pull ($c.out)")
+
+    crio-dropin $node none
+    sh-node $node "pkill mirror-spike; true" | ignore
+    report $r $"CRI-O ($k8s) step 03"
+}
+
 def "main ci" [step: string, minor: string, --k8s: string = "1.37"] {
     let steps = if $step == "all" { ["00" "01" "04"] } else { [$step] }
     main up $minor --k8s $k8s
@@ -531,7 +729,7 @@ def "main ci" [step: string, minor: string, --k8s: string = "1.37"] {
 
 # A CRI-O CI leg; `all` runs the CRI-O spikes written so far.
 def "main crio ci" [step: string, k8s: string] {
-    let steps = if $step == "all" { ["00" "01" "02"] } else { [$step] }
+    let steps = if $step == "all" { ["00" "01" "02" "03"] } else { [$step] }
     main crio up $k8s
     main build
     try {
@@ -540,6 +738,7 @@ def "main crio ci" [step: string, k8s: string] {
                 "00" => { main crio check 00 $k8s }
                 "01" => { main crio check 01 $k8s }
                 "02" => { main crio check 02 $k8s }
+                "03" => { main crio check 03 $k8s }
                 _ => { error make {msg: $"no CRI-O checks for step ($s)"} }
             }
         }
