@@ -20,11 +20,11 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use speculaire_oci::reference::Digest;
+use speculaire_runtime::content::{Blob, Error};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, warn};
 
-use crate::content::{Blob, Error};
 use crate::metrics::{self, Outcome};
 use crate::pulls::{Answer, Body, Pull, Pulls};
 use crate::request::{Ranged, Route, Span, range, route};
@@ -221,7 +221,10 @@ pub(crate) async fn blob_response(
         return Ok(response);
     }
     if let Some(span) = span {
-        let chunks = blob.stream(span).await.map_err(Miss::Failed)?;
+        let chunks = blob
+            .stream(span.first, span.bytes())
+            .await
+            .map_err(Miss::Failed)?;
         let frames = chunks
             .inspect_ok(|chunk| metrics::local_bytes(chunk.len()))
             .map_ok(Frame::data)

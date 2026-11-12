@@ -3,12 +3,80 @@
 //! CRI-O serves the inspect API on `crio.sock` next to the CRI (v1.37.2 `server/inspect.go:140,153`), and answers the
 //! merged TOML of `crio.conf` and `crio.conf.d/` (what `crio status config` prints).
 
+pub mod dropin;
+mod settings;
+mod wiring;
+
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+pub use settings::MINIMUM;
+use speculaire_registry_config::crio::Context;
+
+use crate::content::{Blob, Content};
+use crate::paths::Paths;
+
+/// A node that runs CRI-O: the files it reads, its socket and `systemctl` (D90).
+#[derive(Clone, Debug)]
+pub struct CriO {
+    paths: Paths,
+    socket: PathBuf,
+    systemctl: PathBuf,
+}
+
+impl CriO {
+    /// The CRI-O of the node at `paths`, answering on `socket`; `systemctl` reloads it.
+    #[must_use]
+    pub fn new(paths: Paths, socket: impl Into<PathBuf>, systemctl: impl Into<PathBuf>) -> Self {
+        Self {
+            paths,
+            socket: socket.into(),
+            systemctl: systemctl.into(),
+        }
+    }
+
+    /// Its socket: the CRI, and the inspect API.
+    #[must_use]
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// The drop-in `configure` writes (D66).
+    #[must_use]
+    pub fn dropin(&self) -> PathBuf {
+        self.paths
+            .at("/etc/containers/registries.conf.d/99-speculaire.conf")
+    }
+
+    /// CRI-O's per-registry certificate directories.
+    fn certs(&self) -> PathBuf {
+        self.paths.at("/etc/containers/certs.d")
+    }
+
+    /// The context CRI-O's files are read in.
+    #[must_use]
+    pub fn context(&self) -> Context {
+        Context {
+            root: self.paths.root().to_owned(),
+            // root's home, below the stand-in root too: the user's own files are read.
+            home: self.paths.at("/root"),
+            ..Context::root()
+        }
+    }
+}
+
+/// CRI-O keeps its layers where the mirror cannot read them: what it serves is its blob cache's (D67).
+impl Content for CriO {
+    fn open(
+        &self,
+        _digest: &speculaire_oci::reference::Digest,
+    ) -> impl Future<Output = Result<Option<Blob>, crate::content::Error>> + Send {
+        std::future::ready(Ok(None))
+    }
+}
 
 /// How long CRI-O may take to connect, read or write.
 const TIMEOUT: Duration = Duration::from_secs(5);

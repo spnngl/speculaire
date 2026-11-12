@@ -14,8 +14,8 @@ use anyhow::Context as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use speculaire_agent::config;
 use speculaire_agent::node::Node;
-use speculaire_configure::{Problem, Report};
 use speculaire_runtime::detect::{self, Runtime, Sockets};
+use speculaire_runtime::wiring::{Problem, Report};
 
 /// P2P image mirror and supply-chain gate for containerd and CRI-O.
 #[derive(Parser)]
@@ -117,11 +117,9 @@ fn run(command: Command) -> anyhow::Result<()> {
             let node = node(&config)?;
             let runtime = runtime.resolve(&node.sockets)?;
             let report = speculaire_configure::configure(
-                runtime,
-                &node.paths,
-                &node.settings,
+                node.on(runtime).wiring(),
+                &node.target,
                 SystemTime::now(),
-                &node.system,
             )?;
             print_report(
                 &mut std::io::stdout().lock(),
@@ -136,13 +134,9 @@ fn run(command: Command) -> anyhow::Result<()> {
         } => {
             let node = node(&config)?;
             let runtime = runtime.resolve(&node.sockets)?;
-            let report = speculaire_configure::unconfigure(
-                runtime,
-                &node.paths,
-                &node.settings,
-                force,
-                &node.system,
-            )?;
+            let on = node.on(runtime);
+            let report =
+                speculaire_configure::unconfigure(on.wiring(), on.settings(), &node.target, force)?;
             print_report(
                 &mut std::io::stdout().lock(),
                 &mut std::io::stderr().lock(),
@@ -192,11 +186,11 @@ fn verdict(err: &mut impl Write, problems: &[Problem]) -> anyhow::Result<()> {
 fn check_config(path: &std::path::Path, runtime: &RuntimeArg) -> anyhow::Result<()> {
     let node = node(path)?;
     let runtime = runtime.resolve(&node.sockets)?;
+    let on = node.on(runtime);
     let problems = speculaire_configure::check_all(
-        runtime,
-        &node.paths,
-        &node.settings,
-        &node.system,
+        on.wiring(),
+        on.settings(),
+        &node.target,
         SystemTime::now(),
     )
     .context("cannot check the runtime's config")?;
@@ -259,7 +253,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[mirror]\naddress = \"127.0.0.2:7490\"\n").unwrap();
         assert_eq!(
-            node(&path).unwrap().settings.address,
+            node(&path).unwrap().target.address,
             "127.0.0.2:7490".parse().unwrap()
         );
         std::fs::write(&path, "[mirror]\naddress = \"10.0.0.1:7480\"\n").unwrap();
@@ -269,7 +263,8 @@ mod tests {
 
     #[test]
     fn a_report_prints_changes_on_stdout_and_notes_on_stderr() {
-        use speculaire_configure::{Change, Report};
+        use speculaire_runtime::files::Change;
+        use speculaire_runtime::wiring::Report;
         let report = Report {
             changes: vec![Change::Created("/a".into()), Change::Removed("/b".into())],
             notes: vec!["left /c alone".to_owned()],
@@ -282,7 +277,7 @@ mod tests {
 
     #[test]
     fn problems_are_printed_and_counted() {
-        use speculaire_configure::Problem;
+        use speculaire_runtime::wiring::Problem;
         let problem = |path: &str| Problem {
             path: path.into(),
             message: "is wrong".to_owned(),

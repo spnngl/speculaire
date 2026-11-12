@@ -17,7 +17,6 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 speculaire-agent = { path = "../crates/agent" }
-speculaire-configure = { path = "../crates/configure" }
 speculaire-mirror = { path = "../crates/mirror" }
 speculaire-oci = { path = "../crates/oci" }
 speculaire-registry = { path = "../crates/registry" }

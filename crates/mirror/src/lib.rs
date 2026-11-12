@@ -5,7 +5,6 @@
 //! host or to upstream; it never answers 401, 408 or 429 (ARCHITECTURE.md § Vocabulary, *fall through*).
 
 pub mod cache;
-pub mod content;
 pub mod metrics;
 mod pulls;
 pub mod relay;

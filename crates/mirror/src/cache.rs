@@ -11,10 +11,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use speculaire_oci::reference::Digest;
+use speculaire_runtime::content::{Blob, Content, Error};
 use tokio::io::AsyncWriteExt as _;
 use tracing::{debug, warn};
 
-use crate::content::{Blob, Content, Error};
 use crate::metrics;
 
 struct Entry {

@@ -6,14 +6,21 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
-use containerd_client::services::v1::{Info, InfoResponse, ReadContentResponse};
+use bytes::Bytes;
+use containerd_client::services::v1::{
+    Info, InfoRequest, InfoResponse, ReadContentRequest, ReadContentResponse,
+};
 use containerd_client::tonic::server::Grpc;
-use containerd_client::tonic::{Request, Response, Status};
+use containerd_client::tonic::{Code, Request, Response, Status};
+use futures_util::TryStreamExt as _;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use speculaire_oci::reference::Digest;
 use tonic_prost::ProstCodec;
 
-use super::*;
+use super::{Containerd, NAMESPACE};
+use crate::content::{Blob, Chunks, Content as _, Error};
+use crate::paths::Paths;
 
 fn digest_of(bytes: &[u8]) -> Digest {
     // Any hash will do: the content store does not check names against contents.
@@ -29,8 +36,14 @@ fn pattern(len: usize) -> Bytes {
     )
 }
 
+/// A node of containerd whose files are under `root`.
+fn containerd(root: &Path, socket: impl Into<std::path::PathBuf>) -> Containerd {
+    Containerd::new(Paths::under(root), socket, None)
+}
+
 fn put(root: &Path, digest: &Digest, bytes: &[u8]) {
     let path = root
+        .join("var/lib/containerd/io.containerd.content.v1.content")
         .join("blobs")
         .join(digest.algorithm())
         .join(digest.encoded());
@@ -43,21 +56,17 @@ async fn collect(chunks: Chunks) -> Vec<u8> {
     parts.concat()
 }
 
-fn span(first: u64, last: u64) -> Span {
-    Span { first, last }
-}
-
 #[tokio::test]
 async fn a_blob_in_the_content_directory_is_read_by_its_digest_at_any_span() {
     let dir = tempfile::tempdir().unwrap();
     let bytes = pattern(1_000_000);
     let digest = digest_of(&bytes);
     put(dir.path(), &digest, &bytes);
-    let content = Containerd::new(dir.path(), dir.path().join("no.sock"));
+    let content = containerd(dir.path(), dir.path().join("no.sock"));
     let blob = content.open(&digest).await.unwrap().unwrap();
     assert_eq!(blob.size(), 1_000_000);
     assert_eq!(
-        collect(blob.stream(Span::whole(1_000_000).unwrap()).await.unwrap()).await,
+        collect(blob.stream(0, 1_000_000).await.unwrap()).await,
         bytes
     );
     for (first, last) in [
@@ -68,7 +77,7 @@ async fn a_blob_in_the_content_directory_is_read_by_its_digest_at_any_span() {
         (500_000, 999_999),
     ] {
         let blob = content.open(&digest).await.unwrap().unwrap();
-        let got = collect(blob.stream(span(first, last)).await.unwrap()).await;
+        let got = collect(blob.stream(first, last - first + 1).await.unwrap()).await;
         assert_eq!(
             got,
             bytes[usize::try_from(first).unwrap()..=usize::try_from(last).unwrap()]
@@ -81,7 +90,7 @@ async fn a_blob_in_the_content_directory_is_read_by_its_digest_at_any_span() {
 #[tokio::test]
 async fn a_blob_that_is_not_there_is_none_and_a_directory_is_not_a_blob() {
     let dir = tempfile::tempdir().unwrap();
-    let content = Containerd::new(dir.path(), dir.path().join("no.sock"));
+    let content = containerd(dir.path(), dir.path().join("no.sock"));
     assert!(content.open(&digest_of(b"x")).await.unwrap().is_none());
     let held = digest_of(b"y");
     std::fs::create_dir_all(
@@ -92,8 +101,9 @@ async fn a_blob_that_is_not_there_is_none_and_a_directory_is_not_a_blob() {
     )
     .unwrap();
     assert!(content.open(&held).await.unwrap().is_none());
-    let blocked = Containerd::new(dir.path().join("file"), dir.path().join("no.sock"));
-    std::fs::write(dir.path().join("file"), "").unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let blocked = containerd(other.path(), other.path().join("no.sock"));
+    std::fs::write(other.path().join("var"), "").unwrap();
     assert!(matches!(blocked.open(&held).await, Err(Error::Io(_))));
 }
 
@@ -116,15 +126,9 @@ async fn a_blob_over_the_limit_is_not_read_whole_and_an_empty_one_is_empty() {
         Blob::from_bytes(Bytes::new()).read_all(10).await.unwrap(),
         Bytes::new()
     );
-    let part = Blob::from_bytes(pattern(100))
-        .stream(span(10, 19))
-        .await
-        .unwrap();
+    let part = Blob::from_bytes(pattern(100)).stream(10, 10).await.unwrap();
     assert_eq!(collect(part).await, pattern(100).slice(10..20));
-    let beyond = Blob::from_bytes(pattern(10))
-        .stream(span(50, 60))
-        .await
-        .unwrap();
+    let beyond = Blob::from_bytes(pattern(10)).stream(50, 11).await.unwrap();
     assert_eq!(collect(beyond).await, Vec::<u8>::new());
 }
 
@@ -172,7 +176,7 @@ fn fake_containerd(socket: &Path, blobs: Blobs) -> Arc<Behaviour> {
 
 fn namespaced<T>(request: &Request<T>) -> Result<(), Status> {
     match request.metadata().get("containerd-namespace") {
-        Some(namespace) if namespace == CONTAINERD_NAMESPACE => Ok(()),
+        Some(namespace) if namespace == NAMESPACE => Ok(()),
         _ => Err(Status::invalid_argument("no namespace")),
     }
 }
@@ -252,16 +256,13 @@ async fn a_blob_the_directory_lacks_is_read_from_the_content_service() {
     let held = HashMap::from([(digest.to_string(), bytes.clone())]);
     let socket = dir.path().join("containerd.sock");
     fake_containerd(&socket, Arc::new(held));
-    let content = Containerd::new(dir.path().join("empty"), &socket);
+    let content = containerd(&dir.path().join("empty"), &socket);
     let blob = content.open(&digest).await.unwrap().unwrap();
     assert_eq!(blob.size(), 1000);
-    assert_eq!(
-        collect(blob.stream(Span::whole(1000).unwrap()).await.unwrap()).await,
-        bytes
-    );
+    assert_eq!(collect(blob.stream(0, 1000).await.unwrap()).await, bytes);
     let blob = content.open(&digest).await.unwrap().unwrap();
     assert_eq!(
-        collect(blob.stream(span(100, 199)).await.unwrap()).await,
+        collect(blob.stream(100, 100).await.unwrap()).await,
         bytes[100..200]
     );
     // What the service does not have is a miss, and the directory comes first.
@@ -283,7 +284,7 @@ async fn a_service_that_went_away_is_a_miss_and_the_next_request_connects_again(
     let bytes = pattern(10);
     let digest = digest_of(&bytes);
     let socket = dir.path().join("containerd.sock");
-    let content = Containerd::new(dir.path().join("empty"), &socket);
+    let content = containerd(&dir.path().join("empty"), &socket);
     // No service yet.
     assert!(content.open(&digest).await.unwrap().is_none());
     fake_containerd(
@@ -303,7 +304,7 @@ async fn a_service_that_is_unavailable_is_a_miss_and_the_next_request_connects_a
         &socket,
         Arc::new(HashMap::from([(digest.to_string(), bytes)])),
     );
-    let content = Containerd::new(dir.path().join("empty"), &socket);
+    let content = containerd(&dir.path().join("empty"), &socket);
     assert!(content.open(&digest).await.unwrap().is_some());
     assert!(content.open(&digest).await.unwrap().is_some());
     // The channel is kept: one connection served both.
@@ -327,7 +328,7 @@ async fn a_service_that_fails_otherwise_is_an_error_and_keeps_its_channel() {
         &socket,
         Arc::new(HashMap::from([(digest.to_string(), bytes)])),
     );
-    let content = Containerd::new(dir.path().join("empty"), &socket);
+    let content = containerd(&dir.path().join("empty"), &socket);
     assert!(content.open(&digest).await.unwrap().is_some());
     service.fail.store(Code::Internal as i32, Ordering::SeqCst);
     assert!(matches!(
@@ -345,10 +346,10 @@ async fn a_file_is_streamed_in_chunks_of_a_quarter_mebibyte() {
     let bytes = pattern(1_000_000);
     let digest = digest_of(&bytes);
     put(dir.path(), &digest, &bytes);
-    let content = Containerd::new(dir.path(), dir.path().join("no.sock"));
+    let content = containerd(dir.path(), dir.path().join("no.sock"));
     let blob = content.open(&digest).await.unwrap().unwrap();
     let chunks: Vec<Bytes> = blob
-        .stream(Span::whole(1_000_000).unwrap())
+        .stream(0, 1_000_000)
         .await
         .unwrap()
         .try_collect()
@@ -365,7 +366,7 @@ async fn a_blob_prints_where_it_comes_from_and_not_what_it_holds() {
     let dir = tempfile::tempdir().unwrap();
     let digest = digest_of(b"x");
     put(dir.path(), &digest, b"x");
-    let content = Containerd::new(dir.path(), dir.path().join("no.sock"));
+    let content = containerd(dir.path(), dir.path().join("no.sock"));
     let blob = content.open(&digest).await.unwrap().unwrap();
     let file = format!("{blob:?}");
     assert!(

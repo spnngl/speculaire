@@ -254,7 +254,7 @@ pub fn crio_inspect(data: &[u8]) {
 ///
 /// When editing panics, or a result breaks one of those.
 pub fn hosts_edit(data: &[u8]) {
-    use speculaire_configure::containerd::{Entry, add, remove};
+    use speculaire_runtime::containerd::hosts::{Entry, add, remove};
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };

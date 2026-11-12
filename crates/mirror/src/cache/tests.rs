@@ -6,7 +6,6 @@ use bytes::Bytes;
 use futures_util::TryStreamExt as _;
 
 use super::*;
-use crate::request::Span;
 
 fn digest(n: u8) -> Digest {
     Digest::parse(&format!("sha256:{}", format!("{n:02x}").repeat(32))).unwrap()
@@ -23,7 +22,7 @@ async fn read(cache: &Cache, digest: &Digest) -> Option<Vec<u8>> {
     let blob = cache.open(digest).await.unwrap()?;
     let size = blob.size();
     let chunks: Vec<Bytes> = blob
-        .stream(Span::whole(size).unwrap())
+        .stream(0, size)
         .await
         .unwrap()
         .try_collect()

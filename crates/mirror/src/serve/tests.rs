@@ -16,12 +16,12 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use secrecy::ExposeSecret as _;
 use speculaire_pki::mirror::{Mirror, Part};
+use speculaire_runtime::content::Content;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_rustls::TlsConnector;
 
 use super::*;
-use crate::content::Content;
 use crate::pulls::{Answer as Answer_, Local, Pull, Pulls};
 use crate::request::Kind;
 

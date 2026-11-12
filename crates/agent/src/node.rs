@@ -1,25 +1,25 @@
 //! The node the agent runs on, as its config names it: the runtime's sockets and files, and what `configure`,
-//! `check-config` and the agent's startup read of them (D86, D87).
+//! `check-config` and the agent's startup read of them (D86, D87, D90).
 
 use std::path::PathBuf;
-use std::time::SystemTime;
 
-use speculaire_configure::{Paths, Problem, Settings, System};
 use speculaire_runtime::detect::{self, Runtime, Sockets};
+use speculaire_runtime::paths::Paths;
+use speculaire_runtime::wiring::Target;
 
 use crate::config::Config;
 
-/// What the agent's commands ask of the node.
+/// What the agent's commands ask of the node, before they know which runtime it runs.
 #[derive(Debug)]
 pub struct Node {
     /// Where the node's files are.
     pub paths: Paths,
     /// `mirror.address`, `mirror.registries` and `mirror.directory`.
-    pub settings: Settings,
+    pub target: Target,
     /// The sockets of both runtimes.
     pub sockets: Sockets,
-    /// The system calls the commands make.
-    pub system: System,
+    /// `runtime.containerd_config`.
+    pub containerd_config: PathBuf,
 }
 
 impl Node {
@@ -27,14 +27,9 @@ impl Node {
     #[must_use]
     pub fn new(config: &Config) -> Self {
         let runtime = &config.runtime;
-        let sockets = Sockets {
-            containerd: runtime.containerd_socket.get().get().to_owned(),
-            crio: runtime.crio_socket.get().get().to_owned(),
-        };
         Self {
-            paths: Paths::system()
-                .with_containerd_config(runtime.containerd_config.get().get().to_owned()),
-            settings: Settings {
+            paths: Paths::system(),
+            target: Target {
                 address: config.mirror.address.get().get(),
                 registries: config
                     .mirror
@@ -45,12 +40,11 @@ impl Node {
                     .collect(),
                 directory: config.mirror.directory.get().get().to_owned(),
             },
-            system: System {
-                containerd_socket: sockets.containerd.clone(),
-                crio_socket: sockets.crio.clone(),
-                systemctl: PathBuf::from("systemctl"),
+            sockets: Sockets {
+                containerd: runtime.containerd_socket.get().get().to_owned(),
+                crio: runtime.crio_socket.get().get().to_owned(),
             },
-            sockets,
+            containerd_config: runtime.containerd_config.get().get().to_owned(),
         }
     }
 
@@ -63,15 +57,15 @@ impl Node {
         detect::detect(&self.sockets)
     }
 
-    /// What keeps the agent from starting on this node: nothing when it may (D86).
+    /// The node as `runtime` runs on it: the one thing that hands out wiring, settings, registries and content (D90).
     #[must_use]
-    pub fn preflight(&self, runtime: Runtime) -> Vec<Problem> {
-        speculaire_configure::preflight(
+    pub fn on(&self, runtime: Runtime) -> speculaire_runtime::Node {
+        speculaire_runtime::Node::new(
             runtime,
-            &self.paths,
-            &self.settings,
-            &self.system,
-            SystemTime::now(),
+            &self.sockets,
+            self.paths.clone(),
+            Some(self.containerd_config.clone()),
+            "systemctl",
         )
     }
 }
@@ -90,13 +84,13 @@ mod tests {
     #[test]
     fn the_defaults_are_the_nodes_own_files_and_sockets() {
         let node = node_of("");
-        assert_eq!(node.settings.address, "127.0.0.1:7480".parse().unwrap());
+        assert_eq!(node.target.address, "127.0.0.1:7480".parse().unwrap());
         assert_eq!(
-            node.settings.registries,
+            node.target.registries,
             ["docker.io", "registry.k8s.io", "quay.io", "ghcr.io"]
         );
         assert_eq!(
-            node.settings.directory,
+            node.target.directory,
             Path::new("/var/lib/speculaire/mirror")
         );
         assert_eq!(
@@ -105,11 +99,9 @@ mod tests {
         );
         assert_eq!(node.sockets.crio, Path::new("/var/run/crio/crio.sock"));
         assert_eq!(
-            node.paths.containerd_config(),
+            node.containerd_config.as_path(),
             Path::new("/etc/containerd/config.toml")
         );
-        assert_eq!(node.system.containerd_socket, node.sockets.containerd);
-        assert_eq!(node.system.crio_socket, node.sockets.crio);
     }
 
     #[test]
@@ -119,12 +111,10 @@ mod tests {
         );
         assert_eq!(node.sockets.containerd, Path::new("/t/c.sock"));
         assert_eq!(node.sockets.crio, Path::new("/t/o.sock"));
-        assert_eq!(node.system.containerd_socket, Path::new("/t/c.sock"));
-        assert_eq!(node.system.crio_socket, Path::new("/t/o.sock"));
-        assert_eq!(node.paths.containerd_config(), Path::new("/t/c.toml"));
-        assert_eq!(node.settings.address, "127.0.0.2:7490".parse().unwrap());
-        assert_eq!(node.settings.registries, ["docker.io", "localhost:5000"]);
-        assert_eq!(node.settings.directory, Path::new("/t/mirror"));
+        assert_eq!(node.containerd_config.as_path(), Path::new("/t/c.toml"));
+        assert_eq!(node.target.address, "127.0.0.2:7490".parse().unwrap());
+        assert_eq!(node.target.registries, ["docker.io", "localhost:5000"]);
+        assert_eq!(node.target.directory, Path::new("/t/mirror"));
         // Neither socket answers: the runtime is not found, naming both.
         let err = node.runtime().unwrap_err().to_string();
         assert!(
