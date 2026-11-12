@@ -36,6 +36,8 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("auth_json", auth_json),
     ("crio_inspect", crio_inspect),
     ("runtime_version", runtime_version),
+    ("www_authenticate", www_authenticate),
+    ("manifest", manifest),
     ("mirror_request", mirror_request),
     ("reference", reference),
     ("platform", platform),
@@ -328,5 +330,48 @@ pub fn runtime_version(data: &[u8]) {
             numbers.starts_with(|c: char| c.is_ascii_digit()),
             "{text:?}"
         );
+    }
+}
+
+/// The `WWW-Authenticate` header of a registry's 401, as the upstream client reads it (D88).
+///
+/// Reading never panics. Every challenge has a scheme, and every scheme and parameter name is in lower case and not
+/// empty.
+///
+/// # Panics
+///
+/// When reading panics, or a challenge breaks one of those.
+pub fn www_authenticate(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    for challenge in speculaire_registry::challenge::parse(text) {
+        assert_ne!(challenge.scheme, "");
+        assert_eq!(challenge.scheme, challenge.scheme.to_ascii_lowercase());
+        for (name, _) in &challenge.params {
+            assert_ne!(name, "");
+            assert_eq!(*name, name.to_ascii_lowercase());
+        }
+    }
+}
+
+/// A manifest as the relay reads it, to know which digests lie below it (D67, D88).
+///
+/// Reading never panics. Every digest it finds prints as it parses, and an index points to manifests only.
+///
+/// # Panics
+///
+/// When reading panics, or a digest does not survive printing.
+pub fn manifest(data: &[u8]) {
+    use speculaire_oci::manifest::{Children, children};
+    use speculaire_oci::reference::Digest;
+    let Ok(found) = children(data) else {
+        return;
+    };
+    for digest in found.digests() {
+        assert_eq!(Digest::parse(&digest.to_string()).as_ref(), Ok(digest));
+    }
+    if let Children::Image { layers, .. } = &found {
+        assert_eq!(found.digests().len(), layers.len() + 1);
     }
 }

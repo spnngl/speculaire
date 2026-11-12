@@ -7,6 +7,8 @@
 use std::fmt;
 use std::process::Command;
 
+pub mod registry;
+
 /// The image of the suites' plain pods, pinned by digest; Renovate moves it (renovate.json5, which skips `tests/`).
 pub const TEST_IMAGE: &str = "docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec";
 
@@ -187,8 +189,8 @@ pub struct Node {
 
 /// A command that could not start or exited non-zero.
 pub struct Failure {
-    command: String,
-    detail: String,
+    pub(crate) command: String,
+    pub(crate) detail: String,
 }
 
 impl fmt::Display for Failure {
@@ -206,7 +208,7 @@ impl fmt::Debug for Failure {
 
 impl std::error::Error for Failure {}
 
-fn run(command: &mut Command) -> Result<String, Failure> {
+pub(crate) fn run(command: &mut Command) -> Result<String, Failure> {
     let shown = format!("{command:?}");
     let out = command.output().map_err(|e| Failure {
         command: shown.clone(),

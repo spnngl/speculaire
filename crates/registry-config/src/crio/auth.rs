@@ -343,7 +343,7 @@ fn key_lookup_order<'a>(key: &'a str, registry: &'a str, legacy: bool) -> Vec<&'
 }
 
 /// Go's `base64.StdEncoding.DecodeString`: padded, and blind to line breaks.
-fn base64_decode(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
     let data: Vec<u8> = text
         .bytes()
         .filter(|b| *b != b'\r' && *b != b'\n')

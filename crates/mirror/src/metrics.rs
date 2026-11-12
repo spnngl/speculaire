@@ -1,6 +1,6 @@
 //! The mirror's metrics (D34); `docs/metrics.md` lists them.
 
-use metrics::{counter, describe_counter, describe_histogram};
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge};
 
 use crate::request::Kind;
 
@@ -10,6 +10,11 @@ pub const REQUESTS: &str = "speculaire_mirror_requests_total";
 pub const BYTES: &str = "speculaire_mirror_bytes_total";
 /// `speculaire_mirror_first_byte_seconds`: from the request to the first byte, or to the 404 of a *fall through*.
 pub const FIRST_BYTE: &str = "speculaire_mirror_first_byte_seconds";
+
+/// `speculaire_blob_cache_bytes`: the size of the blob cache (D67).
+pub const CACHE_BYTES: &str = "speculaire_blob_cache_bytes";
+/// `speculaire_blob_cache_evictions_total`: blobs evicted above `blob_cache.max_size` (D67).
+pub const CACHE_EVICTIONS: &str = "speculaire_blob_cache_evictions_total";
 
 /// What became of a pull request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +61,37 @@ pub fn describe() {
         drop(metrics::histogram!(FIRST_BYTE, "kind" => kind.label()));
     }
     counter!(BYTES, "source" => "local").absolute(0);
+}
+
+/// Describes the relay's metrics and gives each its zero, on a node whose mirror relays (CRI-O, D66).
+pub fn describe_relay() {
+    describe_gauge!(CACHE_BYTES, "Size of the blob cache");
+    describe_counter!(
+        CACHE_EVICTIONS,
+        "Blobs evicted from the blob cache above blob_cache.max_size"
+    );
+    counter!(BYTES, "source" => "upstream").absolute(0);
+    counter!(CACHE_EVICTIONS).absolute(0);
+    gauge!(CACHE_BYTES).set(0.0);
+}
+
+/// Sets the size of the blob cache.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a gauge of bytes: a cache of 2^53 bytes is 8 PiB"
+)]
+pub fn cache_bytes(bytes: u64) {
+    gauge!(CACHE_BYTES).set(bytes as f64);
+}
+
+/// Counts a blob evicted from the cache.
+pub fn cache_eviction() {
+    counter!(CACHE_EVICTIONS).increment(1);
+}
+
+/// Counts bytes relayed from upstream.
+pub fn upstream_bytes(bytes: usize) {
+    counter!(BYTES, "source" => "upstream").increment(bytes as u64);
 }
 
 /// Counts a request.

@@ -98,6 +98,10 @@ criteria = "safe-to-deploy"
 version = "0.9.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.core-foundation]]
+version = "0.10.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.crossbeam-epoch]]
 version = "0.9.21"
 criteria = "safe-to-deploy"
@@ -298,6 +302,10 @@ criteria = "safe-to-deploy"
 version = "1.21.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.openssl-probe]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.pem]]
 version = "4.0.0"
 criteria = "safe-to-deploy"
@@ -394,6 +402,10 @@ criteria = "safe-to-deploy"
 version = "0.23.37"
 criteria = "safe-to-deploy"
 
+[[exemptions.rustls-native-certs]]
+version = "0.8.5"
+criteria = "safe-to-deploy"
+
 [[exemptions.rustls-pki-types]]
 version = "1.16.0"
 criteria = "safe-to-deploy"
@@ -402,12 +414,24 @@ criteria = "safe-to-deploy"
 version = "0.103.10"
 criteria = "safe-to-deploy"
 
+[[exemptions.schannel]]
+version = "0.1.30"
+criteria = "safe-to-deploy"
+
 [[exemptions.sd-notify]]
 version = "0.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.secrecy]]
 version = "0.10.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.security-framework]]
+version = "3.7.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.security-framework-sys]]
+version = "2.17.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.signal-hook-registry]]

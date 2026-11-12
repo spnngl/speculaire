@@ -20,6 +20,7 @@ speculaire-agent = { path = "../crates/agent" }
 speculaire-configure = { path = "../crates/configure" }
 speculaire-mirror = { path = "../crates/mirror" }
 speculaire-oci = { path = "../crates/oci" }
+speculaire-registry = { path = "../crates/registry" }
 speculaire-registry-config = { path = "../crates/registry-config" }
 speculaire-runtime = { path = "../crates/runtime" }
 # `containerd_config` reads files: it writes the input to a temporary directory.
@@ -133,3 +134,17 @@ panic = "warn"
 todo = "warn"
 undocumented_unsafe_blocks = "warn"
 unwrap_used = "warn"
+
+[[bin]]
+name = "www_authenticate"
+path = "fuzz_targets/www_authenticate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false

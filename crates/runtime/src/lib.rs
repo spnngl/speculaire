@@ -4,4 +4,5 @@ pub mod containerd;
 pub mod cri;
 pub mod crio;
 pub mod detect;
+pub mod registries;
 pub mod version;

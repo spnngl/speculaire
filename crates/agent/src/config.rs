@@ -117,7 +117,11 @@ impl Config {
                     stall_timeout: _,
                     deny_ttl: _,
                 },
-            blob_cache: BlobCache { max_size: _ },
+            blob_cache:
+                BlobCache {
+                    max_size: _,
+                    directory: blob_directory,
+                },
             metrics: Metrics { address: metrics },
             reflector:
                 Reflector {
@@ -173,6 +177,12 @@ impl Config {
             "mirror.directory",
             directory,
             &running.mirror.directory,
+        );
+        keep(
+            &mut kept,
+            "blob_cache.directory",
+            blob_directory,
+            &running.blob_cache.directory,
         );
         keep(&mut kept, "peer.address", peer, &running.peer.address);
         keep(
@@ -397,12 +407,15 @@ impl Default for Sbom {
 pub struct BlobCache {
     /// The size above which the least recently served blobs are evicted (D67).
     pub max_size: ByteSize,
+    /// Where the cache keeps its blobs (D67, D88).
+    pub directory: Restart<Absolute>,
 }
 
 impl Default for BlobCache {
     fn default() -> Self {
         Self {
             max_size: ByteSize::mebibytes(20 << 10),
+            directory: Restart(Absolute::new("/var/lib/speculaire/blobs")),
         }
     }
 }

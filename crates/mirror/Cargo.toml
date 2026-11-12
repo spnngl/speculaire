@@ -9,18 +9,23 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+aws-lc-rs.workspace = true
 bytes.workspace = true
 containerd-client.workspace = true
 futures-util.workspace = true
+http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 metrics.workspace = true
 rustls.workspace = true
 serde.workspace = true
+secrecy.workspace = true
 serde_json.workspace = true
 speculaire-oci.workspace = true
 speculaire-pki.workspace = true
+speculaire-registry.workspace = true
+speculaire-runtime.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-rustls.workspace = true

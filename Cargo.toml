@@ -19,10 +19,13 @@ speculaire-mirror = { path = "crates/mirror" }
 speculaire-oci = { path = "crates/oci" }
 speculaire-oracle-harness = { path = "crates/oracle-harness" }
 speculaire-pki = { path = "crates/pki" }
+speculaire-registry = { path = "crates/registry" }
 speculaire-registry-config = { path = "crates/registry-config" }
 speculaire-runtime = { path = "crates/runtime" }
 speculaire-configure = { path = "crates/configure" }
 anyhow = "1.0.104"
+# D88: the digests of the relay, on the provider that rustls uses (D13).
+aws-lc-rs = "1.19.0"
 axum = { version = "0.8.9", default-features = false, features = [
   "http1",
   "tokio",
@@ -49,6 +52,7 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false, fe
   "protobuf",
 ] }
 mime = "0.3.18"
+percent-encoding = "2.3.2"
 # D81: the platform of an image index is oci-spec's; the reference is ours.
 oci-spec = { version = "0.10.0", default-features = false, features = [
   "image",
@@ -58,13 +62,17 @@ rcgen = { version = "0.14.10", default-features = false, features = [
   "aws_lc_rs",
   "pem",
 ] }
-# D14: TLS 1.3 only (no `tls12` feature), with client authentication, on aws-lc-rs (D13).
+# D14: the mirror speaks TLS 1.3 only, with client authentication, on aws-lc-rs (D13); `tls12` is for the upstream
+# client alone (D88), and the mirror's server config names TLS 1.3 itself.
 rustls = { version = "0.23.46", default-features = false, features = [
   "aws-lc-rs",
   "std",
+  "tls12",
 ] }
 # D39: readiness, stopping and the watchdog.
 sd-notify = "0.5.0"
+# D88: the system's trusted roots, as Go reads them for containerd and CRI-O.
+rustls-native-certs = "0.8.5"
 # D37: every credential and header value is a `SecretString`: it never prints, in `Debug` or in a log.
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }

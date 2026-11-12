@@ -13,6 +13,16 @@ To move the mirror off port 7480, set `mirror.address` to another loopback `ip:p
 
 To stop using the mirror, run `speculaire unconfigure`. It removes only what `configure` added, keeping every edit of yours, reloads CRI-O, and then deletes the certificates. It stops while the runtime's NRI config requires `speculaire`: remove it from `required_plugins` (containerd) or `nri_validator_required_plugins` (CRI-O) and restart the runtime first, or pass `--force` (D32, D84).
 
+## The relay on CRI-O
+
+On CRI-O every pull of a mirrored registry goes through the agent, which fetches from the registry as the node's own config says (`registries.conf`, its drop-ins, `certs.d`, the credential files; the auth file is the one `[crio.image] global_auth_file` names, read from CRI-O) and keeps each blob in `blob_cache.directory`, bounded by `blob_cache.max_size` (D66, D67, D88, D89). An edit of that config shows within 10 s, with no signal.
+
+- A pull that fails with the agent down succeeds on kubelet's retry, straight from the registry.
+- An image that needs a pod pull secret is pulled by CRI-O itself: the mirror answers 404 to its manifest.
+- A registry whose `registries.conf` prefix has a port is not mirrored: `configure` lists it as left alone, and CRI-O pulls it directly (D88).
+- `a registry does not answer the relay` (warning) names a failure to reach every endpoint of a source; `speculaire_mirror_requests_total{result="error"}` counts the requests the relay could not answer, and the agent stops at startup, naming the directory, when it cannot open `blob_cache.directory`.
+- A credential that lives in a credential helper is not used (D80, D89): the log says which helper, and the registry is asked anonymously.
+
 ## Before turning on `enforce`
 
 1. Run `gate.mode = "audit"` until `speculaire_gate_total{mode="audit"}` shows no `rejected`, `unverifiable` or `unmatched` results you did not expect.

@@ -31,8 +31,8 @@ pub struct Left {
 /// The entries of the drop-in: the admin's effective entry of each prefix to mirror, with the mirror first.
 ///
 /// The prefixes are `names`, besides every prefix of `admin`, the config of the admin's own files. A registry the
-/// admin blocked, or whose entry has no location (a wildcard prefix, which names no registry to relay), is left out,
-/// and so is the mirror itself.
+/// admin blocked, or whose entry has no location (a wildcard prefix, which names no registry to relay), or whose
+/// location has a port, is left out, and so is the mirror itself.
 #[must_use]
 pub fn entries(
     names: &[String],
@@ -71,6 +71,15 @@ pub fn entries(
             Some("a wildcard prefix has no location to relay")
         } else if registry.endpoint.location.split('/').next() == Some(own.as_str()) {
             Some("is the mirror itself")
+        } else if registry
+            .endpoint
+            .location
+            .split('/')
+            .next()
+            .is_some_and(|host| host.contains(':'))
+        {
+            // The mirror's location carries the registry as a path component, and a name has no colon (D88).
+            Some("has a port, which the mirror's path cannot hold")
         } else {
             None
         };
@@ -215,6 +224,10 @@ location = "127.0.0.1:7480/self"
                 ),
                 ("127.0.0.1:7480/self", "is the mirror itself"),
                 ("evil.example", "blocked"),
+                (
+                    "registry.corp:5000",
+                    "has a port, which the mirror's path cannot hold"
+                ),
             ]
         );
         // What was written is what is read back, entry for entry.
@@ -224,6 +237,19 @@ location = "127.0.0.1:7480/self"
             assert_eq!(registry.mirrors[0].pull_from_mirror, "all");
             assert!(registry.mirrors[0].location.starts_with("127.0.0.1:7480/"));
         }
+    }
+
+    #[test]
+    fn a_registry_with_a_port_is_left_out_as_a_name_with_a_colon_is_no_path() {
+        let config = admin(
+            "[[registry]]\nprefix = \"harbor.corp:8443\"\nlocation = \"harbor.corp:8443\"\n\n[[registry]]\nprefix = \"alias.corp\"\nlocation = \"harbor.corp:8443/team\"\n\n[[registry]]\nprefix = \"plain.corp\"\nlocation = \"plain.corp\"\n",
+        );
+        let (entries, left) = entries(&names(&["harbor.corp:8443"]), &config, ADDRESS);
+        let skipped: Vec<_> = left.iter().map(|l| l.prefix.as_str()).collect();
+        assert_eq!(skipped, ["alias.corp", "harbor.corp:8443"]);
+        assert!(left.iter().all(|l| l.reason.contains("port")));
+        let kept: Vec<_> = entries.iter().map(|r| r.prefix.as_str()).collect();
+        assert_eq!(kept, ["plain.corp"]);
     }
 
     #[test]

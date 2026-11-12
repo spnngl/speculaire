@@ -77,6 +77,8 @@
 [blob_cache]
 # On CRI-O, the size above which the least recently served blobs are evicted (D67).
 #max_size = "20GiB"
+# Where the blob cache keeps the blobs and the manifests the mirror served (D67, D88). Restart.
+#directory = "/var/lib/speculaire/blobs"
 
 [metrics]
 # Where /metrics, /readyz and /livez listen, plain HTTP (D42, D45). Restart.

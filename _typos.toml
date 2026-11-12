@@ -5,11 +5,14 @@ extend-exclude = ["plan/", "fuzz/seeds/", "**/tests/data/"]
 
 [default]
 # "ANDed": "AND" in capitals, then a suffix.
-extend-ignore-re = ["\\bANDed\\b"]
+# "YWxpY2U6cHctN2IyZDkw": the Base64 of a test login, which the redaction test looks for in the log.
+extend-ignore-re = ["\\bANDed\\b", "\\bYWxpY2U6cHctN2IyZDkw\\b"]
 
 [default.extend-words]
 # Azure Kubernetes Service.
 AKS = "AKS"
+# Base64 test vectors of RFC 4648: "fo" is "Zm8=".
+fo = "fo"
 # hax, the Rust verification toolchain.
 hax = "hax"
 # The in-toto Rekor entry type.

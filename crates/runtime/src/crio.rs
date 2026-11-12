@@ -5,7 +5,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -181,9 +181,51 @@ impl Nri {
     }
 }
 
+/// The credential file CRI-O reads, `[crio.image] global_auth_file` in the text of its config (v1.37.0
+/// `pkg/config/config.go:717`, handed to the image library as `AuthFilePath` at `server/server.go:448`); `None` when
+/// unset, and the library's default search applies (D89).
+///
+/// # Errors
+///
+/// When the text is not TOML or the key is not a string.
+pub fn global_auth_file(config: &str) -> Result<Option<PathBuf>, Error> {
+    #[derive(Default, Deserialize)]
+    struct Root {
+        #[serde(default)]
+        crio: Crio,
+    }
+    #[derive(Default, Deserialize)]
+    struct Crio {
+        #[serde(default)]
+        image: Image,
+    }
+    #[derive(Default, Deserialize)]
+    struct Image {
+        #[serde(default)]
+        global_auth_file: String,
+    }
+    let Root {
+        crio: Crio { image },
+    } = toml::from_str(config)?;
+    Ok((!image.global_auth_file.is_empty()).then(|| PathBuf::from(image.global_auth_file)))
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn the_global_auth_file_is_under_crio_image_and_empty_means_none() {
+        let set = "[crio.image]\nglobal_auth_file = \"/var/lib/kubelet/config.json\"\n";
+        assert_eq!(
+            super::global_auth_file(set).unwrap(),
+            Some(PathBuf::from("/var/lib/kubelet/config.json"))
+        );
+        for text in ["", "[crio]\n", "[crio.image]\nglobal_auth_file = \"\"\n"] {
+            assert_eq!(super::global_auth_file(text).unwrap(), None, "{text:?}");
+        }
+        assert!(super::global_auth_file("[crio.image]\nglobal_auth_file = 1\n").is_err());
+    }
 
     use super::*;
 

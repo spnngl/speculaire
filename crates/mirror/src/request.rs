@@ -26,17 +26,54 @@ impl Kind {
     }
 }
 
+/// What a pull names: a digest, or a tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reference {
+    /// `sha256:<hex>`: content, found by its hash.
+    Digest(Digest),
+    /// A tag: a name that someone has to resolve, which on containerd is a miss (D6) and on CRI-O is the relay's to
+    /// resolve at upstream (D66).
+    Tag(String),
+}
+
+impl Reference {
+    /// The digest, when it is one.
+    #[must_use]
+    pub const fn digest(&self) -> Option<&Digest> {
+        match self {
+            Self::Digest(digest) => Some(digest),
+            Self::Tag(_) => None,
+        }
+    }
+
+    /// A reference by its text: a digest, else a tag (`[\w][\w.-]{0,127}`), else `None`.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        if let Ok(digest) = Digest::parse(text) {
+            return Some(Self::Digest(digest));
+        }
+        let mut chars = text.chars();
+        let first = chars.next()?;
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        (word(first) && text.len() <= 128 && chars.all(|c| word(c) || c == '.' || c == '-'))
+            .then(|| Self::Tag(text.to_owned()))
+    }
+}
+
 /// A request the mirror answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
     /// `GET /v2/`: the runtime's check that this is a registry.
     Ping,
-    /// A pull of `kind`, by `digest`; `None` when the name is no digest: a tag, which is a miss (D6).
+    /// A pull of `kind`.
     Pull {
         /// What is pulled.
         kind: Kind,
-        /// Its digest.
-        digest: Option<Digest>,
+        /// The repository name, `docker.io/library/busybox` on CRI-O, where the first segment is the registry the
+        /// image comes from (D66).
+        name: String,
+        /// What the name is pulled by; `None` when it is no digest and no tag, which is a miss.
+        reference: Option<Reference>,
         /// Whether only the head of the response is wanted.
         head: bool,
     },
@@ -44,8 +81,7 @@ pub enum Route {
 
 /// The route of a request, or `None` when it is none of the pull API's: the mirror answers those with a 404 too.
 ///
-/// The repository name is ignored: content is found by digest, whatever the name. Query parameters, such as
-/// containerd's `ns`, are ignored.
+/// Query parameters, such as containerd's `ns`, are ignored.
 #[must_use]
 pub fn route(method: &Method, path: &str) -> Option<Route> {
     let head = match *method {
@@ -72,7 +108,8 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
     };
     Some(Route::Pull {
         kind,
-        digest: Digest::parse(reference).ok(),
+        name: name.join("/"),
+        reference: Reference::parse(reference),
         head,
     })
 }
@@ -175,7 +212,12 @@ mod tests {
 
     fn pull(method: &Method, path: &str) -> Option<(Kind, bool, bool)> {
         match route(method, path)? {
-            Route::Pull { kind, digest, head } => Some((kind, digest.is_some(), head)),
+            Route::Pull {
+                kind,
+                reference,
+                head,
+                ..
+            } => Some((kind, reference.is_some_and(|r| r.digest().is_some()), head)),
             Route::Ping => None,
         }
     }
@@ -196,19 +238,47 @@ mod tests {
     }
 
     #[test]
-    fn the_name_may_have_any_number_of_segments_and_is_ignored() {
+    fn the_name_may_have_any_number_of_segments_and_is_kept() {
         for name in ["a", "a/b", "a/b/c/d", "docker.io/library/busybox"] {
             let path = format!("/v2/{name}/blobs/{SHA}");
             assert_eq!(pull(&Method::GET, &path), Some((Kind::Blob, true, false)));
+            let Some(Route::Pull { name: got, .. }) = route(&Method::GET, &path) else {
+                panic!("no pull");
+            };
+            assert_eq!(got, name);
         }
     }
 
     #[test]
-    fn a_tag_is_a_pull_without_a_digest() {
+    fn a_tag_is_a_pull_without_a_digest_and_a_bad_reference_names_nothing() {
         assert_eq!(
             pull(&Method::GET, "/v2/library/busybox/manifests/latest"),
             Some((Kind::Manifest, false, false))
         );
+        let reference = |text: &str| match route(&Method::GET, &format!("/v2/a/manifests/{text}")) {
+            Some(Route::Pull { reference, .. }) => reference,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            reference("1.37.2-alpine_3"),
+            Some(Reference::Tag("1.37.2-alpine_3".to_owned()))
+        );
+        assert_eq!(reference("_x"), Some(Reference::Tag("_x".to_owned())));
+        assert_eq!(
+            reference(&"a".repeat(128)),
+            Some(Reference::Tag("a".repeat(128)))
+        );
+        for bad in [
+            "sha256:short",
+            ".x",
+            "-x",
+            "a:b",
+            &"a".repeat(129),
+            "a%20b",
+            "é",
+        ] {
+            assert_eq!(reference(bad), None, "{bad}");
+        }
         assert_eq!(
             pull(&Method::GET, "/v2/a/blobs/sha256:short"),
             Some((Kind::Blob, false, false))

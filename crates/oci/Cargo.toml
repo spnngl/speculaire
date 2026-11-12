@@ -10,11 +10,11 @@ publish.workspace = true
 
 [dependencies]
 oci-spec.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-serde.workspace = true
-serde_json.workspace = true
 speculaire-oracle-harness.workspace = true
 
 [lints]

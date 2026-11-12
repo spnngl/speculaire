@@ -1,6 +1,6 @@
 //! The mirror's TLS: its server certificate, and the clients it accepts (D14).
 //!
-//! Only TLS 1.3 (the `tls12` feature of rustls is off), and only a client with a certificate that the local CA
+//! Only TLS 1.3 (named in the server config: the upstream client enables `tls12`, D88), and only a client with a certificate that the local CA
 //! signed. The files are read again when one of them changes, so `configure` can replace them under a running agent
 //! (D14, Measured: the next pull used the regenerated certificates).
 
@@ -167,7 +167,7 @@ fn read(directory: &Path) -> Result<Loaded, Error> {
                 reason: e.to_string(),
             })?;
     let mut config = ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
+        .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(verifier)
         .with_single_cert(chain, key)?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];

@@ -21,6 +21,9 @@ use tokio::sync::oneshot;
 use tokio_rustls::TlsConnector;
 
 use super::*;
+use crate::content::Content;
+use crate::pulls::{Answer as Answer_, Local, Pull, Pulls};
+use crate::request::Kind;
 
 const IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -70,6 +73,10 @@ fn write_files(dir: &Path, mirror: &Mirror) {
 }
 
 async fn start<C: Content>(content: C) -> Server {
+    start_pulls(Local::new(content)).await
+}
+
+async fn start_pulls<P: Pulls>(pulls: P) -> Server {
     let directory = tempfile::tempdir().unwrap();
     let mirror = Mirror::generate(IP, SystemTime::now()).unwrap();
     write_files(directory.path(), &mirror);
@@ -77,7 +84,7 @@ async fn start<C: Content>(content: C) -> Server {
     let listener = TcpListener::bind((IP, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
-    tokio::spawn(serve(listener, tls, Arc::new(content), async {
+    tokio::spawn(serve(listener, tls, Arc::new(pulls), async {
         // An error means the sender went with the test: stop too.
         let _ = stopped.await;
     }));
@@ -419,6 +426,31 @@ async fn refused(server: &Server, config: Arc<ClientConfig>) -> bool {
 }
 
 #[tokio::test]
+async fn a_client_that_speaks_only_tls_1_2_is_refused() {
+    let server = start(Fake(HashMap::new())).await;
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut roots = RootCertStore::empty();
+    for der in CertificateDer::pem_slice_iter(server.mirror.ca().as_bytes()) {
+        roots.add(der.unwrap()).unwrap();
+    }
+    let pem = server.mirror.contents(Part::Client);
+    let chain = CertificateDer::pem_slice_iter(pem.expose_secret().as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key = PrivateKeyDer::from_pem_slice(pem.expose_secret().as_bytes()).unwrap();
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS12])
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(chain, key)
+        .unwrap();
+    assert!(refused(&server, Arc::new(config)).await);
+    // The same certificates over TLS 1.3 work.
+    let mut sender = client(&server).await;
+    assert_eq!(get(&mut sender, "/v2/").await.status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn a_client_without_the_local_certificate_is_refused() {
     let server = start(Fake(HashMap::new())).await;
     assert!(refused(&server, client_config(&server.mirror, None)).await);
@@ -525,4 +557,93 @@ async fn the_metrics_count_requests_bytes_and_first_byte_times() {
     ] {
         assert!(text.lines().any(|l| l == line), "no `{line}` in\n{text}");
     }
+}
+
+/// Writes down every pull it is asked, and answers a manifest with a fixed body and everything else with a miss.
+struct Recording(std::sync::Mutex<Vec<String>>);
+
+impl Pulls for Recording {
+    fn pull(&self, pull: Pull<'_>) -> impl std::future::Future<Output = Answer_> + Send {
+        self.0.lock().unwrap().push(format!(
+            "{} {} {:?} head={} range={:?} accept={:?}",
+            pull.kind.label(),
+            pull.name,
+            pull.reference,
+            pull.head,
+            pull.range,
+            pull.accept
+        ));
+        std::future::ready(if pull.kind == Kind::Manifest {
+            let mut response = Response::new(
+                Full::new(Bytes::from_static(b"manifest"))
+                    .map_err(never)
+                    .boxed_unsync(),
+            );
+            *response.status_mut() = StatusCode::OK;
+            Answer_::Served(response)
+        } else {
+            Answer_::Missing
+        })
+    }
+}
+
+/// A `Recording` that the test keeps hold of.
+struct Shared(Arc<Recording>);
+
+impl Pulls for Shared {
+    async fn pull(&self, pull: Pull<'_>) -> Answer_ {
+        self.0.pull(pull).await
+    }
+}
+
+#[tokio::test]
+async fn what_answers_is_told_the_name_the_reference_the_range_and_the_accept() {
+    let recording = Arc::new(Recording(std::sync::Mutex::new(Vec::new())));
+    let server = start_pulls(Shared(Arc::clone(&recording))).await;
+    let mut sender = client(&server).await;
+    let digest = digest_of(1);
+    let request = |method: Method, path: String, range: Option<&str>, accept: Option<&str>| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "mirror");
+        if let Some(range) = range {
+            request = request.header("range", range);
+        }
+        if let Some(accept) = accept {
+            request = request.header("accept", accept);
+        }
+        request.body(Empty::<Bytes>::new()).unwrap()
+    };
+    let answer = sender
+        .send_request(request(
+            Method::GET,
+            "/v2/docker.io/library/busybox/manifests/1.37".to_owned(),
+            None,
+            Some("application/vnd.oci.image.index.v1+json"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(answer.status(), StatusCode::OK);
+    let answer = sender
+        .send_request(request(
+            Method::HEAD,
+            format!("/v2/localhost:5000/team/app/blobs/{digest}"),
+            Some("bytes=5-"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(answer.status(), StatusCode::NOT_FOUND);
+    let seen = recording.0.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        [
+            r#"manifest docker.io/library/busybox Some(Tag("1.37")) head=false range=None accept=Some("application/vnd.oci.image.index.v1+json")"#.to_owned(),
+            format!(
+                r#"blob localhost:5000/team/app Some(Digest(Digest {{ algorithm: "sha256", encoded: "{}" }})) head=true range=Some("bytes=5-") accept=None"#,
+                digest.encoded()
+            ),
+        ]
+    );
 }
