@@ -265,16 +265,7 @@ jobs:
     steps:
       - name: Every job passed
         env:
-          CHECK: ${{ needs.check.result }}
-          COVERAGE: ${{ needs.coverage.result }}
-          MUSL: ${{ needs.musl.result }}
-          DEPS: ${{ needs.deps.result }}
-          ORACLE: ${{ needs.oracle.result }}
-          E2E: ${{ needs.e2e.result }}
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          [ "$CHECK" = success ] || { echo "::error::check: $CHECK"; exit 1; }
-          [ "$COVERAGE" = success ] || { echo "::error::coverage: $COVERAGE"; exit 1; }
-          [ "$MUSL" = success ] || { echo "::error::musl: $MUSL"; exit 1; }
-          [ "$DEPS" = success ] || { echo "::error::deps: $DEPS"; exit 1; }
-          [ "$ORACLE" = success ] || { echo "::error::oracle: $ORACLE"; exit 1; }
-          [ "$E2E" = success ] || { echo "::error::e2e: $E2E"; exit 1; }
+          failed=$(jq -r 'to_entries[] | select(.value.result != "success") | "::error::\(.key): \(.value.result)"' <<< "$NEEDS")
+          [ -z "$failed" ] || { echo "$failed"; exit 1; }
