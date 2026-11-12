@@ -527,3 +527,33 @@ fn merge_table(into: &mut Table, from: Table) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_one_plugin_names_become_uris() {
+        for (name, uri) in [
+            ("cri", "io.containerd.grpc.v1.cri"),
+            ("cgroups", "io.containerd.monitor.v1.cgroups"),
+            ("linux", "io.containerd.runtime.v1.linux"),
+            ("scheduler", "io.containerd.gc.v1.scheduler"),
+            ("bolt", "io.containerd.metadata.v1.bolt"),
+            ("task", "io.containerd.runtime.v2.task"),
+            ("opt", "io.containerd.internal.v1.opt"),
+            ("restart", "io.containerd.internal.v1.restart"),
+            ("tracing", "io.containerd.internal.v1.tracing"),
+            ("otlp", "io.containerd.tracing.processor.v1.otlp"),
+            ("overlayfs", "io.containerd.snapshotter.v1.overlayfs"),
+            ("zfs", "io.containerd.snapshotter.v1.zfs"),
+            ("images-service", "io.containerd.service.v1.images-service"),
+            ("windows", "io.containerd.snapshotter.v1.windows"),
+            ("windows-lcow", "io.containerd.snapshotter.v1.windows-lcow"),
+            ("other", "io.containerd.grpc.v1.other"),
+            ("io.x.y", "io.x.y"),
+        ] {
+            assert_eq!(v1_plugin_name(name), uri, "{name}");
+        }
+    }
+}

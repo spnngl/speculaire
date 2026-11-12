@@ -253,14 +253,18 @@ vet-exempt:
 # (a static Linux binary of this machine's architecture) also runs. Volumes speculaire-go-mod and
 # speculaire-go-build-<arch> keep the module and build caches. `just musl` never builds it, so no artifact holds it.
 # Build, check and run the Go test oracle (D29), then the Rust tests that compare with it (D70)
-oracle:
+oracle: oracle-build
+    if [[ "$(uname -s)" == Linux ]]; then {{ just_executable() }} oracle-test; else {{ just_executable() }} dev oracle-test; fi
+
+# The shards of the mutants workflow ask the binary too (D79).
+# Build and check the Go test oracle into target/oracle/speculaire-oracle
+oracle-build:
     mkdir -p target/oracle
     {{ container }} run --rm -v "$(pwd)/oracle:/src" -w /src -v "$(pwd)/target/oracle:/out" -v speculaire-go-mod:/go/pkg/mod \
         -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" docker.io/library/golang:{{ golang }} sh -euc ' \
             unformatted=$(gofmt -l .); [ -z "$unformatted" ] || { echo "gofmt: $unformatted" >&2; exit 1; }; \
             go mod verify; go vet ./...; go test ./...; \
             go build -trimpath -o /out/speculaire-oracle .; /out/speculaire-oracle version'
-    if [[ "$(uname -s)" == Linux ]]; then {{ just_executable() }} oracle-test; else {{ just_executable() }} dev oracle-test; fi
 
 # The tests that ask target/oracle/speculaire-oracle the cases they run (SPECULAIRE_ORACLE, crates/oracle-harness); the
 # output stays on, so that the log shows each comparison ran and was not skipped.
