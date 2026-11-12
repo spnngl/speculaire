@@ -527,13 +527,21 @@ fn load_cert_files(dir: &Path) -> Result<Vec<HostConfig>, HostsError> {
 /// `hostPaths` (`config_unix.go`): where `root` keeps the config of `host`. A port is written `_port_` in the first.
 fn host_paths(root: &Path, host: &str) -> Vec<PathBuf> {
     let root = root.to_string_lossy();
-    let mut paths = Vec::new();
+    host_dir_names(host)
+        .iter()
+        .map(|name| join_clean(&root, name).into())
+        .collect()
+}
+
+/// The names of the directories of `host` in a root, in the order they are looked for.
+fn host_dir_names(host: &str) -> Vec<String> {
+    let mut names = Vec::new();
     if let Some(i) = host.rfind(':').filter(|i| *i > 0) {
-        paths.push(join_clean(&root, &format!("{}_{}_", &host[..i], &host[i + 1..])).into());
+        names.push(format!("{}_{}_", &host[..i], &host[i + 1..]));
     }
-    paths.push(join_clean(&root, host).into());
-    paths.push(join_clean(&root, "_default").into());
-    paths
+    names.push(host.to_owned());
+    names.push("_default".to_owned());
+    names
 }
 
 /// The directory of `host` in the first of `roots` that has one (`HostDirFromRoot`, `hostDirFromRoots`): `root/host`
@@ -609,14 +617,95 @@ pub fn resolve(
     host: &str,
     default_scheme: Option<&str>,
 ) -> Result<Vec<RegistryHost>, HostsError> {
-    let mut hosts = match host_dir(roots, host)? {
-        Some(dir) => load_host_dir(&dir)?,
-        None => vec![HostConfig::default()],
-    };
+    let configs = host_dir(roots, host)?
+        .map(|dir| load_host_dir(&dir))
+        .transpose()?;
+    Ok(finish(configs, host, default_scheme))
+}
+
+/// The defaults of `host` applied to what its directory holds, if it has one.
+fn finish(
+    configs: Option<Vec<HostConfig>>,
+    host: &str,
+    default_scheme: Option<&str>,
+) -> Vec<RegistryHost> {
+    let mut hosts = configs.unwrap_or_else(|| vec![HostConfig::default()]);
     if let Some(last) = hosts.last_mut().filter(|last| last.host.is_empty()) {
         apply_defaults(last, host, default_scheme);
     }
-    Ok(hosts.into_iter().map(registry_host).collect())
+    hosts.into_iter().map(registry_host).collect()
+}
+
+/// Every host directory below some roots, read once: what [`resolve`] reads from disk at each call, so that a reader
+/// can hold the tree as it was when it was valid (D91).
+///
+/// Unlike [`resolve`], loading refuses a `hosts.toml` that does not parse, where containerd logs it and reads the
+/// certificate files instead: the point of holding the tree is to keep the last one that was right.
+#[derive(Clone, Debug, Default)]
+pub struct Tree {
+    /// How many roots were read.
+    roots: usize,
+    /// By the position of the root and the name of the directory.
+    dirs: std::collections::BTreeMap<(usize, String), Vec<HostConfig>>,
+}
+
+impl Tree {
+    /// The host directories of each of `roots`.
+    ///
+    /// # Errors
+    ///
+    /// When a directory or file cannot be read, or a `hosts.toml` is not valid.
+    pub fn load(roots: &[PathBuf]) -> Result<Self, HostsError> {
+        let mut dirs = std::collections::BTreeMap::new();
+        for (index, root) in roots.iter().enumerate() {
+            let entries = match std::fs::read_dir(root) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(HostsError::Read {
+                        path: root.clone(),
+                        source,
+                    });
+                }
+            };
+            for entry in entries {
+                let entry = entry.map_err(|source| HostsError::Read {
+                    path: root.clone(),
+                    source,
+                })?;
+                let path = entry.path();
+                // A link is followed, as `host_dir` does; one that dangles is no directory.
+                match std::fs::metadata(&path) {
+                    Ok(meta) if meta.is_dir() => {}
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                    Err(source) => return Err(HostsError::Read { path, source }),
+                }
+                let configs = match read_hosts_toml(&path)? {
+                    Some(configs) => configs,
+                    None => load_cert_files(&path)?,
+                };
+                dirs.insert(
+                    (index, entry.file_name().to_string_lossy().into_owned()),
+                    configs,
+                );
+            }
+        }
+        Ok(Self {
+            roots: roots.len(),
+            dirs,
+        })
+    }
+
+    /// [`resolve`] over the tree: the endpoints of `host`, with no disk to read.
+    #[must_use]
+    pub fn resolve(&self, host: &str, default_scheme: Option<&str>) -> Vec<RegistryHost> {
+        let names = host_dir_names(host);
+        let found = (0..self.roots)
+            .flat_map(|index| names.iter().map(move |name| (index, name.clone())))
+            .find_map(|key| self.dirs.get(&key));
+        finish(found.cloned(), host, default_scheme)
+    }
 }
 
 fn apply_defaults(last: &mut HostConfig, host: &str, default_scheme: Option<&str>) {
@@ -791,6 +880,98 @@ mod tests {
         std::os::unix::fs::symlink(certs.join("c.key"), certs.join("c.key")).expect("a link");
         assert!(matches!(
             load_cert_files(&certs),
+            Err(HostsError::Read { .. })
+        ));
+    }
+
+    fn tree_of(files: &[(&str, &str)]) -> (tempfile::TempDir, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        for (path, text) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+            std::fs::write(path, text).expect("a file");
+        }
+        let roots = vec![dir.path().to_owned()];
+        (dir, roots)
+    }
+
+    fn summary(hosts: &[RegistryHost]) -> Vec<(String, String, String)> {
+        hosts
+            .iter()
+            .map(|h| (h.scheme.clone(), h.host.clone(), h.path.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_tree_resolves_every_host_as_the_disk_does() {
+        let (_dir, roots) = tree_of(&[
+            (
+                "docker.io/hosts.toml",
+                "server = \"https://registry-1.docker.io\"\n[host.\"https://mirror.test\"]\ncapabilities = [\"pull\"]\n",
+            ),
+            (
+                "reg.test_5000_/hosts.toml",
+                "server = \"http://reg.test:5000\"\n",
+            ),
+            ("_default/hosts.toml", "[host.\"https://fallback.test\"]\n"),
+            ("a-file", "not a directory"),
+        ]);
+        let tree = Tree::load(&roots).expect("a valid tree");
+        for host in ["docker.io", "reg.test:5000", "other.test", "localhost:5000"] {
+            assert_eq!(
+                summary(&tree.resolve(host, None)),
+                summary(&resolve(&roots, host, None).expect("hosts")),
+                "{host}"
+            );
+        }
+        // The tree holds what it read: a later edit is not in it.
+        std::fs::remove_dir_all(roots[0].join("docker.io")).expect("removed");
+        assert_eq!(tree.resolve("docker.io", None).len(), 2);
+    }
+
+    #[test]
+    fn the_first_root_with_a_directory_of_the_host_wins_in_a_tree() {
+        let (first, mut roots) =
+            tree_of(&[("_default/hosts.toml", "[host.\"https://one.test\"]\n")]);
+        let (second, more) = tree_of(&[
+            ("a.test/hosts.toml", "[host.\"https://two.test\"]\n"),
+            ("_default/hosts.toml", "[host.\"https://three.test\"]\n"),
+        ]);
+        roots.extend(more);
+        roots.push(first.path().join("missing"));
+        let tree = Tree::load(&roots).expect("a valid tree");
+        // `a.test` has a directory only in the second root, but the first root's `_default` comes first.
+        assert_eq!(tree.resolve("a.test", None)[0].host, "one.test");
+        assert_eq!(
+            summary(&tree.resolve("a.test", None)),
+            summary(&resolve(&roots, "a.test", None).expect("hosts"))
+        );
+        drop(second);
+    }
+
+    #[test]
+    fn a_tree_refuses_a_hosts_toml_that_does_not_parse_naming_the_file_and_the_position() {
+        let (_dir, roots) = tree_of(&[("docker.io/hosts.toml", "server = \"https://x\"\n[host\n")]);
+        let err = Tree::load(&roots).expect_err("an invalid file");
+        let HostsError::Parse { path, source } = err else {
+            panic!("not a parse error");
+        };
+        assert!(path.ends_with("docker.io/hosts.toml"));
+        assert_eq!(source.position().map(|(line, _)| line), Some(2));
+        // `resolve` goes on as containerd does, with the certificate files.
+        assert!(resolve(&roots, "docker.io", None).is_ok());
+    }
+
+    #[test]
+    fn a_tree_of_directories_with_certificate_files_and_a_link_that_dangles() {
+        let (dir, roots) = tree_of(&[("a.test/ca.crt", "")]);
+        std::os::unix::fs::symlink(dir.path().join("none"), dir.path().join("b.test"))
+            .expect("a link");
+        let tree = Tree::load(&roots).expect("a valid tree");
+        assert_eq!(tree.resolve("a.test", None)[0].tls.ca.len(), 1);
+        assert_eq!(tree.resolve("b.test", None)[0].tls.ca.len(), 0);
+        assert!(matches!(
+            Tree::load(&[dir.path().join("a.test").join("ca.crt")]),
             Err(HostsError::Read { .. })
         ));
     }

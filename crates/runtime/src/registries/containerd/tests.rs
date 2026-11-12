@@ -1,5 +1,7 @@
 //! Sources from a containerd config on a temporary tree.
 
+use std::time::SystemTime;
+
 use secrecy::ExposeSecret as _;
 
 use super::*;
@@ -32,7 +34,14 @@ impl Node {
         std::fs::write(dir.join("hosts.toml"), text).unwrap();
     }
 
+    /// The registry config of this tree, read.
     fn registries(&self) -> ContainerdRegistries {
+        let registries = self.unread();
+        registries.reload(None).unwrap();
+        registries
+    }
+
+    fn unread(&self) -> ContainerdRegistries {
         ContainerdRegistries::new(self.dir.path().join("config.toml"))
     }
 }
@@ -227,7 +236,7 @@ fn a_login_that_is_no_user_and_password_is_anonymous() {
 }
 
 #[test]
-fn the_deprecated_mirrors_table_and_a_missing_config_are_config_errors() {
+fn the_deprecated_mirrors_table_is_a_config_error() {
     let section = "plugins.\"io.containerd.cri.v1.images\".registry";
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -237,17 +246,110 @@ fn the_deprecated_mirrors_table_and_a_missing_config_are_config_errors() {
         ),
     )
     .unwrap();
-    let err = ContainerdRegistries::new(dir.path().join("config.toml"))
+    let registries = ContainerdRegistries::new(dir.path().join("config.toml"));
+    registries.reload(None).unwrap();
+    let err = registries
         .sources("docker.io/library/busybox", tag("1"))
         .unwrap_err();
     assert!(
         matches!(&err, Error::Config(text) if text.contains("mirrors")),
         "{err}"
     );
-    let err = ContainerdRegistries::new(dir.path().join("gone.toml"))
-        .sources("docker.io/library/busybox", tag("1"))
+}
+
+#[test]
+fn nothing_is_answered_before_a_read_and_no_config_is_the_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let registries = ContainerdRegistries::new(dir.path().join("config.toml"));
+    assert!(matches!(
+        registries.sources("quay.io/org/app", tag("1")),
+        Err(Error::Config(_))
+    ));
+    // containerd with no `config.toml` runs on its defaults: no `config_path`, the registry itself.
+    assert!(registries.reload(None).unwrap());
+    let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
+    assert_eq!(endpoints(&sources), [[("quay.io".to_owned(), true)]]);
+    // It is read again once the file appears.
+    let past = SystemTime::now() - std::time::Duration::from_secs(60);
+    assert!(
+        !registries
+            .reload(Some(SystemTime::now() + std::time::Duration::from_secs(60)))
+            .unwrap()
+    );
+    std::fs::write(dir.path().join("config.toml"), "version = 3\n").unwrap();
+    assert!(registries.reload(Some(past)).unwrap());
+}
+
+#[test]
+fn an_edit_of_a_hosts_file_shows_on_reload_and_only_then() {
+    let node = Node::new("");
+    node.hosts(
+        "quay.io",
+        "[host.\"https://one.corp\"]\n  capabilities = [\"pull\", \"resolve\"]\n",
+    );
+    let registries = node.registries();
+    let hosts = |registries: &ContainerdRegistries| {
+        endpoints(&registries.sources("quay.io/org/app", tag("1")).unwrap())
+    };
+    assert_eq!(
+        hosts(&registries),
+        [
+            [("one.corp".to_owned(), true)],
+            [("quay.io".to_owned(), true)]
+        ]
+    );
+    let before = SystemTime::now();
+    node.hosts(
+        "quay.io",
+        "[host.\"https://two.corp\"]\n  capabilities = [\"pull\", \"resolve\"]\n",
+    );
+    // The answer stays the one that was read, whatever the disk says.
+    assert_eq!(hosts(&registries)[0], [("one.corp".to_owned(), true)]);
+    // A reload with nothing modified since does nothing; one with a file modified since reads.
+    let after = SystemTime::now() + std::time::Duration::from_secs(60);
+    assert!(!registries.reload(Some(after)).unwrap());
+    assert!(
+        registries
+            .reload(Some(before - std::time::Duration::from_secs(1)))
+            .unwrap()
+    );
+    assert_eq!(hosts(&registries)[0], [("two.corp".to_owned(), true)]);
+}
+
+#[test]
+fn a_file_that_is_not_valid_keeps_the_config_held_and_names_the_file_and_the_place() {
+    let node = Node::new("");
+    node.hosts("quay.io", "[host.\"https://one.corp\"]\n");
+    let registries = node.registries();
+    node.hosts("quay.io", "[host.\"https://two.corp\"\n");
+    let err = registries.reload(None).unwrap_err();
+    let Error::Config(text) = &err else {
+        panic!("{err}")
+    };
+    assert!(
+        text.contains("hosts.toml") && text.contains("line 1, column 25"),
+        "{text}"
+    );
+    let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
+    assert_eq!(endpoints(&sources)[0], [("one.corp".to_owned(), true)]);
+    // The file made right is read.
+    node.hosts("quay.io", "[host.\"https://three.corp\"]\n");
+    assert!(registries.reload(None).unwrap());
+    let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
+    assert_eq!(endpoints(&sources)[0], [("three.corp".to_owned(), true)]);
+}
+
+#[test]
+fn a_config_toml_that_is_not_valid_is_an_error_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "version = [").unwrap();
+    let err = ContainerdRegistries::new(dir.path().join("config.toml"))
+        .reload(None)
         .unwrap_err();
-    assert!(matches!(err, Error::Config(_)), "{err}");
+    assert!(
+        matches!(&err, Error::Config(text) if text.contains("config.toml")),
+        "{err}"
+    );
 }
 
 #[test]

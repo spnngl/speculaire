@@ -727,3 +727,83 @@ fn check_config_exits_1_with_the_same_messages_and_0_on_a_node_that_is_right() {
         "{agent}"
     );
 }
+
+/// A node whose containerd reads its `hosts.toml` trees from `certs.d` in the directory of the node.
+fn registry_node() -> Node {
+    let config = format!(
+        "version = 3\n{IMAGES}\n[plugins.\'io.containerd.cri.v1.images\'.registry]\nconfig_path = \'@DIR@/certs.d\'\n"
+    );
+    Node::new(Answers::containerd("v2.4.2"), Some(&config))
+}
+
+fn write_hosts(node: &Node, text: &str) -> PathBuf {
+    let path = node.dir.path().join("certs.d/quay.io/hosts.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn an_invalid_registry_config_keeps_the_previous_is_reported_once_and_a_fix_is_picked_up_by_a_poll()
+{
+    let node = registry_node();
+    let hosts = write_hosts(&node, "[host.\"https://one.corp\"]\n");
+    let mut agent = Agent::spawn_on(
+        node,
+        free_port(),
+        scratch_file(),
+        "[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n",
+        &[],
+    );
+    // The first read, at startup.
+    agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
+    wait_until(|| get(agent.port, "/readyz", "").is_some_and(|r| r.status == 200));
+    std::fs::write(&hosts, "[host.\"https://one.corp\"\n").unwrap();
+    let line = agent.line(&[r#""level":"ERROR""#, "registry config reload failed"]);
+    assert!(
+        line.contains("hosts.toml") && line.contains("line 1, column 25"),
+        "{line}"
+    );
+    // The polls that follow find the file as it was: nothing more to say.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        reload_failures(&agent),
+        "speculaire_config_reload_failures_total 1"
+    );
+    assert_eq!(agent.get("/readyz", "").status, 200);
+    std::fs::write(&hosts, "[host.\"https://two.corp\"]\n").unwrap();
+    agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
+    let (status, lines) = agent.stop();
+    assert!(status.success(), "{status}");
+    let errors = lines
+        .iter()
+        .filter(|l| l.contains(r#""level":"ERROR""#))
+        .count();
+    assert_eq!(errors, 1, "{lines:#?}");
+}
+
+#[test]
+fn sighup_reads_the_registry_config_again_whatever_the_modification_times_say() {
+    let node = registry_node();
+    let hosts = write_hosts(&node, "[host.\"https://one.corp\"]\n");
+    let mut agent = Agent::spawn_on(
+        node,
+        free_port(),
+        scratch_file(),
+        "[config]\npoll_interval = \"1h\"\n[log]\nfilter = \"debug\"\n",
+        &[],
+    );
+    agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
+    wait_until(|| get(agent.port, "/readyz", "").is_some_and(|r| r.status == 200));
+    // A file that is replaced by an older one, as `mv` of a backup does.
+    std::fs::write(&hosts, "[host.\"https://two.corp\"]\n").unwrap();
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&hosts)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    agent.signal("HUP");
+    agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
+}

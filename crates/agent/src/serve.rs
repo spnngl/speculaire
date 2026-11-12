@@ -9,6 +9,7 @@ use speculaire_mirror::Local;
 use speculaire_mirror::cache::Cache;
 use speculaire_mirror::relay::{CriImages, Relay};
 use speculaire_mirror::tls::Tls;
+use speculaire_runtime::registries::Registries;
 use speculaire_runtime::{Fallback, Node as RuntimeNode};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
@@ -88,7 +89,12 @@ async fn serve(
     });
     info!(%address, "status listener open");
     // `/readyz` answers 503 until the mirror listens (D45); an agent that cannot open it stops (D55).
-    let mirror = start_mirror(&config, &node).await?;
+    // The first read of the registry config starts the first interval of the polls: a file changed after it began is
+    // newer than it, and a poll finds it (D30).
+    let mut last_check = SystemTime::now();
+    let registries = node.registries();
+    reload_registries(&*registries, None);
+    let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
     status.mirror_listening();
     systemd::watchdog();
     systemd::ready();
@@ -101,7 +107,6 @@ async fn serve(
     poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // D30: a poll reloads when the file changed at or after the start of the previous read, so a file
     // SIGHUP already read is not read again.
-    let mut last_check = SystemTime::now();
     loop {
         tokio::select! {
             _ = terminate.recv() => break,
@@ -109,6 +114,8 @@ async fn serve(
             _ = hangup.recv() => {
                 last_check = SystemTime::now();
                 reload(path, &mut config, &logs);
+                mirror.apply(&config);
+                reload_registries(&*registries, None);
             }
             _ = poll.tick() => {
                 let start = SystemTime::now();
@@ -116,7 +123,9 @@ async fn serve(
                 let modified = std::fs::metadata(path).and_then(|m| m.modified());
                 if modified.is_ok_and(|m| m >= last_check) {
                     reload(path, &mut config, &logs);
+                    mirror.apply(&config);
                 }
+                reload_registries(&*registries, Some(last_check));
                 last_check = start;
             }
         }
@@ -165,13 +174,38 @@ fn reload(path: &Path, running: &mut Config, logs: &Logs) {
     }
 }
 
+/// Reads the registry config again (D91): all of it without `since`, what changed at or after it with. A config that
+/// is not valid stays unread: the one held serves, and the failure is logged once and counted.
+fn reload_registries(registries: &dyn Registries, since: Option<SystemTime>) {
+    match registries.reload(since) {
+        Ok(true) => debug!("registry config reloaded"),
+        Ok(false) => {}
+        Err(err) => {
+            metrics::counter!(telemetry::CONFIG_RELOAD_FAILURES).increment(1);
+            error!(
+                error = %err,
+                "registry config reload failed; the previous registry config stays in use"
+            );
+        }
+    }
+}
+
 /// The mirror, listening, and what stops it.
 struct Mirror {
     stop: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
+    /// The relay, where the node has one.
+    relay: Option<Arc<Relay<CriImages>>>,
 }
 
 impl Mirror {
+    /// Gives the mirror the live keys of `config`: a lowered `blob_cache.max_size` evicts at the next blob kept (D91).
+    fn apply(&self, config: &Config) {
+        if let Some(relay) = &self.relay {
+            relay.cache().set_max_size(config.blob_cache.max_size.get());
+        }
+    }
+
     async fn stop(self) {
         // An error means the mirror already ended.
         let _ = self.stop.send(());
@@ -183,7 +217,11 @@ impl Mirror {
 
 /// Opens the mirror on `mirror.address` with the certificates of `configure` (D14, D55). On containerd it serves what
 /// the node holds; on CRI-O it relays pulls through the blob cache (D66, D67).
-async fn start_mirror(config: &Config, node: &RuntimeNode) -> anyhow::Result<Mirror> {
+async fn start_mirror(
+    config: &Config,
+    node: &RuntimeNode,
+    registries: Arc<dyn Registries>,
+) -> anyhow::Result<Mirror> {
     let directory = config.mirror.directory.get().get();
     let tls = Tls::load(directory).with_context(|| {
         format!(
@@ -201,20 +239,23 @@ async fn start_mirror(config: &Config, node: &RuntimeNode) -> anyhow::Result<Mir
         let _ = stopped.await;
     };
     let tls = Arc::new(tls);
-    let task = match node.fallback() {
-        Fallback::PerBlob => tokio::spawn(speculaire_mirror::serve(
-            listener,
-            tls,
-            Arc::new(Local::new(node.content())),
-            stopped,
-        )),
+    let (task, relay) = match node.fallback() {
+        Fallback::PerBlob => (
+            tokio::spawn(speculaire_mirror::serve(
+                listener,
+                tls,
+                Arc::new(Local::new(node.content())),
+                stopped,
+            )),
+            None,
+        ),
         Fallback::Relay => {
             let blobs = config.blob_cache.directory.get().get();
             let cache = Cache::open(blobs, config.blob_cache.max_size.get())
                 .with_context(|| format!("opening the blob cache {}", blobs.display()))?;
             let relay = Arc::new(Relay::new(
                 cache,
-                node.registries(),
+                registries,
                 CriImages::new(node.socket(), node.name()),
             ));
             speculaire_mirror::metrics::describe_relay();
@@ -222,9 +263,15 @@ async fn start_mirror(config: &Config, node: &RuntimeNode) -> anyhow::Result<Mir
                 let relay = Arc::clone(&relay);
                 async move { relay.evict_when_over().await }
             });
-            tokio::spawn(speculaire_mirror::serve(listener, tls, relay, stopped))
+            let task = tokio::spawn(speculaire_mirror::serve(
+                listener,
+                tls,
+                Arc::clone(&relay),
+                stopped,
+            ));
+            (task, Some(relay))
         }
     };
     info!(%address, "mirror open");
-    Ok(Mirror { stop, task })
+    Ok(Mirror { stop, task, relay })
 }

@@ -514,6 +514,35 @@ impl Endpoint {
     }
 }
 
+fn search_paths(ctx: &Context) -> configfile::SearchPaths {
+    configfile::search_paths(
+        ctx,
+        &Wanted {
+            name: "registries",
+            extension: "conf",
+            bare: false,
+            custom_file: ctx.registries_conf.as_deref(),
+            env_file: ctx.env_registries_conf.as_deref(),
+            custom_dir: ctx.registries_conf_dir.as_deref(),
+            env_override: ctx.env_registries_conf_override.as_deref(),
+        },
+    )
+}
+
+/// Where [`load`] looks for `ctx`, whether or not anything is there: the main files, the drop-in directories and the
+/// file read last. A change to any of them can change what [`load`] returns.
+#[must_use]
+pub fn watched(ctx: &Context) -> Vec<PathBuf> {
+    let paths = search_paths(ctx);
+    paths
+        .main_files
+        .into_iter()
+        .chain(paths.drop_in_dirs)
+        .chain(paths.extra_override)
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect()
+}
+
 /// Loads `registries.conf` and its drop-ins as go.podman.io/image does for `ctx`, and merges them.
 ///
 /// # Errors
@@ -529,18 +558,7 @@ pub fn load(ctx: &Context) -> Result<Config, Error> {
 ///
 /// As [`load`].
 pub fn load_except(ctx: &Context, skip: Option<&Path>) -> Result<Config, Error> {
-    let paths = configfile::search_paths(
-        ctx,
-        &Wanted {
-            name: "registries",
-            extension: "conf",
-            bare: false,
-            custom_file: ctx.registries_conf.as_deref(),
-            env_file: ctx.env_registries_conf.as_deref(),
-            custom_dir: ctx.registries_conf_dir.as_deref(),
-            env_override: ctx.env_registries_conf_override.as_deref(),
-        },
-    );
+    let paths = search_paths(ctx);
     let files = configfile::files(&paths, "conf").map_err(|e| Error::Read {
         path: e.path,
         source: e.source,
@@ -769,6 +787,23 @@ mod tests {
         ] {
             assert!(!is_domain(domain), "{domain}");
         }
+    }
+
+    #[test]
+    fn what_is_watched_is_where_the_files_are_looked_for_present_or_not() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let ctx = Context {
+            root: dir.path().to_owned(),
+            home: dir.path().join("root"),
+            ..Context::root()
+        };
+        let watched = watched(&ctx);
+        assert!(watched.contains(&dir.path().join("etc/containers/registries.conf")));
+        assert!(watched.contains(&dir.path().join("etc/containers/registries.conf.d")));
+        assert!(watched.iter().all(|path| !path.as_os_str().is_empty()));
+        let certs = crate::crio::certs::watched(&ctx);
+        assert!(certs.contains(&dir.path().join("etc/containers/certs.d")));
+        assert_eq!(certs.last(), Some(&dir.path().join("etc/docker/certs.d")));
     }
 
     #[test]

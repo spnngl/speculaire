@@ -25,6 +25,7 @@ speculaire-runtime = { path = "crates/runtime" }
 speculaire-configure = { path = "crates/configure" }
 anyhow = "1.0.104"
 # D88: the digests of the relay, on the provider that rustls uses (D13).
+arc-swap = "1.9.5"
 aws-lc-rs = "1.19.0"
 axum = { version = "0.8.9", default-features = false, features = [
   "http1",

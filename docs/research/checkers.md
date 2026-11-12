@@ -45,7 +45,7 @@ Crates already in use (tokio, axum, hyper, http, tonic, prost, serde, toml, clap
 |---|---|---|
 | tempfile | trigger: M2 `configure` | `NamedTempFile::persist` is D55's temporary file then rename; also test directories. |
 | insta | trigger: M2 `configure` | Snapshot tests of rewritten `hosts.toml` and `registries.conf.d` files, where an exact string assert would hide the diff. |
-| arc-swap | trigger: the first component reading live keys (M2) | One way to hand reloaded live keys (D47) to the mirror and the gate; weigh it against `tokio::sync::watch`. |
+| arc-swap | used: `speculaire-runtime` holds the registry config in an `ArcSwap` (D91) | One way to hand reloaded state to the request path (D47); `tokio::sync::watch` stays for a task that must wake. |
 | criterion or divan | trigger: the first measured hot path (M3, D35) | Micro-benchmarks of blob hashing (D7) and rendezvous hashing (D51). |
 | dhat | trigger: the same | Heap-allocation counts in tests of a hot path. |
 | release-plz, cargo-release | trigger: M5 release | Compare with dedens' release recipes, which D27 ports. |

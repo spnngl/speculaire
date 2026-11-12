@@ -2,14 +2,15 @@
 #
 # Every key is listed here, commented, at its default (D47); uncomment a key to change it.
 # `speculaire check-config [path]` checks a file without starting the agent.
-# The agent reloads this file on SIGHUP and when it changes, except the keys marked "Restart" (D47).
+# The agent reloads this file on SIGHUP and when it changes, except the keys marked "Restart" (D47). It reads the
+# node's registry config again the same way (D91).
 # Durations read like "300ms", "10m" or "1h"; sizes like "64MiB".
 
 # "agent", or "reflector" on control-plane nodes (D2). Restart.
 #role = "agent"
 
 [config]
-# How often the agent checks its files for changes (D30).
+# How often the agent checks its files, and the node's registry config, for changes (D30, D91).
 #poll_interval = "10s"
 
 [identity]

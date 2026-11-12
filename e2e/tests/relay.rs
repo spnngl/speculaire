@@ -129,6 +129,8 @@ impl Worker {
     fn configure(&mut self) {
         self.configured = true;
         self.sh("speculaire configure");
+        // The agent reads the registry config again at once, rather than at its next poll (D91).
+        self.sh("systemctl reload speculaire");
         self.wait_ready();
     }
 
@@ -153,6 +155,18 @@ impl Worker {
         }
         self.sh("systemctl reset-failed speculaire; systemctl restart speculaire");
         self.wait_ready();
+    }
+
+    /// Edits the agent's config with `sed` scripts and has it read again, as `systemctl reload` does.
+    fn live_config(&mut self, scripts: &[&str]) {
+        if !self.agent_changed {
+            self.sh(&format!("cp {CONFIG} {CONFIG}.e2e"));
+            self.agent_changed = true;
+        }
+        for script in scripts {
+            self.sh(&format!("sed -i '{script}' {CONFIG}"));
+        }
+        self.sh("systemctl reload speculaire");
     }
 
     fn series(&self, name: &str) -> f64 {
@@ -428,6 +442,78 @@ fn on_crio_an_image_that_needs_a_pull_secret_is_pulled_from_upstream_with_it() {
     assert!(!without.success, "{without:?}");
 }
 
+/// A registry behind a Bearer token server, with `app/web:1` in it, whose CA the worker trusts: the node's own
+/// registry config holds it, and a login is only what the test writes.
+struct Private {
+    address: String,
+    image: String,
+    _seed: Registry,
+    _token: TokenServer,
+    _registry: Registry,
+}
+
+impl Private {
+    fn start(worker: &mut Worker) -> Self {
+        let seed = seeded("seed.e2e.test", TEST_IMAGE);
+        let certificates =
+            Certificates::new("bearer", &["private.e2e.test", "token.e2e.test"]).unwrap();
+        let line = registry::htpasswd().unwrap();
+        let token = TokenServer::start("token.e2e.test", &certificates, &line).unwrap();
+        let registry = Registry::start(
+            "private.e2e.test",
+            &Access::Token {
+                certificates: &certificates,
+                realm: "https://token.e2e.test:5001/auth",
+            },
+            Some(&seed),
+        )
+        .unwrap();
+        let address = registry.address();
+        let scratch =
+            std::env::temp_dir().join(format!("speculaire-e2e-ca-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let ca = scratch.join("ca.crt");
+        std::fs::write(&ca, certificates.ca()).unwrap();
+        worker.copy(
+            &ca.display().to_string(),
+            &format!("/etc/containers/certs.d/{address}/ca.crt"),
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+        worker.registry_conf("private", &address, true);
+        Self {
+            image: format!("{address}/app/web:1"),
+            address,
+            _seed: seed,
+            _token: token,
+            _registry: registry,
+        }
+    }
+}
+
+/// `user:password` in base64, as a credential file holds it.
+fn basic_credentials() -> String {
+    use std::io::Write;
+    let mut encoder = Command::new("base64")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    encoder
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{USER}:{PASSWORD}").as_bytes())
+        .unwrap();
+    String::from_utf8(encoder.wait_with_output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+fn auth_file(address: &str, basic: &str) -> String {
+    format!("{{\"auths\":{{\"{address}\":{{\"auth\":\"{basic}\"}}}}}}\n")
+}
+
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_the_relay_logs_in_with_the_nodes_credentials_and_ca_and_logs_no_secret() {
@@ -436,56 +522,14 @@ fn on_crio_the_relay_logs_in_with_the_nodes_credentials_and_ca_and_logs_no_secre
     if !worker.crio() {
         return;
     }
-    let seed = seeded("seed.e2e.test", TEST_IMAGE);
-    let certificates =
-        Certificates::new("bearer", &["private.e2e.test", "token.e2e.test"]).unwrap();
-    let line = registry::htpasswd().unwrap();
-    let _token = TokenServer::start("token.e2e.test", &certificates, &line).unwrap();
-    let private = Registry::start(
-        "private.e2e.test",
-        &Access::Token {
-            certificates: &certificates,
-            realm: "https://token.e2e.test:5001/auth",
-        },
-        Some(&seed),
-    )
-    .unwrap();
-    let address = private.address();
-    let image = format!("{address}/app/web:1");
-
-    // The CA, and the login, only in the node's own registry config.
-    let scratch = std::env::temp_dir().join(format!("speculaire-e2e-ca-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch).unwrap();
-    let ca = scratch.join("ca.crt");
-    std::fs::write(&ca, certificates.ca()).unwrap();
-    worker.copy(
-        &ca.display().to_string(),
-        &format!("/etc/containers/certs.d/{address}/ca.crt"),
-    );
-    let _ = std::fs::remove_dir_all(&scratch);
-    let basic = {
-        use std::io::Write;
-        let mut encoder = Command::new("base64")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        encoder
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(format!("{USER}:{PASSWORD}").as_bytes())
-            .unwrap();
-        String::from_utf8(encoder.wait_with_output().unwrap().stdout)
-            .unwrap()
-            .trim()
-            .to_owned()
-    };
+    let private = Private::start(&mut worker);
+    let image = private.image.clone();
+    let basic = basic_credentials();
+    // The login, only in the node's own credential file.
     worker.file(
         "/run/containers/0/auth.json",
-        &format!("{{\"auths\":{{\"{address}\":{{\"auth\":\"{basic}\"}}}}}}\n"),
+        &auth_file(&private.address, &basic),
     );
-    worker.registry_conf("private", &address, true);
     worker.agent_config(&["s/^filter = .*/filter = \"trace\"/"]);
     let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
 
@@ -515,6 +559,77 @@ fn on_crio_the_relay_logs_in_with_the_nodes_credentials_and_ca_and_logs_no_secre
             secret.len()
         );
     }
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn on_crio_a_login_added_to_the_auth_file_is_used_by_the_next_pull_without_a_restart() {
+    let _serial = serial();
+    let mut worker = Worker::new();
+    if !worker.crio() {
+        return;
+    }
+    let private = Private::start(&mut worker);
+    let image = private.image.clone();
+    // Nobody has a login yet.
+    let without = worker.pull(&image, None);
+    assert!(!without.success, "{without:?}");
+
+    worker.file(
+        "/run/containers/0/auth.json",
+        &auth_file(&private.address, &basic_credentials()),
+    );
+    // No SIGHUP and no restart: a poll finds the file, within `config.poll_interval` (10 s).
+    std::thread::sleep(Duration::from_secs(15));
+    let bytes = worker.upstream_bytes();
+    assert_pulled(&worker.pull(&image, None));
+    assert!(
+        worker.upstream_bytes() > bytes + 1_000_000.0,
+        "the relay did not use the new login: {} then {}",
+        bytes,
+        worker.upstream_bytes()
+    );
+    assert!(worker.cached().len() >= 3, "{:?}", worker.cached());
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn on_crio_lowering_the_bound_of_the_blob_cache_evicts_at_the_next_fill_without_a_restart() {
+    let _serial = serial();
+    let mut worker = Worker::new();
+    if !worker.crio() {
+        return;
+    }
+    let small = seeded("open.e2e.test", TEST_IMAGE);
+    small.copy_in(LARGE_IMAGE, "app/large:1").unwrap();
+    worker.registry_conf("open", &small.address(), false);
+    let first = format!("{}/app/web:1", small.address());
+    assert_pulled(&worker.pull(&first, None));
+    let older = worker.cached();
+    assert_ne!(older.len(), 0);
+    worker.rmi(&first);
+
+    worker.live_config(&["s/^#max_size = .*/max_size = \"12MiB\"/"]);
+    // Nothing is evicted until a blob is kept.
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(worker.series("speculaire_blob_cache_evictions_total") < 1.0);
+    assert_eq!(worker.cached(), older);
+
+    assert_pulled(&worker.pull(&format!("{}/app/large:1", small.address()), None));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while worker.series("speculaire_blob_cache_bytes") > 12.0 * 1024.0 * 1024.0 {
+        assert!(
+            Instant::now() < deadline,
+            "the cache did not shrink:\n{}",
+            worker.sh("grep -n max_size /etc/speculaire/config.toml; journalctl -u speculaire --no-pager -o cat | tail -n 15")
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let left = worker.cached();
+    for name in &older {
+        assert!(!left.contains(name), "{name} is still cached: {left:?}");
+    }
+    assert_eq!(worker.corrupt(), "");
 }
 
 #[test]

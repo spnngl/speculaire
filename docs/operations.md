@@ -15,13 +15,14 @@ To stop using the mirror, run `speculaire unconfigure`. It removes only what `co
 
 ## The relay on CRI-O
 
-On CRI-O every pull of a mirrored registry goes through the agent, which fetches from the registry as the node's own config says (`registries.conf`, its drop-ins, `certs.d`, the credential files; the auth file is the one `[crio.image] global_auth_file` names, read from CRI-O) and keeps each blob in `blob_cache.directory`, bounded by `blob_cache.max_size` (D66, D67, D88, D89). An edit of that config shows within 10 s, with no signal.
+On CRI-O every pull of a mirrored registry goes through the agent, which fetches from the registry as the node's own config says (`registries.conf`, its drop-ins, `certs.d`, the credential files; the auth file is the one `[crio.image] global_auth_file` names, read from CRI-O) and keeps each blob in `blob_cache.directory`, bounded by `blob_cache.max_size` (D66, D67, D88, D89). An edit of that config, or of containerd's `config.toml` and `hosts.toml` files, shows within `config.poll_interval` (10 s), with no signal; SIGHUP reads it at once (D91).
 
 - A pull that fails with the agent down succeeds on kubelet's retry, straight from the registry.
 - An image that needs a pod pull secret is pulled by CRI-O itself: the mirror answers 404 to its manifest.
 - A registry whose `registries.conf` prefix has a port is not mirrored: `configure` lists it as left alone, and CRI-O pulls it directly (D88).
 - `a registry does not answer the relay` (warning) names a failure to reach every endpoint of a source; `speculaire_mirror_requests_total{result="error"}` counts the requests the relay could not answer, and the agent stops at startup, naming the directory, when it cannot open `blob_cache.directory`.
 - A credential that lives in a credential helper is not used (D80, D89): the log says which helper, and the registry is asked anonymously.
+- A registry config that does not parse (`registry config reload failed`, one error naming the file, the line and the column) leaves the previous one in use and does not make the agent unready; fix the file, and the next poll reads it (D91).
 
 ## Before turning on `enforce`
 
@@ -100,7 +101,7 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | `speculaire_gate_total{mode="enforce",result=~"rejected\|unverifiable\|pending\|unmatched"}` | The rate rises above its usual level |
 | `speculaire_peer_fetches_total{result="digest_mismatch"}` | It increases: a peer sent bytes that do not match their digest; the warning log, and the `peer` audit event if on, name its node (D52) |
 | `speculaire_mirror_requests_total{result="error"}` | It increases: the mirror could not read content it may hold, and answered 404; the warning log names the error (D85) |
-| `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config (D30) |
+| `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, or on its previous registry config; the error log names the file and the line (D30, D91) |
 | `speculaire_identity_path{path="annotation"}` | It is 1: the node runs containerd 2.3, with its known identity gap (D15) |
 | `speculaire_trust_root_expiry_timestamp_seconds` | Less than 7 days away: once it passes, new verifications become `unverifiable`; cached verdicts keep serving |
 | `speculaire_p2p_enabled` | 0 for more than 10 min: the node has no kubelet certificate and pulls only from upstream (D16) |

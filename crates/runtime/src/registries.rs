@@ -7,6 +7,7 @@
 
 pub mod containerd;
 pub mod crio;
+mod live;
 
 pub use containerd::ContainerdRegistries;
 pub use crio::CrioRegistries;
@@ -122,6 +123,18 @@ pub trait Registries: Send + Sync {
     ///
     /// When the registry config cannot be read, or `name` has no registry and repository in it.
     fn sources(&self, name: &str, reference: Reference<'_>) -> Result<Vec<Source>, Error>;
+
+    /// Reads the registry config again, and returns whether it changed. `sources` never reads the registry config
+    /// from disk: what it answers is what the last successful `reload` read (D91).
+    ///
+    /// With `since`, only when a file of the config was modified at or after it; without, always, whatever the
+    /// modification times say.
+    ///
+    /// # Errors
+    ///
+    /// When the registry config cannot be read or is not valid, naming the file and the place in it. The config held
+    /// stays in use, if there is one.
+    fn reload(&self, since: Option<std::time::SystemTime>) -> Result<bool, Error>;
 }
 
 /// `name` split into its registry and its repository.
