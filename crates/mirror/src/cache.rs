@@ -301,13 +301,21 @@ impl Content for Cache {
             entry.size
         };
         let path = self.path(digest);
-        match tokio::fs::metadata(&path).await {
-            Ok(meta) if meta.is_file() && meta.len() == size => {
+        // One trip to the blocking pool looks at the file and moves its time to now.
+        let looked = tokio::task::spawn_blocking(move || {
+            let meta = std::fs::metadata(&path)?;
+            let held = meta.is_file() && meta.len() == size;
+            if held {
                 touch(&path);
-                Ok(Some(Blob::from_file(path, size)))
             }
+            Ok(held.then_some(path))
+        })
+        .await
+        .unwrap_or_else(|err| Err(io::Error::other(err)));
+        match looked {
+            Ok(Some(path)) => Ok(Some(Blob::from_file(path, size))),
             // Deleted or changed behind our back: it is not in the cache.
-            Ok(_) => {
+            Ok(None) => {
                 self.forget(digest);
                 Ok(None)
             }

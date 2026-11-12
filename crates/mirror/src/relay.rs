@@ -163,7 +163,11 @@ impl<I: Images> Relay<I> {
             return;
         }
         let protected = self.protected().await;
-        self.cache.evict(&protected);
+        let cache = Arc::clone(&self.cache);
+        // Deleting files blocks.
+        if let Err(err) = tokio::task::spawn_blocking(move || cache.evict(&protected)).await {
+            warn!(error = %err, "the blob cache could not evict");
+        }
     }
 
     /// Evicts whenever a blob kept makes the cache exceed its bound; never returns.
