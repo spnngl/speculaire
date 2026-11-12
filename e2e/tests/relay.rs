@@ -196,7 +196,7 @@ impl Worker {
     /// Removes the test images; a pod that was deleted a moment ago may still hold one, so it tries for 30 s.
     fn forget(&self) {
         self.sh(
-            "crictl rmp -f $(crictl pods --namespace default -q) >/dev/null 2>&1; for i in $(seq 30); do ids=$(crictl images | awk '/busybox|nginx|e2e[.]test\\/app\\// {print $3}' | sort -u); [ -z \"$ids\" ] && exit 0; crictl rmi $ids >/dev/null 2>&1 && exit 0; sleep 1; done; crictl rmi $ids",
+            "crictl rmp -f $(crictl pods --namespace default -q) >/dev/null 2>&1; for i in $(seq 30); do ids=$(crictl images | awk '/busybox|nginx|e2e[.]test\\/app\\// {print $3}' | sort -u); [ -z \"$ids\" ] && exit 0; crictl ps -a | awk '/busybox|nginx|e2e[.]test\\/app\\// {print $1}' | xargs -r crictl rm -f >/dev/null 2>&1; crictl rmi $ids >/dev/null 2>&1 && exit 0; sleep 1; done; crictl rmi $ids",
         );
     }
 

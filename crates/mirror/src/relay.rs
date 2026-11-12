@@ -177,7 +177,7 @@ impl<I: Images> Relay<I> {
         let mut protected = HashSet::new();
         let mut pending = self.images.listed().await;
         while let Some(digest) = pending.pop() {
-            if !protected.insert(digest.clone()) || !self.cache.contains(&digest) {
+            if !protected.insert(digest.clone()) {
                 continue;
             }
             let Ok(Some(blob)) = self.cache.open(&digest).await else {
