@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{Array, DocumentMut, Item, Key, Table, TableLike, value};
 
+use crate::wiring::{Error, io_at};
+
 /// The directory of the registries that have none of their own (`hosts.go`, `hostPaths`).
 pub const DEFAULT_DIR: &str = "_default";
 
@@ -221,19 +223,18 @@ pub struct Skipped {
 ///
 /// # Errors
 ///
-/// When a directory cannot be listed.
-pub fn targets(roots: &[PathBuf]) -> io::Result<(Vec<Target>, Vec<Skipped>)> {
+/// When a directory cannot be listed: the error names it.
+pub fn targets(roots: &[PathBuf]) -> Result<(Vec<Target>, Vec<Skipped>), Error> {
     let mut targets = Vec::new();
     let mut skipped = Vec::new();
     for root in roots {
         let mut dirs = match std::fs::read_dir(root) {
             Ok(entries) => entries
-                .collect::<io::Result<Vec<_>>>()?
-                .into_iter()
-                .map(|entry| entry.path())
-                .collect::<Vec<_>>(),
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()
+                .map_err(io_at(root))?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e),
+            Err(e) => return Err(io_at(root)(e)),
         };
         dirs.sort();
         for dir in dirs.into_iter().filter(|dir| dir.is_dir()) {
@@ -258,7 +259,7 @@ pub fn targets(roots: &[PathBuf]) -> io::Result<(Vec<Target>, Vec<Skipped>)> {
             let alone = match std::fs::read_dir(&dir) {
                 Ok(mut entries) => entries.next().is_none(),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => true,
-                Err(e) => return Err(e),
+                Err(e) => return Err(io_at(&dir)(e)),
             };
             if alone || std::fs::metadata(&file).is_ok() {
                 targets.push(Target {
@@ -475,15 +476,19 @@ mod tests {
     }
 
     #[test]
-    fn a_root_or_a_default_that_cannot_be_listed_is_an_error() {
+    fn a_root_or_a_default_that_cannot_be_listed_is_an_error_naming_it() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("file");
-        std::fs::write(&file, "").unwrap();
-        assert!(targets(std::slice::from_ref(&file)).is_err());
         let root = dir.path().join("root");
         std::fs::create_dir(&root).unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        let failed = |roots: &[PathBuf]| match targets(roots) {
+            Err(Error::Io { path, .. }) => path,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(failed(&[root.clone(), file.clone()]), file);
         std::fs::write(root.join("_default"), "").unwrap();
-        assert!(targets(&[root]).is_err());
+        assert_eq!(failed(std::slice::from_ref(&root)), root.join("_default"));
     }
 
     #[test]
