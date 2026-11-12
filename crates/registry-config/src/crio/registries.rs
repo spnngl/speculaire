@@ -660,6 +660,7 @@ mod tests {
         assert_eq!(prefix("a.b.example.org"), Some("*.example.org"));
         assert_eq!(prefix("example.org/x"), None);
         assert_eq!(prefix("x/sub.example.org"), None);
+        assert_eq!(prefix("example.com/foo"), Some("example.com/foo"));
         assert_eq!(prefix("sub.example.orgs/x"), None);
         let wildcard = config
             .find_registry("sub.example.org/x")
@@ -669,6 +670,19 @@ mod tests {
             .expect("sources");
         assert_eq!(sources[0].reference, "sub.example.org/x:1");
         assert!(wildcard.pull_sources("other.com/x:1").is_err());
+    }
+
+    #[test]
+    fn of_two_prefixes_of_one_length_the_first_in_prefix_order_wins() {
+        let config = config(
+            "[[registry]]\nprefix = \"x.a.io\"\nlocation = \"x\"\n[[registry]]\nprefix = \"*.a.io\"\nlocation = \"\"\nblocked = true\n",
+        );
+        assert_eq!(
+            config
+                .find_registry("x.a.io/app")
+                .map(|r| r.prefix.as_str()),
+            Some("*.a.io")
+        );
     }
 
     #[test]
