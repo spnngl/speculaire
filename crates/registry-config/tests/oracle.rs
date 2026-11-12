@@ -779,6 +779,7 @@ ca = "/etc/path/default"
         "ca = []",
         "client = \"pair.pem\"",
         "client = [[\"client.cert\", \"client.key\"]]",
+        "client = []",
         "capabilities = [\"pull\"]",
     ]
     .iter()
