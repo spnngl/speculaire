@@ -65,7 +65,9 @@ pub(crate) fn fold_value_fields(table: &mut Table, fields: &[&'static str]) {
         .collect();
     for (key, field) in renames {
         if let Some(value) = table.remove(&key) {
-            table.insert(field.to_owned(), value);
+            // go-toml sees the keys in byte order and the last one sets the field: the field's own spelling, all
+            // lower case, sorts after every other case of it.
+            table.entry(field.to_owned()).or_insert(value);
         }
     }
 }

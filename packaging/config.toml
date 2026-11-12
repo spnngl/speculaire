@@ -32,6 +32,14 @@
 # Images the gate allows: globs on the normalised pod-spec image name (D18).
 #images = []
 
+[runtime]
+# containerd's socket (D64). Restart.
+#containerd_socket = "/run/containerd/containerd.sock"
+# containerd's config file, which `speculaire configure` and the agent's startup checks read (D17, D86, D87). Restart.
+#containerd_config = "/etc/containerd/config.toml"
+# CRI-O's socket, which also serves its inspect API (D64). Restart.
+#crio_socket = "/var/run/crio/crio.sock"
+
 [nri]
 # The runtime's NRI socket, the same path on containerd and CRI-O (D9, D64). Restart.
 #socket = "/var/run/nri/nri.sock"

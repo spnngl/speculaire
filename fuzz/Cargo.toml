@@ -77,6 +77,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "runtime_version"
+path = "fuzz_targets/runtime_version.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "registries_conf"
 path = "fuzz_targets/registries_conf.rs"
 test = false

@@ -13,7 +13,8 @@ use std::time::SystemTime;
 use anyhow::Context as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use speculaire_agent::config;
-use speculaire_configure::{Paths, Problem, Report, Settings, System};
+use speculaire_agent::node::Node;
+use speculaire_configure::{Problem, Report};
 use speculaire_runtime::detect::{self, Runtime, Sockets};
 
 /// P2P image mirror and supply-chain gate for containerd and CRI-O.
@@ -87,12 +88,12 @@ enum RuntimeName {
 }
 
 impl RuntimeArg {
-    /// The runtime named, or the one that answers (D64).
-    fn resolve(&self) -> anyhow::Result<Runtime> {
+    /// The runtime named, or the one whose socket answers (D64).
+    fn resolve(&self, sockets: &Sockets) -> anyhow::Result<Runtime> {
         match self.runtime {
             Some(RuntimeName::Containerd) => Ok(Runtime::Containerd),
             Some(RuntimeName::CriO) => Ok(Runtime::CriO),
-            None => Ok(detect::detect(&Sockets::system())?),
+            None => Ok(detect::detect(sockets)?),
         }
     }
 }
@@ -113,14 +114,14 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Version => writeln!(std::io::stdout().lock(), "{}", version())?,
         Command::CheckConfig { path, runtime } => check_config(&path, &runtime)?,
         Command::Configure { config, runtime } => {
-            let settings = settings(&config)?;
-            let runtime = runtime.resolve()?;
+            let node = node(&config)?;
+            let runtime = runtime.resolve(&node.sockets)?;
             let report = speculaire_configure::configure(
                 runtime,
-                &Paths::system(),
-                &settings,
+                &node.paths,
+                &node.settings,
                 SystemTime::now(),
-                &system(),
+                &node.system,
             )?;
             print_report(
                 &mut std::io::stdout().lock(),
@@ -133,14 +134,14 @@ fn run(command: Command) -> anyhow::Result<()> {
             runtime,
             force,
         } => {
-            let settings = settings(&config)?;
-            let runtime = runtime.resolve()?;
+            let node = node(&config)?;
+            let runtime = runtime.resolve(&node.sockets)?;
             let report = speculaire_configure::unconfigure(
                 runtime,
-                &Paths::system(),
-                &settings,
+                &node.paths,
+                &node.settings,
                 force,
-                &system(),
+                &node.system,
             )?;
             print_report(
                 &mut std::io::stdout().lock(),
@@ -152,27 +153,9 @@ fn run(command: Command) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn system() -> System {
-    System {
-        crio_socket: Sockets::system().crio,
-        systemctl: PathBuf::from("systemctl"),
-    }
-}
-
-/// The settings `configure` needs, from the agent's config file.
-fn settings(path: &std::path::Path) -> anyhow::Result<Settings> {
-    let config = config::load(path)?;
-    Ok(Settings {
-        address: config.mirror.address.get().get(),
-        registries: config
-            .mirror
-            .registries
-            .get()
-            .iter()
-            .map(|name| name.as_str().to_owned())
-            .collect(),
-        directory: config.mirror.directory.get().get().to_owned(),
-    })
+/// The node the agent's config file names.
+fn node(path: &std::path::Path) -> anyhow::Result<Node> {
+    Ok(Node::new(&config::load(path)?))
 }
 
 /// What a run changed on `out`, one file per line, and what it left alone on `err`.
@@ -197,18 +180,26 @@ fn verdict(err: &mut impl Write, problems: &[Problem]) -> anyhow::Result<()> {
     }
     match problems.len() {
         0 => Ok(()),
-        1 => anyhow::bail!("1 problem with the runtime's config or the mirror's certificates"),
-        n => anyhow::bail!("{n} problems with the runtime's config or the mirror's certificates"),
+        1 => anyhow::bail!("1 problem with the runtime, its config or the mirror's certificates"),
+        n => {
+            anyhow::bail!("{n} problems with the runtime, its config or the mirror's certificates")
+        }
     }
 }
 
-/// Exits non-zero, naming each file, when the config or the node's runtime config is not as `configure` leaves it.
+/// Exits non-zero, naming each file or socket, when the config is invalid, the agent would refuse to start on this
+/// node (D86), or the runtime's config is not as `configure` leaves it.
 fn check_config(path: &std::path::Path, runtime: &RuntimeArg) -> anyhow::Result<()> {
-    let settings = settings(path)?;
-    let runtime = runtime.resolve()?;
-    let problems =
-        speculaire_configure::check(runtime, &Paths::system(), &settings, SystemTime::now())
-            .context("cannot check the runtime's config")?;
+    let node = node(path)?;
+    let runtime = runtime.resolve(&node.sockets)?;
+    let problems = speculaire_configure::check_all(
+        runtime,
+        &node.paths,
+        &node.settings,
+        &node.system,
+        SystemTime::now(),
+    )
+    .context("cannot check the runtime's config")?;
     verdict(&mut std::io::stderr().lock(), &problems)
 }
 
@@ -230,9 +221,9 @@ fn version() -> String {
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser as _};
-    use speculaire_runtime::detect::Runtime;
+    use speculaire_runtime::detect::{Runtime, Sockets};
 
-    use super::{Cli, Command, RuntimeArg, settings, version};
+    use super::{Cli, Command, RuntimeArg, node, version};
 
     #[test]
     fn cli_is_consistent() {
@@ -249,7 +240,7 @@ mod tests {
             let Command::Configure { runtime, .. } = cli.command else {
                 panic!("not configure");
             };
-            assert_eq!(runtime.resolve().unwrap(), want);
+            assert_eq!(runtime.resolve(&Sockets::system()).unwrap(), want);
         }
         let cli = Cli::try_parse_from(["speculaire", "unconfigure", "--force"]).unwrap();
         assert!(matches!(
@@ -259,26 +250,21 @@ mod tests {
         assert!(Cli::try_parse_from(["speculaire", "configure", "--runtime", "docker"]).is_err());
         let none = RuntimeArg { runtime: None };
         // The sockets of the machine running the tests answer nothing, or one runtime.
-        let _ = none.resolve();
+        let _ = none.resolve(&Sockets::system());
     }
 
     #[test]
-    fn the_settings_are_the_mirror_address_and_registries_of_the_config() {
+    fn the_node_is_the_one_the_config_file_names_and_a_bad_file_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[mirror]\naddress = \"127.0.0.2:7490\"\nregistries = [\"docker.io\", \"localhost:5000\"]\n").unwrap();
-        let settings = settings(&path).unwrap();
-        assert_eq!(settings.address, "127.0.0.2:7490".parse().unwrap());
-        assert_eq!(settings.registries, ["docker.io", "localhost:5000"]);
-        std::fs::write(&path, "").unwrap();
-        let defaults = super::settings(&path).unwrap();
-        assert_eq!(defaults.address, "127.0.0.1:7480".parse().unwrap());
+        std::fs::write(&path, "[mirror]\naddress = \"127.0.0.2:7490\"\n").unwrap();
         assert_eq!(
-            defaults.registries,
-            ["docker.io", "registry.k8s.io", "quay.io", "ghcr.io"]
+            node(&path).unwrap().settings.address,
+            "127.0.0.2:7490".parse().unwrap()
         );
         std::fs::write(&path, "[mirror]\naddress = \"10.0.0.1:7480\"\n").unwrap();
-        assert!(super::settings(&path).is_err());
+        assert!(node(&path).is_err());
+        assert!(node(&dir.path().join("missing.toml")).is_err());
     }
 
     #[test]

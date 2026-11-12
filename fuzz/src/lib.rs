@@ -35,6 +35,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("registries_conf", registries_conf),
     ("auth_json", auth_json),
     ("crio_inspect", crio_inspect),
+    ("runtime_version", runtime_version),
     ("mirror_request", mirror_request),
     ("reference", reference),
     ("platform", platform),
@@ -80,7 +81,7 @@ pub fn containerd_config(data: &[u8]) {
     if let Ok(raw) = containerd_config_file::load_raw(&path) {
         let _ = Registry::try_from(raw);
     }
-    let _ = containerd_config_file::load_nri_required_plugins(&path);
+    let _ = containerd_config_file::load_plugins(&path);
 }
 
 /// A CRI-O `registries.conf` or drop-in (D66).
@@ -305,4 +306,27 @@ pub fn mirror_request(data: &[u8]) {
         }
     }
     assert_eq!(Span::whole(0), None);
+}
+
+/// The version a runtime reports about itself over the CRI (D86).
+///
+/// Reading never panics. A text that is a release prints as `major.minor.patch`, which parses back to the same release,
+/// and the numbers are those of the text's first three dotted fields.
+///
+/// # Panics
+///
+/// When parsing panics, or a release does not survive printing.
+pub fn runtime_version(data: &[u8]) {
+    use speculaire_runtime::version::Release;
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    if let Some(release) = Release::parse(text) {
+        assert_eq!(Release::parse(&release.to_string()), Some(release));
+        let numbers = text.strip_prefix('v').unwrap_or(text);
+        assert!(
+            numbers.starts_with(|c: char| c.is_ascii_digit()),
+            "{text:?}"
+        );
+    }
 }

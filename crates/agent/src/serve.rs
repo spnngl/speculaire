@@ -7,13 +7,13 @@ use std::time::SystemTime;
 use anyhow::Context as _;
 use speculaire_mirror::content::{CONTAINERD_CONTENT_DIR, Containerd};
 use speculaire_mirror::tls::Tls;
-use speculaire_runtime::detect::CONTAINERD_SOCKET;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{self, Config};
 use crate::log::{self, Logs};
+use crate::node::Node;
 use crate::status::{self, Status};
 use crate::{systemd, telemetry};
 
@@ -25,15 +25,36 @@ use crate::{systemd, telemetry};
 pub fn run(path: &Path) -> anyhow::Result<()> {
     let config = config::load(path)?;
     let logs = log::install(&config.log, &config.audit)?;
+    preflight(&config)?;
     tokio::runtime::Runtime::new()
         .context("starting the runtime")?
         .block_on(serve(path, config, logs))
 }
 
+/// Refuses to start on a node where the agent would mirror or gate wrongly (D86), naming each file and key.
+fn preflight(config: &Config) -> anyhow::Result<()> {
+    let node = Node::new(config);
+    let runtime = node.runtime()?;
+    let problems = node.preflight(runtime);
+    if problems.is_empty() {
+        info!(%runtime, "preflight passed");
+        return Ok(());
+    }
+    let lines: Vec<String> = problems
+        .iter()
+        .map(|problem| format!("  {problem}"))
+        .collect();
+    anyhow::bail!(
+        "{} problem{} on this node keep{} the agent from starting ({runtime}):\n{}",
+        problems.len(),
+        if problems.len() == 1 { "" } else { "s" },
+        if problems.len() == 1 { "s" } else { "" },
+        lines.join("\n")
+    )
+}
+
 async fn serve(path: &Path, mut config: Config, logs: Logs) -> anyhow::Result<()> {
     let metrics = telemetry::install()?;
-    // The mirror first: an agent that cannot serve the runtime stops before it reports anything (D45, D55).
-    let mirror = start_mirror(&config).await?;
     let status = Arc::new(Status::new(metrics.clone()));
     let address = *config.metrics.address.get();
     let listener = tokio::net::TcpListener::bind(address)
@@ -56,6 +77,9 @@ async fn serve(path: &Path, mut config: Config, logs: Logs) -> anyhow::Result<()
         }
     });
     info!(%address, "status listener open");
+    // `/readyz` answers 503 until the mirror listens (D45); an agent that cannot open it stops (D55).
+    let mirror = start_mirror(&config).await?;
+    status.mirror_listening();
     systemd::watchdog();
     systemd::ready();
 
@@ -160,7 +184,10 @@ async fn start_mirror(config: &Config) -> anyhow::Result<Mirror> {
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("listening on mirror.address {address}"))?;
-    let content = Containerd::new(CONTAINERD_CONTENT_DIR, CONTAINERD_SOCKET);
+    let content = Containerd::new(
+        CONTAINERD_CONTENT_DIR,
+        config.runtime.containerd_socket.get().get(),
+    );
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(speculaire_mirror::serve(
         listener,

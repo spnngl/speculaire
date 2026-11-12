@@ -101,6 +101,9 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
     ("gate.unmatched", &[r#""deny""#, r#""allow""#, r#""skip""#]),
     ("gate.exempt.namespaces", STRINGS),
     ("gate.exempt.images", STRINGS),
+    ("runtime.containerd_socket", PATHS),
+    ("runtime.containerd_config", PATHS),
+    ("runtime.crio_socket", PATHS),
     ("nri.socket", PATHS),
     ("verify.policy", PATHS),
     (

@@ -265,7 +265,7 @@ const FILE_FIELDS: &[&str] = &[
 /// The keys of the image service's section that the agent reads, matched in any case as go-toml does.
 fn fold_images(images: &mut Table) {
     const AUTH: &[&str] = &["username", "password", "auth", "identitytoken"];
-    fold_value_fields(images, &["registry"]);
+    fold_value_fields(images, &["registry", "discard_unpacked_layers"]);
     let Some(registry) = value_table_at(images, "registry") else {
         return;
     };
@@ -289,18 +289,57 @@ fn fold_images(images: &mut Table) {
     }
 }
 
-/// The image service's plugin section, of which only `registry` is read.
+/// The image service's plugin section, of which only `registry` and `discard_unpacked_layers` are read.
 #[derive(Deserialize, Default)]
 struct Images {
     #[serde(default)]
     registry: RawRegistry,
+    #[serde(default)]
+    discard_unpacked_layers: bool,
 }
 
-/// The NRI plugin's section, of which only the default validator's `required_plugins` is read.
+/// The NRI plugin's section, of which only `disable`, `disable_connections` and the default validator's
+/// `required_plugins` are read.
 #[derive(Deserialize, Default)]
-struct Nri {
+struct RawNri {
+    #[serde(default)]
+    disable: bool,
+    #[serde(default)]
+    disable_connections: bool,
     #[serde(default)]
     default_validator: DefaultValidator,
+}
+
+/// The settings of containerd's NRI plugin that the agent depends on (D54, D64); the default is a config that sets none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Nri {
+    /// `disable`: containerd's NRI is off altogether.
+    pub disable: bool,
+    /// `disable_connections`: plugins that start on their own cannot connect.
+    pub disable_connections: bool,
+    /// The plugin is in `disabled_plugins`, which the daemon honours as `disable`.
+    pub plugin_disabled: bool,
+    /// `required_plugins` of `default_validator`: the plugins containerd refuses containers without.
+    pub required_plugins: Vec<String>,
+}
+
+impl Nri {
+    /// Whether an external plugin can connect to this containerd.
+    #[must_use]
+    pub const fn accepts_plugins(&self) -> bool {
+        !self.disable && !self.plugin_disabled && !self.disable_connections
+    }
+}
+
+/// What the agent reads of containerd's plugin sections besides the registry (D15, D54, D86); the default is what
+/// containerd runs on without a config file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Plugins {
+    /// `discard_unpacked_layers` of the image service: containerd drops the layers it has unpacked, so the node
+    /// cannot serve them.
+    pub discard_unpacked_layers: bool,
+    /// The NRI plugin.
+    pub nri: Nri,
 }
 
 #[derive(Deserialize, Default)]
@@ -331,15 +370,10 @@ struct Merged {
     required: Vec<String>,
 }
 
-/// Loads `path` and its imports, and returns the registry section as containerd decodes it.
-///
-/// # Errors
-///
-/// When a file cannot be read or is not a valid config, or the merged config is one containerd refuses.
-pub fn load_raw(path: &Path) -> Result<RawRegistry, LoadError> {
-    let mut merged = load_merged(path)?;
+/// The image service's section of the merged config, decoded as the daemon does.
+fn images_section(merged: &mut Merged) -> Result<Images, LoadError> {
     let mut images = match merged.plugins.remove(IMAGES_PLUGIN) {
-        None => return Ok(RawRegistry::default()),
+        None => return Ok(Images::default()),
         Some(Value::Table(images)) => images,
         Some(_) => {
             return Err(LoadError::Registry(ParseError::new(
@@ -349,21 +383,29 @@ pub fn load_raw(path: &Path) -> Result<RawRegistry, LoadError> {
         }
     };
     fold_images(&mut images);
-    from_value::<Images>(Value::Table(images))
-        .map(|images| images.registry)
-        .map_err(LoadError::Registry)
+    from_value::<Images>(Value::Table(images)).map_err(LoadError::Registry)
 }
 
-/// The plugins containerd's NRI refuses to create a container without (D32, D64): `required_plugins` of
-/// `[plugins."io.containerd.nri.v1.nri".default_validator]`, in the merged config of `path` and its imports.
+/// Loads `path` and its imports, and returns the registry section as containerd decodes it.
+///
+/// # Errors
+///
+/// When a file cannot be read or is not a valid config, or the merged config is one containerd refuses.
+pub fn load_raw(path: &Path) -> Result<RawRegistry, LoadError> {
+    Ok(images_section(&mut load_merged(path)?)?.registry)
+}
+
+/// Loads `path` and its imports, and returns what the agent reads of the image service and NRI sections: the merged
+/// config of the daemon, which on 2.3 is also the only source of `discard_unpacked_layers` (D15).
 ///
 /// # Errors
 ///
 /// As [`load_raw`], and when the NRI section is not a valid one.
-pub fn load_nri_required_plugins(path: &Path) -> Result<Vec<String>, LoadError> {
+pub fn load_plugins(path: &Path) -> Result<Plugins, LoadError> {
     let mut merged = load_merged(path)?;
+    let images = images_section(&mut merged)?;
     let mut nri = match merged.plugins.remove(NRI_PLUGIN) {
-        None => return Ok(Vec::new()),
+        None => Table::new(),
         Some(Value::Table(nri)) => nri,
         Some(_) => {
             return Err(LoadError::Nri(ParseError::new(
@@ -372,13 +414,23 @@ pub fn load_nri_required_plugins(path: &Path) -> Result<Vec<String>, LoadError> 
             )));
         }
     };
-    fold_value_fields(&mut nri, &["default_validator"]);
+    fold_value_fields(
+        &mut nri,
+        &["disable", "disable_connections", "default_validator"],
+    );
     if let Some(validator) = value_table_at(&mut nri, "default_validator") {
         fold_value_fields(validator, &["required_plugins"]);
     }
-    from_value::<Nri>(Value::Table(nri))
-        .map(|nri| nri.default_validator.required_plugins)
-        .map_err(LoadError::Nri)
+    let nri = from_value::<RawNri>(Value::Table(nri)).map_err(LoadError::Nri)?;
+    Ok(Plugins {
+        discard_unpacked_layers: images.discard_unpacked_layers,
+        nri: Nri {
+            disable: nri.disable,
+            disable_connections: nri.disable_connections,
+            plugin_disabled: merged.disabled.iter().any(|name| name == NRI_PLUGIN),
+            required_plugins: nri.default_validator.required_plugins,
+        },
+    })
 }
 
 /// Reads `path` and its imports, migrates each file and merges them as containerd does.
@@ -478,6 +530,7 @@ fn migrate(file: &mut File) -> Result<(), ParseError> {
         ));
     };
     let registry = cri.get("registry").cloned();
+    let discard = discard_unpacked_layers(cri)?;
     let mut images = match file.plugins.remove(IMAGES_PLUGIN) {
         None => Table::new(),
         Some(Value::Table(table)) => table,
@@ -488,12 +541,72 @@ fn migrate(file: &mut File) -> Result<(), ParseError> {
             ));
         }
     };
+    // `migrateConfig` type-asserts these two sections of the image service, and the daemon crashes on others.
+    for key in ["pinned_images", "runtime_platform"] {
+        if images.get(key).is_some_and(|v| !v.is_table())
+            && (key == "pinned_images" || discard.reached)
+        {
+            return Err(ParseError::new(
+                format!("plugins.{IMAGES_PLUGIN:?}.{key}"),
+                "is not a table",
+            ));
+        }
+    }
     if let Some(registry) = registry {
         images.insert("registry".to_owned(), registry);
+    }
+    if let Some(value) = discard.value {
+        images.insert("discard_unpacked_layers".to_owned(), value);
     }
     file.plugins
         .insert(IMAGES_PLUGIN.to_owned(), Value::Table(images));
     Ok(())
+}
+
+/// What `migrateConfig` takes from `[containerd]` of the CRI plugin.
+struct Discard {
+    /// The migration got past `containerd.runtimes`, where it copies the keys it carries over.
+    reached: bool,
+    /// `containerd.discard_unpacked_layers`, copied only when `reached`.
+    value: Option<Value>,
+}
+
+/// `migrateConfig` (`plugins/cri/images/plugin.go`, v2.4.2): it copies `discard_unpacked_layers` from `[containerd]`
+/// only when that table has `runtimes`, and asserts that `containerd`, `runtimes` and each runtime are tables.
+fn discard_unpacked_layers(cri: &Table) -> Result<Discard, ParseError> {
+    let none = Discard {
+        reached: false,
+        value: None,
+    };
+    let key = format!("plugins.{CRI_PLUGIN:?}");
+    let Some(containerd) = cri.get("containerd") else {
+        return Ok(none);
+    };
+    let Value::Table(containerd) = containerd else {
+        return Err(ParseError::new(
+            format!("{key}.containerd"),
+            "is not a table",
+        ));
+    };
+    let Some(runtimes) = containerd.get("runtimes") else {
+        return Ok(none);
+    };
+    let Value::Table(runtimes) = runtimes else {
+        return Err(ParseError::new(
+            format!("{key}.containerd.runtimes"),
+            "is not a table",
+        ));
+    };
+    if let Some(name) = runtimes.iter().find(|(_, v)| !v.is_table()).map(|(n, _)| n) {
+        return Err(ParseError::new(
+            format!("{key}.containerd.runtimes.{name}"),
+            "is not a table",
+        ));
+    }
+    Ok(Discard {
+        reached: true,
+        value: containerd.get("discard_unpacked_layers").cloned(),
+    })
 }
 
 /// `v1MigratePluginName` (`config.go:162`).

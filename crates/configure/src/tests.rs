@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
 use std::time::Duration;
 
+use speculaire_runtime::containerd::ImageExports;
 use speculaire_runtime::crio::Nri;
 
 use super::*;
@@ -18,6 +19,14 @@ fn now() -> SystemTime {
 /// What a test sets on the fake: CRI-O's NRI answer, whether a reload fails, and what exists at each reload.
 struct Fake {
     required: RefCell<Vec<String>>,
+    /// CRI-O's `enable_nri` and `nri_disable_connections`.
+    nri: Cell<(bool, bool)>,
+    /// Whether CRI-O's inspect API answers.
+    inspect_fails: Cell<bool>,
+    /// What `RuntimeService.Version` answers as (name, version); `None`: nothing listens.
+    version: RefCell<Option<(String, String)>>,
+    /// What containerd's introspection exports; the outer `Err` is a failed call.
+    exports: RefCell<Result<Option<ImageExports>, ()>>,
     reload_fails: Cell<bool>,
     reloads: Cell<u32>,
     watch: RefCell<Option<PathBuf>>,
@@ -28,6 +37,13 @@ impl Fake {
     fn new() -> Self {
         Self {
             required: RefCell::new(Vec::new()),
+            nri: Cell::new((true, false)),
+            inspect_fails: Cell::new(false),
+            version: RefCell::new(Some(("containerd".to_owned(), "v2.4.2".to_owned()))),
+            exports: RefCell::new(Ok(Some(ImageExports {
+                discard_unpacked_layers: false,
+                registry_config_path: "/etc/containerd/certs.d".to_owned(),
+            }))),
             reload_fails: Cell::new(false),
             reloads: Cell::new(0),
             watch: RefCell::new(None),
@@ -50,11 +66,45 @@ impl Host for Fake {
     }
 
     fn crio_nri(&self) -> Result<Nri, speculaire_runtime::crio::Error> {
+        if self.inspect_fails.get() {
+            return Err(speculaire_runtime::crio::Error::Response(
+                "\"HTTP/1.0 503\"".to_owned(),
+            ));
+        }
+        let (enabled, disable_connections) = self.nri.get();
         Ok(Nri {
-            enabled: true,
-            disable_connections: false,
+            enabled,
+            disable_connections,
             required_plugins: self.required.borrow().clone(),
         })
+    }
+
+    fn socket(&self, runtime: Runtime) -> PathBuf {
+        PathBuf::from(format!("/run/{runtime}.sock"))
+    }
+
+    fn runtime_version(&self, runtime: Runtime) -> Result<RuntimeVersion, cri::Error> {
+        match &*self.version.borrow() {
+            Some((name, version)) => Ok(RuntimeVersion {
+                name: name.clone(),
+                version: version.clone(),
+            }),
+            None => Err(cri::Error::Connect {
+                path: self.socket(runtime),
+                message: "connection refused".to_owned(),
+            }),
+        }
+    }
+
+    fn containerd_image_exports(&self) -> Result<Option<ImageExports>, cri::Error> {
+        self.exports
+            .borrow()
+            .clone()
+            .map_err(|()| cri::Error::Call {
+                path: self.socket(Runtime::Containerd),
+                method: "Plugins",
+                message: "Unavailable".to_owned(),
+            })
     }
 }
 
@@ -694,6 +744,7 @@ fn problems_and_changes_print_their_file() {
         "removed /a"
     );
     let system = System {
+        containerd_socket: PathBuf::from("/nonexistent/containerd.sock"),
         crio_socket: PathBuf::from("/nonexistent/crio.sock"),
         systemctl: PathBuf::from("/nonexistent/systemctl"),
     };
@@ -715,6 +766,7 @@ fn fake_systemctl(dir: &Path, status: i32) -> System {
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     System {
+        containerd_socket: dir.join("containerd.sock"),
         crio_socket: dir.join("crio.sock"),
         systemctl: script,
     }
@@ -829,5 +881,409 @@ fn a_later_file_that_keeps_the_mirror_first_but_changes_the_entry_is_named_as_di
             "the effective entry of docker.io differs from the admin's, with the mirror first"
         )),
         "{problems:#?}"
+    );
+}
+
+// ---- preflight ----
+
+impl Node {
+    /// The problems of preflight, with the root of the node taken out of the paths.
+    fn preflight(&self, runtime: Runtime, host: &Fake) -> Vec<String> {
+        let root = self.dir.path().to_str().unwrap();
+        preflight(runtime, &self.paths, &self.settings, host, now())
+            .iter()
+            .map(|p| p.to_string().replace(root, ""))
+            .collect()
+    }
+
+    /// A node `configure` has been run on.
+    fn configured(&self, runtime: Runtime) -> Fake {
+        match runtime {
+            Runtime::Containerd => self.containerd(),
+            Runtime::CriO => {
+                put(
+                    &self
+                        .paths
+                        .context()
+                        .root
+                        .join("etc/containers/registries.conf"),
+                    "unqualified-search-registries = [\"docker.io\"]\n",
+                );
+            }
+        }
+        let fake = Fake::new();
+        if runtime == Runtime::CriO {
+            *fake.version.borrow_mut() = Some(("cri-o".to_owned(), "1.37.2".to_owned()));
+        }
+        self.configure(runtime, &fake).unwrap();
+        fake
+    }
+
+    fn containerd_toml(&self, text: &str) {
+        put(&self.paths.containerd_config(), text);
+    }
+}
+
+fn has(problems: &[String], parts: &[&str]) -> bool {
+    problems
+        .iter()
+        .any(|problem| parts.iter().all(|part| problem.contains(part)))
+}
+
+#[test]
+fn a_node_configure_has_run_on_has_no_problem_on_either_runtime() {
+    for runtime in [Runtime::Containerd, Runtime::CriO] {
+        let node = Node::new();
+        let fake = node.configured(runtime);
+        assert_eq!(
+            node.preflight(runtime, &fake),
+            Vec::<String>::new(),
+            "{runtime}"
+        );
+        assert_eq!(
+            check_all(runtime, &node.paths, &node.settings, &fake, now()).unwrap(),
+            [],
+            "{runtime}"
+        );
+    }
+}
+
+#[test]
+fn missing_certificates_are_named_and_stop_startup() {
+    let node = Node::new();
+    let fake = node.configured(Runtime::Containerd);
+    std::fs::remove_dir_all(node.dir.path().join("var/lib/speculaire/mirror")).unwrap();
+    let problems = node.preflight(Runtime::Containerd, &fake);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        has(
+            &problems,
+            &[
+                "/var/lib/speculaire/mirror/ca.crt",
+                "run `speculaire configure`"
+            ]
+        ),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_runtime_that_is_too_old_is_refused_with_the_version_it_reports() {
+    let node = Node::new();
+    for (runtime, name, old, ok) in [
+        (Runtime::Containerd, "containerd", "v2.2.9", "v2.3.0"),
+        (Runtime::Containerd, "containerd", "1.7.29", "2.3.0-rc.1"),
+        (Runtime::CriO, "cri-o", "1.34.9", "1.35.0"),
+    ] {
+        let fake = node.configured(runtime);
+        *fake.version.borrow_mut() = Some((name.to_owned(), old.to_owned()));
+        let problems = node.preflight(runtime, &fake);
+        assert!(
+            has(
+                &problems,
+                &[
+                    &format!("/run/{runtime}.sock"),
+                    "is older than",
+                    old.trim_start_matches('v')
+                ]
+            ),
+            "{problems:?}"
+        );
+        *fake.version.borrow_mut() = Some((name.to_owned(), ok.to_owned()));
+        assert_eq!(node.preflight(runtime, &fake), Vec::<String>::new(), "{ok}");
+    }
+    let fake = node.configured(Runtime::Containerd);
+    *fake.version.borrow_mut() = Some(("containerd".to_owned(), "v2.2.9".to_owned()));
+    assert!(has(
+        &node.preflight(Runtime::Containerd, &fake),
+        &["containerd 2.2.9 is older than 2.3.0"]
+    ));
+}
+
+#[test]
+fn a_runtime_that_answers_wrongly_or_not_at_all_is_a_problem_naming_its_socket() {
+    let node = Node::new();
+    let fake = node.configured(Runtime::Containerd);
+    *fake.version.borrow_mut() = None;
+    let problems = node.preflight(Runtime::Containerd, &fake);
+    assert!(
+        has(
+            &problems,
+            &[
+                "/run/containerd.sock",
+                "connection refused",
+                "`runtime.containerd_socket`"
+            ]
+        ),
+        "{problems:?}"
+    );
+    *fake.version.borrow_mut() = Some(("cri-o".to_owned(), "1.37.2".to_owned()));
+    assert!(has(
+        &node.preflight(Runtime::Containerd, &fake),
+        &["answers as \"cri-o\", not containerd"]
+    ));
+    *fake.version.borrow_mut() = Some(("containerd".to_owned(), "Unknown".to_owned()));
+    assert!(has(
+        &node.preflight(Runtime::Containerd, &fake),
+        &["\"Unknown\"", "no release"]
+    ));
+    let fake = node.configured(Runtime::CriO);
+    *fake.version.borrow_mut() = None;
+    assert!(has(
+        &node.preflight(Runtime::CriO, &fake),
+        &["/run/cri-o.sock", "`runtime.crio_socket`"]
+    ));
+}
+
+#[test]
+fn containerd_2_4_is_asked_for_what_its_image_service_runs_with() {
+    let node = Node::new();
+    let fake = node.configured(Runtime::Containerd);
+    let exports = |discard: bool, path: &str| {
+        Ok(Some(ImageExports {
+            discard_unpacked_layers: discard,
+            registry_config_path: path.to_owned(),
+        }))
+    };
+    *fake.exports.borrow_mut() = exports(true, "/etc/containerd/certs.d");
+    let problems = node.preflight(Runtime::Containerd, &fake);
+    assert!(
+        has(
+            &problems,
+            &[
+                "/etc/containerd/config.toml",
+                "`discard_unpacked_layers = true`",
+                "set it to false"
+            ]
+        ),
+        "{problems:?}"
+    );
+    *fake.exports.borrow_mut() = exports(false, "");
+    let problems = node.preflight(Runtime::Containerd, &fake);
+    assert!(
+        has(
+            &problems,
+            &[
+                "/etc/containerd/config.toml",
+                "`config_path` is not set",
+                "\"/etc/containerd/certs.d\""
+            ]
+        ),
+        "{problems:?}"
+    );
+    *fake.exports.borrow_mut() = Ok(None);
+    assert!(has(
+        &node.preflight(Runtime::Containerd, &fake),
+        &["/run/containerd.sock", "`io.containerd.cri.v1.images`"]
+    ));
+    *fake.exports.borrow_mut() = Err(());
+    assert!(has(
+        &node.preflight(Runtime::Containerd, &fake),
+        &["/run/containerd.sock", "Unavailable"]
+    ));
+    // The config file says false, the running image service true: the running one counts.
+    node.containerd_toml(
+        "version = 3\n[plugins.'io.containerd.cri.v1.images']\ndiscard_unpacked_layers = false\n",
+    );
+    *fake.exports.borrow_mut() = exports(true, "/x");
+    assert!(has(
+        &node.preflight(Runtime::Containerd, &fake),
+        &["`discard_unpacked_layers = true`"]
+    ));
+}
+
+#[test]
+fn containerd_2_3_has_its_image_settings_read_from_the_config_file() {
+    let node = Node::new();
+    let fake = node.configured(Runtime::Containerd);
+    *fake.version.borrow_mut() = Some(("containerd".to_owned(), "v2.3.7".to_owned()));
+    // The running image service is not asked: these exports would be refused.
+    *fake.exports.borrow_mut() = Err(());
+    assert_eq!(
+        node.preflight(Runtime::Containerd, &fake),
+        Vec::<String>::new()
+    );
+    for (text, key) in [
+        (
+            "version = 3\n[plugins.'io.containerd.cri.v1.images']\ndiscard_unpacked_layers = true\n",
+            "`discard_unpacked_layers = true`",
+        ),
+        (
+            "version = 2\n[plugins.'io.containerd.grpc.v1.cri'.containerd]\ndiscard_unpacked_layers = true\n[plugins.'io.containerd.grpc.v1.cri'.containerd.runtimes.runc]\nruntime_type = 'x'\n",
+            "`discard_unpacked_layers = true`",
+        ),
+        (
+            "version = 2\n[plugins.'io.containerd.grpc.v1.cri'.registry.mirrors.'docker.io']\nendpoint = ['https://m.io']\n",
+            "`config_path` is not set",
+        ),
+    ] {
+        node.containerd_toml(text);
+        let problems = node.preflight(Runtime::Containerd, &fake);
+        assert!(
+            has(&problems, &["/etc/containerd/config.toml", key]),
+            "{text}: {problems:?}"
+        );
+    }
+    // Without a config file, containerd runs on its defaults: config_path set, nothing discarded.
+    std::fs::remove_file(node.paths.containerd_config()).unwrap();
+    assert_eq!(
+        node.preflight(Runtime::Containerd, &fake),
+        Vec::<String>::new()
+    );
+    // An invalid registry section is named; so is a config that is no TOML.
+    node.containerd_toml("version = 3\n[plugins.'io.containerd.cri.v1.images'.registry]\nconfig_path = '/x'\n[plugins.'io.containerd.cri.v1.images'.registry.mirrors.'a.io']\nendpoint = ['https://m.io']\n");
+    assert!(has(
+        &node.preflight(Runtime::Containerd, &fake),
+        &[
+            "the registry section is invalid",
+            "`mirrors` cannot be set when `config_path` is provided"
+        ]
+    ));
+    node.containerd_toml("version = ");
+    assert!(has(
+        &node.preflight(Runtime::Containerd, &fake),
+        &[
+            "/etc/containerd/config.toml",
+            "cannot read containerd's config"
+        ]
+    ));
+}
+
+#[test]
+fn nri_that_is_off_or_closed_is_refused_naming_each_key() {
+    let node = Node::new();
+    let fake = node.configured(Runtime::Containerd);
+    for (text, parts) in [
+        (
+            "version = 3\n[plugins.'io.containerd.nri.v1.nri']\ndisable = true\n",
+            &[
+                "`disable = true` in [plugins.'io.containerd.nri.v1.nri']",
+                "set it to false",
+            ][..],
+        ),
+        (
+            "version = 3\n[plugins.'io.containerd.nri.v1.nri']\ndisable_connections = true\n",
+            &[
+                "`disable_connections = true` in [plugins.'io.containerd.nri.v1.nri']",
+                "restart containerd",
+            ],
+        ),
+        (
+            "version = 3\ndisabled_plugins = ['io.containerd.nri.v1.nri']\n",
+            &[
+                "`io.containerd.nri.v1.nri` is in `disabled_plugins`",
+                "remove it",
+            ],
+        ),
+    ] {
+        node.containerd_toml(text);
+        let problems = node.preflight(Runtime::Containerd, &fake);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            has(&problems, &["/etc/containerd/config.toml", "(D54)"]),
+            "{problems:?}"
+        );
+        assert!(has(&problems, parts), "{problems:?}");
+    }
+    node.containerd_toml("version = 3\ndisabled_plugins = ['io.containerd.nri.v1.nri']\n[plugins.'io.containerd.nri.v1.nri']\ndisable = true\ndisable_connections = true\n");
+    assert_eq!(node.preflight(Runtime::Containerd, &fake).len(), 3);
+}
+
+#[test]
+fn crios_nri_that_is_off_or_closed_and_a_missing_drop_in_are_refused() {
+    let node = Node::new();
+    let fake = node.configured(Runtime::CriO);
+    fake.nri.set((false, false));
+    let problems = node.preflight(Runtime::CriO, &fake);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        has(
+            &problems,
+            &[
+                "/run/cri-o.sock",
+                "`enable_nri = false` in [crio.nri]",
+                "set it to true",
+                "(D54, D64)"
+            ]
+        ),
+        "{problems:?}"
+    );
+    fake.nri.set((true, true));
+    assert!(has(
+        &node.preflight(Runtime::CriO, &fake),
+        &[
+            "`nri_disable_connections = true` in [crio.nri]",
+            "set it to false"
+        ]
+    ));
+    fake.nri.set((false, true));
+    assert_eq!(node.preflight(Runtime::CriO, &fake).len(), 2);
+    fake.nri.set((true, false));
+    fake.inspect_fails.set(true);
+    assert!(has(
+        &node.preflight(Runtime::CriO, &fake),
+        &["/run/cri-o.sock", "CRI-O's inspect API answered"]
+    ));
+    fake.inspect_fails.set(false);
+    std::fs::remove_file(node.paths.crio_dropin()).unwrap();
+    let problems = node.preflight(Runtime::CriO, &fake);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        has(
+            &problems,
+            &[
+                "/etc/containers/registries.conf.d/99-speculaire.conf",
+                "is missing",
+                "run `speculaire configure`"
+            ]
+        ),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn check_all_reports_what_check_and_preflight_both_find_once() {
+    let node = Node::new();
+    let fake = node.configured(Runtime::CriO);
+    std::fs::remove_file(node.paths.crio_dropin()).unwrap();
+    std::fs::remove_dir_all(node.dir.path().join("var/lib/speculaire/mirror")).unwrap();
+    fake.nri.set((false, false));
+    let all = check_all(Runtime::CriO, &node.paths, &node.settings, &fake, now()).unwrap();
+    let root = node.dir.path().to_str().unwrap();
+    let all: Vec<String> = all
+        .iter()
+        .map(|p| p.to_string().replace(root, ""))
+        .collect();
+    // The NRI key, the certificate, the drop-in: each once, though `check` finds the last two as well.
+    assert_eq!(all.len(), 3, "{all:?}");
+    assert!(
+        has(&all, &["enable_nri"]) && has(&all, &["ca.crt"]) && has(&all, &["99-speculaire.conf"])
+    );
+    // A problem only `check` finds still shows up: a drop-in that differs.
+    let node = Node::new();
+    let fake = node.configured(Runtime::CriO);
+    put(&node.paths.crio_dropin(), "# edited\n");
+    let all = check_all(Runtime::CriO, &node.paths, &node.settings, &fake, now()).unwrap();
+    assert!(
+        all.iter().any(|p| p
+            .message
+            .contains("differs from what `speculaire configure` writes")),
+        "{all:?}"
+    );
+}
+
+#[test]
+fn the_containerd_config_can_be_somewhere_else() {
+    let node = Node::new();
+    let elsewhere = node.dir.path().join("other/config.toml");
+    let paths = Paths::under(node.dir.path()).with_containerd_config(&elsewhere);
+    assert_eq!(paths.containerd_config(), elsewhere);
+    assert_eq!(
+        Paths::under(node.dir.path()).containerd_config(),
+        node.dir.path().join("etc/containerd/config.toml")
+    );
+    assert_eq!(
+        Paths::system().containerd_config(),
+        PathBuf::from("/etc/containerd/config.toml")
     );
 }

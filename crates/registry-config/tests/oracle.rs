@@ -981,24 +981,35 @@ fn auth(a: &Auth) -> Value {
 }
 
 fn our_config(root: &Path, entry: &str) -> Value {
-    match config::load_raw(&root.join(entry)) {
-        Err(_) => json!({"error": true}),
-        Ok(RawRegistry {
-            config_path,
-            mirrors,
-            configs,
-            auths,
-            headers: h,
-        }) => json!({
-            "registry": {
-                "config_path": config_path,
-                "mirrors": mirrors,
-                "configs": configs.iter().map(|(k, v)| (k.clone(), v.as_ref().map_or(Value::Null, auth))).collect::<serde_json::Map<_, _>>(),
-                "auths": auths.iter().map(|(k, v)| (k.clone(), auth(v))).collect::<serde_json::Map<_, _>>(),
-                "headers": headers(&h),
-            }
-        }),
-    }
+    let path = root.join(entry);
+    let (Ok(raw), Ok(plugins)) = (config::load_raw(&path), config::load_plugins(&path)) else {
+        return json!({"error": true});
+    };
+    let RawRegistry {
+        config_path,
+        mirrors,
+        configs,
+        auths,
+        headers: h,
+    } = raw;
+    json!({
+        "registry": {
+            "config_path": config_path,
+            "mirrors": mirrors,
+            "configs": configs.iter().map(|(k, v)| (k.clone(), v.as_ref().map_or(Value::Null, auth))).collect::<serde_json::Map<_, _>>(),
+            "auths": auths.iter().map(|(k, v)| (k.clone(), auth(v))).collect::<serde_json::Map<_, _>>(),
+            "headers": headers(&h),
+        },
+        "plugins": {
+            "discard_unpacked_layers": plugins.discard_unpacked_layers,
+            "nri": {
+                "disable": plugins.nri.disable,
+                "disable_connections": plugins.nri.disable_connections,
+                "plugin_disabled": plugins.nri.plugin_disabled,
+                "required_plugins": plugins.nri.required_plugins,
+            },
+        },
+    })
 }
 
 fn config_cases(root: &Path) -> Vec<(String, ConfigCase)> {
@@ -1239,6 +1250,121 @@ fn config_cases(root: &Path) -> Vec<(String, ConfigCase)> {
                 "imports = [\"b.toml\"]\nrequired_plugins = [\"io.a.b\"]\n",
             ),
             ("b.toml", "required_plugins = [\"nodot\"]\n"),
+        ],
+    );
+
+    // Plugin settings: discard_unpacked_layers where each version keeps it, and NRI.
+    let cri = "\"io.containerd.grpc.v1.cri\"";
+    let nri = "\"io.containerd.nri.v1.nri\"";
+    for (label, text) in [
+        (
+            "discard in the images plugin",
+            "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\ndiscard_unpacked_layers = true\n".to_owned(),
+        ),
+        (
+            "discard in the images plugin, other case",
+            "version = 4\n[plugins.\"io.containerd.cri.v1.images\"]\nDiscard_Unpacked_Layers = true\n".to_owned(),
+        ),
+        (
+            "discard in the CRI plugin with runtimes",
+            format!("version = 2\n[plugins.{cri}.containerd]\ndiscard_unpacked_layers = true\n[plugins.{cri}.containerd.runtimes.runc]\nruntime_type = \"x\"\n"),
+        ),
+        (
+            "discard in the CRI plugin without runtimes",
+            format!("version = 2\n[plugins.{cri}.containerd]\ndiscard_unpacked_layers = true\n"),
+        ),
+        (
+            "discard in the CRI plugin of version 1",
+            "version = 1\n[plugins.cri.containerd]\ndiscard_unpacked_layers = true\n[plugins.cri.containerd.runtimes.runc]\nx = 1\n".to_owned(),
+        ),
+        (
+            "discard in the CRI plugin of version 3",
+            format!("version = 3\n[plugins.{cri}.containerd]\ndiscard_unpacked_layers = true\n[plugins.{cri}.containerd.runtimes.runc]\nx = 1\n"),
+        ),
+        (
+            "discard in the CRI plugin of version 4",
+            format!("version = 4\n[plugins.{cri}.containerd]\ndiscard_unpacked_layers = true\n[plugins.{cri}.containerd.runtimes.runc]\nx = 1\n"),
+        ),
+        (
+            "discard in both",
+            format!("version = 2\n[plugins.{cri}.containerd]\ndiscard_unpacked_layers = true\n[plugins.{cri}.containerd.runtimes.runc]\nx = 1\n[plugins.\"io.containerd.cri.v1.images\"]\ndiscard_unpacked_layers = false\n"),
+        ),
+        (
+            "discard is not a boolean",
+            "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\ndiscard_unpacked_layers = \"yes\"\n".to_owned(),
+        ),
+        (
+            "containerd is not a table",
+            format!("version = 2\n[plugins.{cri}]\ncontainerd = 1\n"),
+        ),
+        (
+            "runtimes is not a table",
+            format!("version = 2\n[plugins.{cri}.containerd]\nruntimes = 1\n"),
+        ),
+        (
+            "a runtime is not a table",
+            format!("version = 2\n[plugins.{cri}.containerd.runtimes]\nrunc = 1\n"),
+        ),
+        (
+            "pinned_images is not a table",
+            format!("version = 2\n[plugins.{cri}]\nsandbox_image = \"x\"\n[plugins.\"io.containerd.cri.v1.images\"]\npinned_images = 1\n"),
+        ),
+        (
+            "runtime_platform is not a table with runtimes",
+            format!("version = 2\n[plugins.{cri}.containerd.runtimes.runc]\nx = 1\n[plugins.\"io.containerd.cri.v1.images\"]\nruntime_platform = 1\n"),
+        ),
+        (
+            "runtime_platform is not a table without runtimes",
+            format!("version = 2\n[plugins.{cri}]\nsandbox_image = \"x\"\n[plugins.\"io.containerd.cri.v1.images\"]\nruntime_platform = 1\n"),
+        ),
+        ("nri default", "version = 3\n".to_owned()),
+        (
+            "nri disabled",
+            format!("version = 3\n[plugins.{nri}]\ndisable = true\n"),
+        ),
+        (
+            "nri closed, other case",
+            format!("version = 3\n[plugins.{nri}]\nDisable_Connections = true\n"),
+        ),
+        (
+            "nri keys of the wrong type",
+            format!("version = 3\n[plugins.{nri}]\ndisable = \"yes\"\n"),
+        ),
+        (
+            "nri disabled by the list",
+            "version = 3\ndisabled_plugins = [\"io.containerd.nri.v1.nri\"]\n".to_owned(),
+        ),
+        (
+            "nri disabled by the list of version 1",
+            "version = 1\ndisabled_plugins = [\"io.containerd.nri.v1.nri\"]\n".to_owned(),
+        ),
+        (
+            "nri not disabled by another plugin",
+            "version = 3\ndisabled_plugins = [\"io.containerd.grpc.v1.cri\"]\n".to_owned(),
+        ),
+        (
+            "nri validator",
+            format!("version = 3\n[plugins.{nri}.default_validator]\nrequired_plugins = [\"a\", \"b\"]\n"),
+        ),
+        (
+            "nri validator is not a table",
+            format!("version = 3\n[plugins.{nri}]\ndefault_validator = 1\n"),
+        ),
+    ] {
+        add(label, &[("config.toml", &text)]);
+    }
+
+    add(
+        "keys of two cases across imports",
+        &[
+            (
+                "config.toml",
+                "version = 3\nimports = [\"b.toml\"]\n[plugins.\"io.containerd.nri.v1.nri\".default_validator]\nrequired_plugins = [\"x\"]\n",
+            ),
+            (
+                "b.toml",
+                "[plugins.\"io.containerd.nri.v1.nri\".Default_Validator]\nRequired_Plugins = [\"a\", \"b\"]\n",
+            ),
         ],
     );
 

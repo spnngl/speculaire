@@ -1550,6 +1550,7 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_path_to_error",
+ "speculaire-configure",
  "speculaire-mirror",
  "speculaire-runtime",
  "thiserror",
@@ -1648,9 +1649,13 @@ dependencies = [
 name = "speculaire-runtime"
 version = "0.1.0"
 dependencies = [
+ "containerd-client",
+ "prost",
  "serde",
  "thiserror",
+ "tokio",
  "toml",
+ "tonic-prost",
 ]
 
 [[package]]

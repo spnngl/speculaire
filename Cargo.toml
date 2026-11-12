@@ -14,6 +14,7 @@ publish = false
 
 [workspace.dependencies]
 speculaire-agent = { path = "crates/agent" }
+speculaire-fake-runtime = { path = "crates/fake-runtime" }
 speculaire-mirror = { path = "crates/mirror" }
 speculaire-oci = { path = "crates/oci" }
 speculaire-oracle-harness = { path = "crates/oracle-harness" }
@@ -76,6 +77,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = [
   "aws-lc-rs",
 ] }
 tokio-util = { version = "0.7.20", features = ["io"] }
+prost = "0.14.5"
 tonic-prost = "0.14.9"
 tokio = { version = "1.54.1", features = [
   "macros",
