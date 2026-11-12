@@ -168,7 +168,7 @@ fn our_registries(case: &RegistriesCase) -> Value {
                     "reference": reference,
                     "prefix": registry.prefix,
                     "sources": sources.iter().map(|s| {
-                        let mut source = endpoint(&s.endpoint);
+                        let mut source = endpoint(s.endpoint);
                         source["reference"] = json!(s.reference);
                         source
                     }).collect::<Vec<_>>(),
