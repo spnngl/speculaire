@@ -555,6 +555,16 @@ ca = "/etc/path/default"
             "[host.\"https://a.io\".header]\nx=\"1\"\n[host.\"https://a.io\"]\ncapabilities=[\"pull\"]\n",
         )],
     );
+    // go-toml lowers a key by `strings.ToLower`: K (U+212A) is k and İ (U+0130) is i, ſ (U+017F) stays.
+    add(
+        "keys: non-ASCII letters that lower to a field's",
+        "docker.io",
+        "",
+        &[(
+            "docker.io/hosts.toml",
+            "[host.\"https://a.io\"]\n\"s\u{212a}\u{130}p_verify\" = true\n\"\u{17f}erver\" = \"https://b.io\"\n",
+        )],
+    );
     add(
         "order: dotted keys are not listed",
         "docker.io",

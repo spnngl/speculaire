@@ -18,7 +18,7 @@ use toml::de::DeTable;
 
 use crate::ParseError;
 use crate::error::from_toml;
-use crate::fold::{fold_fields, table_at, tables_in};
+use crate::fold::{fold_fields, go_toml, table_at, tables_in};
 use crate::go::{clean_path, is_localhost, parse_duration, parse_url, split_host_port};
 use crate::header::{HeaderValue, Headers};
 
@@ -249,10 +249,10 @@ const FIELDS: &[&str] = &[
 ];
 
 fn fold_file(table: &mut DeTable<'_>) {
-    fold_fields(table, FIELDS);
+    fold_fields(table, FIELDS, go_toml);
     if let Some(hosts) = table_at(table, "host") {
         for host in tables_in(hosts) {
-            fold_fields(host, FIELDS);
+            fold_fields(host, FIELDS, go_toml);
         }
     }
 }

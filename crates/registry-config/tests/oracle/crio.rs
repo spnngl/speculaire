@@ -501,6 +501,23 @@ fn layout_cases(root: &Path) -> Vec<(String, RegistriesCase)> {
 fn registries_agree_with_go_podman_io_image() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let mut cases = layout_cases(dir.path());
+    // BurntSushi/toml matches a key by `strings.EqualFold`: ſ (U+017F) is s and K (U+212A) is k, İ (U+0130) is not i.
+    for (n, text) in [
+        "[[registry]]\nlocation = \"a.io\"\n\"in\u{17f}ecure\" = true\n\"bloc\u{212a}ed\" = true\n",
+        "[[registry]]\nlocation = \"a.io\"\n\"\u{130}nsecure\" = true\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cases.push((
+            format!("keys {n}: {text:?}"),
+            registries_case(
+                &dir.path().join(format!("keys-{n}")),
+                &[("etc/containers/registries.conf", text)],
+                text,
+            ),
+        ));
+    }
     let files = seeds("registries_conf");
     // The test data of the library, each file as `registries.conf`.
     for (n, bytes) in files.iter().enumerate() {

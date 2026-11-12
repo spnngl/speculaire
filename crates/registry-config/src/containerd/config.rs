@@ -19,7 +19,7 @@ use toml::{Table, Value};
 
 use crate::ParseError;
 use crate::error::{from_toml, from_value};
-use crate::fold::{fold_fields, fold_value_fields, value_table_at, value_tables_in};
+use crate::fold::{fold_fields, fold_value_fields, go_toml, value_table_at, value_tables_in};
 use crate::go::{clean_path, glob, parse_url};
 use crate::header::Headers;
 
@@ -501,12 +501,10 @@ fn load_merged(path: &Path) -> Result<Merged, LoadError> {
             path: file_path.clone(),
             source,
         })?;
-        let mut file: File =
-            from_toml(&text, |table| fold_fields(table, FILE_FIELDS)).map_err(|source| {
-                LoadError::Parse {
-                    path: file_path.clone(),
-                    source,
-                }
+        let mut file: File = from_toml(&text, |table| fold_fields(table, FILE_FIELDS, go_toml))
+            .map_err(|source| LoadError::Parse {
+                path: file_path.clone(),
+                source,
             })?;
         // containerd refuses the merged config when its version is above its own, and the version of a merge only
         // rises: the first file of a newer version decides.

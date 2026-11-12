@@ -18,7 +18,7 @@ use super::Context;
 use super::configfile::{self, Wanted};
 use crate::ParseError;
 use crate::error::from_toml;
-use crate::fold::{fold_fields, table_at};
+use crate::fold::{equal_fold, fold_fields, table_at};
 
 /// The credential helper that stands for the credential files.
 pub const AUTHENTICATION_FILE_HELPER: &str = "containers-auth.json";
@@ -192,27 +192,27 @@ pub struct File {
 }
 
 fn fold_file(table: &mut DeTable<'_>) {
-    fold_fields(table, FILE_FIELDS);
+    fold_fields(table, FILE_FIELDS, equal_fold);
     if let Some(DeValue::Array(registries)) = table.get_mut("registry").map(AsMut::as_mut) {
         for registry in registries.iter_mut() {
             let DeValue::Table(registry) = registry.as_mut() else {
                 continue;
             };
-            fold_fields(registry, REGISTRY_FIELDS);
+            fold_fields(registry, REGISTRY_FIELDS, equal_fold);
             if let Some(DeValue::Array(mirrors)) = registry.get_mut("mirror").map(AsMut::as_mut) {
                 for mirror in mirrors.iter_mut() {
                     if let DeValue::Table(mirror) = mirror.as_mut() {
-                        fold_fields(mirror, ENDPOINT_FIELDS);
+                        fold_fields(mirror, ENDPOINT_FIELDS, equal_fold);
                     }
                 }
             }
         }
     }
     if let Some(v1) = table_at(table, "registries") {
-        fold_fields(v1, V1_FIELDS);
+        fold_fields(v1, V1_FIELDS, equal_fold);
         for list in V1_FIELDS {
             if let Some(list) = table_at(v1, list) {
-                fold_fields(list, &["registries"]);
+                fold_fields(list, &["registries"], equal_fold);
             }
         }
     }
