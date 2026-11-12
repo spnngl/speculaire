@@ -71,18 +71,34 @@ struct Agent {
 }
 
 impl Agent {
-    /// Starts the agent on a free port with `extra` appended to its config.
+    /// Starts the agent on free ports with `extra` appended to its config, and waits until it is ready.
     fn start(extra: &str) -> Self {
         Self::start_with_env(extra, &[])
     }
 
     /// As [`Agent::start`], with `env` added to the agent's environment.
     fn start_with_env(extra: &str, env: &[(&str, &str)]) -> Self {
-        let port = free_port();
-        let config = scratch_file();
-        let agent = Self::spawn(port, config, extra, env);
-        wait_until(|| get(port, "/livez", "").is_some_and(|r| r.status == 200));
-        agent
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let port = free_port();
+            let mut agent = Self::spawn(port, scratch_file(), extra, env);
+            loop {
+                if get(port, "/readyz", "").is_some_and(|r| r.status == 200) {
+                    return agent;
+                }
+                if let Some(status) = agent.child.try_wait().unwrap() {
+                    // A free port can be taken, by another test's agent or connection, before the agent binds it.
+                    let lines: Vec<String> = agent.stderr.iter().collect();
+                    assert!(
+                        lines.iter().any(|l| l.contains("Address already in use")),
+                        "the agent exited, {status}: {lines:#?}"
+                    );
+                    break;
+                }
+                assert!(Instant::now() < deadline, "timed out");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
     }
 
     fn spawn(port: u16, config: PathBuf, extra: &str, env: &[(&str, &str)]) -> Self {
@@ -334,7 +350,6 @@ fn reload_failures(agent: &Agent) -> String {
 fn a_healthy_start_is_ready_and_logs_nothing_below_warn() {
     let agent = Agent::start("");
     assert_eq!(agent.get("/livez", "").status, 200);
-    assert_eq!(agent.get("/readyz", "").status, 200);
     let (status, lines) = agent.stop();
     assert!(status.success(), "{status}");
     let loud: Vec<_> = lines
@@ -528,8 +543,6 @@ fn a_new_poll_interval_applies_to_the_next_poll() {
 #[test]
 fn the_mirror_listens_while_the_agent_runs_and_stops_with_it() {
     let agent = Agent::start("");
-    // `/livez` answers before the mirror listens; `/readyz` only after (D45).
-    wait_until(|| get(agent.port, "/readyz", "").is_some_and(|r| r.status == 200));
     let mirror = (Ipv4Addr::LOCALHOST, agent.mirror_port);
     assert!(
         TcpStream::connect(mirror).is_ok(),
@@ -704,9 +717,8 @@ fn an_agent_that_cannot_open_the_mirror_stops_and_one_that_can_is_ready() {
     let (code, stderr) = refused(&node, &mirror);
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("listening on mirror.address"), "{stderr}");
-    // `/readyz` is 200 only once the mirror listens, and this agent is ready.
+    // `/readyz` is 200 only once the mirror listens, and this agent becomes ready.
     let agent = Agent::start("");
-    assert_eq!(agent.get("/readyz", "").status, 200);
     assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, agent.mirror_port)).is_ok());
 }
 
