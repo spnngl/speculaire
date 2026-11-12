@@ -502,6 +502,8 @@ fn a_new_poll_interval_applies_to_the_next_poll() {
 #[test]
 fn the_mirror_listens_while_the_agent_runs_and_stops_with_it() {
     let agent = Agent::start("");
+    // `/livez` answers before the mirror listens; `/readyz` only after (D45).
+    wait_until(|| get(agent.port, "/readyz", "").is_some_and(|r| r.status == 200));
     let mirror = (Ipv4Addr::LOCALHOST, agent.mirror_port);
     assert!(
         TcpStream::connect(mirror).is_ok(),
