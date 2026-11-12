@@ -7,7 +7,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** Spegel assumes every peer listens on the same port as the local one (`docs/research/spegel.md` §3), which breaks mixed configurations.
 - **Revisit when:** —
 
-## D5: Serve blobs from containerd's content directory (amended by D67)
+## D5: Serve blobs from containerd's content directory (amended by D67, D85)
 
 - **Decision:** read `/var/lib/containerd/io.containerd.content.v1.content/blobs/` directly (read-only), with a gRPC `Content.Read` fallback.
 - **Because:** this is Spegel's proven path, and it is the cheapest one.
@@ -26,7 +26,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Limit:** when containerd itself sends a `Range` request (resuming a download), the agent relays the range unhashed; containerd's commit check is then the only check.
 - **Revisit when:** —
 
-## D14: The mirror is TLS with client auth on loopback; the peer API is mTLS on the node IP (amended by D32, D56, D66, D82)
+## D14: The mirror is TLS with client auth on loopback; the peer API is mTLS on the node IP (amended by D32, D56, D66, D82, D85)
 
 - **Decision:**
   - The mirror listens on `127.0.0.1:7480` (`mirror.address`, D56) with TLS and requires a client certificate.
@@ -226,3 +226,23 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - A reload that fails after the files were written must run again, and it finds nothing to change; and certificates deleted while CRI-O still has the drop-in in memory fail every pull from a mirrored registry.
 - **Measured (M2 step 03, arm64, Docker):** on CRI-O 1.37.2 `speculaire configure` wrote the drop-in and the three certificate files, the journal logged `Applied new registry configuration`, and `crictl pull docker.io/library/busybox:1.36.1` sent `GET /v2/` to a TLS server on `127.0.0.1:7480` with the client certificate; with that server killed the pull went on to Docker Hub and succeeded. `unconfigure` kept an admin's `50-admin.conf` with an edit made after `configure`, and a pull after it succeeded; the same on the three CRI-O legs of each architecture in CI run 43182634661.
 - **Revisit when:** CRI-O gains a per-blob fallback across sources (D66), or a node's CRI-O sets `registries_conf` (D80).
+
+## D85: The mirror is hyper over TLS 1.3, finds a held blob by its digest in the content directory, and is checked by the distribution-spec suite (amends D5, D14, D55, D82)
+
+- **Decision:**
+  - **Stack:** crate `speculaire-mirror`. `hyper` 1 (HTTP/1 only) serves each connection that `tokio-rustls` accepts, with rustls on aws-lc-rs and no `tls12` feature, so TLS 1.3 is the only version the binary has. `WebPkiClientVerifier` requires a client certificate that the local CA signed (D14). A client has 10 s for the handshake and for its request headers. The router is a `match` on the path, not axum's: a name has any number of segments, which axum's routes cannot match before `/blobs/<digest>`.
+  - **Certificates:** the agent reads `ca.crt`, `server.crt` and `server.key` from the new restart key `mirror.directory` (default `/var/lib/speculaire/mirror`; `configure` writes there too, so the key moves both). It stops at startup, naming the directory and `speculaire configure`, when they cannot be loaded (D55). Each accepted connection checks the three files' modification times, at most once a second, and takes new files up when they changed and load; files that do not load leave the last good ones in use and are logged (D14, Measured).
+  - **Routes:** `GET /v2/` is 200. `GET` and `HEAD` of `/v2/<name>/manifests/<digest>` and `/v2/<name>/blobs/<digest>` serve what the node holds, whatever `<name>` and `?ns=`. Everything else is a 404: a tag (D6), `referrers`, a digest the node lacks, a method that is not `GET` or `HEAD`, a path of no route. The mirror never answers 401, 408 or 429; it answers 206 and 416 to a `Range`.
+  - **Bodies:** a blob has `Content-Type: application/octet-stream`, `Docker-Content-Digest`, `Content-Length` and `Accept-Ranges: bytes`. A manifest is read whole (4 MiB at most) and has the `mediaType` it names, or the one its shape implies (`manifests`: an index; `config` or `layers`: an image manifest); bytes that are no manifest are a miss. One range, `a-b`, `a-` or `-n`, is `206` with `Content-Range`; one that starts past the end, or ends before it starts, is `416` with `Content-Range: bytes */<size>` (the conformance suite's `bytes=500-0` wants it); a list of ranges, another unit and text that is no range are ignored, and the whole body follows.
+  - **Finding a blob:** the file `blobs/<algorithm>/<hex>` under `/var/lib/containerd/io.containerd.content.v1.content` (D5), with no call to containerd. Only when the file is missing does the mirror ask containerd's `Content` service, namespace `k8s.io`, `Info` for the size and then `Read`, over a channel it keeps; a service that is not there, or has gone, is a miss. A directory where the file should be is a miss; any other failure to look is an `error`, answered 404.
+  - **Metrics** (D34): `speculaire_mirror_requests_total{kind,result}` (`served`, `fall_through`, `error`), `speculaire_mirror_bytes_total{source="local"}` and `speculaire_mirror_first_byte_seconds{kind}`, all there from startup. A ping is not counted.
+  - **Conformance:** `just conformance` runs `opencontainers/distribution-spec`'s suite at the commit pinned in the justfile, in the Go image, against the musl binary in a container: `configure --runtime containerd`, the agent, content (an index, a manifest, a config, two layers) placed in the content directory by `conformance/run.sh`, and `socat` presenting the client certificate for the suite, which sends none. The suite runs read-only (`OCI_API_PUSH=false`, `OCI_RO_DATA_*`). The two tests that pull by tag fail, as `conformance/expected-failures.txt` lists with their reason; `conformance/check` fails on any other failure, and on a listed test that does not fail. It reads the suite's console report: at the pinned commit the suite panics writing `results.yaml` when push is off, and so writes no `junit.xml`. Its range tests need push, so they do not run; ranges are tested in the mirror's own tests. `just conformance` runs in the `musl` job of CI, on both architectures.
+- **Because:**
+  - The runtime asks for content by digest, and the content directory is a path by digest: no call per request, which keeps a miss, the common case on containerd, at the cost of one `stat` (D5).
+  - A TLS version that the binary does not have cannot be negotiated, and both runtimes speak 1.3 (D14, Measured).
+  - Every distribution error is a fall through (ARCHITECTURE.md § Vocabulary), so no status of the mirror's can start a retry on the same host.
+- **Measured (M2 step 04, arm64, Docker):**
+  - `just conformance`: 14 tests passed and the 2 listed failed.
+  - On a worker of the CRI-O 1.37 leg, 1000 requests for a digest that the node does not hold, on one connection: p50 83 µs, p99 0.27 ms, max 68 ms (the connection's first request).
+  - `crictl pull docker.io/library/busybox:1.36.0` sent the mirror a manifest request that counted as `fall_through`, and the pull succeeded, on containerd 2.4 and CRI-O 1.37; a client without the certificate, and one that did not trust the CA, were refused.
+- **Revisit when:** a node needs a mirror on TLS 1.2, or the suite's `results.yaml` panic is fixed upstream: then `check` reads `junit.xml`.

@@ -6,7 +6,7 @@ For admins running speculaire on a node. Every setting is listed with its defaul
 
 1. Install the package. It doesn't touch the runtime's config (D55).
 2. Run `speculaire configure` as root, with the runtime running. It finds the runtime by its socket (D84), creates the mirror certificates in `/var/lib/speculaire/mirror/`, and adds the mirror entry first in each `hosts.toml` under containerd's `config_path`, creating `_default/hosts.toml` (D82). On CRI-O it writes `/etc/containers/registries.conf.d/99-speculaire.conf`, which copies your entry of each registry in `mirror.registries` and each prefix of your `registries.conf` with the mirror first, and the certificates in `/etc/containers/certs.d/127.0.0.1:7480/`, then reloads CRI-O (D66, D83). It prints each file it changes and any registry or directory it leaves alone, and running it again changes nothing. `--runtime containerd` or `--runtime cri-o` skips the socket probe, for an image build.
-3. Start `speculaire.service`. The agent refuses to start without the mirror certificates, with an error naming `speculaire configure` (D55). `/readyz` on port 7482 answers 200 once it is ready (D45).
+3. Start `speculaire.service`. The agent refuses to start without the mirror certificates in `mirror.directory`, with an error naming that directory and `speculaire configure`, and when it cannot listen on `mirror.address` (D55, D85). `/readyz` on port 7482 answers 200 once it is ready (D45).
 4. Continue with "Before turning on `enforce`". The gate starts in `audit` mode (D47).
 
 To move the mirror off port 7480, set `mirror.address` to another loopback `ip:port`, run `speculaire configure` again, then restart the agent (D56). `configure` rewrites its own entries to the new address wherever they are, and remakes the certificates when the IP changed.
@@ -66,6 +66,7 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 |---|---|
 | `speculaire_gate_total{mode="enforce",result=~"rejected\|unverifiable\|pending\|unmatched"}` | The rate rises above its usual level |
 | `speculaire_peer_fetches_total{result="digest_mismatch"}` | It increases: a peer sent bytes that do not match their digest; the warning log, and the `peer` audit event if on, name its node (D52) |
+| `speculaire_mirror_requests_total{result="error"}` | It increases: the mirror could not read content it may hold, and answered 404; the warning log names the error (D85) |
 | `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config (D30) |
 | `speculaire_identity_path{path="annotation"}` | It is 1: the node runs containerd 2.3, with its known identity gap (D15) |
 | `speculaire_trust_root_expiry_timestamp_seconds` | Less than 7 days away: once it passes, new verifications become `unverifiable`; cached verdicts keep serving |

@@ -114,6 +114,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/agent` | The agent: config (D60), logs (D37), metrics (D34) and status listener (D42, D45) |
 | `crates/registry-config` | The *registry config* parsers, a module per runtime: containerd's `config.toml` and `hosts.toml` (D17, D78); CRI-O's `registries.conf`, `certs.d` and credential files (D66, D80) |
 | `crates/oracle-harness` | Test helper: runs `speculaire-oracle` and reads its answers; the differential tests of the parsers use it (D70, D79) |
+| `crates/mirror` | The local mirror: the pull half of the distribution API over TLS 1.3 with a client certificate, from the runtime's content (D5, D85); later peers and the relay |
 | `crates/oci` | Image references and platforms as containerd parses them (D81); later the Distribution read API, referrers, media types and registry Bearer token auth, on `oci-spec` |
 | `crates/runtime` | containerd and CRI-O: which one runs on the node (D64, D84) and CRI-O's config from its inspect API; later content source (containerd's directory + gRPC fallback, or the *blob cache*), image events, in-memory copy of the image store, preflight (planned) |
 | `crates/configure` | `configure`, `unconfigure` and the node half of `check-config`: certificates, containerd's `hosts.toml` edits, CRI-O's drop-in (D82, D83) |
@@ -125,6 +126,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `oracle/` | Go module, test-only: `speculaire-oracle`, upstream's own code for differential tests, `version`, `hosts`, `config`, `registries`, `certs`, `auth`, `reference` and `platform` today, run by `just oracle` with the Rust differential tests (D29, D70, D79); a fake NRI runtime later |
 | `packaging/` | `config.toml`, the reference of every setting (D30, D47); `speculaire.service`, the systemd unit (D53, D69); nfpm config, runtime drop-in examples, later the Helm chart (planned) |
 | `e2e/` | kind node image per runtime (`node/containerd/`, `node/crio/`), cluster config, and the suites (the node, the unit): a Rust test crate run by `just e2e <runtime> <version> [<kubernetes minor>]` (D59, D63, D69) |
+| `conformance/` | `just conformance`: the distribution-spec suite against the mirror in a container, its seed content, and the list of expected failures (D85) |
 | `bench/` | Benchmarks against Spegel: recipe, node-access pod, policy, results (D35) (planned) |
 | `justfile` | The only entry point, for humans and CI (D27); `just dev <recipe>` runs a recipe in the build image (D57) |
 | `build/Containerfile` | The build image: the musl build and, on macOS, every recipe (D57) |
