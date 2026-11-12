@@ -10,7 +10,7 @@
 //! so does [`load`]. Keys the agent does not read are not checked: a config containerd refuses for one of them still
 //! loads here.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use secrecy::SecretString;
@@ -202,7 +202,8 @@ impl TryFrom<RawRegistry> for Registry {
             } else {
                 &raw.config_path
             };
-            Hosts::ConfigPath(split_list(list))
+            // Go's `filepath.SplitList`, of a list that is not empty.
+            Hosts::ConfigPath(list.split(':').map(PathBuf::from).collect())
         } else if raw.config_path.is_empty() {
             Hosts::Mirrors(raw.mirrors)
         } else {
@@ -232,14 +233,6 @@ impl TryFrom<RawRegistry> for Registry {
             headers: raw.headers,
         })
     }
-}
-
-/// Go's `filepath.SplitList`.
-fn split_list(list: &str) -> Vec<PathBuf> {
-    if list.is_empty() {
-        return Vec::new();
-    }
-    list.split(':').map(PathBuf::from).collect()
 }
 
 /// A config that could not be loaded.
@@ -490,10 +483,9 @@ pub fn load_plugins(path: &Path) -> Result<Plugins, LoadError> {
 /// Reads `path` and its imports, migrates each file and merges them as containerd does.
 fn load_merged(path: &Path) -> Result<Merged, LoadError> {
     let mut merged = Merged::default();
-    let mut loaded = HashSet::new();
     let mut pending = VecDeque::from([path.to_owned()]);
     while let Some(file_path) = pending.pop_front() {
-        if !loaded.insert(file_path.clone()) {
+        if merged.files.contains(&file_path) {
             continue;
         }
         merged.files.push(file_path.clone());
@@ -532,9 +524,7 @@ fn load_merged(path: &Path) -> Result<Merged, LoadError> {
 ///
 /// As [`load_raw`], and when containerd would refuse the registry section ([`RegistryError`]).
 pub fn load(path: &Path) -> Result<Registry, LoadError> {
-    let registry = Registry::try_from(load_raw(path)?)?;
-    tracing::trace!(?registry, path = %path.display(), "read the containerd registry config");
-    Ok(registry)
+    load_with_files(path).map(|(registry, _)| registry)
 }
 
 /// [`load`], and the files it read: the config and its imports. A config that cannot be read has no files to name, and
