@@ -51,9 +51,9 @@ pub struct Registry {
 
 /// Where a pull of one reference may go, and what the reference is there.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PullSource {
+pub struct PullSource<'a> {
     /// The endpoint to try.
-    pub endpoint: Endpoint,
+    pub endpoint: &'a Endpoint,
     /// The reference at that endpoint: the prefix replaced by the endpoint's location.
     pub reference: String,
 }
@@ -465,52 +465,46 @@ impl Registry {
     /// # Errors
     ///
     /// When the registry's prefix does not match the reference, or an empty location has no wildcard prefix.
-    pub fn pull_sources(&self, reference: &str) -> Result<Vec<PullSource>, ParseError> {
-        let digested = reference.contains('@');
-        let mut endpoints: Vec<&Endpoint> = Vec::new();
-        if self.mirror_by_digest_only {
-            if digested {
-                endpoints.extend(&self.mirrors);
-            }
-        } else {
-            endpoints.extend(self.mirrors.iter().filter(|mirror| {
-                match mirror.pull_from_mirror.as_str() {
-                    "digest-only" => digested,
-                    "tag-only" => !digested,
-                    _ => true,
-                }
-            }));
-        }
-        endpoints.push(&self.endpoint);
-        endpoints
-            .into_iter()
-            .map(|endpoint| {
-                Ok(PullSource {
-                    endpoint: endpoint.clone(),
-                    reference: endpoint.rewrite(reference, &self.prefix)?,
-                })
-            })
-            .collect()
-    }
-}
-
-impl Endpoint {
-    /// `rewriteReference`, without the parse of its result.
-    fn rewrite(&self, reference: &str, prefix: &str) -> Result<String, ParseError> {
+    pub fn pull_sources(&self, reference: &str) -> Result<Vec<PullSource<'_>>, ParseError> {
+        let prefix = &self.prefix;
+        // `rewriteReference` of each endpoint.
         let Some(length) = ref_matching_prefix(reference, prefix) else {
             return Err(invalid(format!(
                 "invalid prefix '{prefix}' for reference '{reference}'"
             )));
         };
-        if self.location.is_empty() {
-            if !prefix.starts_with("*.") {
-                return Err(invalid(format!(
+        let rewrite = |endpoint: &Endpoint| {
+            if !endpoint.location.is_empty() {
+                Ok(format!("{}{}", endpoint.location, &reference[length..]))
+            } else if prefix.starts_with("*.") {
+                Ok(reference.to_owned())
+            } else {
+                Err(invalid(format!(
                     "invalid prefix '{prefix}' for empty location, should be in the format: *.example.com"
-                )));
+                )))
             }
-            return Ok(reference.to_owned());
-        }
-        Ok(format!("{}{}", self.location, &reference[length..]))
+        };
+        let digested = reference.contains('@');
+        self.mirrors
+            .iter()
+            .filter(|mirror| {
+                if self.mirror_by_digest_only {
+                    return digested;
+                }
+                match mirror.pull_from_mirror.as_str() {
+                    "digest-only" => digested,
+                    "tag-only" => !digested,
+                    _ => true,
+                }
+            })
+            .chain([&self.endpoint])
+            .map(|endpoint| {
+                Ok(PullSource {
+                    endpoint,
+                    reference: rewrite(endpoint)?,
+                })
+            })
+            .collect()
     }
 }
 

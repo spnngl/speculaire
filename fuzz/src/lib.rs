@@ -123,7 +123,7 @@ pub fn registries_conf(data: &[u8]) {
         );
         if let Ok(sources) = registry.pull_sources(&format!("{}/app:1", registry.prefix)) {
             assert_eq!(
-                sources.last().map(|source| &source.endpoint),
+                sources.last().map(|source| source.endpoint),
                 Some(&registry.endpoint),
                 "{text}"
             );
