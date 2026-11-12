@@ -111,13 +111,14 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 |---|---|
 | `apps/speculaire` | The binary: `version`, `check-config`, `configure`, `unconfigure` and `agent` today; `verify` (planned) (D62) |
 | `apps/loadgen` | Test-only reflector load generator, never packaged (D33) (planned) |
-| `crates/agent` | The agent: config (D60), logs (D37), metrics (D34) and status listener (D42, D45) |
+| `crates/agent` | The agent: config (D60), the node its config names (D87), preflight at startup (D86), logs (D37), metrics (D34) and status listener (D42, D45) |
 | `crates/registry-config` | The *registry config* parsers, a module per runtime: containerd's `config.toml` and `hosts.toml` (D17, D78); CRI-O's `registries.conf`, `certs.d` and credential files (D66, D80) |
 | `crates/oracle-harness` | Test helper: runs `speculaire-oracle` and reads its answers; the differential tests of the parsers use it (D70, D79) |
 | `crates/mirror` | The local mirror: the pull half of the distribution API over TLS 1.3 with a client certificate, from the runtime's content (D5, D85); later peers and the relay |
 | `crates/oci` | Image references and platforms as containerd parses them (D81); later the Distribution read API, referrers, media types and registry Bearer token auth, on `oci-spec` |
 | `crates/runtime` | containerd and CRI-O: which one runs on the node (D64, D84) and CRI-O's config from its inspect API; later content source (containerd's directory + gRPC fallback, or the *blob cache*), image events, in-memory copy of the image store, preflight (planned) |
-| `crates/configure` | `configure`, `unconfigure` and the node half of `check-config`: certificates, containerd's `hosts.toml` edits, CRI-O's drop-in (D82, D83) |
+| `crates/configure` | `configure`, `unconfigure`, the preflight and the node half of `check-config`: certificates, containerd's `hosts.toml` edits, CRI-O's drop-in (D82, D83, D86) |
+| `crates/fake-runtime` | Test support: a fake containerd on a socket, answering the CRI `Version` and introspection `Plugins` (D87) |
 | `crates/pki` | the mirror's local CA and certificates (D14, D82); later kubelet certificate loading and rotation, rustls verifiers (D16) |
 | `crates/reflect` | Protobuf, reflector server, agent client, membership (D2) (planned) |
 | `crates/verify` | Artifact discovery and *artifact store*, sigstore glue, policy, SBOM checks, verdict cache (planned) |
