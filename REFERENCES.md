@@ -17,7 +17,7 @@ Notes with file:line citations into upstream code, taken at the versions below. 
 
 | Repo | Version read | Use for |
 |---|---|---|
-| `containerd/containerd` | v2.3.0, v2.4.x, main | CRI create path, registry config, `hosts.toml`, content store, NRI wiring |
+| `containerd/containerd` | v2.3.0, v2.3.7, v2.4.2, main | CRI create path, registry config, `hosts.toml`, content store, NRI wiring |
 | `containerd/nri` | v0.11.0 (CRI-O 1.35, 1.36), v0.12.0 (containerd 2.3), v0.12.2 (CRI-O 1.37), v0.12.3 (2.4), main | plugin protocol, `Container` fields, `default_validator` |
 | `cri-o/cri-o` | v1.37.2, v1.36.7, v1.35.10 | NRI wiring and config (`internal/nri`, `internal/config/nri`), container create and its annotations (D64, D65), image store and pinning, `registries.conf` reload (D66); read the modules below under its `vendor/` |
 | `go.podman.io/image/v5` | v5.40.0 (CRI-O v1.37.2) | `registries.conf` mirrors, `certs.d`, auth files, one source per image, `Range` resume (D66, D67) |
