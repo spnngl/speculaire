@@ -206,12 +206,10 @@ impl Nri {
             nri: Section,
         }
         #[derive(Deserialize)]
+        #[serde(default)]
         struct Section {
-            #[serde(default = "yes")]
             enable_nri: bool,
-            #[serde(default)]
             nri_disable_connections: bool,
-            #[serde(default)]
             default_validator: Validator,
         }
         impl Default for Section {
@@ -228,24 +226,12 @@ impl Nri {
             #[serde(default)]
             nri_validator_required_plugins: Vec<String>,
         }
-        const fn yes() -> bool {
-            true
-        }
         let Root { crio: Crio { nri } } = toml::from_str(config)?;
         Ok(Self {
             enabled: nri.enable_nri,
             disable_connections: nri.nri_disable_connections,
             required_plugins: nri.default_validator.nri_validator_required_plugins,
         })
-    }
-
-    /// The NRI settings in a whole `GET /config` response, headers included.
-    ///
-    /// # Errors
-    ///
-    /// As [`body`] and [`Nri::parse`].
-    pub fn from_response(response: &[u8]) -> Result<Self, Error> {
-        Self::parse(body(response)?)
     }
 }
 
@@ -367,7 +353,7 @@ mod tests {
             (b"HTTP/1.0 200 OK\xff\r\n\r\n".to_vec(), "not text"),
             (Vec::new(), "end of headers"),
         ] {
-            let err = Nri::from_response(&bad).unwrap_err().to_string();
+            let err = body(&bad).unwrap_err().to_string();
             assert!(err.contains(want), "{err}");
         }
     }
