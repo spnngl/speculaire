@@ -392,7 +392,10 @@ mod tests {
             mirror.server_key().expose_secret(),
             mirror.client_key().expose_secret(),
         ] {
-            assert!(!text.contains('\r') && text.ends_with("-----\n"), "{text}");
+            assert!(
+                !text.contains('\r') && text.ends_with("-----\n"),
+                "a PEM with CRLF or no final newline"
+            );
         }
         let client = mirror.contents(Part::Client);
         let rebuilt = Mirror::from_files(
