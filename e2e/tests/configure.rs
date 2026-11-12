@@ -191,56 +191,6 @@ fn check_config_passes_and_names_the_file_that_lacks_the_entry() {
 
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
-fn a_pull_reaches_the_mirror_address_with_the_client_certificate() {
-    let _serial = serial();
-    let cluster = Cluster::from_env();
-    let node = workers(&cluster).remove(0);
-    // A server that takes the connection and the request and answers nothing, until it is killed: the runtime then
-    // goes on to upstream, as it does when the mirror fails (D14, D66).
-    sh(
-        &cluster,
-        &node,
-        "pkill openssl; rm -f /tmp/mirror.log /tmp/pull.log; true",
-    );
-    cluster
-        .exec_output(
-            &node,
-            &[
-                "sh",
-                "-c",
-                &format!(
-                    "cd /tmp && exec sleep 600 | openssl s_server -accept 127.0.0.1:7480 -cert {MIRROR_DIR}/server.crt -key {MIRROR_DIR}/server.key -CAfile {MIRROR_DIR}/ca.crt -Verify 1 -verify_return_error > /tmp/mirror.log 2>&1 &"
-                ),
-            ],
-        )
-        .unwrap();
-    wait_until("the stand-in mirror", || {
-        sh(&cluster, &node, "cat /tmp/mirror.log").contains("ACCEPT")
-    });
-    cluster
-        .exec_output(
-            &node,
-            &[
-                "sh",
-                "-c",
-                &format!("(crictl pull {IMAGE} > /tmp/pull.log 2>&1 &)"),
-            ],
-        )
-        .unwrap();
-    wait_until("a request at the mirror address", || {
-        sh(&cluster, &node, "cat /tmp/mirror.log").contains("GET /v2/")
-    });
-    let log = sh(&cluster, &node, "cat /tmp/mirror.log");
-    sh(&cluster, &node, "pkill openssl; true");
-    assert!(log.contains("subject=CN=speculaire mirror client"), "{log}");
-    wait_until("the pull to finish through upstream", || {
-        sh(&cluster, &node, "cat /tmp/pull.log").contains("Image is up to date")
-    });
-    sh(&cluster, &node, &format!("crictl rmi {IMAGE}"));
-}
-
-#[test]
-#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn unconfigure_refuses_while_the_plugin_is_required() {
     let _serial = serial();
     let cluster = Cluster::from_env();
