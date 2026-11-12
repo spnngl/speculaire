@@ -49,6 +49,17 @@ fn containerd_without_a_config_file_has_no_required_plugin_but_a_bad_config_is_a
 }
 
 #[test]
+fn a_missing_import_is_an_error_as_containerd_refuses_to_load_it() {
+    let node = Tree::new(Runtime::Containerd);
+    node.containerd();
+    let config = node.containerd_config();
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("imports = [\"gone.toml\"]\n{text}")).unwrap();
+    let err = node.node.settings().required_plugins().unwrap_err();
+    assert!(err.to_string().contains("gone.toml"), "{err}");
+}
+
+#[test]
 fn containerd_2_4_is_asked_for_what_its_image_service_runs_with() {
     let node = configured();
     exports(&node, true, "/etc/containerd/certs.d");

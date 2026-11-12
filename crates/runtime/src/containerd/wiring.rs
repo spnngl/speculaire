@@ -1,6 +1,5 @@
 //! Wiring containerd: the mirror first in every `hosts.toml` of its `config_path` (D32, D55, D56).
 
-use std::io;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -8,7 +7,7 @@ use speculaire_pki::mirror::Part;
 use speculaire_registry_config::containerd::config as containerd_config;
 use speculaire_registry_config::containerd::config::Hosts;
 
-use super::{Containerd, hosts};
+use super::{Containerd, config_missing, hosts};
 use crate::wiring::{Error, Problem, Report, Target, Wiring, io_at};
 use crate::{certificates, files};
 
@@ -32,14 +31,10 @@ impl Containerd {
                 Hosts::Mirrors(_) => Err(Error::LegacyMirrors(config)),
             },
             // containerd without a config file runs on its defaults.
-            Err(containerd_config::LoadError::Read { path, source })
-                if path == config && source.kind() == io::ErrorKind::NotFound =>
-            {
-                Ok(vec![
-                    self.paths.at("/etc/containerd/certs.d"),
-                    self.paths.at("/etc/docker/certs.d"),
-                ])
-            }
+            Err(e) if config_missing(&e, &config) => Ok(vec![
+                self.paths.at("/etc/containerd/certs.d"),
+                self.paths.at("/etc/docker/certs.d"),
+            ]),
             Err(source) => Err(Error::Containerd {
                 path: config,
                 source: Box::new(source),
