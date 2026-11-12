@@ -544,6 +544,29 @@ fn registries_agree_with_go_podman_io_image() {
             ),
         ));
     }
+    // A struct is read from a table alone, and a map from anything but a table is none.
+    for (n, text) in [
+        "registry = [[\"a.io\"]]\n",
+        "registry = [[\"a.io\", \"a.io\"]]\n",
+        "[[registry]]\nprefix = \"a.io\"\nmirror = [[\"m.io\"]]\n",
+        "registries = []\n",
+        "[registries]\nsearch = [[\"a.io\"]]\n",
+        "aliases = 1\n",
+        "aliases = [\"x\"]\n",
+        "aliases = 1\n[[registry]]\nlocation = \"a.io\"\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cases.push((
+            format!("types {n}: {text:?}"),
+            registries_case(
+                &dir.path().join(format!("types-{n}")),
+                &[("etc/containers/registries.conf", text)],
+                text,
+            ),
+        ));
+    }
     labelled(&cases, "registries", our_registries, adjust_registries);
 }
 

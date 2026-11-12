@@ -11,7 +11,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{Error as _, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use toml::de::{DeTable, DeValue};
 
 use super::Context;
@@ -134,7 +136,7 @@ struct RawRegistry {
     #[serde(default, rename = "pull-from-mirror")]
     pull_from_mirror: String,
     #[serde(default)]
-    mirror: Vec<RawEndpoint>,
+    mirror: Vec<Table<RawEndpoint>>,
     #[serde(default)]
     blocked: bool,
     #[serde(default, rename = "mirror-by-digest-only")]
@@ -150,9 +152,9 @@ struct RawV1List {
 /// The format 1 file, which is refused as soon as any list of it is set, an empty one too.
 #[derive(Deserialize, Default)]
 struct RawV1 {
-    search: Option<RawV1List>,
-    insecure: Option<RawV1List>,
-    block: Option<RawV1List>,
+    search: Option<Table<RawV1List>>,
+    insecure: Option<Table<RawV1List>>,
+    block: Option<Table<RawV1List>>,
 }
 
 impl RawV1 {
@@ -167,7 +169,7 @@ impl RawV1 {
 #[derive(Deserialize, Default)]
 struct RawFile {
     #[serde(default)]
-    registry: Vec<RawRegistry>,
+    registry: Vec<Table<RawRegistry>>,
     #[serde(rename = "unqualified-search-registries")]
     unqualified_search_registries: Option<Vec<String>>,
     #[serde(rename = "credential-helpers")]
@@ -177,9 +179,50 @@ struct RawFile {
     // Read for the types of these two, as the library does; the values are not used.
     #[serde(default, rename = "additional-layer-store-auth-helper")]
     _additional_layer_store_auth_helper: String,
-    #[serde(rename = "aliases")]
+    #[serde(default, rename = "aliases", deserialize_with = "map")]
     _aliases: Option<BTreeMap<String, String>>,
-    registries: Option<RawV1>,
+    registries: Option<Table<RawV1>>,
+}
+
+/// A struct as BurntSushi/toml reads one: from a table alone, where serde also reads an array as its fields in order.
+struct Table<T>(T);
+
+impl<T> std::ops::Deref for Table<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Table<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Fields<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for Fields<T> {
+            type Value = T;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a table")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+                T::deserialize(MapAccessDeserializer::new(map))
+            }
+        }
+        deserializer
+            .deserialize_map(Fields(std::marker::PhantomData))
+            .map(Table)
+    }
+}
+
+/// A map as BurntSushi/toml reads one: any value but a table is no map, and no error.
+fn map<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, String>>, D::Error> {
+    match toml::Value::deserialize(deserializer)? {
+        toml::Value::Table(table) => table.try_into().map(Some).map_err(D::Error::custom),
+        _ => Ok(None),
+    }
 }
 
 /// One file, checked and normalized (`loadConfigFile`).
@@ -230,7 +273,7 @@ pub fn parse_file(text: &str) -> Result<File, ParseError> {
     // BurntSushi/toml skips a byte order mark.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let raw: RawFile = from_toml(text, fold_file)?;
-    if raw.registries.as_ref().is_some_and(RawV1::is_set) {
+    if raw.registries.as_ref().is_some_and(|v1| v1.is_set()) {
         return Err(invalid("registries.conf must be in v2 format but is in v1"));
     }
     let registries = post_process(&raw.registry, raw.unqualified_search_registries.as_deref())?;
@@ -274,7 +317,7 @@ fn parse_location(input: &str) -> Result<String, ParseError> {
 /// `postProcessRegistries`: prefixes default to locations, entries are checked, the first entry of a prefix wins,
 /// and the result is sorted by prefix.
 fn post_process(
-    raw: &[RawRegistry],
+    raw: &[Table<RawRegistry>],
     unqualified: Option<&[String]>,
 ) -> Result<Vec<Registry>, ParseError> {
     let mut registries = Vec::with_capacity(raw.len());
@@ -759,6 +802,23 @@ mod tests {
             assert!(parse_file(text).is_err(), "{text:?} is accepted");
         }
         assert!(refused("[registries.search]\nregistries = [\"a.io\"]\n").contains("v1"));
+        // BurntSushi/toml reads a struct from a table alone, where serde also reads an array as its fields.
+        for text in [
+            "registry = [[\"a.io\"]]\n",
+            "[[registry]]\nprefix = \"a.io\"\nmirror = [[\"m.io\"]]\n",
+            "registries = []\n",
+            "[registries]\nsearch = [[\"a.io\"]]\n",
+        ] {
+            assert!(
+                refused(text).contains("table"),
+                "{text:?}: {}",
+                refused(text)
+            );
+        }
+        // ... and decodes anything but a table into a map as nothing.
+        for text in ["aliases = 1\n", "aliases = [\"x\"]\n"] {
+            assert!(parse_file(text).is_ok(), "{text:?} is refused");
+        }
         assert!(refused("[[registry]]\nlocation = \"https://a.io\"\n").contains("URI schemes"));
         for text in [
             "",
