@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 pub use value::{
     Absolute, ByteSize, Interval, InvalidValue, LogFilter, Loopback, MaxUploads, NodeName,
-    PeerAddress, ReflectorUrl, Span, TrustedRoot,
+    PeerAddress, ReflectorUrl, RegistryName, Span, TrustedRoot,
 };
 
 /// Where the agent reads its settings when `--config` names no other file (D30).
@@ -92,7 +92,11 @@ impl Config {
                     stale_max: _,
                 },
             sbom: Sbom { max_size: _ },
-            mirror: Mirror { address: mirror },
+            mirror:
+                Mirror {
+                    address: mirror,
+                    registries,
+                },
             peer:
                 Peer {
                     address: peer,
@@ -127,6 +131,12 @@ impl Config {
         keep(&mut kept, "identity.ca", ca, &running.identity.ca);
         keep(&mut kept, "nri.socket", socket, &running.nri.socket);
         keep(&mut kept, "mirror.address", mirror, &running.mirror.address);
+        keep(
+            &mut kept,
+            "mirror.registries",
+            registries,
+            &running.mirror.registries,
+        );
         keep(&mut kept, "peer.address", peer, &running.peer.address);
         keep(
             &mut kept,
@@ -344,12 +354,20 @@ impl Default for BlobCache {
 pub struct Mirror {
     /// Where the mirror listens, on loopback only (D56).
     pub address: Restart<Loopback>,
+    /// The registries `configure` points CRI-O at the mirror for, besides the ones the admin's own `registries.conf`
+    /// names (D83).
+    pub registries: Restart<Vec<RegistryName>>,
 }
 
 impl Default for Mirror {
     fn default() -> Self {
         Self {
             address: Restart(Loopback::MIRROR),
+            registries: Restart(
+                ["docker.io", "registry.k8s.io", "quay.io", "ghcr.io"]
+                    .map(|name| RegistryName(name.to_owned()))
+                    .to_vec(),
+            ),
         }
     }
 }

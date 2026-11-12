@@ -17,8 +17,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 speculaire-agent = { path = "../crates/agent" }
+speculaire-configure = { path = "../crates/configure" }
 speculaire-oci = { path = "../crates/oci" }
 speculaire-registry-config = { path = "../crates/registry-config" }
+speculaire-runtime = { path = "../crates/runtime" }
 # `containerd_config` reads files: it writes the input to a temporary directory.
 tempfile = "3.27.0"
 # The serializer of the round trip in `config`; the same version as the workspace's.
@@ -48,6 +50,20 @@ bench = false
 [[bin]]
 name = "hosts_toml"
 path = "fuzz_targets/hosts_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hosts_edit"
+path = "fuzz_targets/hosts_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crio_inspect"
+path = "fuzz_targets/crio_inspect.rs"
 test = false
 doc = false
 bench = false

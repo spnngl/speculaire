@@ -83,6 +83,41 @@ fn keys_are_matched_in_any_case_as_go_toml_does() {
 }
 
 #[test]
+fn nri_required_plugins_come_from_the_default_validator_across_imports() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let required = |text: &str| {
+        let path = write(dir.path(), "config.toml", text);
+        config::load_nri_required_plugins(&path)
+    };
+    assert_eq!(
+        required("version = 3\n").expect("a config"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        required("[plugins.\"io.containerd.nri.v1.nri\".default_validator]\nenable = true\nrequired_plugins = [\"speculaire\"]\n")
+            .expect("a config"),
+        ["speculaire"]
+    );
+    // Keys match in any case, and a later file replaces the array.
+    write(
+        dir.path(),
+        "conf.d/late.toml",
+        "[plugins.\"io.containerd.nri.v1.nri\".Default_Validator]\nRequired_Plugins = [\"a\", \"b\"]\n",
+    );
+    assert_eq!(
+        required("imports = [\"conf.d/*.toml\"]\n[plugins.\"io.containerd.nri.v1.nri\".default_validator]\nrequired_plugins = [\"speculaire\"]\n")
+            .expect("a config"),
+        ["a", "b"]
+    );
+    let err = required("[plugins.\"io.containerd.nri.v1.nri\".default_validator]\nrequired_plugins = \"speculaire\"\n")
+        .unwrap_err();
+    assert!(matches!(err, LoadError::Nri(_)), "{err}");
+    let err = required("[plugins]\n\"io.containerd.nri.v1.nri\" = 1\n").unwrap_err();
+    assert!(matches!(err, LoadError::Nri(_)), "{err}");
+    assert!(config::load_nri_required_plugins(&dir.path().join("missing.toml")).is_err());
+}
+
+#[test]
 fn imports_merge_in_order_and_expand_globs() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     write(

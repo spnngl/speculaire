@@ -1,0 +1,13 @@
+HTTP/1.0 200 OK
+Content-Type: application/toml
+
+[crio]
+root = "/var/lib/containers/storage"
+
+[crio.nri]
+enable_nri = true
+nri_disable_connections = false
+
+[crio.nri.default_validator]
+nri_enable_default_validator = true
+nri_validator_required_plugins = ["speculaire"]

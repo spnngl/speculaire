@@ -1,0 +1,24 @@
+[package]
+name = "speculaire-configure"
+description = "Points containerd and CRI-O at the mirror, and back"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+secrecy.workspace = true
+speculaire-pki.workspace = true
+speculaire-registry-config.workspace = true
+speculaire-runtime.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
+[lints]
+workspace = true

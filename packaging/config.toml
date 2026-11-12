@@ -51,6 +51,8 @@
 [mirror]
 # Where the mirror listens, loopback only; run `speculaire configure` after a change (D56). Restart.
 #address = "127.0.0.1:7480"
+# The registries `speculaire configure` sends CRI-O pulls through the mirror for, besides every registry named in registries.conf; containerd needs none (D83). Restart.
+#registries = ["docker.io", "registry.k8s.io", "quay.io", "ghcr.io"]
 
 [peer]
 # "auto" is the local IP of the reflector connection on port 7481; or an ip:port (D36, D56). Restart.

@@ -10,8 +10,8 @@ yanked = "deny"
 
 [licenses]
 # BSD-3-Clause: `matchit`, axum's router. Zlib: `foldhash`, through `prost-build` at build time of the protobuf
-# exposition (D34).
-allow = ["Apache-2.0", "BSD-3-Clause", "MIT", "Unicode-3.0", "Zlib"]
+# exposition (D34). ISC: `aws-lc-rs`, `aws-lc-sys` and `untrusted`, which `rcgen` signs the mirror's certificates with (D13, D82).
+allow = ["Apache-2.0", "BSD-3-Clause", "ISC", "MIT", "Unicode-3.0", "Zlib"]
 
 [bans]
 multiple-versions = "warn"

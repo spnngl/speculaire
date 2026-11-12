@@ -60,7 +60,8 @@ impl Context {
     }
 
     /// `path` below [`Context::root`].
-    pub(crate) fn under_root(&self, path: &str) -> PathBuf {
+    #[must_use]
+    pub fn under_root(&self, path: &str) -> PathBuf {
         if self.root.as_os_str().is_empty() {
             PathBuf::from(path)
         } else {
