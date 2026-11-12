@@ -297,7 +297,13 @@ async fn a_manifest_is_served_with_the_media_type_it_names_or_its_shape_implies(
     let unnamed_index = Bytes::from_static(br#"{"schemaVersion":2,"manifests":[]}"#);
     let unnamed_image = Bytes::from_static(br#"{"schemaVersion":2,"config":{},"layers":[]}"#);
     let layer = pattern(1000);
-    let big = Bytes::from(vec![b' '; usize::try_from(MAX_MANIFEST).unwrap() + 1]);
+    // A manifest padded with spaces to a size: one of 2 MiB and one of exactly the limit are served, one byte more is not.
+    let padded = |len: usize| {
+        let mut bytes = br#"{"layers":[]}"#.to_vec();
+        bytes.resize(len, b' ');
+        Bytes::from(bytes)
+    };
+    let limit = usize::try_from(MAX_MANIFEST).unwrap();
     let all = [
         (index, "application/vnd.oci.image.index.v1+json"),
         (
@@ -306,13 +312,26 @@ async fn a_manifest_is_served_with_the_media_type_it_names_or_its_shape_implies(
         ),
         (unnamed_index, "application/vnd.oci.image.index.v1+json"),
         (unnamed_image, "application/vnd.oci.image.manifest.v1+json"),
+        (
+            Bytes::from_static(br#"{"config":{}}"#),
+            "application/vnd.oci.image.manifest.v1+json",
+        ),
+        (
+            Bytes::from_static(br#"{"layers":[]}"#),
+            "application/vnd.oci.image.manifest.v1+json",
+        ),
+        (
+            padded(2 * 1024 * 1024),
+            "application/vnd.oci.image.manifest.v1+json",
+        ),
+        (padded(limit), "application/vnd.oci.image.manifest.v1+json"),
     ];
     let mut held = HashMap::new();
     for (i, (bytes, _)) in all.iter().enumerate() {
         held.insert(digest_of(u8::try_from(i).unwrap()), bytes.clone());
     }
     held.insert(digest_of(10), layer);
-    held.insert(digest_of(11), big);
+    held.insert(digest_of(11), padded(limit + 1));
     let server = start(Fake(held)).await;
     let mut sender = client(&server).await;
     for (i, (bytes, media_type)) in all.iter().enumerate() {
@@ -489,6 +508,14 @@ async fn the_metrics_count_requests_bytes_and_first_byte_times() {
         StatusCode::NOT_FOUND
     );
     let text = handle.render();
+    // Every request that found its content, or not, has a first byte.
+    for kind in ["blob", "manifest"] {
+        let count = format!(r#"speculaire_mirror_first_byte_seconds_count{{kind="{kind}"}} "#);
+        assert!(
+            text.lines().any(|l| l.starts_with(&count)),
+            "no `{count}` in\n{text}"
+        );
+    }
     for line in [
         r#"speculaire_mirror_requests_total{kind="blob",result="served"} 1"#,
         r#"speculaire_mirror_requests_total{kind="blob",result="fall_through"} 1"#,

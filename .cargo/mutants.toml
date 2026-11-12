@@ -15,6 +15,11 @@ exclude_re = [
   # A poll that starts at once, not a period after the agent starts or the interval changes, finds nothing: the file was
   # written before `last_check` was taken, and the polls after it fall on the same instants.
   'serve\.rs:\d+:\d+: replace \+ with - in serve$',
+  # The mirror stops with the process: without `stop`, the runtime drops its task a moment later, and no client
+  # outlives the agent in a test.
+  'serve\.rs:\d+:\d+: replace Mirror::stop with \(\)$',
+  # `Default::default()` of a body is an empty body: the same bytes and headers.
+  'serve\.rs:\d+:\d+: replace empty -> Body with Default::default\(\)$',
 ]
 # `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run. `fuzz/` is a workspace of its own,
 # which cargo-mutants never lists.

@@ -6,9 +6,19 @@ use e2e::{Cluster, Runtime, TEST_IMAGE};
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn every_node_is_ready_on_the_pinned_runtime_and_kubernetes() {
     let cluster = Cluster::from_env();
-    let nodes = cluster.nodes().unwrap();
-    assert_eq!(nodes.len(), 3, "e2e/kind.yaml has 3 nodes: {nodes:?}");
     let runtime = format!("{}://{}", cluster.runtime().scheme(), cluster.release());
+    // A kubelet that asked its runtime for its version while the runtime reloaded (`speculaire configure` reloads CRI-O)
+    // reports `Unknown` until its next status update, at most 10 s later.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let nodes = loop {
+        let nodes = cluster.nodes().unwrap();
+        if nodes.iter().all(|node| node.runtime == runtime) || std::time::Instant::now() > deadline
+        {
+            break nodes;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    };
+    assert_eq!(nodes.len(), 3, "e2e/kind.yaml has 3 nodes: {nodes:?}");
     let kubelet = format!("v{}.", cluster.kubernetes());
     for node in &nodes {
         assert!(node.ready, "{node:?}");
