@@ -208,7 +208,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 
 - **Decision:**
   - `rust-toolchain.toml` pins stable `1.99.1` with clippy and rustfmt; the justfile pins one nightly, for rustfmt (`rustfmt.toml` uses unstable options) and `-Z` flags. `rust-version` is `1.95`, which `just msrv` checks.
-  - `build/Containerfile` is the one build image, from the digest-pinned `rust:<channel>-alpine` whose tag is the pinned stable. Its `build` stage has lld, mimalloc's C toolchain, just, cargo-auditable and rust-audit-info; its `dev` stage adds the nightly rustfmt and the tools of `just check` and the dependency checks.
+  - `build/Containerfile` is the one build image, from the digest-pinned `rust:<channel>-alpine` whose tag is the pinned stable. Its `build` stage has lld, mimalloc's C toolchain, cargo-auditable and rust-audit-info; its `dev` stage adds the nightly rustfmt, just and the tools of `just check` and the dependency checks.
   - On macOS, `just dev <recipe>` runs any recipe in the `dev` stage; `just musl <target>` builds in the `build` stage. Named volumes keep the cargo registry and each architecture's target directory between runs. `SPECULAIRE_CONTAINER` picks the engine, default `docker`.
   - `crates/speculaire` is a binary crate only until a module needs a fuzz target or an integration test; then it gains `src/lib.rs`.
 - **Because:**
