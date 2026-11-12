@@ -204,7 +204,8 @@ impl Client {
         let service = challenge.param("service").unwrap_or_default();
         let scope = challenge.param("scope").unwrap_or(&key.scope);
         let query = token::query(service, scope);
-        let (method, body, headers) = match credentials {
+        // The password goes as the authorization, which a redirect to another host does not get.
+        let (method, body, headers, authorization) = match credentials {
             Credentials::Login {
                 identity_token: Some(identity),
                 ..
@@ -226,6 +227,7 @@ impl Client {
                         CONTENT_TYPE,
                         HeaderValue::from_static("application/x-www-form-urlencoded"),
                     )],
+                    None,
                 )
             }
             Credentials::Login {
@@ -233,34 +235,33 @@ impl Client {
             } => (
                 Method::GET,
                 Bytes::new(),
-                vec![(AUTHORIZATION, basic(username, password))],
+                Vec::new(),
+                Some(basic(username, password)),
             ),
-            Credentials::Anonymous => (Method::GET, Bytes::new(), Vec::new()),
+            Credentials::Anonymous => (Method::GET, Bytes::new(), Vec::new(), None),
         };
-        let mut path = realm.path().to_owned();
-        let own_query = realm.query();
-        if method == Method::GET {
-            let joined = [own_query.unwrap_or_default(), query.as_str()]
-                .iter()
-                .filter(|part| !part.is_empty())
-                .copied()
-                .collect::<Vec<_>>()
-                .join("&");
-            if !joined.is_empty() {
-                path = format!("{path}?{joined}");
-            }
-        } else if let Some(own_query) = own_query {
-            path = format!("{path}?{own_query}");
-        }
-        let uri: Uri = format!("{scheme}://{realm_authority}{path}")
-            .parse()
-            .map_err(|_| failed("the realm is no URL".to_owned()))?;
+        // A form carries the query's fields in its body.
+        let ours = if method == Method::GET {
+            query.as_str()
+        } else {
+            ""
+        };
+        let uri =
+            with_query(&realm, ours).ok_or_else(|| failed("the realm is no URL".to_owned()))?;
         let realm_endpoint = Endpoint {
             tls: endpoint.tls.clone(),
             ..Endpoint::new(scheme == "https", realm_authority.to_string())
         };
-        let response =
-            follow_uri(client, &realm_endpoint, &method, uri, &headers, body, None).await?;
+        let response = follow_uri(
+            client,
+            &realm_endpoint,
+            &method,
+            uri,
+            &headers,
+            body,
+            authorization.as_ref(),
+        )
+        .await?;
         let status = response.status;
         let body = Limited::new(response.body, MAX_TOKEN_ANSWER)
             .collect()
@@ -298,6 +299,23 @@ impl Client {
         clients.insert(fingerprint, client.clone());
         Ok(client)
     }
+}
+
+/// `uri` with `query` appended to the query it has.
+fn with_query(uri: &Uri, query: &str) -> Option<Uri> {
+    let joined = [uri.query().unwrap_or_default(), query]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("&");
+    let path = uri.path();
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(if joined.is_empty() {
+        path.parse().ok()?
+    } else {
+        format!("{path}?{joined}").parse().ok()?
+    });
+    Uri::from_parts(parts).ok()
 }
 
 fn challenges_of(headers: &HeaderMap) -> Vec<Challenge> {

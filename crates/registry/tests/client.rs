@@ -310,6 +310,43 @@ async fn an_anonymous_client_asks_the_token_endpoint_without_a_password() {
 }
 
 #[tokio::test]
+async fn a_token_endpoint_that_redirects_to_another_host_does_not_pass_it_the_password() {
+    let elsewhere = serve(None, Box::new(|_| respond(200, &[], r#"{"token":"tok1"}"#))).await;
+    let to = format!("http://{}/token", elsewhere.authority());
+    let auth = serve(
+        None,
+        Box::new(move |_| respond(307, &[("location", &to)], "")),
+    )
+    .await;
+    let realm = format!(r#"Bearer realm="http://{}/token""#, auth.authority());
+    let registry = serve(
+        None,
+        Box::new(move |seen| {
+            if seen.authorization.as_deref() == Some("Bearer tok1") {
+                respond(200, &[], "manifest")
+            } else {
+                respond(401, &[(WWW_AUTHENTICATE.as_str(), &realm)], "")
+            }
+        }),
+    )
+    .await;
+    let response = Client::new()
+        .send(
+            &endpoint(&registry),
+            &alice(),
+            &get("/app/web/manifests/1", "app/web"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        auth.last().authorization.as_deref(),
+        Some("Basic YWxpY2U6czNjcmV0")
+    );
+    assert_eq!(elsewhere.last().authorization, None);
+}
+
+#[tokio::test]
 async fn an_identity_token_is_traded_at_the_token_endpoint_by_a_form() {
     let issued = Arc::new(Mutex::new(vec!["tok1"]));
     let fake = serve(None, token_registry("tok1", issued)).await;
