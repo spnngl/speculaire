@@ -4,10 +4,14 @@
 //! What this node does not hold, the mirror answers with a fast 404, so that the runtime falls through to the next
 //! host or to upstream; it never answers 401, 408 or 429 (ARCHITECTURE.md § Vocabulary, *fall through*).
 
+pub mod cache;
 pub mod content;
 pub mod metrics;
+mod pulls;
+pub mod relay;
 pub mod request;
 mod serve;
 pub mod tls;
 
+pub use pulls::{Answer, Body, Local, Pull, Pulls};
 pub use serve::serve;

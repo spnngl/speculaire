@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+# The certificates of the Bearer registry that the relay suite pulls from.
+rcgen.workspace = true
+
 [dev-dependencies]
 serde_json.workspace = true
 

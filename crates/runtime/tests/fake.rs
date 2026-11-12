@@ -87,3 +87,38 @@ fn a_runtime_that_does_not_answer_is_an_error_after_five_seconds() {
         "{waited:?}"
     );
 }
+
+#[test]
+fn the_list_of_images_is_read_with_its_names() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let socket = dir.path().join("crio.sock");
+    let mut answers = Answers::containerd("1.37.2");
+    answers.images = vec![
+        (
+            "0123".to_owned(),
+            vec!["docker.io/library/busybox:1.37".to_owned()],
+            vec!["docker.io/library/busybox@sha256:aa".to_owned()],
+        ),
+        ("4567".to_owned(), Vec::new(), Vec::new()),
+    ];
+    let _fake = Fake::start(&socket, answers).expect("a fake runtime");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let images = runtime
+        .block_on(cri::list_images(&socket))
+        .expect("an answer");
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0].id, "0123");
+    assert_eq!(images[0].repo_tags, ["docker.io/library/busybox:1.37"]);
+    assert_eq!(
+        images[0].repo_digests,
+        ["docker.io/library/busybox@sha256:aa"]
+    );
+    assert_eq!(images[1].repo_tags.len(), 0);
+    let err = runtime
+        .block_on(cri::list_images(&dir.path().join("none.sock")))
+        .expect_err("no runtime");
+    assert!(matches!(err, Error::Connect { .. }), "{err}");
+}

@@ -117,11 +117,11 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Restart keys are those that open sockets or define who the agent is; changing them live would leave peers or containerd holding stale addresses.
 - **Revisit when:** —
 
-## D53: The systemd unit's hardening (amended by D69)
+## D53: The systemd unit's hardening (amended by D69, D88)
 
 - **Decision:** the unit runs the agent as root and sets:
   - `NoNewPrivileges=yes`, `CapabilityBoundingSet=` (empty), `AmbientCapabilities=` (empty);
-  - `ProtectSystem=strict`, `StateDirectory=speculaire`, `RuntimeDirectory=speculaire` (D31), `ProtectHome=yes`, `PrivateTmp=yes`, `PrivateDevices=yes`;
+  - `ProtectSystem=strict`, `StateDirectory=speculaire`, `RuntimeDirectory=speculaire` (D31), `ProtectHome=read-only` (D88), `PrivateTmp=yes`, `PrivateDevices=yes`;
   - `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `ProtectKernelLogs=yes`, `ProtectControlGroups=yes`, `ProtectClock=yes`, `ProtectHostname=yes`;
   - `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `RestrictNamespaces=yes`, `RestrictRealtime=yes`, `RestrictSUIDSGID=yes`, `LockPersonality=yes`, `MemoryDenyWriteExecute=yes`;
   - `SystemCallArchitectures=native`, `SystemCallFilter=@system-service`, `SystemCallFilter=~@privileged io_uring_setup io_uring_enter io_uring_register` (D4), `SystemCallErrorNumber=EPERM`;

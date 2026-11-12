@@ -1,0 +1,1 @@
+Bearer scope="repository:a:pull,push", realm="a\"b\\c"

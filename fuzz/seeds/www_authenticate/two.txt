@@ -1,0 +1,1 @@
+Basic realm="r", Bearer realm="https://t/x", error="insufficient_scope"

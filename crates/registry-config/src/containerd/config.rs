@@ -55,6 +55,58 @@ fn empty() -> SecretString {
     SecretString::from(String::new())
 }
 
+/// What an [`Auth`] logs in with.
+#[derive(Clone, Debug)]
+pub enum Login {
+    /// A user name and password.
+    Password {
+        /// The user name.
+        username: String,
+        /// The password.
+        password: SecretString,
+    },
+    /// An identity token, with no user name.
+    IdentityToken(SecretString),
+}
+
+/// An `auth` that is not the base64 of `user:password`.
+#[derive(Debug, thiserror::Error)]
+#[error("auth is not the base64 of user:password")]
+pub struct InvalidAuth;
+
+impl Auth {
+    /// The login `ParseAuth` makes of these credentials (`internal/cri/server/images/image_pull.go:358`): the user
+    /// name and password, else the identity token, else `auth` split at its first `:`, with NULs trimmed off the
+    /// password. `None` when nothing is set: the registry is asked as anyone.
+    ///
+    /// # Errors
+    ///
+    /// When `auth` is set and is not base64 with a `:` in it.
+    pub fn login(&self) -> Result<Option<Login>, InvalidAuth> {
+        use secrecy::ExposeSecret as _;
+        if !self.username.is_empty() {
+            return Ok(Some(Login::Password {
+                username: self.username.clone(),
+                password: self.password.clone(),
+            }));
+        }
+        if !self.identity_token.expose_secret().is_empty() {
+            return Ok(Some(Login::IdentityToken(self.identity_token.clone())));
+        }
+        let auth = self.auth.expose_secret();
+        if auth.is_empty() {
+            return Ok(None);
+        }
+        let decoded = crate::crio::auth::base64_decode(auth).ok_or(InvalidAuth)?;
+        let decoded = String::from_utf8_lossy(&decoded);
+        let (username, password) = decoded.split_once(':').ok_or(InvalidAuth)?;
+        Ok(Some(Login::Password {
+            username: username.to_owned(),
+            password: SecretString::from(password.trim_matches('\0').to_owned()),
+        }))
+    }
+}
+
 #[derive(Deserialize, Default)]
 struct Mirror {
     #[serde(default)]
@@ -739,5 +791,59 @@ mod tests {
         ] {
             assert_eq!(v1_plugin_name(name), uri, "{name}");
         }
+    }
+
+    fn auth(username: &str, password: &str, auth: &str, token: &str) -> Auth {
+        Auth {
+            username: username.to_owned(),
+            password: password.to_owned().into(),
+            auth: auth.to_owned().into(),
+            identity_token: token.to_owned().into(),
+        }
+    }
+
+    fn password(login: Option<Login>) -> (String, String) {
+        use secrecy::ExposeSecret as _;
+        match login {
+            Some(Login::Password { username, password }) => {
+                (username, password.expose_secret().to_owned())
+            }
+            other => panic!("not a password login: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_user_name_wins_over_the_token_and_auth() {
+        let login = auth("u", "p", "dTpw", "t").login().expect("valid");
+        assert_eq!(password(login), ("u".to_owned(), "p".to_owned()));
+    }
+
+    #[test]
+    fn the_token_wins_over_auth() {
+        use secrecy::ExposeSecret as _;
+        let login = auth("", "", "dTpw", "t").login().expect("valid");
+        match login {
+            Some(Login::IdentityToken(token)) => assert_eq!(token.expose_secret(), "t"),
+            other => panic!("not a token: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_is_split_at_its_first_colon_and_loses_its_nuls() {
+        // "u:p:q\0\0"
+        let login = auth("", "", "dTpwOnEAAA==", "").login().expect("valid");
+        assert_eq!(password(login), ("u".to_owned(), "p:q".to_owned()));
+    }
+
+    #[test]
+    fn nothing_set_is_anonymous() {
+        assert!(auth("", "", "", "").login().expect("valid").is_none());
+    }
+
+    #[test]
+    fn an_auth_that_is_no_login_is_refused() {
+        // "nocolon", and no base64.
+        assert!(auth("", "", "bm9jb2xvbg==", "").login().is_err());
+        assert!(auth("", "", "***", "").login().is_err());
     }
 }

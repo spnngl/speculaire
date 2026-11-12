@@ -35,6 +35,28 @@ struct VersionResponse {
     runtime_api_version: String,
 }
 
+/// `ListImagesRequest` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ListImagesRequest {}
+
+/// `ListImagesResponse` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ListImagesResponse {
+    #[prost(message, repeated, tag = "1")]
+    images: Vec<Image>,
+}
+
+/// `Image` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct Image {
+    #[prost(string, tag = "1")]
+    id: String,
+    #[prost(string, repeated, tag = "2")]
+    repo_tags: Vec<String>,
+    #[prost(string, repeated, tag = "3")]
+    repo_digests: Vec<String>,
+}
+
 /// What the fake answers.
 #[derive(Clone, Debug)]
 pub struct Answers {
@@ -45,6 +67,8 @@ pub struct Answers {
     /// The exports of the CRI image service in `Plugins`: `DiscardUnpackedLayers` and `RegistryConfigPath`; `None`
     /// lists no such plugin.
     pub image_exports: Option<(bool, String)>,
+    /// The images of `ListImages`: ID, tags and digests.
+    pub images: Vec<(String, Vec<String>, Vec<String>)>,
 }
 
 impl Answers {
@@ -55,6 +79,7 @@ impl Answers {
             runtime_name: "containerd".to_owned(),
             runtime_version: version.to_owned(),
             image_exports: Some((false, "/etc/containerd/certs.d".to_owned())),
+            images: Vec::new(),
         }
     }
 }
@@ -193,6 +218,27 @@ async fn route(
                 }
             });
             Grpc::new(ProstCodec::<PluginsResponse, PluginsRequest>::default())
+                .unary(service, request)
+                .await
+        }
+        "/runtime.v1.ImageService/ListImages" => {
+            let service = tower::service_fn(move |_: Request<ListImagesRequest>| {
+                let answers = Arc::clone(&answers);
+                async move {
+                    Ok::<_, Status>(Response::new(ListImagesResponse {
+                        images: answers
+                            .images
+                            .iter()
+                            .map(|(id, repo_tags, repo_digests)| Image {
+                                id: id.clone(),
+                                repo_tags: repo_tags.clone(),
+                                repo_digests: repo_digests.clone(),
+                            })
+                            .collect(),
+                    }))
+                }
+            });
+            Grpc::new(ProstCodec::<ListImagesResponse, ListImagesRequest>::default())
                 .unary(service, request)
                 .await
         }

@@ -43,6 +43,9 @@ pub enum Error {
     /// containerd's content service failed.
     #[error("containerd's content service: {0}")]
     Grpc(#[from] Status),
+    /// The relay could not find where to fetch from.
+    #[error("the relay: {0}")]
+    Relay(String),
     /// The blob is longer than the reader accepts.
     #[error("content of {size} bytes is over the limit of {limit}")]
     TooLarge {
@@ -81,6 +84,15 @@ impl std::fmt::Debug for Source {
 }
 
 impl Blob {
+    /// A blob that is a file.
+    #[must_use]
+    pub(crate) fn from_file(path: PathBuf, size: u64) -> Self {
+        Self {
+            size,
+            source: Source::File(path),
+        }
+    }
+
     /// A blob held in memory.
     #[must_use]
     pub fn from_bytes(bytes: Bytes) -> Self {

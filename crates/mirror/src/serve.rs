@@ -8,11 +8,10 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::TryStreamExt as _;
-use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt as _, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
-    ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderValue, RANGE,
+    ACCEPT, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderValue, RANGE,
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -25,9 +24,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, warn};
 
-use crate::content::{Blob, Content, Error};
+use crate::content::{Blob, Error};
 use crate::metrics::{self, Outcome};
-use crate::request::{Kind, Ranged, Route, Span, range, route};
+use crate::pulls::{Answer, Body, Pull, Pulls};
+use crate::request::{Ranged, Route, Span, range, route};
 use crate::tls::Tls;
 
 /// The largest manifest the mirror reads, as containerd limits one (`core/remotes/docker/resolver.go`).
@@ -36,15 +36,13 @@ const MAX_MANIFEST: u64 = 4 * 1024 * 1024;
 /// How long a client may take to finish the TLS handshake, and to send a request's headers.
 const CLIENT_TIME: Duration = Duration::from_secs(10);
 
-type Body = UnsyncBoxBody<Bytes, io::Error>;
-
 /// Serves the pull API on `listener` until `stop` completes.
 ///
 /// A connection that is open when `stop` completes is left to finish: the agent's own shutdown ends it (D39).
-pub async fn serve<C: Content>(
+pub async fn serve<P: Pulls>(
     listener: TcpListener,
     tls: Arc<Tls>,
-    content: Arc<C>,
+    pulls: Arc<P>,
     stop: impl Future<Output = ()>,
 ) {
     tokio::pin!(stop);
@@ -54,9 +52,9 @@ pub async fn serve<C: Content>(
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
                     let config = tls.config();
-                    let content = Arc::clone(&content);
+                    let pulls = Arc::clone(&pulls);
                     tokio::spawn(async move {
-                        connection(stream, TlsAcceptor::from(config), content).await;
+                        connection(stream, TlsAcceptor::from(config), pulls).await;
                     });
                 }
                 // A connection that was reset before it was accepted, or no file descriptor left: log and go on.
@@ -69,7 +67,7 @@ pub async fn serve<C: Content>(
     }
 }
 
-async fn connection<C: Content>(stream: TcpStream, acceptor: TlsAcceptor, content: Arc<C>) {
+async fn connection<P: Pulls>(stream: TcpStream, acceptor: TlsAcceptor, pulls: Arc<P>) {
     let Ok(accepted) = tokio::time::timeout(CLIENT_TIME, acceptor.accept(stream)).await else {
         debug!("a client did not finish the TLS handshake in time");
         return;
@@ -83,8 +81,8 @@ async fn connection<C: Content>(stream: TcpStream, acceptor: TlsAcceptor, conten
         }
     };
     let service = service_fn(move |request: Request<Incoming>| {
-        let content = Arc::clone(&content);
-        async move { Ok::<_, Infallible>(handle(&*content, &request).await) }
+        let pulls = Arc::clone(&pulls);
+        async move { Ok::<_, Infallible>(handle(&*pulls, &request).await) }
     });
     let served = http1::Builder::new()
         .timer(TokioTimer::new())
@@ -97,34 +95,47 @@ async fn connection<C: Content>(stream: TcpStream, acceptor: TlsAcceptor, conten
 }
 
 /// Why a pull is answered with a 404.
-enum Miss {
+pub(crate) enum Miss {
     /// This node does not hold it, or the request names no digest.
     NotHeld,
     /// Looking failed.
     Failed(Error),
 }
 
-async fn handle<C: Content>(content: &C, request: &Request<Incoming>) -> Response<Body> {
+async fn handle<P: Pulls>(pulls: &P, request: &Request<Incoming>) -> Response<Body> {
     let started = Instant::now();
     let Some(route) = route(request.method(), request.uri().path()) else {
         return status(StatusCode::NOT_FOUND);
     };
-    let (kind, digest, head) = match route {
+    let (kind, name, reference, head) = match route {
         Route::Ping => return ping(),
-        Route::Pull { kind, digest, head } => (kind, digest, head),
+        Route::Pull {
+            kind,
+            name,
+            reference,
+            head,
+        } => (kind, name, reference, head),
     };
-    let range_header = request
-        .headers()
-        .get(RANGE)
-        .and_then(|value| value.to_str().ok());
-    let answered = match (kind, digest) {
-        (Kind::Referrers, _) | (_, None) => Err(Miss::NotHeld),
-        (_, Some(digest)) => pull(content, kind, &digest, head, range_header).await,
+    let header = |name| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
     };
+    let answered = pulls
+        .pull(Pull {
+            kind,
+            name: &name,
+            reference: reference.as_ref(),
+            head,
+            range: header(RANGE),
+            accept: header(ACCEPT),
+        })
+        .await;
     let (response, outcome) = match answered {
-        Ok(response) => (response, Outcome::Served),
-        Err(Miss::NotHeld) => (status(StatusCode::NOT_FOUND), Outcome::FallThrough),
-        Err(Miss::Failed(err)) => {
+        Answer::Served(response) => (response, Outcome::Served),
+        Answer::Missing => (status(StatusCode::NOT_FOUND), Outcome::FallThrough),
+        Answer::Failed(err) => {
             warn!(error = %err, kind = kind.label(), "the mirror could not read content it may hold");
             (status(StatusCode::NOT_FOUND), Outcome::Error)
         }
@@ -134,28 +145,24 @@ async fn handle<C: Content>(content: &C, request: &Request<Incoming>) -> Respons
     response
 }
 
-async fn pull<C: Content>(
-    content: &C,
-    kind: Kind,
+/// The manifest as it is, with the content type it names.
+pub(crate) async fn manifest(
+    blob: Blob,
     digest: &Digest,
     head: bool,
-    range_header: Option<&str>,
 ) -> Result<Response<Body>, Miss> {
-    let blob = content
-        .open(digest)
-        .await
-        .map_err(Miss::Failed)?
-        .ok_or(Miss::NotHeld)?;
-    match kind {
-        Kind::Manifest => manifest(blob, digest, head).await,
-        _ => Ok(blob_response(blob, digest, head, range_header).await?),
-    }
-}
-
-/// The manifest as it is, with the content type it names.
-async fn manifest(blob: Blob, digest: &Digest, head: bool) -> Result<Response<Body>, Miss> {
     let bytes = blob.read_all(MAX_MANIFEST).await.map_err(Miss::Failed)?;
     let media_type = media_type(&bytes).ok_or(Miss::NotHeld)?;
+    Ok(manifest_response(&bytes, digest, media_type, head))
+}
+
+/// The response that serves manifest `bytes` of `digest`.
+pub(crate) fn manifest_response(
+    bytes: &Bytes,
+    digest: &Digest,
+    media_type: HeaderValue,
+    head: bool,
+) -> Response<Body> {
     let mut response = Response::new(if head {
         empty()
     } else {
@@ -165,10 +172,10 @@ async fn manifest(blob: Blob, digest: &Digest, head: bool) -> Result<Response<Bo
     headers.insert(CONTENT_TYPE, media_type);
     headers.insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
     insert_digest(headers, digest);
-    Ok(response)
+    response
 }
 
-async fn blob_response(
+pub(crate) async fn blob_response(
     blob: Blob,
     digest: &Digest,
     head: bool,
@@ -224,12 +231,12 @@ async fn blob_response(
     Ok(response)
 }
 
-fn insert_digest(headers: &mut hyper::HeaderMap, digest: &Digest) {
+pub(crate) fn insert_digest(headers: &mut hyper::HeaderMap, digest: &Digest) {
     headers.insert("Docker-Content-Digest", header(&digest.to_string()));
 }
 
 /// A header value from text that is known to be one: digests, numbers, media types the mirror checked.
-fn header(text: &str) -> HeaderValue {
+pub(crate) fn header(text: &str) -> HeaderValue {
     HeaderValue::from_str(text).unwrap_or_else(|_| HeaderValue::from_static(""))
 }
 
@@ -248,7 +255,7 @@ fn ping() -> Response<Body> {
     response
 }
 
-fn status(code: StatusCode) -> Response<Body> {
+pub(crate) fn status(code: StatusCode) -> Response<Body> {
     let mut response = Response::new(empty());
     *response.status_mut() = code;
     response
@@ -257,16 +264,16 @@ fn status(code: StatusCode) -> Response<Body> {
     response
 }
 
-fn empty() -> Body {
+pub(crate) fn empty() -> Body {
     http_body_util::Empty::new().map_err(never).boxed_unsync()
 }
 
-fn never(never: Infallible) -> io::Error {
+pub(crate) fn never(never: Infallible) -> io::Error {
     match never {}
 }
 
 /// The media type a manifest names, or the one its shape implies; `None` when the bytes are no manifest at all.
-fn media_type(bytes: &[u8]) -> Option<HeaderValue> {
+pub(crate) fn media_type(bytes: &[u8]) -> Option<HeaderValue> {
     #[derive(Deserialize)]
     struct Document {
         #[serde(rename = "mediaType")]

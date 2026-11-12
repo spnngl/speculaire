@@ -7,7 +7,9 @@ use serde_json::Value;
 
 /// `systemd-analyze security` entries of D53's settings that stay unset by design: `@system-service` includes
 /// `@resources`, and the agent needs local and IP sockets.
-const UNSET_BY_DESIGN: [&str; 3] = [
+const UNSET_BY_DESIGN: [&str; 4] = [
+    // `read-only`, not `yes`: the relay reads the registry credentials below `/root` (D88).
+    "ProtectHome=",
     "SystemCallFilter=~@resources",
     "RestrictAddressFamilies=~AF_UNIX",
     "RestrictAddressFamilies=~AF_(INET|INET6)",

@@ -1,0 +1,36 @@
+[package]
+name = "speculaire-registry"
+description = "The upstream registry client: TLS and credentials per endpoint, Bearer token challenge, redirects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1"] }
+percent-encoding.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+speculaire-runtime.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hyper = { workspace = true, features = ["client", "server"] }
+rcgen.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

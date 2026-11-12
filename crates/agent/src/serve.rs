@@ -5,8 +5,13 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
+use speculaire_mirror::Local;
+use speculaire_mirror::cache::Cache;
 use speculaire_mirror::content::{CONTAINERD_CONTENT_DIR, Containerd};
+use speculaire_mirror::relay::{CrioImages, Relay};
 use speculaire_mirror::tls::Tls;
+use speculaire_runtime::detect::Runtime;
+use speculaire_runtime::registries::CrioRegistries;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, error, info, warn};
@@ -25,20 +30,21 @@ use crate::{systemd, telemetry};
 pub fn run(path: &Path) -> anyhow::Result<()> {
     let config = config::load(path)?;
     let logs = log::install(&config.log, &config.audit)?;
-    preflight(&config)?;
+    let node = Node::new(&config);
+    let runtime = preflight(&node)?;
     tokio::runtime::Runtime::new()
         .context("starting the runtime")?
-        .block_on(serve(path, config, logs))
+        .block_on(serve(path, config, logs, node, runtime))
 }
 
-/// Refuses to start on a node where the agent would mirror or gate wrongly (D86), naming each file and key.
-fn preflight(config: &Config) -> anyhow::Result<()> {
-    let node = Node::new(config);
+/// Refuses to start on a node where the agent would mirror or gate wrongly (D86), naming each file and key; returns the
+/// runtime the node has.
+fn preflight(node: &Node) -> anyhow::Result<Runtime> {
     let runtime = node.runtime()?;
     let problems = node.preflight(runtime);
     if problems.is_empty() {
         info!(%runtime, "preflight passed");
-        return Ok(());
+        return Ok(runtime);
     }
     let lines: Vec<String> = problems
         .iter()
@@ -53,7 +59,13 @@ fn preflight(config: &Config) -> anyhow::Result<()> {
     )
 }
 
-async fn serve(path: &Path, mut config: Config, logs: Logs) -> anyhow::Result<()> {
+async fn serve(
+    path: &Path,
+    mut config: Config,
+    logs: Logs,
+    node: Node,
+    runtime: Runtime,
+) -> anyhow::Result<()> {
     let metrics = telemetry::install()?;
     let status = Arc::new(Status::new(metrics.clone()));
     let address = *config.metrics.address.get();
@@ -78,7 +90,7 @@ async fn serve(path: &Path, mut config: Config, logs: Logs) -> anyhow::Result<()
     });
     info!(%address, "status listener open");
     // `/readyz` answers 503 until the mirror listens (D45); an agent that cannot open it stops (D55).
-    let mirror = start_mirror(&config).await?;
+    let mirror = start_mirror(&config, &node, runtime).await?;
     status.mirror_listening();
     systemd::watchdog();
     systemd::ready();
@@ -171,8 +183,9 @@ impl Mirror {
     }
 }
 
-/// Opens the mirror on `mirror.address` with the certificates of `configure` (D14, D55).
-async fn start_mirror(config: &Config) -> anyhow::Result<Mirror> {
+/// Opens the mirror on `mirror.address` with the certificates of `configure` (D14, D55). On containerd it serves what
+/// the node holds; on CRI-O it relays pulls through the blob cache (D66, D67).
+async fn start_mirror(config: &Config, node: &Node, runtime: Runtime) -> anyhow::Result<Mirror> {
     let directory = config.mirror.directory.get().get();
     let tls = Tls::load(directory).with_context(|| {
         format!(
@@ -184,20 +197,47 @@ async fn start_mirror(config: &Config) -> anyhow::Result<Mirror> {
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("listening on mirror.address {address}"))?;
-    let content = Containerd::new(
-        CONTAINERD_CONTENT_DIR,
-        config.runtime.containerd_socket.get().get(),
-    );
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let task = tokio::spawn(speculaire_mirror::serve(
-        listener,
-        Arc::new(tls),
-        Arc::new(content),
-        async {
-            // An error means the sender is gone, which also means stop.
-            let _ = stopped.await;
-        },
-    ));
+    let stopped = async {
+        // An error means the sender is gone, which also means stop.
+        let _ = stopped.await;
+    };
+    let tls = Arc::new(tls);
+    let task = match runtime {
+        Runtime::Containerd => {
+            let content = Containerd::new(
+                CONTAINERD_CONTENT_DIR,
+                config.runtime.containerd_socket.get().get(),
+            );
+            tokio::spawn(speculaire_mirror::serve(
+                listener,
+                tls,
+                Arc::new(Local::new(content)),
+                stopped,
+            ))
+        }
+        Runtime::CriO => {
+            let blobs = config.blob_cache.directory.get().get();
+            let cache = Cache::open(blobs, config.blob_cache.max_size.get())
+                .with_context(|| format!("opening the blob cache {}", blobs.display()))?;
+            let registries = CrioRegistries::new(
+                node.paths.context(),
+                config.runtime.crio_socket.get().get(),
+                node.paths.crio_dropin(),
+            );
+            let relay = Arc::new(Relay::new(
+                cache,
+                Arc::new(registries),
+                CrioImages::new(config.runtime.crio_socket.get().get()),
+            ));
+            speculaire_mirror::metrics::describe_relay();
+            tokio::spawn({
+                let relay = Arc::clone(&relay);
+                async move { relay.evict_when_over().await }
+            });
+            tokio::spawn(speculaire_mirror::serve(listener, tls, relay, stopped))
+        }
+    };
     info!(%address, "mirror open");
     Ok(Mirror { stop, task })
 }

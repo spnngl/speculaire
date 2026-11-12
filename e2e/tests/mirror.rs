@@ -4,7 +4,7 @@
     reason = "the helpers of a test fail it by panicking"
 )]
 
-use e2e::Cluster;
+use e2e::{Cluster, Runtime};
 
 const MIRROR: &str = "https://127.0.0.1:7480";
 const DIR: &str = "/var/lib/speculaire/mirror";
@@ -12,8 +12,15 @@ const DIR: &str = "/var/lib/speculaire/mirror";
 const UNHELD: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 /// An image no other suite pulls (`configure.rs` has its own).
 const IMAGE: &str = "docker.io/library/busybox:1.36.0";
-const FALL_THROUGH: &str =
-    r#"speculaire_mirror_requests_total{kind="manifest",result="fall_through"}"#;
+/// What the mirror counts of a manifest request: on containerd it falls through; on CRI-O it relays (D66).
+const fn manifest_result(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Containerd => {
+            r#"speculaire_mirror_requests_total{kind="manifest",result="fall_through"}"#
+        }
+        Runtime::Crio => r#"speculaire_mirror_requests_total{kind="manifest",result="served"}"#,
+    }
+}
 
 fn sh(cluster: &Cluster, node: &str, script: &str) -> String {
     cluster.exec(node, &["sh", "-c", script]).unwrap()
@@ -146,7 +153,7 @@ fn a_digest_the_node_does_not_hold_falls_through_in_under_5_ms_at_p99() {
 
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
-fn a_pull_goes_through_the_mirror_and_falls_through() {
+fn a_pull_goes_through_the_mirror() {
     let cluster = Cluster::from_env();
     let node = workers(&cluster).remove(1);
     sh(
@@ -154,7 +161,7 @@ fn a_pull_goes_through_the_mirror_and_falls_through() {
         &node,
         &format!("crictl rmi {IMAGE} >/dev/null 2>&1; true"),
     );
-    let manifests = |cluster: &Cluster| series(cluster, &node, FALL_THROUGH);
+    let manifests = |cluster: &Cluster| series(cluster, &node, manifest_result(cluster.runtime()));
     let before = manifests(&cluster);
     let pull = cluster
         .exec_output(&node, &["crictl", "pull", IMAGE])
