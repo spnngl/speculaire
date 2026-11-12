@@ -6,14 +6,11 @@
 //! v2.4.2 `internal/cri/server/images/image_pull.go:108`). The deprecated `mirrors` table is not followed.
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use secrecy::SecretString;
 use speculaire_registry_config::Headers;
-use speculaire_registry_config::containerd::config::{
-    self, Auth, Hosts, LoadError, Login, Registry,
-};
+use speculaire_registry_config::containerd::config::{self, Auth, Hosts, Login, Registry};
 use speculaire_registry_config::containerd::hosts::{Capabilities, RegistryHost, Tree};
 
 use super::live::Live;
@@ -21,6 +18,7 @@ use super::{
     ClientCert, Credentials, Endpoint, Error, Reference, Registries, Reloaded, Source, Tls,
     read_ca, read_client, split_name,
 };
+use crate::containerd::config_missing;
 use crate::settings::chain;
 
 /// What `config.toml`, the host directories and the certificate files they name held.
@@ -113,7 +111,7 @@ fn read(config: &Path, problems: &mut Vec<String>) -> (Vec<PathBuf>, Result<Snap
     let (registry, mut paths) = match config::load_with_files(config) {
         Ok(read) => read,
         // No `config.toml`: containerd runs on its defaults, which have no `config_path`.
-        Err(LoadError::Read { source, .. }) if source.kind() == ErrorKind::NotFound => (
+        Err(err) if config_missing(&err, config) => (
             Registry {
                 hosts: Hosts::ConfigPath(Vec::new()),
                 configs: std::collections::BTreeMap::new(),

@@ -450,6 +450,23 @@ fn a_config_toml_that_cannot_be_read_is_an_error_and_a_missing_one_is_not() {
 }
 
 #[test]
+fn a_missing_import_is_an_error_and_keeps_the_config_held() {
+    let node = Node::new("");
+    node.hosts("quay.io", "[host.\"https://one.corp\"]\n");
+    let registries = node.registries();
+    let config = node.dir.path().join("config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("imports = [\"gone.toml\"]\n{text}")).unwrap();
+    let err = registries.reload().unwrap_err();
+    assert!(
+        matches!(&err, Error::Config(text) if text.contains("gone.toml")),
+        "{err}"
+    );
+    let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
+    assert_eq!(endpoints(&sources)[0], [("one.corp".to_owned(), true)]);
+}
+
+#[test]
 fn a_config_toml_that_is_not_valid_is_an_error_naming_it() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("config.toml"), "version = [").unwrap();

@@ -1,12 +1,10 @@
 //! containerd's settings as the agent depends on them (D15, D54, D86).
 
-use std::io;
-
 use speculaire_registry_config::containerd::config::{
     self as containerd_config, Hosts, Nri, Plugins,
 };
 
-use super::{Containerd, image_exports};
+use super::{Containerd, config_missing, image_exports};
 use crate::detect::Runtime;
 use crate::settings::{Required, Settings, chain, check_version};
 use crate::version::Release;
@@ -28,11 +26,7 @@ impl Settings for Containerd {
         // containerd without a config file has no NRI validator either.
         let plugins = match containerd_config::load_plugins(&config).map(|p| p.nri.required_plugins)
         {
-            Err(containerd_config::LoadError::Read { source, .. })
-                if source.kind() == io::ErrorKind::NotFound =>
-            {
-                Vec::new()
-            }
+            Err(e) if config_missing(&e, &config) => Vec::new(),
             other => other.map_err(|source| Error::Containerd {
                 path: config,
                 source: Box::new(source),
@@ -60,11 +54,7 @@ impl Settings for Containerd {
         let plugins = match containerd_config::load_plugins(&config) {
             Ok(plugins) => plugins,
             // containerd without a config file runs on its defaults.
-            Err(containerd_config::LoadError::Read { path, source })
-                if path == config && source.kind() == io::ErrorKind::NotFound =>
-            {
-                Plugins::default()
-            }
+            Err(e) if config_missing(&e, &config) => Plugins::default(),
             Err(e) => {
                 problems.push(at_config(format!(
                     "cannot read containerd's config: {}",

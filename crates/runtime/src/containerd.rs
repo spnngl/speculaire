@@ -77,6 +77,13 @@ impl Containerd {
     }
 }
 
+/// Whether `error` is `config` itself missing, where containerd runs on its defaults. A missing import fails containerd's
+/// load as any other read does (v2.4.2 `cmd/containerd/server/config/config.go:522`).
+pub(crate) fn config_missing(error: &containerd_config::LoadError, config: &Path) -> bool {
+    matches!(error, containerd_config::LoadError::Read { path, source }
+        if path == config && source.kind() == std::io::ErrorKind::NotFound)
+}
+
 const PLUGINS_METHOD: &str = "containerd.services.introspection.v1.Introspection/Plugins";
 
 /// The image service's type and id in `Plugins`.
