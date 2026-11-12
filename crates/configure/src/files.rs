@@ -49,11 +49,8 @@ pub fn write(path: &Path, contents: &[u8], mode: u32) -> io::Result<Option<Chang
     // A symlink, as config management makes of a config file, is written through, not replaced.
     let target = std::fs::canonicalize(path).ok();
     let real = target.as_deref().unwrap_or(path);
-    let existing = match std::fs::metadata(real) {
-        Ok(meta) => Some(meta),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
+    // A file that cannot be looked at is written as if new: the write then fails, or replaces it.
+    let existing = std::fs::metadata(real).ok();
     if let Some(meta) = &existing
         && meta.is_file()
         && meta.mode() & 0o7777 == mode
@@ -95,18 +92,13 @@ pub fn write_keeping_mode(
 
 /// Makes `dir` and its missing parents, with mode 0755 whatever the umask says.
 fn make_dir(dir: &Path) -> io::Result<()> {
-    let mut missing = Vec::new();
-    let mut at = Some(dir);
-    while let Some(path) = at.filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
-        missing.push(path);
-        at = path.parent();
-    }
+    let missing: Vec<&Path> = dir
+        .ancestors()
+        .take_while(|path| !path.as_os_str().is_empty() && !path.exists())
+        .collect();
     for path in missing.into_iter().rev() {
-        match std::fs::create_dir(path) {
-            Ok(()) => std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
+        std::fs::create_dir(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
 }
@@ -238,6 +230,34 @@ mod tests {
         let fresh = dir.path().join("fresh");
         write_keeping_mode(&fresh, b"x", 0o644).unwrap();
         assert_eq!(mode(&fresh), 0o644);
+    }
+
+    #[test]
+    fn a_path_through_a_file_is_an_error_for_every_call_but_a_missing_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, "").unwrap();
+        let through = file.join("sub");
+        assert!(remove(&through).is_err());
+        assert!(read(&through).is_err());
+        assert!(remove_dir_if_empty(&file).is_err());
+        assert!(write(&through, b"x", 0o644).is_err());
+        let missing = dir.path().join("missing/sub");
+        assert_eq!(remove(&missing).unwrap(), None);
+        assert_eq!(read(&missing).unwrap(), None);
+        remove_dir_if_empty(&missing).unwrap();
+    }
+
+    #[test]
+    fn writing_into_a_directory_that_exists_makes_nothing_and_missing_ones_get_0755() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a"), b"x", 0o600).unwrap();
+        write(&dir.path().join("b/c/d"), b"x", 0o600).unwrap();
+        assert_eq!(mode(&dir.path().join("b")), 0o755);
+        assert_eq!(mode(&dir.path().join("b/c")), 0o755);
+        write(&dir.path().join("b/c/e"), b"x", 0o600).unwrap();
+        // A relative path has a parent that is empty, and that is the working directory.
+        assert_eq!(make_dir(Path::new("")).ok(), Some(()));
     }
 
     #[test]

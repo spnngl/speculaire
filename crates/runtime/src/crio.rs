@@ -14,7 +14,7 @@ use serde::Deserialize;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The longest response read: CRI-O's whole config is a few tens of KiB.
-const MAX_RESPONSE: u64 = 4 * 1024 * 1024;
+const MAX_RESPONSE: u64 = 4_194_304;
 
 /// The settings of CRI-O's NRI that the agent depends on (D54, D64), under `[crio.nri]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,6 +231,8 @@ mod tests {
         assert_eq!(body(&ok).unwrap(), "a = 1\n");
         let sized = response("200 OK", "content-length: 3\r\n", "a = 1\n");
         assert_eq!(body(&sized).unwrap(), "a =");
+        let exact = response("200 OK", "Content-Length: 6\r\n", "a = 1\n");
+        assert_eq!(body(&exact).unwrap(), "a = 1\n");
         let short = response("200 OK", "Content-Length: 30\r\n", "a = 1\n");
         assert!(body(&short).is_err());
         assert!(body(&response("200 OK", "Content-Length: x\r\n", "")).is_err());

@@ -168,7 +168,7 @@ impl Mirror {
         let client = client.expose_secret();
         let split = client
             .find("-----BEGIN PRIVATE KEY-----")
-            .filter(|at| client.starts_with("-----BEGIN CERTIFICATE-----") && *at > 0)
+            .filter(|_| client.starts_with("-----BEGIN CERTIFICATE-----"))
             .ok_or_else(|| {
                 Problem::new(
                     Part::Client,

@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use anyhow::Context as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use speculaire_agent::config;
-use speculaire_configure::{Paths, Report, Settings, System};
+use speculaire_configure::{Paths, Problem, Report, Settings, System};
 use speculaire_runtime::detect::{self, Runtime, Sockets};
 
 /// P2P image mirror and supply-chain gate for containerd and CRI-O.
@@ -122,7 +122,11 @@ fn run(command: Command) -> anyhow::Result<()> {
                 SystemTime::now(),
                 &system(),
             )?;
-            print_report(&report)?;
+            print_report(
+                &mut std::io::stdout().lock(),
+                &mut std::io::stderr().lock(),
+                &report,
+            )?;
         }
         Command::Unconfigure {
             config,
@@ -138,7 +142,11 @@ fn run(command: Command) -> anyhow::Result<()> {
                 force,
                 &system(),
             )?;
-            print_report(&report)?;
+            print_report(
+                &mut std::io::stdout().lock(),
+                &mut std::io::stderr().lock(),
+                &report,
+            )?;
         }
     }
     Ok(())
@@ -147,6 +155,7 @@ fn run(command: Command) -> anyhow::Result<()> {
 fn system() -> System {
     System {
         crio_socket: Sockets::system().crio,
+        systemctl: PathBuf::from("systemctl"),
     }
 }
 
@@ -165,16 +174,31 @@ fn settings(path: &std::path::Path) -> anyhow::Result<Settings> {
     })
 }
 
-fn print_report(report: &Report) -> anyhow::Result<()> {
-    let mut out = std::io::stdout().lock();
+/// What a run changed on `out`, one file per line, and what it left alone on `err`.
+fn print_report(
+    out: &mut impl Write,
+    err: &mut impl Write,
+    report: &Report,
+) -> std::io::Result<()> {
     for change in &report.changes {
         writeln!(out, "{change}")?;
     }
-    drop(out);
     for note in &report.notes {
-        eprintln!("note: {note}");
+        writeln!(err, "note: {note}")?;
     }
     Ok(())
+}
+
+/// Each problem on `err`, and an error that counts them when there are any.
+fn verdict(err: &mut impl Write, problems: &[Problem]) -> anyhow::Result<()> {
+    for problem in problems {
+        writeln!(err, "{problem}")?;
+    }
+    match problems.len() {
+        0 => Ok(()),
+        1 => anyhow::bail!("1 problem with the runtime's config or the mirror's certificates"),
+        n => anyhow::bail!("{n} problems with the runtime's config or the mirror's certificates"),
+    }
 }
 
 /// Exits non-zero, naming each file, when the config or the node's runtime config is not as `configure` leaves it.
@@ -184,14 +208,7 @@ fn check_config(path: &std::path::Path, runtime: &RuntimeArg) -> anyhow::Result<
     let problems =
         speculaire_configure::check(runtime, &Paths::system(), &settings, SystemTime::now())
             .context("cannot check the runtime's config")?;
-    for problem in &problems {
-        eprintln!("{problem}");
-    }
-    match problems.len() {
-        0 => Ok(()),
-        1 => anyhow::bail!("1 file is not as `speculaire configure` leaves it"),
-        n => anyhow::bail!("{n} files are not as `speculaire configure` leaves them"),
-    }
+    verdict(&mut std::io::stderr().lock(), &problems)
 }
 
 /// The line `speculaire version` prints: name, version, architecture and OS, then `-musl` for a static build.
@@ -261,6 +278,39 @@ mod tests {
         );
         std::fs::write(&path, "[mirror]\naddress = \"10.0.0.1:7480\"\n").unwrap();
         assert!(super::settings(&path).is_err());
+    }
+
+    #[test]
+    fn a_report_prints_changes_on_stdout_and_notes_on_stderr() {
+        use speculaire_configure::{Change, Report};
+        let report = Report {
+            changes: vec![Change::Created("/a".into()), Change::Removed("/b".into())],
+            notes: vec!["left /c alone".to_owned()],
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        super::print_report(&mut out, &mut err, &report).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "created /a\nremoved /b\n");
+        assert_eq!(String::from_utf8(err).unwrap(), "note: left /c alone\n");
+    }
+
+    #[test]
+    fn problems_are_printed_and_counted() {
+        use speculaire_configure::Problem;
+        let problem = |path: &str| Problem {
+            path: path.into(),
+            message: "is wrong".to_owned(),
+        };
+        let mut err = Vec::new();
+        super::verdict(&mut err, &[]).unwrap();
+        assert_eq!(err, b"");
+        let one = super::verdict(&mut err, &[problem("/x")]).unwrap_err();
+        assert!(one.to_string().starts_with("1 problem "), "{one}");
+        let two = super::verdict(&mut err, &[problem("/y"), problem("/z")]).unwrap_err();
+        assert!(two.to_string().starts_with("2 problems "), "{two}");
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "/x: is wrong\n/y: is wrong\n/z: is wrong\n"
+        );
     }
 
     #[test]

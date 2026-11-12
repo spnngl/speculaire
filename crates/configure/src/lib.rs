@@ -123,11 +123,13 @@ pub trait Host {
 pub struct System {
     /// CRI-O's socket.
     pub crio_socket: PathBuf,
+    /// The `systemctl` to run.
+    pub systemctl: PathBuf,
 }
 
 impl Host for System {
     fn reload_crio(&self) -> io::Result<()> {
-        let status = Command::new("systemctl")
+        let status = Command::new(&self.systemctl)
             .args(["reload", "crio"])
             .status()?;
         if status.success() {

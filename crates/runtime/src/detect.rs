@@ -221,6 +221,21 @@ mod tests {
     }
 
     #[test]
+    fn only_both_accepting_is_ambiguous() {
+        let error = |containerd: Answer, crio: Answer| DetectError {
+            containerd_path: PathBuf::from("a"),
+            containerd,
+            crio_path: PathBuf::from("b"),
+            crio,
+        };
+        let refused = || Answer::Refused("no".to_owned());
+        assert!(error(Answer::Accepted, Answer::Accepted).is_ambiguous());
+        assert!(!error(Answer::Accepted, refused()).is_ambiguous());
+        assert!(!error(refused(), Answer::Accepted).is_ambiguous());
+        assert!(!error(refused(), refused()).is_ambiguous());
+    }
+
+    #[test]
     fn a_path_that_is_not_a_socket_is_refused_with_the_systems_reason() {
         let mut node = Node::new();
         node.serve("crio.sock");
