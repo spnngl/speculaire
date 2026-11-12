@@ -653,15 +653,15 @@ mod tests {
         write(
             dir.path(),
             "run/containers/0/auth.json",
-            r#"{"auths": {"a.io": {"auth": "dXNlcg=="}, "h.io": {"auth": "dTpw"}}, "credHelpers": {"h.io": "pass"}}"#,
+            r#"{"auths": {"a.io": {"auth": "dXNlcg=="}, "c.io": {"auth": "Og=="}, "h.io": {"auth": "dTpw"}}, "credHelpers": {"h.io": "pass"}}"#,
         );
         write(
             dir.path(),
             "home/.docker/config.json",
-            r#"{"auths": {"a.io": {"auth": "dTpw"}, "b.io": {"auth": "dTpw"}}}"#,
+            r#"{"auths": {"a.io": {"auth": "dTpw"}, "b.io": {"auth": "dTpw"}, "c.io": {"auth": "dTpw"}}}"#,
         );
         let parsed = Files::load(&ctx).expect("valid files");
-        for key in ["a.io", "b.io", "h.io", "none.io", "b.io/ns/repo"] {
+        for key in ["a.io", "b.io", "c.io", "h.io", "none.io", "b.io/ns/repo"] {
             let from_files = credentials(&ctx, &files(), key).expect("a lookup");
             let from_parsed = parsed.credentials(&files(), key).expect("a lookup");
             assert_eq!(
@@ -670,6 +670,11 @@ mod tests {
                 "{key}"
             );
         }
+        // An empty login in a file does not hide the one in the next.
+        assert!(matches!(
+            parsed.credentials(&files(), "c.io").expect("a lookup"),
+            Lookup::Found(auth) if auth.username == "u"
+        ));
         // What the parsed files hold is what was read, whatever happens to the files.
         std::fs::remove_dir_all(dir.path().join("home")).expect("removed");
         assert!(matches!(

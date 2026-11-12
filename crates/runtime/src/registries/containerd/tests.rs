@@ -340,6 +340,19 @@ fn a_file_that_is_not_valid_keeps_the_config_held_and_names_the_file_and_the_pla
 }
 
 #[test]
+fn a_config_toml_that_cannot_be_read_is_an_error_and_a_missing_one_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    // A directory where the file should be: not `NotFound`, so not the defaults.
+    let registries = ContainerdRegistries::new(dir.path());
+    assert!(registries.reload(None).is_err());
+    assert!(
+        ContainerdRegistries::new(dir.path().join("gone.toml"))
+            .reload(None)
+            .is_ok()
+    );
+}
+
+#[test]
 fn a_config_toml_that_is_not_valid_is_an_error_naming_it() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("config.toml"), "version = [").unwrap();
