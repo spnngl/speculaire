@@ -635,6 +635,21 @@ async fn what_answers_is_told_the_name_the_reference_the_range_and_the_accept() 
         .await
         .unwrap();
     assert_eq!(answer.status(), StatusCode::NOT_FOUND);
+    // CRI-O's Go client sends one `Accept` header per media type (go.podman.io/image docker_client.go:632-634).
+    let mut two = request(
+        Method::GET,
+        "/v2/docker.io/library/busybox/manifests/1.37".to_owned(),
+        None,
+        Some("application/vnd.oci.image.manifest.v1+json"),
+    );
+    two.headers_mut().append(
+        "accept",
+        HeaderValue::from_static("application/vnd.oci.image.index.v1+json"),
+    );
+    assert_eq!(
+        sender.send_request(two).await.unwrap().status(),
+        StatusCode::OK
+    );
     let seen = recording.0.lock().unwrap().clone();
     assert_eq!(
         seen,
@@ -644,6 +659,7 @@ async fn what_answers_is_told_the_name_the_reference_the_range_and_the_accept() 
                 r#"blob localhost:5000/team/app Some(Digest(Digest {{ algorithm: "sha256", encoded: "{}" }})) head=true range=Some("bytes=5-") accept=None"#,
                 digest.encoded()
             ),
+            r#"manifest docker.io/library/busybox Some(Tag("1.37")) head=false range=None accept=Some("application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json")"#.to_owned(),
         ]
     );
 }

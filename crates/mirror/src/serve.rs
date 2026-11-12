@@ -122,6 +122,14 @@ async fn handle<P: Pulls>(pulls: &P, request: &Request<Incoming>) -> Response<Bo
             .get(name)
             .and_then(|value| value.to_str().ok())
     };
+    // Go clients, CRI-O's among them, send one `Accept` header per media type.
+    let accept = request
+        .headers()
+        .get_all(ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(", ");
     let answered = pulls
         .pull(Pull {
             kind,
@@ -129,7 +137,7 @@ async fn handle<P: Pulls>(pulls: &P, request: &Request<Incoming>) -> Response<Bo
             reference: reference.as_ref(),
             head,
             range: header(RANGE),
-            accept: header(ACCEPT),
+            accept: (!accept.is_empty()).then_some(accept.as_str()),
         })
         .await;
     let (response, outcome) = match answered {
