@@ -16,6 +16,7 @@ speculaire-configure.workspace = true
 speculaire-runtime.workspace = true
 
 [dev-dependencies]
+humantime.workspace = true
 secrecy.workspace = true
 speculaire-fake-runtime.workspace = true
 speculaire-pki.workspace = true

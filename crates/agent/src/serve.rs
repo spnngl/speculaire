@@ -27,13 +27,16 @@ use crate::{systemd, telemetry};
 ///
 /// When the config is invalid, which stops startup before any listener opens (D30), or a listener cannot open.
 pub fn run(path: &Path) -> anyhow::Result<()> {
+    // The first read of the config starts the first interval of the polls: a file changed after it began is newer than
+    // it, and a poll finds it (D30). The registry config's first read comes later, so it starts no earlier.
+    let last_check = SystemTime::now();
     let config = config::load(path)?;
     let logs = log::install(&config.log, &config.audit)?;
     let node = Node::new(&config);
     let node = preflight(&node)?;
     tokio::runtime::Runtime::new()
         .context("starting the runtime")?
-        .block_on(serve(path, config, logs, node))
+        .block_on(serve(path, last_check, config, logs, node))
 }
 
 /// Refuses to start on a node where the agent would mirror or gate wrongly (D86), naming each file and key; returns the
@@ -61,6 +64,7 @@ fn preflight(node: &Node) -> anyhow::Result<RuntimeNode> {
 
 async fn serve(
     path: &Path,
+    mut last_check: SystemTime,
     mut config: Config,
     logs: Logs,
     node: RuntimeNode,
@@ -89,9 +93,6 @@ async fn serve(
     });
     info!(%address, "status listener open");
     // `/readyz` answers 503 until the mirror listens (D45); an agent that cannot open it stops (D55).
-    // The first read of the registry config starts the first interval of the polls: a file changed after it began is
-    // newer than it, and a poll finds it (D30).
-    let mut last_check = SystemTime::now();
     let registries = node.registries();
     reload_registries(&*registries, None);
     let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
