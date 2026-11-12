@@ -82,8 +82,9 @@ pub fn check_all(
     target: &Target,
     now: SystemTime,
 ) -> Result<Vec<Problem>, Error> {
+    // The certificates are in preflight's problems already: they are read once.
     let mut problems = preflight(settings, target, now);
-    for problem in check(wiring, target, now)? {
+    for problem in wiring.check(target)? {
         if !problems.contains(&problem) {
             problems.push(problem);
         }
