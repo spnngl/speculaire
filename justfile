@@ -386,6 +386,7 @@ e2e-test runtime version kubernetes="" *args:
         SPECULAIRE_E2E_RELEASE="$release" SPECULAIRE_E2E_KUBERNETES="$kubernetes" \
         cargo test -p e2e --locked -- --ignored {{ args }}
 
+# The containers a killed suite left go too.
 # Delete the e2e cluster `just e2e-up` made with the same arguments, or every e2e cluster: just e2e-down
 e2e-down runtime="" version="" kubernetes="":
     #!/usr/bin/env bash
@@ -401,6 +402,8 @@ e2e-down runtime="" version="" kubernetes="":
             kind delete cluster --name "$c"
         fi
     done
+    # The registries and proxies of a killed run (e2e/src/registry.rs).
+    docker ps -aq --filter label=speculaire-e2e | xargs -r docker rm -f -v >/dev/null
 
 # Print the shell variables of an e2e cluster: `release`, `kubernetes`, `node` (the kindest/node tag and digest) and
 # `cluster`. CRI-O runs on its own Kubernetes minor; containerd on the one named, by default the newest (D63).

@@ -348,7 +348,8 @@ fn with_neither_runtime_socket_or_both_all_three_commands_refuse_naming_both() {
     sh(
         &cluster,
         &node,
-        &format!("pkill systemd-socket-a; rm -f {other}; true"),
+        // `-f`: a process name is cut to 15 bytes; `[s]` keeps the pattern from matching this shell.
+        &format!("pkill -f '[s]ystemd-socket-activate'; rm -f {other}; true"),
     );
 
     for stderr in neither.unwrap().into_iter().chain(both.unwrap()) {
