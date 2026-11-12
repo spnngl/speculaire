@@ -366,6 +366,27 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_path_from_the_environment_names_nothing() {
+        let empty = PathBuf::new();
+        let paths = search_paths(
+            &Context::root(),
+            &Wanted {
+                name: "registries",
+                extension: "conf",
+                bare: false,
+                custom_file: None,
+                env_file: Some(&empty),
+                custom_dir: None,
+                env_override: Some(&empty),
+            },
+        );
+        assert_eq!(paths.main_files.len(), 3);
+        assert!(paths.ignore_main_missing);
+        assert_eq!(paths.drop_in_dirs.len(), 5);
+        assert_eq!(paths.extra_override, None);
+    }
+
+    #[test]
     fn a_named_file_that_is_missing_and_an_unreadable_directory_are_errors() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let mut paths = registries(&Context {

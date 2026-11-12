@@ -372,7 +372,7 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
         }
         let mut bits = 0u32;
         for b in &quad[..4 - padding] {
-            bits = (bits << 6) | u32::from(value(*b)?);
+            bits = (bits << 6) + u32::from(value(*b)?);
         }
         bits <<= 6 * padding;
         let bytes = bits.to_be_bytes();
@@ -520,6 +520,8 @@ mod tests {
             Some(b"user:pass".to_vec())
         );
         assert_eq!(base64_decode(""), Some(Vec::new()));
+        assert_eq!(base64_decode("+/+/"), Some(vec![0xfb, 0xff, 0xbf]));
+        assert_eq!(base64_decode("Pz8/"), Some(b"???".to_vec()));
         for bad in [
             "dXNlcjpwYXN",
             "dXN=cjpw",
@@ -667,6 +669,16 @@ mod tests {
         };
         // A runtime directory that does not exist is skipped.
         assert_eq!(auth_file_paths(&rootless).len(), 3);
+        // Any other failure to look at it is not: the library uses the path and fails reading it.
+        std::fs::write(dir.path().join("file"), "").expect("a file");
+        let beyond = Context {
+            xdg_runtime_dir: Some(dir.path().join("file/sub")),
+            ..rootless.clone()
+        };
+        assert_eq!(
+            auth_file_paths(&beyond)[0].path,
+            dir.path().join("file/sub/containers/auth.json")
+        );
         let runtime = Context {
             xdg_runtime_dir: Some(dir.path().to_owned()),
             ..rootless.clone()

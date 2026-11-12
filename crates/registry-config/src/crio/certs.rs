@@ -224,6 +224,33 @@ mod tests {
     }
 
     #[test]
+    fn a_certificate_that_vanished_since_the_listing_is_skipped() {
+        let dir = dir_with(&["a.cert", "a.key"]);
+        std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join("ca.crt"))
+            .expect("a link");
+        let found = setup(dir.path()).expect("certificates");
+        assert_eq!(found.ca, Vec::<PathBuf>::new());
+        assert_eq!(found.client.len(), 1);
+    }
+
+    #[test]
+    fn the_certificates_of_a_host_are_those_of_its_directory() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let host = dir.path().join("etc/containers/certs.d/reg.test");
+        std::fs::create_dir_all(&host).expect("a directory");
+        std::fs::write(host.join("ca.crt"), "pem").expect("a file");
+        let ctx = Context {
+            root: dir.path().to_owned(),
+            home: dir.path().join("home"),
+            ..Context::root()
+        };
+        assert_eq!(
+            load(&ctx, "reg.test").expect("certificates").ca,
+            [host.join("ca.crt")]
+        );
+    }
+
+    #[test]
     fn a_missing_directory_has_no_certificates_and_a_file_is_not_a_directory() {
         let dir = dir_with(&["file"]);
         assert_eq!(
