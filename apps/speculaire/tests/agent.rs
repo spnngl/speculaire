@@ -765,6 +765,9 @@ fn an_invalid_registry_config_keeps_the_previous_is_reported_once_and_a_fix_is_p
     // The first read, at startup.
     agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
     wait_until(|| get(agent.port, "/readyz", "").is_some_and(|r| r.status == 200));
+    // The polls compare the file's time with the start of the previous check, the first one just before startup's read.
+    // The pause puts the write past it even when the kernel's coarse file clock dates it a few milliseconds early.
+    std::thread::sleep(Duration::from_millis(100));
     std::fs::write(&hosts, "[host.\"https://one.corp\"\n").unwrap();
     let line = agent.line(&[r#""level":"ERROR""#, "registry config reload failed"]);
     assert!(
