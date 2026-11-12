@@ -227,12 +227,129 @@ fn the_login_of_an_endpoint_is_its_configs_entry_by_host() {
 #[test]
 fn a_login_that_is_no_user_and_password_is_anonymous() {
     let section = "plugins.\"io.containerd.cri.v1.images\".registry.configs";
-    let node = Node::new(&format!("[{section}.\"quay.io\".auth]\nauth = \"***\"\n"));
-    let sources = node
-        .registries()
-        .sources("quay.io/org/app", tag("1"))
-        .unwrap();
+    let node = Node::new(&format!(
+        "[{section}.\"quay.io\".auth]\nauth = \"***\"\n[{section}.\"ghcr.io\".auth]\nusername = \"alice\"\npassword = \"s3cret\"\n"
+    ));
+    let registries = node.unread();
+    let reloaded = registries.reload(None).unwrap();
+    // The snapshot is built: the other login is kept, and the bad one is reported, once.
+    assert_eq!(reloaded.problems.len(), 1, "{:?}", reloaded.problems);
+    assert!(reloaded.problems[0].contains("quay.io"));
+    let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
     assert!(matches!(sources[0].credentials, Credentials::Anonymous));
+    let sources = registries.sources("ghcr.io/org/app", tag("1")).unwrap();
+    assert!(
+        matches!(&sources[0].credentials, Credentials::Login { username, .. } if username == "alice")
+    );
+    let later = SystemTime::now() + std::time::Duration::from_secs(60);
+    assert_eq!(registries.reload(Some(later)).unwrap(), Reloaded::default());
+}
+
+const CERT: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+const ROTATED: &str = "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n";
+// Armor in two pieces, so that no secret scanner takes the made-up key for a leak.
+const KEY: &str = concat!(
+    "-----BEGIN PRIVATE ",
+    "KEY-----\nCCCC\n-----END PRIVATE ",
+    "KEY-----\n"
+);
+
+/// A directory outside `config_path` with `files`, and the `hosts.toml` of `reg.test` naming them as `client` pairs
+/// and `ca`.
+fn outside(
+    node: &Node,
+    files: &[(&str, &str)],
+    hosts: impl Fn(&Path) -> String,
+) -> tempfile::TempDir {
+    let pki = tempfile::tempdir().unwrap();
+    for (name, text) in files {
+        std::fs::write(pki.path().join(name), text).unwrap();
+    }
+    node.hosts("reg.test", &hosts(pki.path()));
+    pki
+}
+
+fn trust(registries: &ContainerdRegistries) -> Tls {
+    registries.sources("reg.test/app", tag("1")).unwrap()[0].candidates[0]
+        .tls
+        .clone()
+}
+
+#[test]
+fn certificates_are_read_at_reload_and_a_rotation_outside_the_host_directory_is_picked_up_by_the_next_poll()
+ {
+    let node = Node::new("");
+    let pki = outside(
+        &node,
+        &[("ca.crt", CERT), ("c.cert", CERT), ("c.key", KEY)],
+        |pki| {
+            format!(
+                "ca = {:?}\nclient = [[{:?}, {:?}]]\n",
+                pki.join("ca.crt"),
+                pki.join("c.cert"),
+                pki.join("c.key")
+            )
+        },
+    );
+    let registries = node.registries();
+    // No request reads a file: they can all be gone, and the trust is the one that was read.
+    std::fs::remove_file(pki.path().join("c.key")).unwrap();
+    std::fs::remove_file(pki.path().join("c.cert")).unwrap();
+    let held = trust(&registries);
+    assert_eq!(held.roots, [CERT.as_bytes()]);
+    assert_eq!(held.client.as_ref().unwrap().key.expose_secret(), KEY);
+    // A key that is held is never shown.
+    assert!(!format!("{held:?}").contains("CCCC"));
+    // A rotation of a file that `config_path` does not hold is found by the poll all the same.
+    let since = SystemTime::now();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(pki.path().join("ca.crt"), ROTATED).unwrap();
+    let reloaded = registries.reload(Some(since)).unwrap();
+    assert!(reloaded.changed);
+    assert_eq!(trust(&registries).roots, [ROTATED.as_bytes()]);
+    // The client files are gone now: the reload says so once and the host has no client certificate.
+    assert_eq!(reloaded.problems.len(), 1, "{:?}", reloaded.problems);
+    assert!(reloaded.problems[0].contains("c.cert"));
+    assert!(trust(&registries).client.is_none());
+    assert_eq!(
+        registries.reload(Some(later())).unwrap(),
+        Reloaded::default()
+    );
+}
+
+fn later() -> SystemTime {
+    SystemTime::now() + std::time::Duration::from_secs(60)
+}
+
+#[test]
+fn a_client_key_that_is_not_pem_and_a_ca_without_a_certificate_are_left_out_and_reported() {
+    let node = Node::new("");
+    let _pki = outside(
+        &node,
+        &[
+            ("good.crt", CERT),
+            ("junk.crt", "junk"),
+            ("c.cert", CERT),
+            ("c.key", "not a key"),
+        ],
+        |pki| {
+            format!(
+                "ca = [{:?}, {:?}]\nclient = [[{:?}, {:?}]]\n",
+                pki.join("good.crt"),
+                pki.join("junk.crt"),
+                pki.join("c.cert"),
+                pki.join("c.key")
+            )
+        },
+    );
+    let registries = node.unread();
+    let reloaded = registries.reload(None).unwrap();
+    assert_eq!(reloaded.problems.len(), 2, "{:?}", reloaded.problems);
+    assert!(reloaded.problems.iter().any(|p| p.contains("junk.crt")));
+    assert!(reloaded.problems.iter().any(|p| p.contains("c.key")));
+    let trust = trust(&registries);
+    assert_eq!(trust.roots, [CERT.as_bytes()]);
+    assert!(trust.client.is_none());
 }
 
 #[test]
@@ -266,7 +383,7 @@ fn nothing_is_answered_before_a_read_and_no_config_is_the_defaults() {
         Err(Error::Config(_))
     ));
     // containerd with no `config.toml` runs on its defaults: no `config_path`, the registry itself.
-    assert!(registries.reload(None).unwrap());
+    assert!(registries.reload(None).unwrap().changed);
     let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
     assert_eq!(endpoints(&sources), [[("quay.io".to_owned(), true)]]);
     // It is read again once the file appears.
@@ -275,9 +392,10 @@ fn nothing_is_answered_before_a_read_and_no_config_is_the_defaults() {
         !registries
             .reload(Some(SystemTime::now() + std::time::Duration::from_secs(60)))
             .unwrap()
+            .changed
     );
     std::fs::write(dir.path().join("config.toml"), "version = 3\n").unwrap();
-    assert!(registries.reload(Some(past)).unwrap());
+    assert!(registries.reload(Some(past)).unwrap().changed);
 }
 
 #[test]
@@ -307,11 +425,12 @@ fn an_edit_of_a_hosts_file_shows_on_reload_and_only_then() {
     assert_eq!(hosts(&registries)[0], [("one.corp".to_owned(), true)]);
     // A reload with nothing modified since does nothing; one with a file modified since reads.
     let after = SystemTime::now() + std::time::Duration::from_secs(60);
-    assert!(!registries.reload(Some(after)).unwrap());
+    assert!(!registries.reload(Some(after)).unwrap().changed);
     assert!(
         registries
             .reload(Some(before - std::time::Duration::from_secs(1)))
             .unwrap()
+            .changed
     );
     assert_eq!(hosts(&registries)[0], [("two.corp".to_owned(), true)]);
 }
@@ -334,7 +453,7 @@ fn a_file_that_is_not_valid_keeps_the_config_held_and_names_the_file_and_the_pla
     assert_eq!(endpoints(&sources)[0], [("one.corp".to_owned(), true)]);
     // The file made right is read.
     node.hosts("quay.io", "[host.\"https://three.corp\"]\n");
-    assert!(registries.reload(None).unwrap());
+    assert!(registries.reload(None).unwrap().changed);
     let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
     assert_eq!(endpoints(&sources)[0], [("three.corp".to_owned(), true)]);
 }

@@ -1751,6 +1751,7 @@ dependencies = [
  "containerd-client",
  "futures-util",
  "prost",
+ "rustls-pki-types",
  "secrecy",
  "serde",
  "speculaire-oci",

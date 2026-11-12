@@ -175,11 +175,25 @@ fn reload(path: &Path, running: &mut Config, logs: &Logs) {
 }
 
 /// Reads the registry config again (D91): all of it without `since`, what changed at or after it with. A config that
-/// is not valid stays unread: the one held serves, and the failure is logged once and counted.
+/// is not valid stays unread: the one held serves, and the failure is logged once and counted. A credential,
+/// certificate or key file that cannot be used does not fail the read: each is logged, and the reload counts as one
+/// failure however many there are (D92).
 fn reload_registries(registries: &dyn Registries, since: Option<SystemTime>) {
     match registries.reload(since) {
-        Ok(true) => debug!("registry config reloaded"),
-        Ok(false) => {}
+        Ok(reloaded) => {
+            if reloaded.changed {
+                debug!("registry config reloaded");
+            }
+            if !reloaded.problems.is_empty() {
+                metrics::counter!(telemetry::CONFIG_RELOAD_FAILURES).increment(1);
+            }
+            for problem in &reloaded.problems {
+                error!(
+                    error = %problem,
+                    "registry config reloaded with a file left out"
+                );
+            }
+        }
         Err(err) => {
             metrics::counter!(telemetry::CONFIG_RELOAD_FAILURES).increment(1);
             error!(

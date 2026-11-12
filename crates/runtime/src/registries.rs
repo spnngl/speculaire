@@ -4,6 +4,9 @@
 //! The upstream client asks a [`Registries`] for the [`Source`]s of a name, and never reads a runtime's files itself.
 //! One implementation reads containerd's (`config.toml`, `hosts.toml`), another CRI-O's (`registries.conf`, `certs.d`,
 //! the auth file).
+//!
+//! A config is read at [`Registries::reload`], files of certificates and keys with it; nothing a request does reads a
+//! file (D91, D92).
 
 pub mod containerd;
 pub mod crio;
@@ -11,7 +14,10 @@ mod live;
 
 pub use containerd::ContainerdRegistries;
 pub use crio::CrioRegistries;
+use rustls_pki_types::pem::PemObject as _;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use secrecy::SecretString;
+use secrecy::zeroize::Zeroizing;
 
 /// A certificate to present to an endpoint that asks for one, and its key (PEM).
 #[derive(Clone, Debug)]
@@ -124,8 +130,8 @@ pub trait Registries: Send + Sync {
     /// When the registry config cannot be read, or `name` has no registry and repository in it.
     fn sources(&self, name: &str, reference: Reference<'_>) -> Result<Vec<Source>, Error>;
 
-    /// Reads the registry config again, and returns whether it changed. `sources` never reads the registry config
-    /// from disk: what it answers is what the last successful `reload` read (D91).
+    /// Reads the registry config again. `sources` never reads the registry config from disk: what it answers is what the
+    /// last successful `reload` read (D91).
     ///
     /// With `since`, only when a file of the config was modified at or after it; without, always, whatever the
     /// modification times say.
@@ -133,8 +139,19 @@ pub trait Registries: Send + Sync {
     /// # Errors
     ///
     /// When the registry config cannot be read or is not valid, naming the file and the place in it. The config held
-    /// stays in use, if there is one.
-    fn reload(&self, since: Option<std::time::SystemTime>) -> Result<bool, Error>;
+    /// stays in use, if there is one. A credential, certificate or key file that cannot be used is no error: see
+    /// [`Reloaded::problems`].
+    fn reload(&self, since: Option<std::time::SystemTime>) -> Result<Reloaded, Error>;
+}
+
+/// What a [`Registries::reload`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Reloaded {
+    /// Whether the registry config held was replaced.
+    pub changed: bool,
+    /// What the new config does without, one text each: a credential, certificate or key file that cannot be used
+    /// leaves only the hosts it is for anonymous, or without it (D92). Empty when nothing was read.
+    pub problems: Vec<String>,
 }
 
 /// `name` split into its registry and its repository.
@@ -144,27 +161,45 @@ pub(crate) fn split_name(name: &str) -> Result<(&str, &str), Error> {
         .ok_or_else(|| Error::Name(name.to_owned()))
 }
 
-/// The trust of a host from its CA and client certificate files.
-pub(crate) fn read_tls(
-    authority: &str,
-    ca: &[std::path::PathBuf],
-    client: Option<(&std::path::Path, &std::path::Path)>,
-) -> Tls {
-    let read = |path: &std::path::Path| {
-        std::fs::read(path)
-            .map_err(|err| tracing::warn!(authority, path = %path.display(), error = %err, "a certificate file cannot be read"))
-            .ok()
-    };
-    Tls {
-        roots: ca.iter().filter_map(|path| read(path)).collect(),
-        client: client.and_then(|(cert, key)| {
-            let certificate = read(cert)?;
-            let key = String::from_utf8(read(key)?).ok()?;
-            Some(ClientCert {
-                certificate,
-                key: SecretString::from(key),
-            })
-        }),
-        skip_verify: false,
+/// The CA certificates (PEM) of `path`, or `why` they cannot be used.
+fn read_chain(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let pem = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let chain = CertificateDer::pem_slice_iter(&pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if chain.is_empty() {
+        return Err(format!("{}: no certificate in it", path.display()));
     }
+    Ok(pem)
+}
+
+/// A CA file (D92): read and checked now, so that no request reads it. One that cannot be used is noted in `problems`
+/// and left out.
+pub(crate) fn read_ca(path: &std::path::Path, problems: &mut Vec<String>) -> Option<Vec<u8>> {
+    read_chain(path)
+        .map_err(|why| problems.push(format!("a CA file is not used: {why}")))
+        .ok()
+}
+
+/// A client certificate and its key (D92): read and checked now, so that no request reads them, the key into memory
+/// that is wiped. A pair that cannot be used is noted in `problems` and left out.
+pub(crate) fn read_client(
+    cert: &std::path::Path,
+    key: &std::path::Path,
+    problems: &mut Vec<String>,
+) -> Option<ClientCert> {
+    let read = || -> Result<ClientCert, String> {
+        let certificate = read_chain(cert)?;
+        let pem =
+            Zeroizing::new(std::fs::read(key).map_err(|e| format!("{}: {e}", key.display()))?);
+        PrivateKeyDer::from_pem_slice(&pem).map_err(|e| format!("{}: {e}", key.display()))?;
+        let text = std::str::from_utf8(&pem).map_err(|e| format!("{}: {e}", key.display()))?;
+        Ok(ClientCert {
+            certificate,
+            key: SecretString::from(text),
+        })
+    };
+    read()
+        .map_err(|why| problems.push(format!("a client certificate is not used: {why}")))
+        .ok()
 }

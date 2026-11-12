@@ -730,8 +730,13 @@ fn check_config_exits_1_with_the_same_messages_and_0_on_a_node_that_is_right() {
 
 /// A node whose containerd reads its `hosts.toml` trees from `certs.d` in the directory of the node.
 fn registry_node() -> Node {
+    registry_node_with("")
+}
+
+/// As `registry_node`, with `extra` below the registry section of its `config.toml`.
+fn registry_node_with(extra: &str) -> Node {
     let config = format!(
-        "version = 3\n{IMAGES}\n[plugins.\'io.containerd.cri.v1.images\'.registry]\nconfig_path = \'@DIR@/certs.d\'\n"
+        "version = 3\n{IMAGES}\n[plugins.\'io.containerd.cri.v1.images\'.registry]\nconfig_path = \'@DIR@/certs.d\'\n{extra}"
     );
     Node::new(Answers::containerd("v2.4.2"), Some(&config))
 }
@@ -773,6 +778,39 @@ fn an_invalid_registry_config_keeps_the_previous_is_reported_once_and_a_fix_is_p
     assert_eq!(agent.get("/readyz", "").status, 200);
     std::fs::write(&hosts, "[host.\"https://two.corp\"]\n").unwrap();
     agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
+    let (status, lines) = agent.stop();
+    assert!(status.success(), "{status}");
+    let errors = lines
+        .iter()
+        .filter(|l| l.contains(r#""level":"ERROR""#))
+        .count();
+    assert_eq!(errors, 1, "{lines:#?}");
+}
+
+#[test]
+fn a_login_that_cannot_be_used_leaves_one_registry_anonymous_is_reported_once_and_counted() {
+    let node = registry_node_with(
+        "[plugins.\'io.containerd.cri.v1.images\'.registry.configs.\'quay.io\'.auth]\nauth = \'***\'\n",
+    );
+    let mut agent = Agent::spawn_on(
+        node,
+        free_port(),
+        scratch_file(),
+        "[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n",
+        &[],
+    );
+    let line = agent.line(&[
+        r#""level":"ERROR""#,
+        "registry config reloaded with a file left out",
+    ]);
+    assert!(line.contains("quay.io"), "{line}");
+    // The rest of the config is built: the agent is ready, and the polls that follow have nothing to say.
+    wait_until(|| get(agent.port, "/readyz", "").is_some_and(|r| r.status == 200));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        reload_failures(&agent),
+        "speculaire_config_reload_failures_total 1"
+    );
     let (status, lines) = agent.stop();
     assert!(status.success(), "{status}");
     let errors = lines

@@ -240,10 +240,10 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Cost:** a `Node` carries both runtimes' paths whichever it is; `Required` names its runtime so that the refusal's text is unchanged.
 - **Revisit when:** a third runtime comes, or `Fallback` has a third value.
 
-## D91: The registry config is read into a snapshot that a reload swaps, and the request path never reads it from disk (amends D47)
+## D91: The registry config is read into a snapshot that a reload swaps, and the request path never reads it from disk (amends D47; amended by D92)
 
 - **Decision:**
-  - **Snapshots:** `Registries::reload` (D89) parses everything a source needs into one value held in an `arc_swap::ArcSwap`: containerd's `config.toml`, its imports and every `hosts.toml` under `config_path`; CRI-O's `registries.conf`, drop-ins, `certs.d` list and credential files, with `global_auth_file` read from `crio.sock`. `sources` loads the snapshot, takes no lock and reads no file except a host's certificate files, which the TLS settings still read per request.
+  - **Snapshots:** `Registries::reload` (D89) parses everything a source needs into one value held in an `arc_swap::ArcSwap`: containerd's `config.toml`, its imports and every `hosts.toml` under `config_path`; CRI-O's `registries.conf`, drop-ins, `certs.d` list and credential files, with `global_auth_file` read from `crio.sock`. `sources` loads the snapshot, takes no lock and reads no file, certificate files included (D92).
   - **When:** at startup and on SIGHUP, unconditionally, so a file replaced by an older one is read (D30); on each poll of `config.poll_interval`, when a watched path changed at or after the previous check. A watched path is a file, a directory and what is below it down to four levels: the newest modification time of those counts.
   - **A bad file keeps the previous snapshot:** the agent logs one `error` that names the file and the line and column (`invalid …/hosts.toml: line 1, column 25: …`), counts `speculaire_config_reload_failures_total` and goes on; `/readyz` does not change. The next poll finds the same file unchanged and says nothing more. Until a first read works, `sources` answers an error and the relay answers 404, so CRI-O pulls upstream.
   - **A missing containerd `config.toml` is the defaults** (no `config_path`: the registry itself), as containerd runs. The deprecated `mirrors` table stays an error (D89).
@@ -254,8 +254,28 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - `arc-swap` is a reader without a lock and a writer that never waits for readers, which `docs/research/checkers.md` names as the way for live keys.
   - Comparing modification times to the last check is D30's rule; watching the whole tree is needed because an admin edits `hosts.toml` or an auth file, not the main file.
 - **Cost:**
-  - A credential file that does not parse fails the whole CRI-O snapshot, where D89 treated it as anonymous.
-  - A certificate file edited while a pull runs is read in the middle of the edit: the connection fails for that request and the next one succeeds.
+  - A credential file that does not parse fails the whole CRI-O snapshot, where D89 treated it as anonymous (D92 restores that).
+  - A certificate file edited while a pull runs is read in the middle of the edit: the connection fails for that request and the next one succeeds (D92 reads them at reload).
   - A change in a directory more than four levels below a watched root is read on SIGHUP only.
 - **Measured (M2 step 07, arm64, Docker, local runs):** on CRI-O 1.37 a login written to `/run/containers/0/auth.json` after an anonymous pull had failed was used by the next pull 15 s later (`config.poll_interval` is 10 s), with no signal, and the relay moved the blobs; `systemctl reload speculaire` with `blob_cache.max_size` lowered to 12 MiB evicted nothing until the next blob was kept, then the cache fell to the bound and the older blobs were gone (relay suite 11 of 11 on CRI-O 1.37 and containerd 2.4). The agent's own tests, with a fake containerd and `poll_interval = "1s"`, saw an invalid `hosts.toml` keep the previous config (`/readyz` 200, `speculaire_config_reload_failures_total 1`, one error naming the file, line 1 and column 25, no second error over three more polls), the corrected file read by the next poll, and a file replaced with a modification time of 2001 read on SIGHUP.
 - **Revisit when:** a key that cannot be an atomic or a snapshot is live, or a node has so many `hosts.toml` files that a poll costs measurable CPU.
+
+## D92: A credential, certificate or key file that cannot be used leaves its hosts without it, and certificate files are read at reload (amends D89, D91)
+
+- **Decision:**
+  - **Credentials:** a file that holds credentials and cannot be used does not fail the snapshot. On CRI-O that is a credential file that cannot be read or parsed, or an entry whose `auth` is not Base64. On containerd it is a `registry.configs.<host>.auth` that is no `user:password`. The registries that would have taken a login from it are asked anonymously, as D89 did with an unreadable file, and the rest of the snapshot is built. On CRI-O the registries that reach a bad file in the search order are anonymous, including those a later file would serve, as `go.podman.io/image` stops at the file. Routing files (`registries.conf`, `hosts.toml`, `config.toml`, `crio.sock`) still fail the snapshot (D91): a wrong route is no anonymous pull.
+  - **Certificates:** a host's `ca` files and its first client certificate with its key are read into the snapshot at reload and parsed as PEM there; a request reads no file. A CA file that holds no certificate is left out, the others stay; a client certificate or key that cannot be used leaves the host without a client certificate; a `certs.d` directory that cannot be listed leaves its host with no extra trust. The key is held as a `SecretString` and `Debug` never prints it.
+  - **Reported:** one `error` per file that was left out, naming the file, the line and column where there are any, and what the registries get (`registry config reloaded with a file left out`). `speculaire_config_reload_failures_total` counts reloads that left something out, once each however many files. `Registries::reload` returns what changed and these problems; the agent logs and counts them. A reload that finds the same files unchanged says nothing more (D91). A fixed file is read by the next poll.
+  - **Watched:** on CRI-O the `certs.d` directories were watched (D91). On containerd every `ca`, `client` certificate and key path of every `hosts.toml` is a watched path as well, whether or not it is below `config_path`. A rotation is read by the next poll or by SIGHUP.
+  - **No scope beyond that:** a bad CRI-O or containerd *route* is not softened.
+- **Because:**
+  - A pull of a public image should not stop because an unrelated login file is damaged; the hosts that need it fail upstream, with the error naming the file, and the others keep working (D89).
+  - A request that reads a certificate reads it mid-edit and fails; a snapshot holds the pair that was whole, or none (D91).
+  - Reporting at reload says it once, where a request reports it at every pull.
+- **Cost:**
+  - A certificate file edited at the moment of a poll may be read half-written: it is reported once, and the end of the edit changes the modification time, so the next poll reads it again.
+  - A certificate file named by an absolute path outside `config_path` that is missing at reload is watched as that path; one that appears later is read by the next poll only if its modification time is newer than the last check, and by SIGHUP in any case.
+  - A bad credential file hides the logins of the files after it, for the registries that reach it.
+  - Private keys stay in the agent's memory for the life of its snapshot; D91's request-time reads kept them for a request. The copy the PEM parser makes to check a key is not wiped (`docs/security.md`).
+- **Measured (M2 step 08, arm64, Docker, local runs):** `just e2e crio 1.37` and `just e2e containerd 2.4` pass (relay suite 11 of 11 on containerd 2.4), the request path no longer reads a certificate file. Unit tests in `speculaire-runtime` and the agent's own test with a fake containerd, `poll_interval = "1s"`: a `configs.'quay.io'.auth` of `***` gave one error naming quay.io, `speculaire_config_reload_failures_total 1`, `/readyz` 200 and no second error over three more polls.
+- **Revisit when:** a bad routing file should degrade too, or a node has client certificates for more than the first pair of a host.

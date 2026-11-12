@@ -74,6 +74,8 @@ rustls = { version = "0.23.46", default-features = false, features = [
 sd-notify = "0.5.0"
 # D88: the system's trusted roots, as Go reads them for containerd and CRI-O.
 rustls-native-certs = "0.8.5"
+# D92: the certificate and key files of a host are parsed when the registry config is read, not when a request needs them.
+rustls-pki-types = "1.16.0"
 # D37: every credential and header value is a `SecretString`: it never prints, in `Debug` or in a log.
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }

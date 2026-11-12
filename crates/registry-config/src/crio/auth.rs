@@ -87,6 +87,12 @@ pub enum Error {
         /// The entry.
         key: String,
     },
+    /// A lookup reached a credential file that [`Files::load`] could not use.
+    #[error("{} could not be read or parsed when the files were loaded", path.display())]
+    Unusable {
+        /// The file.
+        path: PathBuf,
+    },
     /// Every helper failed.
     #[error("errors looking up credentials: {} failed", .0.len())]
     Helpers(Vec<Error>),
@@ -112,6 +118,19 @@ struct Entry {
 pub struct AuthFile {
     auths: BTreeMap<String, Entry>,
     cred_helpers: BTreeMap<String, String>,
+}
+
+impl AuthFile {
+    /// The entries whose `auth` is not base64: a lookup that reaches one fails.
+    fn undecodable<'a>(&'a self, path: &'a AuthPath) -> impl Iterator<Item = Error> + 'a {
+        self.auths
+            .iter()
+            .filter(|(_, entry)| base64_decode(entry.auth.expose_secret()).is_none())
+            .map(|(key, _)| Error::Base64 {
+                path: path.path.clone(),
+                key: key.clone(),
+            })
+    }
 }
 
 fn invalid(message: impl Into<String>) -> ParseError {
@@ -459,23 +478,34 @@ pub fn credentials(ctx: &Context, helpers: &[String], key: &str) -> Result<Looku
     })
 }
 
-/// The credential files of a [`Context`], parsed once, so that a reader can hold the login of a moment when every file
-/// was valid (D91).
+/// The credential files of a [`Context`], parsed once, so that a reader can hold the logins of a moment (D91). A file
+/// that is not valid is kept as one that fails the lookups that reach it (D92).
 #[derive(Debug, Default)]
-pub struct Files(Vec<(AuthPath, AuthFile)>);
+pub struct Files(Vec<(AuthPath, Option<AuthFile>)>);
 
 impl Files {
     /// Reads [`auth_file_paths`]; a file that does not exist is an empty one.
     ///
-    /// # Errors
-    ///
-    /// When a file cannot be read or is not valid. [`credentials`] fails only on the files it reaches.
-    pub fn load(ctx: &Context) -> Result<Self, Error> {
-        auth_file_paths(ctx)
+    /// A file that cannot be read or is not valid does not fail the whole: its [`Error`] is returned beside the files,
+    /// with those of the entries whose `auth` is not base64. A lookup that reaches such a file or entry fails as
+    /// [`credentials`] does, and one that is answered before it is not affected.
+    #[must_use]
+    pub fn load(ctx: &Context) -> (Self, Vec<Error>) {
+        let mut problems = Vec::new();
+        let files = auth_file_paths(ctx)
             .into_iter()
-            .map(|path| read_auth_file(&path).map(|file| (path, file)))
-            .collect::<Result<_, _>>()
-            .map(Self)
+            .map(|path| match read_auth_file(&path) {
+                Ok(file) => {
+                    problems.extend(file.undecodable(&path));
+                    (path, Some(file))
+                }
+                Err(error) => {
+                    problems.push(error);
+                    (path, None)
+                }
+            })
+            .collect();
+        (Self(files), problems)
     }
 
     /// [`credentials`] over the parsed files.
@@ -486,6 +516,11 @@ impl Files {
     pub fn credentials(&self, helpers: &[String], key: &str) -> Result<Lookup, Error> {
         lookup(helpers, key, |key, registry| {
             for (path, file) in &self.0 {
+                let Some(file) = file else {
+                    return Err(Error::Unusable {
+                        path: path.path.clone(),
+                    });
+                };
                 match find_in_parsed(key, registry, path, file)? {
                     Lookup::Found(auth) if auth.is_empty() => {}
                     Lookup::NotFound => {}
@@ -660,7 +695,8 @@ mod tests {
             "home/.docker/config.json",
             r#"{"auths": {"a.io": {"auth": "dTpw"}, "b.io": {"auth": "dTpw"}, "c.io": {"auth": "dTpw"}}}"#,
         );
-        let parsed = Files::load(&ctx).expect("valid files");
+        let (parsed, problems) = Files::load(&ctx);
+        assert!(problems.is_empty(), "{problems:?}");
         for key in ["a.io", "b.io", "c.io", "h.io", "none.io", "b.io/ns/repo"] {
             let from_files = credentials(&ctx, &files(), key).expect("a lookup");
             let from_parsed = parsed.credentials(&files(), key).expect("a lookup");
@@ -681,8 +717,14 @@ mod tests {
             parsed.credentials(&files(), "b.io").expect("a lookup"),
             Lookup::Found(_)
         ));
+        // A file that is not valid is reported, and fails the lookups that reach it.
         write(dir.path(), "run/containers/0/auth.json", "{");
-        assert!(matches!(Files::load(&ctx), Err(Error::Parse { .. })));
+        let (broken, problems) = Files::load(&ctx);
+        assert!(matches!(problems.as_slice(), [Error::Parse { .. }]));
+        assert!(matches!(
+            broken.credentials(&files(), "a.io"),
+            Err(Error::Helpers(errors)) if matches!(errors.as_slice(), [Error::Unusable { .. }])
+        ));
         assert!(matches!(
             Files::default()
                 .credentials(&files(), "a.io")

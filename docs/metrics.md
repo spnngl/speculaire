@@ -67,6 +67,6 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `speculaire_build_info` | gauge | `version`, `runtime` = `containerd`\|`cri-o`, `runtime_version`, `nri_version` | Always 1; the last three are empty until NRI's `Configure` (D68) |
-| `speculaire_config_reload_failures_total` | counter | — | Reloads rejected, of the agent's config or of the node's registry config; the previous one is still in use (D30, D91) |
+| `speculaire_config_reload_failures_total` | counter | — | Reloads rejected, of the agent's config or of the node's registry config, which the previous one then serves, and registry config reloads that left a credential, certificate or key file out, once per reload (D30, D91, D92) |
 
 Memory, CPU and file descriptors come from node-exporter and systemd (D34).
