@@ -2,7 +2,7 @@
 # The distribution-spec conformance suite against the mirror (D85), run by `just conformance` in the Go image, in a
 # container of its own: `speculaire configure` and the agent act on the container's root, as on a node.
 #
-# In: CONFORMANCE_REV, the commit of opencontainers/distribution-spec; /usr/bin/speculaire; /conformance (this
+# In: CONFORMANCE_REV, the commit of opencontainers/distribution-spec; /usr/bin/speculaire; /usr/bin/fake-runtime; /conformance (this
 # directory) and /packaging (the reference config), read-only; /results, where the suite's output goes.
 set -eu
 
@@ -37,8 +37,11 @@ cat >/tmp/seed/index <<EOF
 EOF
 index=$(put /tmp/seed/index)
 
-# The node: the reference config, `configure` (no runtime runs here), and the agent.
-mkdir -p /etc/speculaire
+# The node: a fake containerd, which answers what the agent's startup checks ask (D86, D87), the reference config,
+# `configure`, and the agent.
+mkdir -p /etc/speculaire /run/containerd
+fake-runtime /run/containerd/containerd.sock &
+while [ ! -S /run/containerd/containerd.sock ]; do sleep 0.1; done
 cp /packaging/config.toml /etc/speculaire/config.toml
 speculaire configure --runtime containerd
 speculaire agent >/tmp/agent.log 2>&1 &
