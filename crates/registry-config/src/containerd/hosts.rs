@@ -132,7 +132,8 @@ impl HostConfig {
         self.client.as_deref().unwrap_or_default()
     }
 
-    /// Whether the host names TLS settings: `ca`, `client` or `skip_verify`, even an empty `ca = []`.
+    /// Whether the host names TLS settings: `ca`, `client` or `skip_verify`, even an empty
+    /// `ca = []`; an empty `client = []` names none, as in Go.
     #[must_use]
     pub fn has_tls(&self) -> bool {
         self.ca.is_some() || self.client.is_some() || self.skip_verify.is_some()
@@ -380,6 +381,8 @@ fn host_config(
             cert: absolute(cert),
             key: None,
         }]),
+        // Go appends each pair to a nil list, so an empty list leaves it unset.
+        Some(Client::Many(items)) if items.is_empty() => None,
         Some(Client::Many(items)) => Some(
             items
                 .iter()
@@ -808,7 +811,9 @@ mod tests {
             hosts[0].has_tls()
         };
         assert!(has_tls("ca = []\n"));
-        assert!(has_tls("client = []\n"));
+        assert!(has_tls("client = \"\"\n"));
+        // Go appends each pair to a nil list, which an empty list leaves nil.
+        assert!(!has_tls("client = []\n"));
         assert!(has_tls("skip_verify = false\n"));
         assert!(!has_tls("capabilities = [\"pull\"]\n"));
     }
