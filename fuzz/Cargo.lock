@@ -1631,13 +1631,7 @@ dependencies = [
 name = "speculaire-configure"
 version = "0.1.0"
 dependencies = [
- "secrecy",
- "speculaire-pki",
- "speculaire-registry-config",
  "speculaire-runtime",
- "tempfile",
- "thiserror",
- "toml_edit",
 ]
 
 [[package]]
@@ -1646,7 +1640,6 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "speculaire-agent",
- "speculaire-configure",
  "speculaire-mirror",
  "speculaire-oci",
  "speculaire-registry",
@@ -1662,7 +1655,6 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "bytes",
- "containerd-client",
  "futures-util",
  "http",
  "http-body-util",
@@ -1680,7 +1672,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
- "tokio-util",
  "tracing",
 ]
 
@@ -1746,14 +1737,21 @@ dependencies = [
 name = "speculaire-runtime"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "containerd-client",
+ "futures-util",
  "prost",
  "secrecy",
  "serde",
+ "speculaire-oci",
+ "speculaire-pki",
  "speculaire-registry-config",
+ "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "toml",
+ "toml_edit",
  "tonic-prost",
  "tracing",
 ]

@@ -1,15 +1,73 @@
-//! What containerd 2.4 says about its CRI image service through its introspection service (D15, D86).
+//! containerd: what it says about itself, and the files and content of its node (D15, D86, D90).
 //!
 //! The image service exports two of its settings, `DiscardUnpackedLayers` and `RegistryConfigPath`, for clients that
 //! detect them (v2.4.2 `plugins/cri/images/plugin.go:170`). containerd 2.3 exports neither: there the settings come
 //! from `config.toml`.
 
-use std::path::Path;
+pub mod content;
+pub mod hosts;
+mod settings;
+mod wiring;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use containerd_client::services::v1::PluginsRequest;
 use containerd_client::services::v1::introspection_client::IntrospectionClient;
+use containerd_client::tonic::transport::Channel;
+pub use settings::MINIMUM;
+use speculaire_registry_config::containerd::config as containerd_config;
 
 use crate::cri::{Error, block_on, connect};
+use crate::paths::Paths;
+
+/// containerd's content directory, where its root is `/var/lib/containerd`.
+const CONTENT_DIR: &str = "/var/lib/containerd/io.containerd.content.v1.content";
+
+/// The namespace containerd's CRI plugin keeps its images in; the content service lists a blob only for a namespace
+/// that has a reference to it.
+const NAMESPACE: &str = "k8s.io";
+
+/// A node that runs containerd: the files it reads, its socket and its content (D90).
+#[derive(Clone, Debug)]
+pub struct Containerd {
+    paths: Paths,
+    socket: PathBuf,
+    config: Option<PathBuf>,
+    content_directory: PathBuf,
+    /// A channel to the content service, made once and kept; shared by the clones of this value.
+    channel: Arc<tokio::sync::Mutex<Option<Channel>>>,
+}
+
+impl Containerd {
+    /// The containerd of the node at `paths`, answering on `socket`; `config` is its `config.toml` when that is not
+    /// the default one (`runtime.containerd_config`, D87).
+    #[must_use]
+    pub fn new(paths: Paths, socket: impl Into<PathBuf>, config: Option<PathBuf>) -> Self {
+        let content_directory = paths.at(CONTENT_DIR);
+        Self {
+            paths,
+            socket: socket.into(),
+            config,
+            content_directory,
+            channel: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Its CRI socket.
+    #[must_use]
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// containerd's `config.toml`.
+    #[must_use]
+    pub fn config(&self) -> PathBuf {
+        self.config
+            .clone()
+            .unwrap_or_else(|| self.paths.at(containerd_config::DEFAULT_PATH))
+    }
+}
 
 const PLUGINS_METHOD: &str = "containerd.services.introspection.v1.Introspection/Plugins";
 

@@ -7,8 +7,8 @@ use bytes::Bytes;
 use http_body_util::combinators::UnsyncBoxBody;
 use hyper::Response;
 use speculaire_oci::reference::Digest;
+use speculaire_runtime::content::{Content, Error};
 
-use crate::content::{Content, Error};
 use crate::request::{Kind, Reference};
 
 /// The body of an answer.

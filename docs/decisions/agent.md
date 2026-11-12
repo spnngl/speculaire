@@ -198,7 +198,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Measured (M2 step 03, arm64, Docker):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass the six `configure` tests: on every node `just e2e-up` ran `configure` before the agent, a second run printed nothing and changed no file (mode, SHA-256 compared), and the keys are 0600. A `crictl pull` on a worker reached an `openssl s_server` on `127.0.0.1:7480` that required a client certificate, with `subject=CN=speculaire mirror client`, and went on to upstream once the stand-in was killed. In CI run 43182634661 (PR 43) all 14 e2e legs passed the suite.
 - **Revisit when:** a node needs a `hosts.toml` in a directory of certificate files, or a certificate must be renewed without remaking the CA.
 
-## D84: The three commands find the runtime by its socket, and `unconfigure` asks the runtime's NRI config (amends D32, D64)
+## D84: The three commands find the runtime by its socket, and `unconfigure` asks the runtime's NRI config (amends D32, D64; amended by D90)
 
 - **Decision:**
   - `configure`, `unconfigure` and `check-config` connect to `/run/containerd/containerd.sock` and `/var/run/crio/crio.sock` (`speculaire-runtime`, `detect`), each with a 2 s limit. Exactly one must accept. Otherwise they stop before changing anything, naming both paths and what each answered (`no such socket`, the system's error, `accepted a connection`).
@@ -225,3 +225,17 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A skip switch is a way around the gate, however well named.
   - Reading the same keys everywhere keeps `check-config` honest: it checks the node the agent would run on.
 - **Revisit when:** a second thing needs a directory, such as the blob cache (D67) or the verdict cache (D31).
+
+## D90: A `Node` hands out four traits, and everything that differs between containerd and CRI-O sits behind them (amends D64, D84, D86)
+
+- **Decision:**
+  - **Traits** (`speculaire-runtime`): `Wiring` (`configure`, `unconfigure`, `check`: containerd's `hosts.toml` files; CRI-O's drop-in, `certs.d` and `systemctl reload crio`), `Settings` (`required_plugins`, which `unconfigure` reads (D84), and `preflight` (D86)), `Registries` (the sources of an image name, D89) and `Content` (a blob by digest). `Containerd` and `CriO` implement them and hold their socket and paths. `detect` still returns the `Runtime` enum; a `Node` is built from it once at startup, or by a command after `--runtime`, and hands out each trait. Nothing outside `speculaire-runtime` and the parsing of `--runtime` matches on `Runtime`.
+  - **CRI first:** what the CRI can say, the common `cri` module asks (`Version`, `ListImages`). Only what it cannot say goes to a runtime's own API: containerd's introspection and content services, CRI-O's `GET /config`. A new call to a runtime asks first whether the CRI has it.
+  - **`Fallback` is visible:** `Node::fallback()` is `PerBlob` (serve what the runtime holds, containerd) or `Relay` (pull upstream through the blob cache, CRI-O). No trait hides it: it changes what the mirror does, which metrics it emits and what it trusts (D66, D67), and the agent starts a different component for each. CRI-O's `Content` holds nothing, `open` answers `None`: its blobs are the mirror's cache, which stays in `speculaire-mirror`.
+  - **`speculaire-configure` is the orchestration:** thin functions over `&dyn Wiring` and `&dyn Settings`: `configure`, `unconfigure` (the `--force` refusal), `check`, `preflight`, `check_all`, each adding the certificates' problems. It names no runtime. What was its `Settings` is `Target` (address, registries, directory), in `speculaire-runtime` with `Report`, `Problem` and the file edits.
+  - **Later:** the `Images` trait of the image store (D15, D65) joins at M5 as a fifth, with the same `Node`.
+- **Because:**
+  - A second runtime, or a third, was a `match` in each of five crates; now it is one module and four `impl`s, and the compiler lists what is missing.
+  - The two differences that are not plumbing, who holds the blobs and so who verifies what is served, have to stay where a reader and a reviewer see them.
+- **Cost:** a `Node` carries both runtimes' paths whichever it is; `Required` names its runtime so that the refusal's text is unchanged.
+- **Revisit when:** a third runtime comes, or `Fallback` has a third value.

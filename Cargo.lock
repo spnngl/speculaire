@@ -1801,21 +1801,18 @@ dependencies = [
 name = "speculaire-configure"
 version = "0.1.0"
 dependencies = [
- "insta",
- "secrecy",
- "speculaire-pki",
- "speculaire-registry-config",
+ "speculaire-fake-runtime",
  "speculaire-runtime",
  "tempfile",
- "thiserror",
- "toml_edit",
 ]
 
 [[package]]
 name = "speculaire-fake-runtime"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "containerd-client",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "prost",
@@ -1830,7 +1827,6 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "bytes",
- "containerd-client",
  "futures-util",
  "http",
  "http-body-util",
@@ -1850,9 +1846,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
- "tokio-util",
- "tonic-prost",
- "tower",
  "tracing",
 ]
 
@@ -1933,17 +1926,27 @@ dependencies = [
 name = "speculaire-runtime"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "containerd-client",
+ "futures-util",
+ "hyper",
+ "hyper-util",
+ "insta",
  "prost",
  "secrecy",
  "serde",
  "speculaire-fake-runtime",
+ "speculaire-oci",
+ "speculaire-pki",
  "speculaire-registry-config",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "toml",
+ "toml_edit",
  "tonic-prost",
+ "tower",
  "tracing",
 ]
 

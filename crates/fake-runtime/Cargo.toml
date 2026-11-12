@@ -1,6 +1,6 @@
 [package]
 name = "speculaire-fake-runtime"
-description = "A fake containerd on a Unix socket, for the tests of what the agent asks its runtime"
+description = "A fake containerd or CRI-O on a Unix socket, for the tests of what the agent asks its runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,8 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 containerd-client.workspace = true
+bytes.workspace = true
+http-body-util.workspace = true
 hyper.workspace = true
-hyper-util.workspace = true
+hyper-util = { workspace = true, features = ["http1", "http2", "server-auto"] }
 prost.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "sync"] }
 tonic-prost.workspace = true

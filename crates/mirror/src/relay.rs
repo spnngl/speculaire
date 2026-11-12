@@ -19,12 +19,12 @@ use hyper::body::{Frame, Incoming};
 use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::reference::Digest;
 use speculaire_registry::{Client, Request, Response as Upstreamed};
+use speculaire_runtime::content::{Content as _, Error};
 use speculaire_runtime::registries::{self, Registries, Source};
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 
 use crate::cache::{Cache, Writer};
-use crate::content::{Content as _, Error};
 use crate::metrics;
 use crate::pulls::{Answer, Body, Pull, Pulls, from_content};
 use crate::request::{Kind, Reference};
@@ -54,27 +54,29 @@ impl Images for NoImages {
     }
 }
 
-/// The image list of CRI-O (D65, D67).
-pub struct CrioImages {
+/// The image list of a runtime that lists its images over the CRI (D65, D67).
+pub struct CriImages {
     socket: std::path::PathBuf,
+    runtime: &'static str,
 }
 
-impl CrioImages {
-    /// The list `ListImages` gives on `socket`.
+impl CriImages {
+    /// The list `ListImages` gives on `socket`, of the runtime named `runtime` in the log.
     #[must_use]
-    pub fn new(socket: impl Into<std::path::PathBuf>) -> Self {
+    pub fn new(socket: impl Into<std::path::PathBuf>, runtime: &'static str) -> Self {
         Self {
             socket: socket.into(),
+            runtime,
         }
     }
 }
 
-impl Images for CrioImages {
+impl Images for CriImages {
     async fn listed(&self) -> Vec<Digest> {
         let images = match speculaire_runtime::cri::list_images(&self.socket).await {
             Ok(images) => images,
             Err(err) => {
-                warn!(error = %err, "the image list of CRI-O cannot be read: the blob cache evicts without it");
+                warn!(error = %err, "the image list of {} cannot be read: the blob cache evicts without it", self.runtime);
                 return Vec::new();
             }
         };

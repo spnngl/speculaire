@@ -1,6 +1,6 @@
 [package]
 name = "speculaire-runtime"
-description = "containerd and CRI-O: which one runs on the node, and what they say about themselves"
+description = "containerd and CRI-O: which one runs on the node, and everything that differs between them, behind traits"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,21 +9,31 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+bytes.workspace = true
 containerd-client.workspace = true
+futures-util.workspace = true
 prost.workspace = true
 secrecy.workspace = true
 serde.workspace = true
+speculaire-oci.workspace = true
+speculaire-pki.workspace = true
 speculaire-registry-config.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
+tokio-util.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 tonic-prost.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt"] }
+hyper = { workspace = true, features = ["client", "http2"] }
+hyper-util.workspace = true
+insta.workspace = true
 speculaire-fake-runtime.workspace = true
-tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+tower.workspace = true
 
 [lints]
 workspace = true

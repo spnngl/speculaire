@@ -109,7 +109,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** a node that mirrors but never gates looks protected and is not. `audit` keeps the mirror and the verdicts, and the gap stays visible in `speculaire_gate_total{mode="audit"}`.
 - **Revisit when:** users ask for a mirror-only deployment; then add an explicit `gate.enabled = false` that logs a warning at startup and sets a metric.
 
-## D64: The same NRI plugin gates CRI-O; the agent finds its runtime by its socket (amends D9, D41, D54; amended by D84, D86)
+## D64: The same NRI plugin gates CRI-O; the agent finds its runtime by its socket (amends D9, D41, D54; amended by D84, D86, D90)
 
 - **Decision:**
   - **One plugin:** D9's `nri` crate serves containerd and CRI-O with no runtime-specific code in the NRI path. `Configure.NRI_version` may be empty.
@@ -147,7 +147,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Cost:** a pod-spec name matched by no policy can still be held to a policy through another name of the same image, so CRI-O can reject what containerd allows.
 - **Revisit when:** CRI-O fills `Container.image` or passes `user_specified_image`, or gains a pin that does not edit its configuration.
 
-## D86: One preflight stops the agent and fails `check-config` on a node where it would mirror or gate wrongly (amends D15, D54, D64)
+## D86: One preflight stops the agent and fails `check-config` on a node where it would mirror or gate wrongly (amends D15, D54, D64; amended by D90)
 
 - **Decision:**
   - **One function:** `speculaire_configure::preflight` returns every problem of the node, each naming the file or socket and what to set. `speculaire agent` runs it before it opens a listener and exits 1 with `N problems on this node keep the agent from starting (<runtime>):` and one line each, as `<file or socket>: <message>`. `speculaire check-config` prints the same lines, plus what D82 and D83 check (`hosts.toml` entries, the CRI-O drop-in's text), each once, and exits 1 with their count. Both stop (D54): no flag skips preflight, as none turns the gate off.
