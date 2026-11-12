@@ -9,7 +9,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use toml_edit::visit_mut::{VisitMut, visit_table_mut};
 use toml_edit::{Array, DocumentMut, Item, Key, Table, TableLike, value};
 
 /// The directory of the registries that have none of their own (`hosts.go`, `hostPaths`).
@@ -57,7 +56,6 @@ pub enum EditError {
 pub fn add(text: &str, entry: &Entry, mirror_dir: &Path) -> Result<String, EditError> {
     let mut doc: DocumentMut = text.parse()?;
     let own = own_urls(&doc, mirror_dir)?;
-    let before_all = first_position(&doc).map_or(0, |position| position - 1);
     let host = host_table(&mut doc)?;
     if let Some((first, extra)) = own.split_first() {
         for url in extra {
@@ -75,7 +73,8 @@ pub fn add(text: &str, entry: &Entry, mirror_dir: &Path) -> Result<String, EditE
         }
         let mut table = Table::new();
         table.decor_mut().set_prefix(format!("\n{MARKER}\n"));
-        table.set_position(Some(before_all));
+        // Parsed tables are numbered from 0 up.
+        table.set_position(Some(-1));
         set_fields(&mut table, entry);
         host.insert(&entry.url, Item::Table(table));
     }
@@ -123,23 +122,6 @@ pub fn remove(text: &str, mirror_dir: &Path) -> Result<String, EditError> {
 #[must_use]
 pub fn is_blank(text: &str) -> bool {
     text.trim().is_empty()
-}
-
-/// The first table's position in the document, if there is a table.
-fn first_position(doc: &DocumentMut) -> Option<isize> {
-    struct Min(Option<isize>);
-    impl VisitMut for Min {
-        fn visit_table_mut(&mut self, table: &mut Table) {
-            if let Some(position) = table.position() {
-                self.0 = Some(self.0.map_or(position, |min| min.min(position)));
-            }
-            visit_table_mut(self, table);
-        }
-    }
-    let mut min = Min(None);
-    let mut copy = doc.clone();
-    min.visit_document_mut(&mut copy);
-    min.0
 }
 
 /// The names of the `[host.*]` tables whose `ca` is in `mirror_dir`.
@@ -455,6 +437,7 @@ mod tests {
         for (root, name, file) in [
             (&first, "docker.io", Some("x")),
             (&first, "quay.io", Some("")),
+            (&first, "empty-hosts", Some("empty")),
             (&first, "certs-only", None),
             (&second, "ghcr.io", Some("y")),
             (&second, "_default", Some("z")),
@@ -463,6 +446,7 @@ mod tests {
             std::fs::create_dir_all(&sub).unwrap();
             match file {
                 Some("") | None => std::fs::write(sub.join("ca.crt"), "").unwrap(),
+                Some("empty") => std::fs::write(sub.join("hosts.toml"), "").unwrap(),
                 Some(text) => std::fs::write(sub.join("hosts.toml"), text).unwrap(),
             }
         }
@@ -480,7 +464,26 @@ mod tests {
             ]
         );
         let names: Vec<_> = skipped.iter().map(|s| s.dir.clone()).collect();
-        assert_eq!(names, [first.join("certs-only"), first.join("quay.io")]);
+        assert_eq!(
+            names,
+            [
+                first.join("certs-only"),
+                first.join("empty-hosts"),
+                first.join("quay.io")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_root_or_a_default_that_cannot_be_listed_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(targets(std::slice::from_ref(&file)).is_err());
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("_default"), "").unwrap();
+        assert!(targets(&[root]).is_err());
     }
 
     #[test]

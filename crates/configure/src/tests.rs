@@ -693,6 +693,139 @@ fn problems_and_changes_print_their_file() {
     );
     let system = System {
         crio_socket: PathBuf::from("/nonexistent/crio.sock"),
+        systemctl: PathBuf::from("/nonexistent/systemctl"),
     };
     assert!(system.crio_nri().is_err());
+    assert!(system.reload_crio().is_err());
+}
+
+/// A `systemctl` that records its arguments and exits with `status`.
+fn fake_systemctl(dir: &Path, status: i32) -> System {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("systemctl");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$@\" > '{}'\nexit {status}\n",
+            dir.join("args").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    System {
+        crio_socket: dir.join("crio.sock"),
+        systemctl: script,
+    }
+}
+
+#[test]
+fn the_system_reloads_crio_with_systemctl_and_reports_its_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    // A script just written can be busy while another test forks: try again.
+    let run = |system: &System| {
+        for _ in 0..50 {
+            match system.reload_crio() {
+                Err(e) if e.kind() == io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+        system.reload_crio()
+    };
+    let ok = fake_systemctl(dir.path(), 0);
+    run(&ok).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("args")).unwrap(),
+        "reload crio\n"
+    );
+    let failing = fake_systemctl(dir.path(), 3);
+    let err = run(&failing).unwrap_err();
+    assert!(err.to_string().contains("systemctl reload crio"), "{err}");
+}
+
+#[test]
+fn own_cert_dirs_are_those_holding_the_ca_and_a_missing_certs_d_has_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let certs = dir.path().join("certs.d");
+    assert_eq!(own_cert_dirs(&certs, "ca").unwrap(), Vec::<PathBuf>::new());
+    put(&certs.join("b:7480/ca.crt"), "ca");
+    put(&certs.join("a:7480/ca.crt"), "ca");
+    put(&certs.join("other/ca.crt"), "another ca");
+    put(&certs.join("no-ca/client.key"), "x");
+    assert_eq!(
+        own_cert_dirs(&certs, "ca").unwrap(),
+        [certs.join("a:7480"), certs.join("b:7480")]
+    );
+    let file = dir.path().join("file");
+    put(&file, "");
+    assert!(matches!(own_cert_dirs(&file, "ca"), Err(Error::Io { .. })));
+}
+
+#[test]
+fn containerd_without_a_config_file_has_no_required_plugin_but_a_bad_config_stops_unconfigure() {
+    let node = Node::new();
+    node.configure(Runtime::Containerd, &Fake::new()).unwrap();
+    // No `config.toml`: containerd's defaults, and so no NRI validator.
+    node.unconfigure(Runtime::Containerd, false, &Fake::new())
+        .unwrap();
+    assert!(!node.dir.path().join("var/lib/speculaire/mirror").exists());
+    // A `config.toml` that cannot be read is not the same as none.
+    std::fs::create_dir_all(node.paths.containerd_config()).unwrap();
+    let err = node
+        .unconfigure(Runtime::Containerd, false, &Fake::new())
+        .unwrap_err();
+    assert!(matches!(err, Error::Containerd { .. }), "{err}");
+    let err = node
+        .configure(Runtime::Containerd, &Fake::new())
+        .unwrap_err();
+    assert!(matches!(err, Error::Containerd { .. }), "{err}");
+}
+
+#[test]
+fn a_missing_import_is_an_error_and_not_a_config_that_is_missing() {
+    let node = Node::new();
+    put(
+        &node.paths.containerd_config(),
+        "version = 2\nimports = [\"/nonexistent/conf.d/x.toml\"]\n",
+    );
+    let err = node
+        .configure(Runtime::Containerd, &Fake::new())
+        .unwrap_err();
+    assert!(matches!(err, Error::Containerd { .. }), "{err}");
+    assert!(err.to_string().contains("config.toml"), "{err}");
+}
+
+#[test]
+fn directories_that_are_left_alone_are_noted() {
+    let node = Node::new();
+    node.containerd();
+    put(&node.certs_d().join("private.example/ca.crt"), "pem");
+    let report = node.configure(Runtime::Containerd, &Fake::new()).unwrap();
+    assert_eq!(report.notes.len(), 1, "{:?}", report.notes);
+    assert!(
+        report.notes[0].contains("private.example: left alone"),
+        "{:?}",
+        report.notes
+    );
+}
+
+#[test]
+fn a_later_file_that_keeps_the_mirror_first_but_changes_the_entry_is_named_as_different() {
+    let (node, fake) = crio_node();
+    node.configure(Runtime::CriO, &fake).unwrap();
+    put(
+        &node
+            .dir
+            .path()
+            .join("etc/containers/registries.conf.d/999-admin.conf"),
+        "[[registry]]\nprefix = \"docker.io\"\nlocation = \"registry-1.docker.io\"\ninsecure = true\n[[registry.mirror]]\nlocation = \"127.0.0.1:7480/registry-1.docker.io\"\npull-from-mirror = \"all\"\n[[registry.mirror]]\nlocation = \"mirror.corp:5000/dockerhub\"\n",
+    );
+    let problems = node.check(Runtime::CriO);
+    assert!(
+        problems.iter().any(|p| p.contains(
+            "the effective entry of docker.io differs from the admin's, with the mirror first"
+        )),
+        "{problems:#?}"
+    );
 }
