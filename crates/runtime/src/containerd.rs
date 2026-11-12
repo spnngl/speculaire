@@ -28,6 +28,14 @@ const CONTENT_DIR: &str = "/var/lib/containerd/io.containerd.content.v1.content"
 /// that has a reference to it.
 const NAMESPACE: &str = "k8s.io";
 
+/// Puts `request` in [`NAMESPACE`].
+pub(crate) fn with_namespace<T>(request: &mut containerd_client::tonic::Request<T>) {
+    request.metadata_mut().insert(
+        "containerd-namespace",
+        containerd_client::tonic::metadata::MetadataValue::from_static(NAMESPACE),
+    );
+}
+
 /// A node that runs containerd: the files it reads, its socket and its content (D90).
 #[derive(Clone, Debug)]
 pub struct Containerd {
