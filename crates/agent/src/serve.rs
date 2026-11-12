@@ -275,3 +275,32 @@ async fn start_mirror(
     info!(%address, "mirror open");
     Ok(Mirror { stop, task, relay })
 }
+
+#[cfg(test)]
+mod tests {
+    use speculaire_runtime::registries::ContainerdRegistries;
+
+    use super::*;
+
+    #[test]
+    fn the_live_keys_of_a_config_reach_the_relays_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let relay = Arc::new(Relay::new(
+                Cache::open(dir.path(), 1 << 30).unwrap(),
+                Arc::new(ContainerdRegistries::new(dir.path().join("config.toml"))),
+                CriImages::new(dir.path().join("crio.sock"), "cri-o"),
+            ));
+            let (stop, _stopped) = tokio::sync::oneshot::channel();
+            let mirror = Mirror {
+                stop,
+                task: tokio::spawn(async {}),
+                relay: Some(Arc::clone(&relay)),
+            };
+            let config = Config::default();
+            assert_ne!(config.blob_cache.max_size.get(), 1 << 30);
+            mirror.apply(&config);
+            assert_eq!(relay.cache().max_size(), config.blob_cache.max_size.get());
+        });
+    }
+}
