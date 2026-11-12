@@ -147,7 +147,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Without the certificates the mirror cannot listen (D14). Without the entry, containerd never calls the mirror, so verification starts only at the gate (D22), and every first start waits.
 - **Revisit when:** a packaging runs `configure` for the admin, as the DaemonSet's init container would.
 
-## D60: Config values parse into types, and the remaining keys get names (amends D16, D47)
+## D60: Config values parse into types, and the remaining keys get names (amends D16, D47; amended by D87)
 
 - **Decision:**
   - Keys the decisions left unnamed, with their defaults:
@@ -211,3 +211,17 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - CRI-O's merged config is what CRI-O runs with, including `crio.conf.d`; the file alone would miss a drop-in.
 - **Measured (M2 step 03, arm64, Docker):** on a worker of each runtime, `unconfigure` with the validator requiring `speculaire` (containerd: the `config.toml` key; CRI-O: a `crio.conf.d` drop-in and `systemctl restart crio`) exited non-zero, naming the key, and changed no file; with the socket of the runtime moved aside (neither), and with a stand-in socket where the other runtime's would be (both), all three commands refused naming both paths (CI run 43182634661, 14 legs).
 - **Revisit when:** a node runs both runtimes.
+
+## D87: The runtime's sockets and containerd's config file are restart keys, and the agent's tests run against a fake containerd (amends D60)
+
+- **Decision:**
+  - **Keys:** `[runtime]` has `containerd_socket` (`/run/containerd/containerd.sock`), `containerd_config` (`/etc/containerd/config.toml`) and `crio_socket` (`/var/run/crio/crio.sock`), absolute paths, restart keys (D47). The agent, `configure`, `unconfigure` and `check-config` all read them, through `speculaire_agent::node::Node`, so a node whose runtime lives elsewhere is set up and checked the same way. The mirror's content service reads `runtime.containerd_socket` too.
+  - **No `state.directory`:** the plan's third key has nothing to move: `mirror.directory` (D85) is where the agent keeps files under `/var/lib/speculaire`, and `/run/speculaire` (D31) is not used yet. The key arrives with the first file that needs it.
+  - **The fake:** `crates/fake-runtime` serves the CRI's `Version` and introspection's `Plugins` on a Unix socket, which is all preflight asks. `apps/speculaire/tests/agent.rs` starts one per test in a temporary directory with a `[runtime]` table naming it, so the agent starts on the CI runner and on macOS, where no runtime socket exists, and a fake that answers containerd 2.2 stops it. The `runtime` crate's own tests use it too. `.cargo/mutants.toml` leaves it out: it is test support.
+  - **No bypass:** no flag and no key skips preflight (D86); the tests change what the node is.
+  - **The agent's order:** preflight, then the status listener, then the mirror (D86's readiness).
+- **Because:**
+  - The CI runner has no containerd, and a test that needs one would not run for the contributor on macOS, which is where `just check` runs first.
+  - A skip switch is a way around the gate, however well named.
+  - Reading the same keys everywhere keeps `check-config` honest: it checks the node the agent would run on.
+- **Revisit when:** a second thing needs a directory, such as the blob cache (D67) or the verdict cache (D31).

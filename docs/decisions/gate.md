@@ -36,7 +36,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** CRI silently bypasses it through the local-pull fallback, through imports, and through `IfNotPresent` when the image is cached. The gate covers all of these cases.
 - **Revisit when:** users want unsigned images rejected before download.
 
-## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65, D81)
+## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65, D81, D86)
 
 - **Decision:**
   - containerd 2.3 is the minimum. 2.4+ is the main target, and new features land there first.
@@ -103,13 +103,13 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The annotation is already the accepted escape hatch for static pods (`docs/security.md`).
 - **Revisit when:** containerd offers a way to exempt a plugin's own pod from validation.
 
-## D54: The gate cannot be turned off (amended by D64)
+## D54: The gate cannot be turned off (amended by D64, D86)
 
 - **Decision:** no setting disables the gate. Startup and `speculaire check-config` refuse a containerd config whose NRI plugin is disabled or closed to external plugins (`disable = true` or `disable_connections = true` under `[plugins.'io.containerd.nri.v1.nri']`, v2.3.7 `internal/nri/config.go:30,42`), and the error names the key. `gate.mode = "audit"` and `gate.exempt` (D18) are the ways to let containers through.
 - **Because:** a node that mirrors but never gates looks protected and is not. `audit` keeps the mirror and the verdicts, and the gap stays visible in `speculaire_gate_total{mode="audit"}`.
 - **Revisit when:** users ask for a mirror-only deployment; then add an explicit `gate.enabled = false` that logs a warning at startup and sets a metric.
 
-## D64: The same NRI plugin gates CRI-O; the agent finds its runtime by its socket (amends D9, D41, D54; amended by D84)
+## D64: The same NRI plugin gates CRI-O; the agent finds its runtime by its socket (amends D9, D41, D54; amended by D84, D86)
 
 - **Decision:**
   - **One plugin:** D9's `nri` crate serves containerd and CRI-O with no runtime-specific code in the NRI path. `Configure.NRI_version` may be empty.
@@ -146,3 +146,25 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - A `pinned_images` drop-in under `/etc/crio/crio.conf.d/` and `systemctl reload crio` kept `nginx:alpine` through `crictl rmi --prune` on all three versions (`server/server.go:701-745`). It needs write access to CRI-O's configuration and a signal to CRI-O, and a drop-in's list replaces the admin's `pinned_images`. Without pinning, kubelet's image GC may remove a prewarmed image under disk pressure, and the next pull fetches it again from peers.
 - **Cost:** a pod-spec name matched by no policy can still be held to a policy through another name of the same image, so CRI-O can reject what containerd allows.
 - **Revisit when:** CRI-O fills `Container.image` or passes `user_specified_image`, or gains a pin that does not edit its configuration.
+
+## D86: One preflight stops the agent and fails `check-config` on a node where it would mirror or gate wrongly (amends D15, D54, D64)
+
+- **Decision:**
+  - **One function:** `speculaire_configure::preflight` returns every problem of the node, each naming the file or socket and what to set. `speculaire agent` runs it before it opens a listener and exits 1 with `N problems on this node keep the agent from starting (<runtime>):` and one line each, as `<file or socket>: <message>`. `speculaire check-config` prints the same lines, plus what D82 and D83 check (`hosts.toml` entries, the CRI-O drop-in's text), each once, and exits 1 with their count. Both stop (D54): no flag skips preflight, as none turns the gate off.
+  - **Both runtimes:** `RuntimeService.Version` over the CRI on the runtime's socket (`/runtime.v1.RuntimeService/Version`, hand-written prost messages, 5 s). The runtime must answer as itself (`containerd` or `cri-o`, D64), report a `runtime_version` of the form `[v]major.minor.patch[-pre][+build]`, and be at least the floor: containerd 2.3.0 (D15), CRI-O 1.35.0, the oldest Kubernetes minor that kind ships (D63). There is no ceiling: a newer runtime starts, and the e2e window (D63) is what is tested. The mirror's certificates are those `check` reads (D55, D82), and `mirror.address` is loopback by its type at config load (D56).
+  - **containerd NRI:** from the merged `config.toml` and its imports: `disable = true` and `disable_connections = true` under `[plugins.'io.containerd.nri.v1.nri']`, and the plugin named in `disabled_plugins`, each its own problem (D54). A node without a config file runs on containerd's defaults, which are all fine.
+  - **containerd image service:** on 2.4 and later, from what the running service exports through introspection (`Plugins`, type `io.containerd.cri.v1`, id `images`): `DiscardUnpackedLayers` must be `false` and `RegistryConfigPath` non-empty (v2.4.2 `plugins/cri/images/plugin.go:170`). A service that is not listed, or has no exports, is a problem naming the socket. On 2.3, which exports nothing (v2.3.7 `plugins/cri/images/plugin.go:235-260` has none), from the parsed `config.toml`: `discard_unpacked_layers` of the image service, and `config_path` set (`mirrors` in use is the problem). A version 1 to 3 config keeps `discard_unpacked_layers` under `[plugins.'io.containerd.grpc.v1.cri'.containerd]`, and containerd's migration copies it only when that table also has `runtimes` (`migrateConfig`, which returns before its copy otherwise); the parser does the same, with the type assertions that panic containerd as errors (D78).
+  - **CRI-O:** `enable_nri = true` and `nri_disable_connections = false` under `[crio.nri]`, from `GET /config` (D64: `Nri::parse`, fuzzed by `crio_inspect` since M2 step 03), and the drop-in present (D66).
+  - **Each message** names the key, the section when two spellings exist, why it matters, what to set, and that the runtime restarts after the change.
+  - **Readiness:** the status listener opens first, and `/readyz` answers 503 until the mirror listens, then 200 (D45); `/livez` answers 200 throughout. An agent that cannot open the mirror stops.
+- **Because:**
+  - A node that is wrong in one of these ways looks protected and is not: no NRI means no gate (D54), a discarded layer is one the node cannot serve, and without `config_path` no pull reaches the mirror.
+  - The running service is what counts on 2.4, and it answers the question without parsing a file that its own migrations rewrite. 2.3 offers no such answer, so the file, parsed as containerd parses it (the differential tests), is the only source.
+  - One list of problems gives `check-config` exactly what the unit prints in the journal, so the admin sees the refusal before the restart.
+  - The CRI-O floor follows the Kubernetes minors the support window names (D63), so a CRI-O older than the oldest tested one is the unsupported case, as for containerd.
+- **Measured (M2 step 05, arm64, Docker):**
+  - The config cases of the oracle now include `discard_unpacked_layers`, the NRI keys and `disabled_plugins` (D79): 1682 of 1692 cases agree with containerd v2.4.2's own loader; the other 10 have no stable answer, as before (v1 plugin renames collide in a map).
+  - On kind nodes the agent starts and passes preflight on containerd 2.3.7, containerd 2.4.2 and CRI-O 1.37.2; `check-config` exits 0 on every node of each. A second agent on a worker, given no certificates, a socket that nothing listens on, or (containerd) a config with `disable = true`, stops with the line of the key and exits 1 (`e2e/tests/preflight.rs`).
+  - kindest/node ships `/etc/containerd` as `0644`, a directory root without capabilities (D53) cannot enter: the agent's first start on containerd 2.3.7 failed with `Permission denied` on `config.toml`. The e2e node image sets `0755`.
+  - `fuzz runtime_version` (60 s budget, 20 s run): 135953 runs, no finding; `containerd_config`, now also through `load_plugins`: 91091 runs in 60 s, no finding.
+- **Revisit when:** containerd 2.3 reaches end of life (then drop the config-file path of the image settings), or CRI-O reports its version in another form.

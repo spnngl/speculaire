@@ -6,7 +6,7 @@ For admins running speculaire on a node. Every setting is listed with its defaul
 
 1. Install the package. It doesn't touch the runtime's config (D55).
 2. Run `speculaire configure` as root, with the runtime running. It finds the runtime by its socket (D84), creates the mirror certificates in `/var/lib/speculaire/mirror/`, and adds the mirror entry first in each `hosts.toml` under containerd's `config_path`, creating `_default/hosts.toml` (D82). On CRI-O it writes `/etc/containers/registries.conf.d/99-speculaire.conf`, which copies your entry of each registry in `mirror.registries` and each prefix of your `registries.conf` with the mirror first, and the certificates in `/etc/containers/certs.d/127.0.0.1:7480/`, then reloads CRI-O (D66, D83). It prints each file it changes and any registry or directory it leaves alone, and running it again changes nothing. `--runtime containerd` or `--runtime cri-o` skips the socket probe, for an image build.
-3. Start `speculaire.service`. The agent refuses to start without the mirror certificates in `mirror.directory`, with an error naming that directory and `speculaire configure`, and when it cannot listen on `mirror.address` (D55, D85). `/readyz` on port 7482 answers 200 once it is ready (D45).
+3. Start `speculaire.service`. The agent checks the node first and refuses to start, naming each file and key, in the cases of "Startup refusals" (D86). `/readyz` on port 7482 answers 503 until the mirror listens, then 200 (D45).
 4. Continue with "Before turning on `enforce`". The gate starts in `audit` mode (D47).
 
 To move the mirror off port 7480, set `mirror.address` to another loopback `ip:port`, run `speculaire configure` again, then restart the agent (D56). `configure` rewrites its own entries to the new address wherever they are, and remakes the certificates when the IP changed.
@@ -20,17 +20,40 @@ To stop using the mirror, run `speculaire unconfigure`. It removes only what `co
 3. Pick a toleration annotation for the static control-plane pods. Set it in the runtime's validator section, and add that annotation, set to `"true"`, to each static pod manifest. Without it, a stopped agent keeps the control plane from restarting (`containerd/nri` `plugins/default-validator/default-validator.go:53-65`).
    - containerd: `tolerate_missing_plugins_annotation` under `[plugins.'io.containerd.nri.v1.nri'.default_validator]`.
    - CRI-O: `nri_validator_tolerate_missing_plugins_annotation` under `[crio.nri.default_validator]`, in a file of `/etc/crio/crio.conf.d/`.
-4. On every node, `speculaire check-config` exits 0. It exits 1, naming each file, when a `hosts.toml` lacks the mirror entry, so `configure` has not run there or an edit removed it (D55, D82), or when a certificate is missing, expires within 30 days or is not for `mirror.address`. On CRI-O it exits 1 when a later drop-in overrides speculaire's entry for a registry, or the admin changed their entry since `configure`; run `configure` again (D66).
+4. On every node, `speculaire check-config` exits 0. It exits 1, with the startup refusals below and each file that lacks what `configure` makes, when a `hosts.toml` lacks the mirror entry, so `configure` has not run there or an edit removed it (D55, D82), or when a certificate is missing, expires within 30 days or is not for `mirror.address`. On CRI-O it exits 1 when a later drop-in overrides speculaire's entry for a registry, or the admin changed their entry since `configure`; run `configure` again (D66).
 5. Turn on fail-closed in the same section, then restart the runtime (D64):
    - containerd: `enable = true` and `required_plugins = ["speculaire"]`, then `systemctl restart containerd`.
    - CRI-O: `nri_enable_default_validator = true` and `nri_validator_required_plugins = ["speculaire"]`, then `systemctl restart crio`.
+
+## Startup refusals
+
+`speculaire agent` stops before it opens a listener, and `speculaire check-config` exits 1, with one line per problem: `<file or socket>: <message>` (D86). Each message names the key. Restart the runtime after changing its config.
+
+| Message | Meaning | Action |
+|---|---|---|
+| `cannot connect to <socket>` / `<socket> did not answer ...` | The runtime does not answer the CRI `Version` call within 5 s | Start the runtime, or set `runtime.containerd_socket` or `runtime.crio_socket` |
+| no runtime socket answers, or both | Neither or both runtimes run (D64) | Run one runtime, or point the keys at the right sockets |
+| `answers as "<name>", not <runtime>` | The socket belongs to the other runtime | Fix `[runtime]` |
+| `containerd <version> is older than 2.3.0` / `CRI-O <version> is older than 1.35.0` | The runtime is below the supported floor (D15, D63) | Upgrade it |
+| `reports the version "<text>", which is no release` | The version is not `major.minor.patch` | Report it: the agent cannot tell what it runs on |
+| `` `discard_unpacked_layers = true` `` | containerd deletes the layers it unpacked, so the node cannot serve them (D15) | Set it to `false` in `[plugins.'io.containerd.cri.v1.images']` (`[plugins.'io.containerd.grpc.v1.cri'.containerd]` in a config of version 2) |
+| `` `config_path` is not set `` | containerd reads no `hosts.toml`: `mirrors` is in use (D14) | Set `config_path = "/etc/containerd/certs.d"` under `[plugins.'io.containerd.cri.v1.images'.registry]`, and move `mirrors` to `hosts.toml` files |
+| `does not export the settings of the CRI image service` | containerd 2.4's `io.containerd.cri.v1.images` is disabled or failed to start | Fix containerd's own logs first |
+| `` `disable = true` ``, `` `disable_connections = true` `` or `io.containerd.nri.v1.nri is in disabled_plugins` | containerd's NRI is off or closed to plugins that start on their own (D54) | Set the key to `false`, or remove the plugin from `disabled_plugins` |
+| `` `enable_nri = false` `` or `` `nri_disable_connections = true` `` | CRI-O's NRI is off or closed (D54, D64) | Set `enable_nri = true` and `nri_disable_connections = false` under `[crio.nri]` |
+| `CRI-O's inspect API answered ...` | `GET /config` on `crio.sock` failed | Check CRI-O |
+| `cannot read containerd's config` | `config.toml` or an import is not valid | Fix the file named |
+| `<mirror.directory>/<file>: is missing: run `speculaire configure`` (also: expires within 30 days, not for `mirror.address`) | The mirror's certificates are absent or no longer fit (D55) | Run `speculaire configure` |
+| `99-speculaire.conf: is missing` | CRI-O pulls do not go through the mirror (D66) | Run `speculaire configure` |
+| `listening on mirror.address ...` | Another process holds the address | Free it or change `mirror.address` (D56) |
+| `mirror.address` is not loopback | The mirror would listen beyond the node (D56) | Use a loopback address |
 
 ## Break glass: containers do not start
 
 Work through these steps in order, and stop at the first one that helps.
 
 1. **The gate rejects images it should allow.** Set `gate.mode = "audit"` and run `systemctl reload speculaire`. The mode reloads live (D30), and pods start on kubelet's next retry.
-2. **The agent is down.** Run `systemctl restart speculaire`. If it does not start, run `speculaire check-config` and read `journalctl -u speculaire`.
+2. **The agent is down.** Run `systemctl restart speculaire`. If it does not start, run `speculaire check-config` and read `journalctl -u speculaire`: both give the refusals of "Startup refusals".
 3. **The agent cannot be started.** Remove `speculaire` from `required_plugins` and run `systemctl restart containerd`; on CRI-O, from `nri_validator_required_plugins`, then `systemctl restart crio`. Running containers survive a runtime restart. New containers then start ungated.
 
 ## Rejection reasons
