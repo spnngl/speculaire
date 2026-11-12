@@ -159,11 +159,24 @@ async fn route(
             let service = tower::service_fn(move |_: Request<PluginsRequest>| {
                 let answers = Arc::clone(&answers);
                 async move {
-                    let mut plugins = vec![Plugin {
-                        r#type: "io.containerd.nri.v1".to_owned(),
-                        id: "nri".to_owned(),
-                        ..Plugin::default()
-                    }];
+                    // The plugins that share a type or an id with the image service, which come first in containerd's list.
+                    let mut plugins = vec![
+                        Plugin {
+                            r#type: "io.containerd.nri.v1".to_owned(),
+                            id: "nri".to_owned(),
+                            ..Plugin::default()
+                        },
+                        Plugin {
+                            r#type: "io.containerd.cri.v1".to_owned(),
+                            id: "runtime".to_owned(),
+                            ..Plugin::default()
+                        },
+                        Plugin {
+                            r#type: "io.containerd.service.v1".to_owned(),
+                            id: "images".to_owned(),
+                            ..Plugin::default()
+                        },
+                    ];
                     if let Some((discard, path)) = &answers.image_exports {
                         plugins.push(Plugin {
                             r#type: "io.containerd.cri.v1".to_owned(),

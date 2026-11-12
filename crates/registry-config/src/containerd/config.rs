@@ -696,6 +696,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nri_accepts_plugins_unless_any_one_switch_is_off() {
+        assert!(Nri::default().accepts_plugins());
+        for nri in [
+            Nri {
+                disable: true,
+                ..Nri::default()
+            },
+            Nri {
+                plugin_disabled: true,
+                ..Nri::default()
+            },
+            Nri {
+                disable_connections: true,
+                ..Nri::default()
+            },
+        ] {
+            assert!(!nri.accepts_plugins(), "{nri:?}");
+        }
+    }
+
+    #[test]
     fn version_one_plugin_names_become_uris() {
         for (name, uri) in [
             ("cri", "io.containerd.grpc.v1.cri"),
