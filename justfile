@@ -341,6 +341,9 @@ e2e-up runtime version kubernetes="": e2e-tools
         docker cp packaging/speculaire.service "$node:/usr/lib/systemd/system/speculaire.service"
         docker exec "$node" mkdir -p /etc/speculaire
         docker cp "$agent_config" "$node:/etc/speculaire/config.toml"
+        # The admin's step of docs/operations.md § Install (D55): the mirror's certificates and the runtime's entries
+        # come before the agent, whose preflight looks for them.
+        docker exec "$node" speculaire configure
         docker exec "$node" sh -c 'systemctl daemon-reload && systemctl enable --now speculaire'
     done
     # kind's --wait covers the control plane only.
