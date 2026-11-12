@@ -17,6 +17,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 speculaire-agent = { path = "../crates/agent" }
+speculaire-oci = { path = "../crates/oci" }
 speculaire-registry-config = { path = "../crates/registry-config" }
 # `containerd_config` reads files: it writes the input to a temporary directory.
 tempfile = "3.27.0"
@@ -61,6 +62,20 @@ bench = false
 [[bin]]
 name = "auth_json"
 path = "fuzz_targets/auth_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reference"
+path = "fuzz_targets/reference.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "platform"
+path = "fuzz_targets/platform.rs"
 test = false
 doc = false
 bench = false

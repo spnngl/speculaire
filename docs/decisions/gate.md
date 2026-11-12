@@ -36,7 +36,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** CRI silently bypasses it through the local-pull fallback, through imports, and through `IfNotPresent` when the image is cached. The gate covers all of these cases.
 - **Revisit when:** users want unsigned images rejected before download.
 
-## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65)
+## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65, D81)
 
 - **Decision:**
   - containerd 2.3 is the minimum. 2.4+ is the main target, and new features land there first.
@@ -57,6 +57,21 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - On 2.4.2 `container.image.digest` equalled the image's target digest for all 20 pods.
   - The residual gap is a retag to an image with identical layers but a different config. It is accepted on 2.3 with the warning, and closed on 2.4.
 - **Revisit when:** containerd 2.3 reaches end of life. Then drop the 2.3 path.
+
+## D81: References and platforms are parsed as containerd's CRI plugin parses them, by a port that only its parser can build (amends D11, D15, D70)
+
+- **Decision:**
+  - `crates/oci` (`speculaire-oci`) holds `reference` and `platform`. A `Reference` is `domain/path` with an optional tag and digest, built only by `Reference::parse_docker_ref` (what `ParseDockerRef` makes of an image name: normalized, with `latest` when there is no tag or digest, and only the digest when there are both) or `parse_normalized_named` (the same, a missing tag staying missing). It has no constructor from parts and no `From<String>`, so one that exists is normalized. Policies match its `name()` (D11).
+  - The port is of `github.com/distribution/reference` v0.6.0 (`reference.go`, `normalize.go`, `regexp.go`), which containerd v2.4.2 vendors and its CRI plugin calls (`internal/cri/server/images/image_pull.go:153`), and of go-digest v1.0.0's `Validate`. The library's regular expressions are written as a grammar; the differential tests are what holds the two together. Its quirks stay: a first segment that is not a valid domain but is a valid path makes the whole name the path, with an empty domain (`my_registry.example/app`); an upper-case first segment is a domain; the path, not the name, is limited to 255 characters; a digest uses sha256, sha384 or sha512 in lower-case hexadecimal, and nothing else, because those are the algorithms go-digest registers in containerd's binary.
+  - A platform is `oci-spec`'s `Platform`: the types of an image index are the ones a walk reads. `platform` ports `github.com/containerd/platforms` v1.0.0-rc.5 (`Parse`, `Normalize`, `Format`, `FormatAll`, `Only`, `OnlyStrict`, the arm and arm64 variant rules) for Linux nodes. What a specifier leaves out comes from a `Host` (`Host::current()` in the agent, the oracle's own in the tests). A matcher for a Windows platform is refused: the library's OS version matching is not ported, and a node is Linux (D13).
+  - The gate and the walks use `Matcher::only` for the node platform: it is what containerd's pull uses (`platforms.Default()` is `Only(DefaultSpec())`, `defaults_unix.go:38`), so the manifest the gate picks is one containerd may run, `arm/v8` for an `arm64` node included. `Matcher::only_strict` stays for where containerd calls `OnlyStrict` (`DefaultStrict`), none today.
+  - The oracle gains `reference` (`ParseDockerRef` and `ParseNormalizedNamed`) and `platform` (`Parse`, `Normalize`, `Format`, `FormatAll`, and for each platform as a node, `Only` and `OnlyStrict`, with their `Match` and `Less` on a list of candidates).
+- **Because:**
+  - The gate matches policies on normalized names (D11) and picks the platform manifest (D15): a difference with containerd is a policy that does not apply to an image that runs, or a manifest that is not the one that runs. That makes a parser bug a security bug.
+  - A reference that cannot be built unnormalized cannot reach a policy match unnormalized.
+  - `Only`, not `OnlyStrict`, because a gate that rejected the `arm/v8` manifest of an `arm64` node would disagree with a pull that took it.
+- **Measured (M2 step 02, arm64, Docker):** the differential tests send the oracle 19214 `reference` cases (the string literals of the test files of distribution/reference v0.6.0, 40 mutations of each, the e2e images, and about 70 by hand) and 3555 `platform` cases (specifiers, 20 mutations of each literal of containerd/platforms' tests, and 63 nodes against 63 candidates for `Only`, `OnlyStrict` and their `Less`), and every answer is the same.
+- **Revisit when:** a Windows node is supported, or containerd 2.5 moves `platforms` or `reference`.
 
 ## D18: Exemptions are explicit and empty by default
 

@@ -1,0 +1,1 @@
+anchored name regexp should have two submatches: %v, %v != 2

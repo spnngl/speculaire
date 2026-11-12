@@ -1,0 +1,1 @@
+normalized output did not survive the round trip: %v != %v
