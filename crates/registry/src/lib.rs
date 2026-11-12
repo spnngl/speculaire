@@ -7,6 +7,6 @@
 pub mod challenge;
 mod client;
 mod connect;
-mod token;
+pub mod token;
 
 pub use client::{Client, Error, Request, Response};

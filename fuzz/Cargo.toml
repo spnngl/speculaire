@@ -22,6 +22,8 @@ speculaire-oci = { path = "../crates/oci" }
 speculaire-registry = { path = "../crates/registry" }
 speculaire-registry-config = { path = "../crates/registry-config" }
 speculaire-runtime = { path = "../crates/runtime" }
+# `token_answer` reads the token it parsed; the same version as the workspace's.
+secrecy = "0.10.3"
 # `containerd_config` reads files: it writes the input to a temporary directory.
 tempfile = "3.27.0"
 # The serializer of the round trip in `config`; the same version as the workspace's.
@@ -137,6 +139,13 @@ unwrap_used = "warn"
 [[bin]]
 name = "www_authenticate"
 path = "fuzz_targets/www_authenticate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "token_answer"
+path = "fuzz_targets/token_answer.rs"
 test = false
 doc = false
 bench = false

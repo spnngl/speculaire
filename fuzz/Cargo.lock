@@ -1648,6 +1648,7 @@ name = "speculaire-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "secrecy",
  "speculaire-agent",
  "speculaire-mirror",
  "speculaire-oci",
