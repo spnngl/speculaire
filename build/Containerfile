@@ -2,7 +2,7 @@
 # (D13), natively on the architecture of the machine running it.
 #
 #   build  the toolchain, lld and cargo-auditable: just musl
-#   dev    plus the tools of `just check` and the dependency checks: just dev <recipe>
+#   dev    plus just and the tools of `just check` and the dependency checks: just dev <recipe>
 
 # The tag is rust-toolchain.toml's channel; Renovate keeps the digest.
 FROM docker.io/library/rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build
@@ -14,15 +14,12 @@ RUN apk add --no-cache bash build-base file git lld protobuf-dev
 # rust-toolchain.toml's components; the image's minimal profile lacks them, and rustup would fetch them on every run.
 RUN rustup component add clippy llvm-tools rustfmt
 
-# renovate: datasource=crate depName=just
-ARG JUST_VERSION=1.59.0
 # renovate: datasource=crate depName=cargo-auditable
 ARG CARGO_AUDITABLE_VERSION=0.7.7
 # renovate: datasource=crate depName=rust-audit-info
 ARG RUST_AUDIT_INFO_VERSION=0.5.4
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo install --locked just@"$JUST_VERSION" cargo-auditable@"$CARGO_AUDITABLE_VERSION" \
-        rust-audit-info@"$RUST_AUDIT_INFO_VERSION"
+    cargo install --locked cargo-auditable@"$CARGO_AUDITABLE_VERSION" rust-audit-info@"$RUST_AUDIT_INFO_VERSION"
 
 # Constant time: mimalloc's `options.c` embeds `__DATE__` and `__TIME__`, which gcc takes from this variable (D46).
 # `.cargo/config.toml` remaps the paths.
@@ -36,6 +33,8 @@ FROM build AS dev
 ARG NIGHTLY
 RUN rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt
 
+# renovate: datasource=crate depName=just
+ARG JUST_VERSION=1.59.0
 # renovate: datasource=crate depName=taplo-cli
 ARG TAPLO_VERSION=0.10.0
 # renovate: datasource=crate depName=typos-cli
@@ -55,7 +54,7 @@ ARG CARGO_LLVM_COV_VERSION=0.9.1
 # cargo-vet links zlib statically through libz-sys.
 RUN apk add --no-cache zlib-static
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo install --locked taplo-cli@"$TAPLO_VERSION" typos-cli@"$TYPOS_VERSION" \
+    cargo install --locked just@"$JUST_VERSION" taplo-cli@"$TAPLO_VERSION" typos-cli@"$TYPOS_VERSION" \
         cargo-shear@"$CARGO_SHEAR_VERSION" cargo-hack@"$CARGO_HACK_VERSION" cargo-deny@"$CARGO_DENY_VERSION" \
         cargo-vet@"$CARGO_VET_VERSION" cargo-nextest@"$CARGO_NEXTEST_VERSION" \
         cargo-llvm-cov@"$CARGO_LLVM_COV_VERSION"
