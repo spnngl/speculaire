@@ -95,14 +95,6 @@ pub struct DetectError {
     crio: Answer,
 }
 
-impl DetectError {
-    /// Whether both runtimes accepted, rather than neither.
-    #[must_use]
-    pub fn is_ambiguous(&self) -> bool {
-        self.containerd == Answer::Accepted && self.crio == Answer::Accepted
-    }
-}
-
 /// The runtime whose socket accepts a connection, when exactly one does.
 ///
 /// # Errors
@@ -199,9 +191,7 @@ mod tests {
     fn neither_or_both_is_refused_naming_both_sockets_and_their_answers() {
         let node = Node::new();
         let sockets = node.sockets("containerd.sock", "crio.sock");
-        let err = detect(&sockets).unwrap_err();
-        assert!(!err.is_ambiguous());
-        let text = err.to_string();
+        let text = detect(&sockets).unwrap_err().to_string();
         for want in [
             "containerd (",
             "containerd.sock): no such socket",
@@ -216,23 +206,7 @@ mod tests {
         node.serve("containerd.sock");
         node.serve("crio.sock");
         let err = detect(&node.sockets("containerd.sock", "crio.sock")).unwrap_err();
-        assert!(err.is_ambiguous());
         assert_eq!(err.to_string().matches("accepted a connection").count(), 2);
-    }
-
-    #[test]
-    fn only_both_accepting_is_ambiguous() {
-        let error = |containerd: Answer, crio: Answer| DetectError {
-            containerd_path: PathBuf::from("a"),
-            containerd,
-            crio_path: PathBuf::from("b"),
-            crio,
-        };
-        let refused = || Answer::Refused("no".to_owned());
-        assert!(error(Answer::Accepted, Answer::Accepted).is_ambiguous());
-        assert!(!error(Answer::Accepted, refused()).is_ambiguous());
-        assert!(!error(refused(), Answer::Accepted).is_ambiguous());
-        assert!(!error(refused(), refused()).is_ambiguous());
     }
 
     #[test]
