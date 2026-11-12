@@ -26,7 +26,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Limit:** when containerd itself sends a `Range` request (resuming a download), the agent relays the range unhashed; containerd's commit check is then the only check.
 - **Revisit when:** —
 
-## D14: The mirror is TLS with client auth on loopback; the peer API is mTLS on the node IP (amended by D32, D56, D66)
+## D14: The mirror is TLS with client auth on loopback; the peer API is mTLS on the node IP (amended by D32, D56, D66, D82)
 
 - **Decision:**
   - The mirror listens on `127.0.0.1:7480` (`mirror.address`, D56) with TLS and requires a client certificate.
@@ -133,7 +133,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - A TTL bounds the cost of a false positive, such as a disk fault that is later fixed.
 - **Revisit when:** mismatches from one node show up on many requesters; then add a reflector-side report with a quorum.
 
-## D56: `mirror.address` and `peer.address` are `ip:port` settings (amends D14, D32, D36, D47)
+## D56: `mirror.address` and `peer.address` are `ip:port` settings (amends D14, D32, D36, D47; amended by D82)
 
 - **Decision:**
   - `mirror.address = "127.0.0.1:7480"`, a restart key (D47). Startup refuses an address that is not loopback. After changing it, the admin runs `speculaire configure` again, then restarts the agent.
@@ -146,7 +146,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - It has the same form as `metrics.address` and `reflector.listen`.
 - **Revisit when:** —
 
-## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80)
+## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80, D83)
 
 - **Decision:**
   - `speculaire configure` writes `/etc/containers/registries.conf.d/99-speculaire.conf`. For each registry it mirrors, the file holds one `[[registry]]` that copies the admin's effective entry for that prefix (`location`, `insecure`, `blocked`, its mirrors) and puts first `[[registry.mirror]] location = "<mirror.address>/<registry host>"` with `pull-from-mirror = "all"`.
@@ -209,3 +209,20 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - A peer that keeps its connection open and sends nothing would otherwise hold the runtime's pull until its own timeout, which neither containerd nor CRI-O sets per blob.
   - A timer on silence, not on the whole transfer, does not penalise a large layer coming at a steady rate.
 - **Revisit when:** M3's suite, which stalls a serving node with `tc qdisc … netem`, shows 5 s too short for a loaded node or too long for a pull.
+
+## D83: The CRI-O drop-in copies the admin's entry of every mirrored registry, and the mirror's location is the entry's (amends D66)
+
+- **Decision:**
+  - **Which registries:** the prefixes of the new restart key `mirror.registries` (default `["docker.io", "registry.k8s.io", "quay.io", "ghcr.io"]`; a host and an optional port, no path or wildcard), and every prefix of the admin's effective config, read with every file but `99-speculaire.conf` (D80). CRI-O has no `_default`, so a registry the admin never named gets an entry only when it is in `mirror.registries`.
+  - **Left out, and named in the output:** a blocked registry, an entry with no location (a wildcard prefix names no registry to relay), and an entry at the mirror's own address.
+  - **Each entry** is the admin's, with its `location` and `insecure` as they are, and a first `[[registry.mirror]]` with `location = "<mirror.address>/<location of the entry>"` and `pull-from-mirror = "all"`. The library refuses `mirror-by-digest-only` beside a `pull-from-mirror`, so an entry that has the flag loses it and each of its own mirrors gets `pull-from-mirror = "digest-only"`, which is what the flag means. The entries come in prefix order.
+  - **Certificates:** `ca.crt`, `client.cert` and `client.key` in `/etc/containers/certs.d/<mirror.address>/` (0644, 0644, 0600), the parts of `client.pem`. A directory of `certs.d` holding the mirror's previous CA, of an address it had before, is removed.
+  - **Reload:** `configure` and `unconfigure` run `systemctl reload crio` every time, not only when a file changed. `unconfigure` removes the drop-in, reloads, and only then deletes the certificates.
+  - **`check-config`** names the drop-in when it is missing, when its text is not what `configure` writes for the admin's config now, and, for each mirrored prefix, when the entry CRI-O ends up with, after every file, is not the drop-in's: a file named after `99-speculaire.conf` replaces the entry, which `configure` cannot undo, so it says so as a note.
+  - **Paths** are the defaults of go.podman.io/image for root (D80); a CRI-O whose `registries_conf` or `registries_conf_dir` points elsewhere is not followed.
+- **Because:**
+  - A later `[[registry]]` of a prefix replaces an earlier one whole (D66), so an entry that only added the mirror would drop the admin's mirrors and `insecure`.
+  - CRI-O replaces a reference's prefix with the mirror's location, so the mirror receives `/v2/<location>/…`, the name of the registry itself: it finds the upstream without redoing the admin's prefix rewriting, and a wildcard prefix with a location works.
+  - A reload that fails after the files were written must run again, and it finds nothing to change; and certificates deleted while CRI-O still has the drop-in in memory fail every pull from a mirrored registry.
+- **Measured (M2 step 03, arm64, Docker):** on CRI-O 1.37.2 `speculaire configure` wrote the drop-in and the three certificate files, the journal logged `Applied new registry configuration`, and `crictl pull docker.io/library/busybox:1.36.1` sent `GET /v2/` to a TLS server on `127.0.0.1:7480` with the client certificate; with that server killed the pull went on to Docker Hub and succeeded. `unconfigure` kept an admin's `50-admin.conf` with an edit made after `configure`, and a pull after it succeeded.
+- **Revisit when:** CRI-O gains a per-blob fallback across sources (D66), or a node's CRI-O sets `registries_conf` (D80).

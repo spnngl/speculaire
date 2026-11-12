@@ -109,7 +109,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** a node that mirrors but never gates looks protected and is not. `audit` keeps the mirror and the verdicts, and the gap stays visible in `speculaire_gate_total{mode="audit"}`.
 - **Revisit when:** users ask for a mirror-only deployment; then add an explicit `gate.enabled = false` that logs a warning at startup and sets a metric.
 
-## D64: The same NRI plugin gates CRI-O; the agent finds its runtime by its socket (amends D9, D41, D54)
+## D64: The same NRI plugin gates CRI-O; the agent finds its runtime by its socket (amends D9, D41, D54; amended by D84)
 
 - **Decision:**
   - **One plugin:** D9's `nri` crate serves containerd and CRI-O with no runtime-specific code in the NRI path. `Configure.NRI_version` may be empty.

@@ -21,7 +21,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57)
-- D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66)
+- D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82)
 - D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81)
 - D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60)
 - D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable` (amended by D66, D78)
@@ -39,7 +39,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a watched file's modification time is at or after the last check; a bad reload keeps the old config (amended by D37, D47)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21)
-- D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66)
+- D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2)
 - D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61)
 - D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower
@@ -63,8 +63,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D73 [distribution](distribution.md): a peer fetch silent for `peer.stall_timeout` moves to the next peer or falls through, without denying the peer (amends D7)
 - D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69)
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64)
-- D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32)
-- D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47)
+- D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32; amended by D82)
+- D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47; amended by D82)
 - D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62)
 - D58 [build](build.md): CI runs the check on the runner with prebuilt tools, and the musl build in the build image; `ci` jobs land with their content (amends D27, D57)
 - D59 [build](build.md): e2e is a Rust test crate of `#[ignore]`d suites on a kind cluster managed by `just e2e <minor>`, with pinned containerd, kind and kubectl (amends D27; amended by D63)
@@ -72,9 +72,9 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D61 [build](build.md): `speculaire_build_info` exists from startup with empty runtime versions; every build has `protoc` (amends D34; amended by D68)
 - D62 [build](build.md): binaries in `apps/`, libraries in `crates/` as `speculaire-<name>` (amends D57)
 - D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59)
-- D64 [gate](gate.md): the same NRI plugin gates CRI-O; the agent finds its runtime by probing both sockets, and reads CRI-O's NRI keys from `GET /config` on `crio.sock` (amends D9, D41, D54)
+- D64 [gate](gate.md): the same NRI plugin gates CRI-O; the agent finds its runtime by probing both sockets, and reads CRI-O's NRI keys from `GET /config` on `crio.sock` (amends D9, D41, D54; amended by D84)
 - D65 [gate](gate.md): on CRI-O the image identity is the `ImageRef` annotation (the config digest), policies match every name of the image, and `images.json` changes trigger verification; no pinning (amends D11, D15, D20, D21, D22)
-- D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32; amended by D80)
+- D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32; amended by D80, D83)
 - D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7)
 - D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61)
 - D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53)
@@ -92,5 +92,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D80 [distribution](distribution.md): the CRI-O module reads what go.podman.io/image reads, from the files its `configfile` searches; credential helpers are not run, aliases are not parsed (amends D66, D70)
 
 - D81 [gate](gate.md): references and platforms are parsed as containerd's CRI plugin parses them (`ParseDockerRef`, `platforms.Only`), by a port that only its parser can build (amends D11, D15, D70)
+- D82 [agent](agent.md): `configure` makes one set of four certificate files, edits every `hosts.toml` under `config_path` with the mirror first, and `unconfigure` removes only what it added (amends D14, D32, D55, D56)
+- D83 [distribution](distribution.md): the CRI-O drop-in copies the admin's entry of every mirrored registry (`mirror.registries` and the admin's prefixes), with the mirror's location the entry's own (amends D66)
+- D84 [agent](agent.md): `configure`, `unconfigure` and `check-config` find the runtime by its socket, `--runtime` names it, and `unconfigure` stops while the runtime's NRI config requires `speculaire` (amends D32, D64)
 
-Next free number: D82.
+Next free number: D85.

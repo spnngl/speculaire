@@ -30,7 +30,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A bad reload keeps the old config because the gate must keep deciding. Failing closed on a typo would block every container creation on the node.
 - **Revisit when:** —
 
-## D32: `configure` and `unconfigure` change only what speculaire added (amends D14; amended by D55, D56, D66)
+## D32: `configure` and `unconfigure` change only what speculaire added (amends D14; amended by D55, D56, D66, D82, D84)
 
 - **Decision:**
   - `speculaire configure` edits each `hosts.toml` with a format-preserving TOML editor, so the admin's comments and ordering stay. It recognises its own entries by their `ca` path (D56).
@@ -134,7 +134,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The list matches dedens' unit where the two agree (`docs/research/ci-dedens.md:64`).
 - **Revisit when:** a host keeps a file the agent reads under another owner; then add `CAP_DAC_READ_SEARCH` only.
 
-## D55: The admin runs `configure`; the agent refuses to start without it (amends D32)
+## D55: The admin runs `configure`; the agent refuses to start without it (amends D32; amended by D82)
 
 - **Decision:**
   - Installing the package neither runs `speculaire configure` nor edits containerd's config. The admin runs `configure` once per node (`docs/operations.md` § Install).
@@ -179,3 +179,35 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Ordering after the runtime units starts the agent once the sockets it reads exist; `After=` on a missing unit is a no-op.
 - **Measured (M1 step 06, `just e2e containerd 2.4 1.37` and `just e2e crio 1.37`, arm64):** the unit is active on every node with `Type=notify` and `WatchdogUSec=30s`; `systemd-analyze security` reports D53's settings set, except `SystemCallFilter=~@resources`, `RestrictAddressFamilies=~AF_UNIX` and `RestrictAddressFamilies=~AF_(INET|INET6)`, which D53 leaves open; removing `ProtectClock=` and `WatchdogSec=` from one node failed the suite; `systemctl stop` exits 0 in under a second; `/run/speculaire` survives a restart; the journal holds the agent's fields with tracing-journald's `F_` prefix, such as `F_ADDRESS=[::]:7482`.
 - **Revisit when:** a component holds a thread for longer than the watchdog allows by design.
+
+## D82: `configure` makes one set of certificates and edits every `hosts.toml` under `config_path` (amends D14, D32, D55, D56)
+
+- **Decision:**
+  - **Certificates:** four files in `/var/lib/speculaire/mirror/`: `ca.crt` and `server.crt` (0644), `server.key` and `client.pem` (0600). `client.pem` is the client certificate and its key, in that order, as containerd's `client` reads them (D14). The keys are ECDSA P-256 (`rcgen` on aws-lc-rs, D13), the certificates valid from an hour before they are made for ten years, and the CA's own key is dropped after it signs the two others. Crates `speculaire-pki` (`mirror`) and `speculaire-configure`.
+  - **Keep or remake:** `configure` keeps the files when all four parse, both certificates are valid for 30 more days, the CA signed both, the server certificate names the IP of `mirror.address`, and each key is its certificate's. Otherwise it makes all four anew, the CA included, so a changed IP, an expiry or a damaged file is repaired by running it again. A changed port alone keeps them: the certificate names the IP.
+  - **Writing:** each file by a temporary file in its directory, set to its mode, then renamed (D55). A file that exists with the same contents and mode is not touched. A symlink is written through, and an existing `hosts.toml` keeps its mode.
+  - **containerd's files:** the directories of `config_path` come from containerd's `config.toml` and its imports (D78), or containerd's defaults when there is no file. `mirrors` in the config is refused: containerd 2.x refuses it beside `config_path`. The targets are every non-empty `hosts.toml` under every directory of every root, and `_default/hosts.toml` of the first root, which `configure` creates when `_default` is missing or empty. A directory with no `hosts.toml` is left alone and named, because containerd then reads its certificate files, which a `hosts.toml` would replace; so is a `_default` that holds files.
+  - **The entry:** first in each file, a `[host."https://<mirror.address>"]` table with `capabilities = ["pull"]`, `ca`, `client` and `dial_timeout = "200ms"` (D14, D6), under a comment that names `configure` and `unconfigure`. The edit is `toml_edit`'s: comments, spacing, order and every other table stay as they were, and removing the entry gives back the file it was added to, as the tests show on the examples of containerd's docs. A table whose `ca` lies in the mirror directory is the mirror's, whatever its name (D56): its name is rewritten in place to the current address, its four keys are set, and a second one is removed. A table of the admin's with the mirror's name, or a `host` key in another case, which containerd reads as `host` too, is refused, naming the file. So is a file that is not TOML, before anything is written.
+  - **Order:** `configure` reads and edits everything in memory first, then writes the certificates, then the files. `unconfigure` removes the entry from each file, deletes a file that is blank afterwards (and `_default/` when that leaves it empty), then deletes the four certificates and the directory when it is empty. It never deletes a file it did not write.
+  - **`check-config`** reads the agent config, then the node. A `hosts.toml` is as `configure` leaves it when adding the entry to its text changes nothing; the problem names the file. The certificates are checked as `configure` keeps them. A missing target or certificate is named too.
+- **Because:**
+  - containerd reads `ca` and `client` on every resolve and fails every pull of a registry whose `hosts.toml` names a missing file (D14, D32): certificates first when adding, last when removing.
+  - A tool that rewrites the admin's files would lose their comments and their trust: the check that adding changes nothing is what makes a hand edit visible.
+  - A directory of certificate files has to stay a directory of certificate files; the registries without a directory are the `_default`'s (`hostPaths`, containerd v2.4.2 `core/remotes/docker/config/config_unix.go`).
+  - A cert for the IP survives a port change; the CA is remade with it because its key is gone, and nothing but the runtime's `ca` and `client` and the agent's listener read it.
+- **Measured (M2 step 03, arm64, Docker):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass the six `configure` tests: on every node `just e2e-up` ran `configure` before the agent, a second run printed nothing and changed no file (mode, SHA-256 compared), and the keys are 0600. A `crictl pull` on a worker reached an `openssl s_server` on `127.0.0.1:7480` that required a client certificate, with `subject=CN=speculaire mirror client`, and went on to upstream once the stand-in was killed.
+- **Revisit when:** a node needs a `hosts.toml` in a directory of certificate files, or a certificate must be renewed without remaking the CA.
+
+## D84: The three commands find the runtime by its socket, and `unconfigure` asks the runtime's NRI config (amends D32, D64)
+
+- **Decision:**
+  - `configure`, `unconfigure` and `check-config` connect to `/run/containerd/containerd.sock` and `/var/run/crio/crio.sock` (`speculaire-runtime`, `detect`), each with a 2 s limit. Exactly one must accept. Otherwise they stop before changing anything, naming both paths and what each answered (`no such socket`, the system's error, `accepted a connection`).
+  - `--runtime containerd|cri-o` names the runtime and skips the probe, for an image build, where no runtime runs. Without it `configure` refuses a node whose runtime is not running.
+  - **`unconfigure` stops** while the runtime requires `speculaire`, unless `--force`, before it changes anything. On containerd it reads `required_plugins` of `[plugins.'io.containerd.nri.v1.nri'.default_validator]` in `config.toml` and its imports, merged as containerd merges them (D78), and treats a missing file as no requirement. On CRI-O it reads `nri_validator_required_plugins` of `[crio.nri.default_validator]` from `GET /config` on `crio.sock`, an HTTP/1.0 request, so that the response comes whole and unchunked. The error names the key and says what to do.
+  - The NRI settings of CRI-O's `GET /config` (`enable_nri`, `nri_disable_connections`, the required plugins) are `speculaire_runtime::crio::Nri`, which startup (D54) reads later; the response parser has a fuzz target.
+- **Because:**
+  - The runtime is the one whose socket answers (D64), and a probe is the only way a command run by an admin can know without reading both configs.
+  - With `required_plugins` naming the agent, the runtime blocks every container creation once the agent is gone (D32).
+  - CRI-O's merged config is what CRI-O runs with, including `crio.conf.d`; the file alone would miss a drop-in.
+- **Measured (M2 step 03, arm64, Docker):** on a worker of each runtime, `unconfigure` with the validator requiring `speculaire` (containerd: the `config.toml` key; CRI-O: a `crio.conf.d` drop-in and `systemctl restart crio`) exited non-zero, naming the key, and changed no file; with the socket of the runtime moved aside (neither), and with a stand-in socket where the other runtime's would be (both), all three commands refused naming both paths.
+- **Revisit when:** a node runs both runtimes.
