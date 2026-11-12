@@ -829,6 +829,19 @@ mod tests {
     }
 
     #[test]
+    fn two_spellings_of_a_field_merge_their_tables_and_keep_the_later_value() {
+        let text = "Server = \"https://a.io\"\nserver = \"https://b.io\"\nSERVER = \"https://c.io\"\n\
+            [host.\"d.io\"]\ncapabilities = [\"pull\"]\nskip_verify = false\n[HOST.\"e.io\"]\n[host.\"f.io\"]\n\
+            [Host.\"d.io\"]\nskip_verify = true\n";
+        let hosts = parse_hosts_file(Path::new("/b"), text).expect("a hosts.toml");
+        // The order of the hosts is that of the tables spelled `host`, as `getSortedHosts` reads it.
+        let names: Vec<&str> = hosts.iter().map(|h| h.host.as_str()).collect();
+        assert_eq!(names, ["d.io", "f.io", "c.io"]);
+        assert_eq!(hosts[0].capabilities, Capabilities::PULL);
+        assert_eq!(hosts[0].skip_verify, Some(true));
+    }
+
+    #[test]
     fn the_api_root_gains_v2_unless_it_has_it_or_is_overridden() {
         let path = |server: &str, extra: &str| {
             let text = format!("server = \"{server}\"\n{extra}");
