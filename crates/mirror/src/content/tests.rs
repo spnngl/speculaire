@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 use containerd_client::services::v1::{Info, InfoResponse, ReadContentResponse};
 use containerd_client::tonic::server::Grpc;
@@ -131,18 +132,34 @@ async fn a_blob_over_the_limit_is_not_read_whole_and_an_empty_one_is_empty() {
 
 type Blobs = Arc<HashMap<String, Bytes>>;
 
-fn fake_containerd(socket: &Path, blobs: Blobs) {
+/// What the fake does besides serving its blobs.
+#[derive(Default)]
+struct Behaviour {
+    /// The gRPC code `Info` answers with instead of the blob's, when not 0.
+    fail: AtomicI32,
+    /// How many connections it accepted.
+    connections: AtomicUsize,
+}
+
+fn fake_containerd(socket: &Path, blobs: Blobs) -> Arc<Behaviour> {
+    let behaviour = Arc::new(Behaviour::default());
     let listener = tokio::net::UnixListener::bind(socket).unwrap();
+    let seen = Arc::clone(&behaviour);
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            seen.connections.fetch_add(1, Ordering::SeqCst);
             let blobs = Arc::clone(&blobs);
+            let behaviour = Arc::clone(&seen);
             tokio::spawn(async move {
                 let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
                     let blobs = Arc::clone(&blobs);
-                    async move { Ok::<_, Infallible>(content_service(&blobs, request).await) }
+                    let behaviour = Arc::clone(&behaviour);
+                    async move {
+                        Ok::<_, Infallible>(content_service(&blobs, &behaviour, request).await)
+                    }
                 });
                 let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
                     .serve_connection(TokioIo::new(stream), service)
@@ -150,6 +167,7 @@ fn fake_containerd(socket: &Path, blobs: Blobs) {
             });
         }
     });
+    behaviour
 }
 
 fn namespaced<T>(request: &Request<T>) -> Result<(), Status> {
@@ -161,16 +179,23 @@ fn namespaced<T>(request: &Request<T>) -> Result<(), Status> {
 
 async fn content_service(
     blobs: &Blobs,
+    behaviour: &Arc<Behaviour>,
     request: hyper::Request<hyper::body::Incoming>,
 ) -> hyper::Response<containerd_client::tonic::body::Body> {
     let blobs = Arc::clone(blobs);
+    let behaviour = Arc::clone(behaviour);
     let mut grpc_info = Grpc::new(ProstCodec::<InfoResponse, InfoRequest>::default());
     let mut grpc_read = Grpc::new(ProstCodec::<ReadContentResponse, ReadContentRequest>::default());
     if request.uri().path() == "/containerd.services.content.v1.Content/Info" {
         let svc = tower::service_fn(move |request: Request<InfoRequest>| {
             let blobs = Arc::clone(&blobs);
+            let behaviour = Arc::clone(&behaviour);
             async move {
                 namespaced(&request)?;
+                match behaviour.fail.load(Ordering::SeqCst) {
+                    0 => {}
+                    code => return Err(Status::new(Code::from(code), "told to fail")),
+                }
                 let digest = request.into_inner().digest;
                 match blobs.get(&digest) {
                     Some(bytes) => Ok(Response::new(InfoResponse {
@@ -266,4 +291,85 @@ async fn a_service_that_went_away_is_a_miss_and_the_next_request_connects_again(
         Arc::new(HashMap::from([(digest.to_string(), bytes)])),
     );
     assert!(content.open(&digest).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_service_that_is_unavailable_is_a_miss_and_the_next_request_connects_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = pattern(10);
+    let digest = digest_of(&bytes);
+    let socket = dir.path().join("containerd.sock");
+    let service = fake_containerd(
+        &socket,
+        Arc::new(HashMap::from([(digest.to_string(), bytes)])),
+    );
+    let content = Containerd::new(dir.path().join("empty"), &socket);
+    assert!(content.open(&digest).await.unwrap().is_some());
+    assert!(content.open(&digest).await.unwrap().is_some());
+    // The channel is kept: one connection served both.
+    assert_eq!(service.connections.load(Ordering::SeqCst), 1);
+    service
+        .fail
+        .store(Code::Unavailable as i32, Ordering::SeqCst);
+    assert!(content.open(&digest).await.unwrap().is_none());
+    service.fail.store(0, Ordering::SeqCst);
+    assert!(content.open(&digest).await.unwrap().is_some());
+    assert_eq!(service.connections.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_service_that_fails_otherwise_is_an_error_and_keeps_its_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = pattern(10);
+    let digest = digest_of(&bytes);
+    let socket = dir.path().join("containerd.sock");
+    let service = fake_containerd(
+        &socket,
+        Arc::new(HashMap::from([(digest.to_string(), bytes)])),
+    );
+    let content = Containerd::new(dir.path().join("empty"), &socket);
+    assert!(content.open(&digest).await.unwrap().is_some());
+    service.fail.store(Code::Internal as i32, Ordering::SeqCst);
+    assert!(matches!(
+        content.open(&digest).await,
+        Err(Error::Grpc(status)) if status.code() == Code::Internal
+    ));
+    service.fail.store(0, Ordering::SeqCst);
+    assert!(content.open(&digest).await.unwrap().is_some());
+    assert_eq!(service.connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_file_is_streamed_in_chunks_of_a_quarter_mebibyte() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = pattern(1_000_000);
+    let digest = digest_of(&bytes);
+    put(dir.path(), &digest, &bytes);
+    let content = Containerd::new(dir.path(), dir.path().join("no.sock"));
+    let blob = content.open(&digest).await.unwrap().unwrap();
+    let chunks: Vec<Bytes> = blob
+        .stream(Span::whole(1_000_000).unwrap())
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let sizes: Vec<usize> = chunks.iter().map(Bytes::len).collect();
+    assert_eq!(sizes, [262_144, 262_144, 262_144, 213_568]);
+}
+
+#[tokio::test]
+async fn a_blob_prints_where_it_comes_from_and_not_what_it_holds() {
+    let memory = format!("{:?}", Blob::from_bytes(pattern(10)));
+    assert!(memory.contains("Memory(10 bytes)"), "{memory}");
+    let dir = tempfile::tempdir().unwrap();
+    let digest = digest_of(b"x");
+    put(dir.path(), &digest, b"x");
+    let content = Containerd::new(dir.path(), dir.path().join("no.sock"));
+    let blob = content.open(&digest).await.unwrap().unwrap();
+    let file = format!("{blob:?}");
+    assert!(
+        file.contains("File(") && file.contains(digest.encoded()),
+        "{file}"
+    );
 }
