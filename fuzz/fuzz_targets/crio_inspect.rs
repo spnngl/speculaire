@@ -1,4 +1,4 @@
-//! The response of CRI-O's inspect API to GET /config must never panic, and its settings are those of its body.
+//! Reading the answer of CRI-O's inspect API to GET /config, then the settings in its body, must never panic.
 
 #![no_main]
 

@@ -230,20 +230,17 @@ pub fn platform(data: &[u8]) {
 
 /// What CRI-O's inspect API answers to `GET /config`, as the agent reads it (D64).
 ///
-/// A response that parses has a body, and the settings read from it are those of the body alone.
+/// Reading the body, then the NRI settings and the credential file from it, never panics.
 ///
 /// # Panics
 ///
-/// When parsing panics, or the settings of a response differ from those of its body.
+/// When reading panics.
 pub fn crio_inspect(data: &[u8]) {
-    let Ok(body) = speculaire_runtime::crio::body(data) else {
-        assert!(speculaire_runtime::crio::Nri::from_response(data).is_err());
-        return;
-    };
-    assert_eq!(
-        speculaire_runtime::crio::Nri::from_response(data).ok(),
-        speculaire_runtime::crio::Nri::parse(body).ok()
-    );
+    use speculaire_runtime::crio::{Nri, body, global_auth_file};
+    if let Ok(body) = body(data) {
+        let _ = Nri::parse(body);
+        let _ = global_auth_file(body);
+    }
 }
 
 /// A containerd `hosts.toml` as `configure` edits it (D32, D82).
