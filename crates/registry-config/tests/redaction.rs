@@ -63,7 +63,8 @@ Authorization = ["Bearer hunter2-header"]
         "hunter2-token",
         "hunter2-header",
     ] {
-        assert!(!printed.contains(secret), "{secret} is printed: {printed}");
+        // The message leaves the secret out: a failing run would otherwise log it.
+        assert!(!printed.contains(secret), "a secret is printed: {printed}");
         assert!(!format!("{registry:?}").contains(secret));
     }
 }
