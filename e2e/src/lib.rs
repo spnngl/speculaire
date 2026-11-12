@@ -107,6 +107,25 @@ impl Cluster {
         run(Command::new("docker").arg("exec").arg(node).args(command))
     }
 
+    /// Runs a command in a node's container and returns its exit status and output, whatever the status.
+    ///
+    /// # Errors
+    ///
+    /// When `docker` cannot start.
+    pub fn exec_output(&self, node: &str, command: &[&str]) -> Result<Output, Failure> {
+        let mut docker = Command::new("docker");
+        docker.arg("exec").arg(node).args(command);
+        let out = docker.output().map_err(|e| Failure {
+            command: format!("{docker:?}"),
+            detail: e.to_string(),
+        })?;
+        Ok(Output {
+            success: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
     /// Every node with its `Ready` condition and versions.
     ///
     /// # Errors
@@ -138,6 +157,17 @@ impl Cluster {
             })
             .collect())
     }
+}
+
+/// What a command run in a node left: its exit status and both streams.
+#[derive(Debug)]
+pub struct Output {
+    /// Whether it exited with status 0.
+    pub success: bool,
+    /// What it wrote to stdout.
+    pub stdout: String,
+    /// What it wrote to stderr.
+    pub stderr: String,
 }
 
 /// A node of the cluster, as `kubectl get nodes` reports it.
