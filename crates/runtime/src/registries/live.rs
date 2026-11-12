@@ -176,6 +176,31 @@ mod tests {
     }
 
     #[test]
+    fn a_change_is_seen_down_to_the_depth_that_is_asked_and_no_further() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("sub/file");
+        std::fs::create_dir(dir.path().join("sub")).expect("a directory");
+        std::fs::write(&file, "a").expect("a file");
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .expect("the file")
+            .set_modified(future)
+            .expect("a modification time");
+        let own = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        // The directory itself at depth 0, what is in it at 1, what is in that at 2.
+        assert_eq!(newest(dir.path(), 0), own(dir.path()));
+        assert_eq!(
+            newest(dir.path(), 1),
+            own(&dir.path().join("sub")).max(own(dir.path()))
+        );
+        assert_eq!(newest(dir.path(), 2), Some(future));
+        assert_eq!(newest(&file, 0), Some(future));
+        assert_eq!(newest(&dir.path().join("none"), 3), None);
+    }
+
+    #[test]
     fn the_paths_of_a_failed_first_read_are_still_watched() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let live = Live::<u32>::new();

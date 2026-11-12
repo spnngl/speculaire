@@ -974,6 +974,10 @@ mod tests {
             Tree::load(&[dir.path().join("a.test").join("ca.crt")]),
             Err(HostsError::Read { .. })
         ));
+        // A link that loops is an error, not a host that is not there.
+        std::os::unix::fs::symlink(dir.path().join("c.test"), dir.path().join("c.test"))
+            .expect("a link");
+        assert!(matches!(Tree::load(&roots), Err(HostsError::Read { .. })));
     }
 
     #[test]

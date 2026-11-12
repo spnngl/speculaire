@@ -1797,6 +1797,7 @@ dependencies = [
  "speculaire-configure",
  "speculaire-mirror",
  "speculaire-runtime",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml",
