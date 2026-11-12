@@ -411,17 +411,10 @@ fn a_poll_reloads_a_changed_file() {
 fn a_poll_reloads_a_file_changed_after_startup_read_it() {
     let mut agent = Agent::start("[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"info\"\n");
     // A write during preflight: after the config was read, before the listeners open.
-    let line = agent.line(&["preflight passed"]);
-    let (_, rest) = line.split_once(r#""timestamp":""#).unwrap();
-    let (stamp, _) = rest.split_once('"').unwrap();
-    let during = humantime::parse_rfc3339(stamp).unwrap();
-    agent.rewrite("[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n");
-    std::fs::File::options()
-        .write(true)
-        .open(&agent.config)
-        .unwrap()
-        .set_modified(during)
-        .unwrap();
+    agent.line(&["preflight passed"]);
+    backdated(&agent.config, || {
+        agent.rewrite("[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n");
+    });
     agent.line(&[RELOADED]);
 }
 
@@ -774,6 +767,19 @@ fn registry_node_with(extra: &str) -> Node {
     Node::new(Answers::containerd("v2.4.2"), Some(&config))
 }
 
+/// Runs `write` on `path` and gives the file back the modification time it had, from before the agent started: a kernel
+/// whose file clock is coarser than the agent's can date a write made just after a poll started before that poll (D93).
+fn backdated(path: &Path, write: impl FnOnce()) {
+    let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+    write();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+}
+
 fn write_hosts(node: &Node, text: &str) -> PathBuf {
     let path = node.dir.path().join("certs.d/quay.io/hosts.toml");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -796,10 +802,9 @@ fn an_invalid_registry_config_keeps_the_previous_is_reported_once_and_a_fix_is_p
     // The first read, at startup.
     agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
     wait_until(|| get(agent.port, "/readyz", "").is_some_and(|r| r.status == 200));
-    // The polls compare the file's time with the start of the previous check, the first one just before startup's read.
-    // The pause puts the write past it even when the kernel's coarse file clock dates it a few milliseconds early.
-    std::thread::sleep(Duration::from_millis(100));
-    std::fs::write(&hosts, "[host.\"https://one.corp\"\n").unwrap();
+    backdated(&hosts, || {
+        std::fs::write(&hosts, "[host.\"https://one.corp\"\n").unwrap();
+    });
     let line = agent.line(&[r#""level":"ERROR""#, "registry config reload failed"]);
     assert!(
         line.contains("hosts.toml") && line.contains("line 1, column 25"),
@@ -812,7 +817,9 @@ fn an_invalid_registry_config_keeps_the_previous_is_reported_once_and_a_fix_is_p
         "speculaire_config_reload_failures_total 1"
     );
     assert_eq!(agent.get("/readyz", "").status, 200);
-    std::fs::write(&hosts, "[host.\"https://two.corp\"]\n").unwrap();
+    backdated(&hosts, || {
+        std::fs::write(&hosts, "[host.\"https://two.corp\"]\n").unwrap();
+    });
     agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
     let (status, lines) = agent.stop();
     assert!(status.success(), "{status}");

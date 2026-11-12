@@ -233,10 +233,11 @@ impl Registries for Fixed {
         Ok(self.0.lock().unwrap().clone())
     }
 
-    fn reload(
-        &self,
-        _since: Option<std::time::SystemTime>,
-    ) -> Result<registries::Reloaded, ConfigError> {
+    fn changed(&self) -> bool {
+        false
+    }
+
+    fn reload(&self) -> Result<registries::Reloaded, ConfigError> {
         Ok(registries::Reloaded::default())
     }
 }

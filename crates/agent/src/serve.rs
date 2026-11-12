@@ -10,6 +10,7 @@ use speculaire_mirror::cache::Cache;
 use speculaire_mirror::relay::{CriImages, Relay};
 use speculaire_mirror::tls::Tls;
 use speculaire_runtime::registries::Registries;
+use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
@@ -27,16 +28,15 @@ use crate::{systemd, telemetry};
 ///
 /// When the config is invalid, which stops startup before any listener opens (D30), or a listener cannot open.
 pub fn run(path: &Path) -> anyhow::Result<()> {
-    // The first read of the config starts the first interval of the polls: a file changed after it began is newer than
-    // it, and a poll finds it (D30). The registry config's first read comes later, so it starts no earlier.
-    let last_check = SystemTime::now();
+    // Stamped before the first read, so that a write during it is a change the first poll finds (D93).
+    let watch = Watch::new(vec![path.to_owned()]);
     let config = config::load(path)?;
     let logs = log::install(&config.log, &config.audit)?;
     let node = Node::new(&config);
     let node = preflight(&node)?;
     tokio::runtime::Runtime::new()
         .context("starting the runtime")?
-        .block_on(serve(path, last_check, config, logs, node))
+        .block_on(serve(path, watch, config, logs, node))
 }
 
 /// Refuses to start on a node where the agent would mirror or gate wrongly (D86), naming each file and key; returns the
@@ -64,7 +64,7 @@ fn preflight(node: &Node) -> anyhow::Result<RuntimeNode> {
 
 async fn serve(
     path: &Path,
-    mut last_check: SystemTime,
+    mut watch: Watch,
     mut config: Config,
     logs: Logs,
     node: RuntimeNode,
@@ -99,7 +99,7 @@ async fn serve(
     info!(%address, "status listener open");
     // `/readyz` answers 503 until the mirror listens (D45); an agent that cannot open it stops (D55).
     let registries = node.registries();
-    reload_registries(&*registries, None);
+    reload_registries(&*registries);
     let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
     status.mirror_listening();
     systemd::watchdog();
@@ -108,28 +108,26 @@ async fn serve(
     let mut period = config.config.poll_interval.get();
     let mut poll = interval_at(Instant::now() + period, period);
     poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // D30: a poll reloads when the file changed at or after the start of the previous read, so a file
-    // SIGHUP already read is not read again.
+    // D93: a poll reads a file again when it differs from its stamp, taken before the last read; SIGHUP always does.
     loop {
         tokio::select! {
             _ = terminate.recv() => break,
             _ = interrupt.recv() => break,
             _ = hangup.recv() => {
-                last_check = SystemTime::now();
+                watch = watch.again();
                 reload(path, &mut config, &logs);
                 mirror.apply(&config);
-                reload_registries(&*registries, None);
+                reload_registries(&*registries);
             }
             _ = poll.tick() => {
-                let start = SystemTime::now();
-                // A file that cannot be stat'ed is left to SIGHUP, which reports why.
-                let modified = std::fs::metadata(path).and_then(|m| m.modified());
-                if modified.is_ok_and(|m| m >= last_check) {
+                if watch.changed() {
+                    watch = watch.again();
                     reload(path, &mut config, &logs);
                     mirror.apply(&config);
                 }
-                reload_registries(&*registries, Some(last_check));
-                last_check = start;
+                if registries.changed() {
+                    reload_registries(&*registries);
+                }
             }
         }
         if config.config.poll_interval.get() != period {
@@ -177,16 +175,13 @@ fn reload(path: &Path, running: &mut Config, logs: &Logs) {
     }
 }
 
-/// Reads the registry config again (D91): all of it without `since`, what changed at or after it with. A config that
-/// is not valid stays unread: the one held serves, and the failure is logged once and counted. A credential,
-/// certificate or key file that cannot be used does not fail the read: each is logged, and the reload counts as one
-/// failure however many there are (D92).
-fn reload_registries(registries: &dyn Registries, since: Option<SystemTime>) {
-    match registries.reload(since) {
+/// Reads the registry config again (D91). A config that is not valid stays unread: the one held serves, and the failure
+/// is logged and counted. A credential, certificate or key file that cannot be used does not fail the read: each is
+/// logged, and the reload counts as one failure however many there are (D92).
+fn reload_registries(registries: &dyn Registries) {
+    match registries.reload() {
         Ok(reloaded) => {
-            if reloaded.changed {
-                debug!("registry config reloaded");
-            }
+            debug!("registry config reloaded");
             if !reloaded.problems.is_empty() {
                 metrics::counter!(telemetry::CONFIG_RELOAD_FAILURES).increment(1);
             }

@@ -1,50 +1,15 @@
 //! A registry config read once and handed to every request without a lock, read again when a file of it changes (D91).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
 
 use super::Error;
-
-/// How far below a watched directory a change is looked for: `hosts.toml` is two below its root, a drop-in one.
-const DEPTH: usize = 4;
-
-/// What a [`Live`] value was read from, and when it last changed.
-#[derive(Debug, Default)]
-pub(crate) struct Watch(Vec<PathBuf>);
-
-impl Watch {
-    pub(crate) fn new(paths: Vec<PathBuf>) -> Self {
-        Self(paths)
-    }
-
-    /// Whether a watched file, or a directory with its entries, was modified at or after `since`. What cannot be
-    /// looked at has not changed.
-    fn changed_since(&self, since: SystemTime) -> bool {
-        self.0
-            .iter()
-            .any(|path| newest(path, DEPTH).is_some_and(|modified| modified >= since))
-    }
-}
-
-/// The latest modification of `path` and, when it is a directory, of what is below it.
-fn newest(path: &Path, depth: usize) -> Option<SystemTime> {
-    let meta = std::fs::metadata(path).ok()?;
-    let own = meta.modified().ok();
-    if !meta.is_dir() || depth == 0 {
-        return own;
-    }
-    let below = std::fs::read_dir(path)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| newest(&entry.path(), depth - 1));
-    below.chain(own).max()
-}
+use crate::watch::Watch;
 
 struct Loaded<T> {
+    /// What the value was read from, stamped before the read (D93).
     watch: Watch,
     /// The text of why the last read failed, when no read has worked since.
     value: Result<Arc<T>, String>,
@@ -78,39 +43,44 @@ impl<T> Live<T> {
         }
     }
 
-    /// Reads again by `read`, which returns the paths its result depends on, and the result. With `since`, only when a
-    /// watched path was modified at or after it. A read that fails keeps the value held, if there is one.
-    ///
-    /// Returns whether the value was replaced.
+    /// Whether a watched path changed since the last read began.
+    pub(crate) fn changed(&self) -> bool {
+        self.state.load().watch.changed()
+    }
+
+    /// Reads again by `read`, which returns the paths its result depends on, and the result. A read that fails keeps
+    /// the value held, if there is one, and watches the paths it returns with those already watched: a fix to either is
+    /// a change, the same failure is not.
     ///
     /// # Errors
     ///
     /// When the read fails.
     pub(crate) fn reload(
         &self,
-        since: Option<SystemTime>,
         read: impl FnOnce() -> (Vec<PathBuf>, Result<T, Error>),
-    ) -> Result<bool, Error> {
+    ) -> Result<(), Error> {
         let current = self.state.load();
-        if since.is_some_and(|since| !current.watch.changed_since(since)) {
-            return Ok(false);
-        }
-        let (paths, value) = read();
+        let before = current.watch.again();
+        let (mut paths, value) = read();
         match value {
             Ok(value) => {
                 self.state.store(Arc::new(Loaded {
-                    watch: Watch::new(paths),
+                    watch: before.follow(paths),
                     value: Ok(Arc::new(value)),
                 }));
-                Ok(true)
+                Ok(())
             }
             Err(error) => {
-                if current.value.is_err() {
-                    self.state.store(Arc::new(Loaded {
-                        watch: Watch::new(paths),
-                        value: Err(error.to_string()),
-                    }));
-                }
+                paths.extend_from_slice(before.roots());
+                paths.sort_unstable();
+                paths.dedup();
+                self.state.store(Arc::new(Loaded {
+                    watch: before.follow(paths),
+                    value: match &current.value {
+                        Ok(held) => Ok(Arc::clone(held)),
+                        Err(_) => Err(error.to_string()),
+                    },
+                }));
                 Err(error)
             }
         }
@@ -119,8 +89,6 @@ impl<T> Live<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     fn ok(value: u32) -> (Vec<PathBuf>, Result<u32, Error>) {
@@ -135,81 +103,58 @@ mod tests {
     fn nothing_is_read_until_a_read_works() {
         let live = Live::<u32>::new();
         assert!(matches!(live.get(), Err(Error::Config(_))));
-        assert!(live.reload(None, || broken(Vec::new())).is_err());
+        assert!(live.reload(|| broken(Vec::new())).is_err());
         assert!(matches!(live.get(), Err(Error::Config(why)) if why == "registry config: bad"));
-        assert!(live.reload(None, || ok(1)).expect("a read"));
+        live.reload(|| ok(1)).expect("a read");
         assert_eq!(*live.get().expect("a value"), 1);
     }
 
     #[test]
     fn a_read_that_fails_keeps_the_value_held() {
         let live = Live::new();
-        live.reload(None, || ok(1)).expect("a read");
-        assert!(live.reload(None, || broken(Vec::new())).is_err());
+        live.reload(|| ok(1)).expect("a read");
+        assert!(live.reload(|| broken(Vec::new())).is_err());
         assert_eq!(*live.get().expect("a value"), 1);
-        live.reload(None, || ok(2)).expect("a read");
+        live.reload(|| ok(2)).expect("a read");
         assert_eq!(*live.get().expect("a value"), 2);
     }
 
     #[test]
-    fn a_read_since_a_time_happens_only_when_a_watched_path_changed() {
+    fn a_change_is_a_watched_path_that_differs_from_before_the_read() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let file = dir.path().join("sub/file");
-        std::fs::create_dir(dir.path().join("sub")).expect("a directory");
+        let file = dir.path().join("file");
         std::fs::write(&file, "a").expect("a file");
         let live = Live::new();
-        live.reload(None, || (vec![dir.path().to_owned()], Ok(1)))
+        live.reload(|| (vec![dir.path().to_owned()], Ok(0)))
             .expect("a read");
-        let past = SystemTime::now() - Duration::from_secs(3600);
-        let future = SystemTime::now() + Duration::from_secs(3600);
-        assert!(!live.reload(Some(future), || ok(2)).expect("no read"));
-        assert_eq!(*live.get().expect("a value"), 1);
-        // The files are newer than `past`: even one deep below the watched directory counts.
-        assert!(
-            live.reload(Some(past), || (vec![file.clone()], Ok(3)))
-                .expect("a read")
-        );
-        assert_eq!(*live.get().expect("a value"), 3);
-        // A path that is gone has not changed.
-        std::fs::remove_file(&file).expect("removed");
-        assert!(!live.reload(Some(future), || ok(4)).expect("no read"));
+        assert!(!live.changed());
+        // A write during the read: the read saw the old file, so the next look finds a change.
+        live.reload(|| {
+            std::fs::write(&file, "ab").expect("a write");
+            (vec![dir.path().to_owned()], Ok(1))
+        })
+        .expect("a read");
+        assert!(live.changed());
+        live.reload(|| (vec![dir.path().to_owned()], Ok(2)))
+            .expect("a read");
+        assert!(!live.changed());
     }
 
     #[test]
-    fn a_change_is_seen_down_to_the_depth_that_is_asked_and_no_further() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let file = dir.path().join("sub/file");
-        std::fs::create_dir(dir.path().join("sub")).expect("a directory");
-        std::fs::write(&file, "a").expect("a file");
-        let future = SystemTime::now() + Duration::from_secs(3600);
-        std::fs::File::options()
-            .write(true)
-            .open(&file)
-            .expect("the file")
-            .set_modified(future)
-            .expect("a modification time");
-        let own = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        // The directory itself at depth 0, what is in it at 1, what is in that at 2.
-        assert_eq!(newest(dir.path(), 0), own(dir.path()));
-        assert_eq!(
-            newest(dir.path(), 1),
-            own(&dir.path().join("sub")).max(own(dir.path()))
-        );
-        assert_eq!(newest(dir.path(), 2), Some(future));
-        assert_eq!(newest(&file, 0), Some(future));
-        assert_eq!(newest(&dir.path().join("none"), 3), None);
-    }
-
-    #[test]
-    fn the_paths_of_a_failed_first_read_are_still_watched() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let live = Live::<u32>::new();
-        let past = SystemTime::now() - Duration::from_secs(3600);
-        assert!(
-            live.reload(None, || broken(vec![dir.path().to_owned()]))
-                .is_err()
-        );
-        assert!(live.reload(Some(past), || ok(5)).expect("a read"));
-        assert_eq!(*live.get().expect("a value"), 5);
+    fn the_paths_of_a_failed_read_are_watched_with_those_of_the_value_held() {
+        let held = tempfile::tempdir().expect("a temporary directory");
+        let new = tempfile::tempdir().expect("a temporary directory");
+        for changed in [&held, &new] {
+            let live = Live::new();
+            live.reload(|| (vec![held.path().to_owned()], Ok(1)))
+                .expect("a read");
+            assert!(live.reload(|| broken(vec![new.path().to_owned()])).is_err());
+            // The failure is not a change: the next poll says nothing more.
+            assert!(!live.changed());
+            let file = changed.path().join("file");
+            std::fs::write(&file, "a").expect("a file");
+            assert!(live.changed());
+            std::fs::remove_file(&file).expect("removed");
+        }
     }
 }

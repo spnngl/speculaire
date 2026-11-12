@@ -130,27 +130,25 @@ pub trait Registries: Send + Sync {
     /// When the registry config cannot be read, or `name` has no registry and repository in it.
     fn sources(&self, name: &str, reference: Reference<'_>) -> Result<Vec<Source>, Error>;
 
+    /// Whether a file or directory the registry config was read from changed since the last `reload` began (D93).
+    fn changed(&self) -> bool;
+
     /// Reads the registry config again. `sources` never reads the registry config from disk: what it answers is what the
     /// last successful `reload` read (D91).
-    ///
-    /// With `since`, only when a file of the config was modified at or after it; without, always, whatever the
-    /// modification times say.
     ///
     /// # Errors
     ///
     /// When the registry config cannot be read or is not valid, naming the file and the place in it. The config held
     /// stays in use, if there is one. A credential, certificate or key file that cannot be used is no error: see
     /// [`Reloaded::problems`].
-    fn reload(&self, since: Option<std::time::SystemTime>) -> Result<Reloaded, Error>;
+    fn reload(&self) -> Result<Reloaded, Error>;
 }
 
 /// What a [`Registries::reload`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Reloaded {
-    /// Whether the registry config held was replaced.
-    pub changed: bool,
     /// What the new config does without, one text each: a credential, certificate or key file that cannot be used
-    /// leaves only the hosts it is for anonymous, or without it (D92). Empty when nothing was read.
+    /// leaves only the hosts it is for anonymous, or without it (D92).
     pub problems: Vec<String>,
 }
 
