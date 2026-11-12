@@ -18,11 +18,11 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43)
 - D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
-- D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65)
+- D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66)
-- D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65)
+- D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81)
 - D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60)
 - D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable` (amended by D66, D78)
 - D18 [gate](gate.md): `gate.exempt` is explicit and empty by default
@@ -78,7 +78,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7)
 - D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61)
 - D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53)
-- D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29; amended by D79, D80)
+- D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29; amended by D79, D80, D81)
 - D71 [build](build.md): cargo-vet holds every crate version of `Cargo.lock` to an imported audit, a trusted publisher or an exemption, in `deps (deny)` inside `required`; bumps of exempted crates are renewed by hand (amends D27)
 - D72 [build](build.md): the `coverage` job uploads line coverage for the ruleset's `code_coverage` rule and `required` needs it; cargo-nextest runs the tests of `just check` and `just cov`, killing hung tests (amends D27, D48)
 - D74 [build](build.md): cargo-mutants tests the diff of each pull request in up to 4 shards, outside `required`; every package's tests run for each mutant, a hang killed by nextest counts as caught, one change is excluded (amends D27)
@@ -91,4 +91,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 
 - D80 [distribution](distribution.md): the CRI-O module reads what go.podman.io/image reads, from the files its `configfile` searches; credential helpers are not run, aliases are not parsed (amends D66, D70)
 
-Next free number: D81.
+- D81 [gate](gate.md): references and platforms are parsed as containerd's CRI plugin parses them (`ParseDockerRef`, `platforms.Only`), by a port that only its parser can build (amends D11, D15, D70)
+
+Next free number: D82.

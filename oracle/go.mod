@@ -6,7 +6,10 @@ go 1.26.6
 require (
 	github.com/containerd/containerd/v2 v2.4.2
 	github.com/containerd/nri v0.12.3
+	github.com/containerd/platforms v1.0.0-rc.5
 	github.com/containerd/plugin v1.1.0
+	github.com/distribution/reference v0.6.0
+	github.com/opencontainers/image-spec v1.1.1
 	github.com/sirupsen/logrus v1.10.2
 	go.podman.io/image/v5 v5.40.0
 )
@@ -41,7 +44,6 @@ require (
 	github.com/containerd/log v0.2.0 // indirect
 	github.com/containerd/log/otel v0.1.0 // indirect
 	github.com/containerd/otelttrpc v0.1.0 // indirect
-	github.com/containerd/platforms v1.0.0-rc.5 // indirect
 	github.com/containerd/ttrpc v1.2.9 // indirect
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
 	github.com/containerd/zfs/v2 v2.0.0 // indirect
@@ -51,7 +53,6 @@ require (
 	github.com/containers/ocicrypt v1.3.2 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
-	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.7 // indirect
 	github.com/docker/go-connections v0.7.0 // indirect
@@ -93,7 +94,6 @@ require (
 	github.com/moby/sys/userns v0.2.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
-	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runtime-spec v1.3.0 // indirect
 	github.com/opencontainers/selinux v1.15.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect

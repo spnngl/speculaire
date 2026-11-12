@@ -1,0 +1,21 @@
+[package]
+name = "speculaire-oci"
+description = "OCI image references and platforms, parsed and normalized as containerd does"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+oci-spec.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+speculaire-oracle-harness.workspace = true
+
+[lints]
+workspace = true

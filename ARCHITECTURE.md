@@ -114,14 +114,14 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/agent` | The agent: config (D60), logs (D37), metrics (D34) and status listener (D42, D45) |
 | `crates/registry-config` | The *registry config* parsers, a module per runtime: containerd's `config.toml` and `hosts.toml` (D17, D78); CRI-O's `registries.conf`, `certs.d` and credential files (D66, D80) |
 | `crates/oracle-harness` | Test helper: runs `speculaire-oracle` and reads its answers; the differential tests of the parsers use it (D70, D79) |
-| `crates/oci` | Distribution read API, referrers, media types, registry Bearer token auth (on `oci-spec`) (planned) |
+| `crates/oci` | Image references and platforms as containerd parses them (D81); later the Distribution read API, referrers, media types and registry Bearer token auth, on `oci-spec` |
 | `crates/runtime` | containerd and CRI-O, one module each: content source (containerd's directory + gRPC fallback, or the *blob cache*), image events, in-memory copy of the image store, preflight (planned) |
 | `crates/pki` | kubelet certificate loading and rotation, rustls verifiers (D16), local mirror CA (D14) (planned) |
 | `crates/reflect` | Protobuf, reflector server, agent client, membership (D2) (planned) |
 | `crates/verify` | Artifact discovery and *artifact store*, sigstore glue, policy, SBOM checks, verdict cache (planned) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data, a workspace of its own, run by `just fuzz <target>` and nightly; `just check` replays their seeds on stable (D27). `config` takes raw bytes and `config_values` a config file written from the keys (D75) |
-| `oracle/` | Go module, test-only: `speculaire-oracle`, upstream's own code for differential tests, `version`, `hosts`, `config`, `registries`, `certs` and `auth` today, run by `just oracle` with the Rust differential tests (D29, D70, D79); a fake NRI runtime later |
+| `oracle/` | Go module, test-only: `speculaire-oracle`, upstream's own code for differential tests, `version`, `hosts`, `config`, `registries`, `certs`, `auth`, `reference` and `platform` today, run by `just oracle` with the Rust differential tests (D29, D70, D79); a fake NRI runtime later |
 | `packaging/` | `config.toml`, the reference of every setting (D30, D47); `speculaire.service`, the systemd unit (D53, D69); nfpm config, runtime drop-in examples, later the Helm chart (planned) |
 | `e2e/` | kind node image per runtime (`node/containerd/`, `node/crio/`), cluster config, and the suites (the node, the unit): a Rust test crate run by `just e2e <runtime> <version> [<kubernetes minor>]` (D59, D63, D69) |
 | `bench/` | Benchmarks against Spegel: recipe, node-access pod, policy, results (D35) (planned) |

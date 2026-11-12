@@ -1,0 +1,1 @@
+OnlyStrict(%q).Match(%q) should return %v, but returns %v

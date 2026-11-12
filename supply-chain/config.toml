@@ -46,12 +46,44 @@ criteria = "safe-to-deploy"
 version = "1.0.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.const_format]]
+version = "0.2.37"
+criteria = "safe-to-deploy"
+
+[[exemptions.const_format_proc_macros]]
+version = "0.2.37"
+criteria = "safe-to-deploy"
+
 [[exemptions.crossbeam-epoch]]
 version = "0.9.21"
 criteria = "safe-to-deploy"
 
 [[exemptions.crossbeam-utils]]
 version = "0.8.23"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling]]
+version = "0.20.11"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling_core]]
+version = "0.20.11"
+criteria = "safe-to-deploy"
+
+[[exemptions.darling_macro]]
+version = "0.13.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.derive_builder]]
+version = "0.20.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.derive_builder_core]]
+version = "0.20.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.derive_builder_macro]]
+version = "0.20.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.evmap]]
@@ -82,6 +114,10 @@ criteria = "safe-to-deploy"
 version = "0.3.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.getset]]
+version = "0.1.7"
+criteria = "safe-to-deploy"
+
 [[exemptions.hashbag]]
 version = "0.1.13"
 criteria = "safe-to-deploy"
@@ -92,6 +128,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
 version = "0.3.107"
+criteria = "safe-to-deploy"
+
+[[exemptions.konst]]
+version = "0.2.20"
+criteria = "safe-to-deploy"
+
+[[exemptions.konst_macro_rules]]
+version = "0.2.19"
 criteria = "safe-to-deploy"
 
 [[exemptions.lazy_static]]
@@ -144,6 +188,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.multimap]]
 version = "0.10.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.oci-spec]]
+version = "0.10.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.once_cell]]

@@ -12,7 +12,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The GitHub *release* attestation (`in-toto.io/attestation/release/v0.2`, a v0.3 bundle with an RFC 3161 timestamp and no log entry) is rejected: `bundle must have an inclusion proof`. We don't use it.
 - **Revisit when:** —
 
-## D11: Policy shape and image matching (amended by D65)
+## D11: Policy shape and image matching (amended by D65, D81)
 
 - **Decision:**
   - The policy is a file shaped like `ClusterImagePolicy`. *authorities* pass if any one passes; *attestations* pass only if all do. v1 conditions are predicateType presence plus the SBOM checks in D12; CEL comes later.

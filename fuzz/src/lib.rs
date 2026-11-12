@@ -16,6 +16,8 @@ mod values;
 use std::path::Path;
 
 use speculaire_agent::config;
+use speculaire_oci::platform::{self as oci_platform, Host, Matcher};
+use speculaire_oci::reference::Reference;
 use speculaire_registry_config::containerd::config::{self as containerd_config_file, Registry};
 use speculaire_registry_config::containerd::hosts;
 use speculaire_registry_config::crio::{auth, registries};
@@ -31,6 +33,8 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("hosts_toml", hosts_toml),
     ("registries_conf", registries_conf),
     ("auth_json", auth_json),
+    ("reference", reference),
+    ("platform", platform),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -161,5 +165,57 @@ fn round_trip(text: &str) {
     match config::parse(&printed) {
         Ok(again) => assert_eq!(again, parsed, "round trip through\n{printed}"),
         Err(err) => panic!("a serialized config parses: {err}\n{printed}"),
+    }
+}
+
+/// An image reference as the CRI plugin parses it (D11, D81).
+///
+/// A reference that parses prints as text that parses to the same reference, and never has a tag together with a
+/// digest.
+///
+/// # Panics
+///
+/// When parsing panics, or a parsed reference is not a fixed point.
+pub fn reference(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    if let Ok(parsed) = Reference::parse_docker_ref(text) {
+        assert!(
+            parsed.tag().is_none() || parsed.digest().is_none(),
+            "a docker reference keeps one of tag and digest: {text}"
+        );
+        assert_eq!(
+            Reference::parse_docker_ref(&parsed.to_string()).as_ref(),
+            Ok(&parsed),
+            "{text}"
+        );
+    }
+}
+
+/// A platform specifier as containerd parses it (D15, D81).
+///
+/// A platform that parses normalizes to itself, and matches itself.
+///
+/// # Panics
+///
+/// When parsing or matching panics, or a parsed platform breaks one of those.
+pub fn platform(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let host = Host::current();
+    let Ok(parsed) = oci_platform::parse(text, &host) else {
+        return;
+    };
+    let normal = oci_platform::normalize(&parsed, &host);
+    assert_eq!(oci_platform::normalize(&normal, &host), normal, "{text}");
+    // A variant that counts to a million makes `Only` list a million platforms, as it does in Go.
+    let huge = parsed
+        .variant()
+        .as_deref()
+        .is_some_and(|variant| variant.trim_start_matches('v').len() > 3);
+    if !huge && let Ok(strict) = Matcher::only_strict(&parsed, &host) {
+        assert!(strict.matches(&parsed), "{text}");
     }
 }
