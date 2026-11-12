@@ -1,6 +1,7 @@
 //! Case-insensitive keys: go-toml, which containerd reads TOML with, matches the key of a struct field in any case
-//! (`Server`, `CA` and `Skip_Verify` are `server`, `ca` and `skip_verify`; `unmarshaler.go:2165` in go-toml v2.4.3).
-//! Map keys, such as host names and plugin names, stay exact.
+//! (`Server`, `CA` and `Skip_Verify` are `server`, `ca` and `skip_verify`; `unmarshaler.go:2165` in go-toml v2.4.3), and
+//! so does BurntSushi/toml, which CRI-O's image library reads `registries.conf` with. Map keys, such as host names and
+//! plugin names, stay exact.
 //!
 //! serde matches exactly, so the keys of a document that name a field are renamed before it is read. When two
 //! spellings of a field meet, go-toml sets the field once for each: tables merge into one, and of two other values
@@ -11,15 +12,45 @@ use std::borrow::Cow;
 use toml::de::{DeTable, DeValue};
 use toml::{Spanned, Table, Value};
 
-/// Renames the keys of `table` that name one of `fields` in another case, merging two spellings of one field.
-pub(crate) fn fold_fields(table: &mut DeTable<'_>, fields: &[&'static str]) {
+/// Whether `key` names `field`, a name in ASCII lower case, as go-toml matches them: by `strings.ToLower`, which also
+/// lowers K (U+212A) to k and İ (U+0130) to i.
+pub(crate) fn go_toml(key: &str, field: &str) -> bool {
+    folds_to(key, field, |c, n| {
+        matches!((c, n), ('\u{212a}', 'k') | ('\u{130}', 'i'))
+    })
+}
+
+/// Whether `key` names `field`, a name in ASCII lower case, as BurntSushi/toml matches them: by `strings.EqualFold`,
+/// which also folds K (U+212A) to k and ſ (U+017F) to s.
+pub(crate) fn equal_fold(key: &str, field: &str) -> bool {
+    folds_to(key, field, |c, n| {
+        matches!((c, n), ('\u{212a}', 'k') | ('\u{17f}', 's'))
+    })
+}
+
+/// Whether each character of `key` is that of `field` in any ASCII case, or a non-ASCII one that `folds` to it.
+fn folds_to(key: &str, field: &str, folds: impl Fn(char, char) -> bool) -> bool {
+    let mut chars = key.chars();
+    field.chars().all(|n| {
+        chars
+            .next()
+            .is_some_and(|c| c.eq_ignore_ascii_case(&n) || folds(c, n))
+    }) && chars.next().is_none()
+}
+
+/// Renames the keys of `table` that name one of `fields` in another case, as `names` matches them, merging two
+/// spellings of one field.
+pub(crate) fn fold_fields(
+    table: &mut DeTable<'_>,
+    fields: &[&'static str],
+    names: fn(&str, &str) -> bool,
+) {
     let renames: Vec<(Spanned<Cow<'_, str>>, &'static str)> = table
         .keys()
         .filter_map(|key| {
-            let lower = key.as_ref().to_lowercase();
             fields
                 .iter()
-                .find(|field| **field == lower && **field != key.as_ref())
+                .find(|field| **field != key.as_ref() && names(key.as_ref(), field))
                 .map(|field| (key.clone(), *field))
         })
         .collect();
@@ -84,7 +115,7 @@ pub(crate) fn fold_value_fields(table: &mut Table, fields: &[&'static str]) {
         // go-toml sees the keys in byte order, which is the order of the map: the last spelling is set last.
         let spellings: Vec<String> = table
             .keys()
-            .filter(|key| key.to_lowercase() == *field)
+            .filter(|key| go_toml(key, field))
             .cloned()
             .collect();
         let merged = spellings
@@ -128,4 +159,38 @@ pub(crate) fn value_tables_in(table: &mut Table) -> impl Iterator<Item = &mut Ta
         Value::Table(inner) => Some(inner),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{equal_fold, go_toml};
+
+    #[test]
+    fn a_key_names_a_field_as_each_library_folds_it() {
+        for key in [
+            "skip_verify",
+            "Skip_Verify",
+            "s\u{212a}ip_verify",
+            "s\u{212a}\u{130}p_verify",
+        ] {
+            assert!(go_toml(key, "skip_verify"), "{key}");
+        }
+        for key in [
+            "\u{17f}kip_verify",
+            "skip_verif",
+            "skip_verifyy",
+            "skip-verify",
+        ] {
+            assert!(!go_toml(key, "skip_verify"), "{key}");
+        }
+        for key in ["insecure", "INSECURE", "in\u{17f}ecure", "bloc\u{212a}ed"] {
+            assert!(
+                equal_fold(key, "insecure") || equal_fold(key, "blocked"),
+                "{key}"
+            );
+        }
+        for key in ["\u{130}nsecure", "insecur", "insecures"] {
+            assert!(!equal_fold(key, "insecure"), "{key}");
+        }
+    }
 }
