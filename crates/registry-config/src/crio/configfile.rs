@@ -199,7 +199,9 @@ fn drop_ins(dirs: &[PathBuf], suffix: &str) -> Result<Vec<PathBuf>, ReadError> {
             }
         }
     }
-    Ok(by_name.into_values().collect())
+    let mut files: Vec<PathBuf> = by_name.into_values().collect();
+    files.reverse();
+    Ok(files)
 }
 
 #[cfg(test)]
