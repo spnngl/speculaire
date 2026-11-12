@@ -2,6 +2,10 @@
 
 Open questions, each with a proposed default. Once a question is answered, record the answer as a decision (`docs/decisions/README.md`) and delete the question.
 
+## Before M2 step 06
+
+- **Where does the agent learn CRI-O's `global_auth_file`?** On CRI-O the library reads credentials from `global_auth_file` of `crio.conf` alone when it is set (D80), and the agent has no access to CRI-O's configuration. [The agent reads `[crio.image] global_auth_file` from `/etc/crio/crio.conf` and its `crio.conf.d` drop-ins, in file-name order, as CRI-O does, and uses the default search when none sets it. Amends D80.]
+
 ## Before M5
 
 - **Do identity regexes match the whole string?** D8 makes regex identity matching ours, and no decision says whether a policy's `subjectRegExp` and `issuerRegExp` must cover the whole SAN and issuer. Rust's `Regex::is_match`, like Go's `MatchString` in policy-controller and cosign, matches a substring, so `https://github.com/myorg/` also matches `https://github.com/myorg-evil/`. [Each regex is compiled as `^(?:…)$`, so it matches the whole string. A policy ported from policy-controller can only become stricter, and `docs/operations.md` says so. Amends D11.]

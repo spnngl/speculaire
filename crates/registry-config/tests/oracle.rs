@@ -1,6 +1,8 @@
 //! The registry config parsers against containerd's own code (D29, D70): the same cases go to `speculaire-oracle` and
 //! to the Rust port, and the answers must be the same.
 //!
+//! The cases of CRI-O's config are in `oracle/crio.rs`.
+//!
 //! The cases are containerd's test cases (`hosts_test.go`, `config_test.go` at v2.4.2), the config of the e2e node
 //! images, and the seeds of the fuzz targets. Without `SPECULAIRE_ORACLE` the tests skip, as in `just check`; `just
 //! oracle` sets it, and then a missing binary fails them.
@@ -25,6 +27,9 @@ use speculaire_registry_config::containerd::hosts::{self, HostConfig, RegistryHo
 /// A self-signed certificate and its key: files that Go's TLS code loads.
 const CA: &str = include_str!("data/test-ca.pem");
 const KEY: &str = include_str!("data/test-key.pem");
+
+#[path = "oracle/crio.rs"]
+mod crio;
 
 fn oracle() -> Option<Oracle> {
     match Oracle::from_env() {
@@ -57,6 +62,33 @@ fn normalise(value: &mut Value) {
     }
 }
 
+/// Where two answers first differ: the path, and both values.
+fn first_difference(ours: &Value, theirs: &Value, path: &str) -> String {
+    match (ours, theirs) {
+        (Value::Object(a), Value::Object(b)) => {
+            for key in a.keys().chain(b.keys()) {
+                let (x, y) = (
+                    a.get(key).unwrap_or(&Value::Null),
+                    b.get(key).unwrap_or(&Value::Null),
+                );
+                if x != y {
+                    return first_difference(x, y, &format!("{path}.{key}"));
+                }
+            }
+            format!("{path}: objects differ")
+        }
+        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
+            for (n, (x, y)) in a.iter().zip(b).enumerate() {
+                if x != y {
+                    return first_difference(x, y, &format!("{path}[{n}]"));
+                }
+            }
+            format!("{path}: arrays differ")
+        }
+        _ => format!("{path}: rust {ours}, oracle {theirs}"),
+    }
+}
+
 fn expect_same(subcommand: &str, labelled: &[(String, Value, Value)]) {
     let mut failures = Vec::new();
     let mut compared = 0;
@@ -69,18 +101,26 @@ fn expect_same(subcommand: &str, labelled: &[(String, Value, Value)]) {
         normalise(&mut ours);
         normalise(&mut theirs);
         if ours != theirs {
-            failures.push(format!("{label}\n  rust:   {ours}\n  oracle: {theirs}"));
+            failures.push(format!(
+                "{label}\n  {}",
+                first_difference(&ours, &theirs, "")
+            ));
         }
     }
     assert!(
         failures.is_empty(),
-        "{} of {} {subcommand} cases differ from containerd:\n{}",
+        "{} of {} {subcommand} cases differ from the oracle:\n{}",
         failures.len(),
         compared,
-        failures.join("\n")
+        failures
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     eprintln!(
-        "oracle: {compared} of {} {subcommand} cases agree with containerd, the rest has no stable answer",
+        "oracle: {compared} of {} {subcommand} cases agree with the oracle, the rest has no stable answer",
         labelled.len()
     );
 }
@@ -894,7 +934,10 @@ fn hosts_agree_with_containerd() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let mut cases = hosts_cases(dir.path());
     // The seeds of the fuzz target: each is the `hosts.toml` of `docker.io`.
-    for (n, text) in seeds_and_mutations("hosts_toml").into_iter().enumerate() {
+    for (n, text) in seeds_and_mutations("hosts_toml", 400)
+        .into_iter()
+        .enumerate()
+    {
         let root = dir.path().join(format!("seed-{n}"));
         cases.push((
             format!("seed {n}"),
@@ -1468,7 +1511,7 @@ fn config_agrees_with_containerd() {
     let Some(oracle) = oracle() else { return };
     let dir = tempfile::tempdir().expect("a temporary directory");
     let mut cases = config_cases(dir.path());
-    for (n, text) in seeds_and_mutations("containerd_config")
+    for (n, text) in seeds_and_mutations("containerd_config", 400)
         .into_iter()
         .enumerate()
     {
@@ -1494,7 +1537,7 @@ fn config_agrees_with_containerd() {
 
 /// The seeds, and for each of them mutations that a fuzzer would try: bytes deleted, replaced by one of the seed's own,
 /// or inserted. A fixed generator keeps the cases the same on every run.
-fn seeds_and_mutations(target: &str) -> Vec<String> {
+fn seeds_and_mutations(target: &str, per_seed: usize) -> Vec<String> {
     let mut state: u64 = 0x2545_F491_4F6C_DD1D;
     let mut next = move |bound: usize| {
         state ^= state << 13;
@@ -1506,7 +1549,7 @@ fn seeds_and_mutations(target: &str) -> Vec<String> {
     let mut texts = Vec::new();
     for seed in seeds(target) {
         texts.push(String::from_utf8_lossy(&seed).into_owned());
-        for _ in 0..400 {
+        for _ in 0..per_seed {
             let mut bytes = seed.clone();
             for _ in 0..=next(3) {
                 if bytes.is_empty() {

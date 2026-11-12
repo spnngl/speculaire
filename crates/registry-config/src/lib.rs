@@ -5,6 +5,7 @@
 //! and the runtime agree on every file. Credentials and header values are [`secrecy::SecretString`]s (D37).
 
 pub mod containerd;
+pub mod crio;
 mod error;
 mod fold;
 mod go;

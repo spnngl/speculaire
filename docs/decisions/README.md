@@ -74,11 +74,11 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59)
 - D64 [gate](gate.md): the same NRI plugin gates CRI-O; the agent finds its runtime by probing both sockets, and reads CRI-O's NRI keys from `GET /config` on `crio.sock` (amends D9, D41, D54)
 - D65 [gate](gate.md): on CRI-O the image identity is the `ImageRef` annotation (the config digest), policies match every name of the image, and `images.json` changes trigger verification; no pinning (amends D11, D15, D20, D21, D22)
-- D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32)
+- D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32; amended by D80)
 - D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7)
 - D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61)
 - D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53)
-- D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29; amended by D79)
+- D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29; amended by D79, D80)
 - D71 [build](build.md): cargo-vet holds every crate version of `Cargo.lock` to an imported audit, a trusted publisher or an exemption, in `deps (deny)` inside `required`; bumps of exempted crates are renewed by hand (amends D27)
 - D72 [build](build.md): the `coverage` job uploads line coverage for the ruleset's `code_coverage` rule and `required` needs it; cargo-nextest runs the tests of `just check` and `just cov`, killing hung tests (amends D27, D48)
 - D74 [build](build.md): cargo-mutants tests the diff of each pull request in up to 4 shards, outside `required`; every package's tests run for each mutant, a hang killed by nextest counts as caught, one change is excluded (amends D27)
@@ -89,4 +89,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D78 [distribution](distribution.md): one `registry-config` crate holds both runtimes' parsers and reads what containerd reads: versions 1 to 4, any key case, credentials per host as secrets, ignored keys ignored (amends D17)
 - D79 [build](build.md): `just oracle` also runs the Rust differential tests against the binary, mutated fuzz seeds included; the oracle reaches containerd's unexported parsers by linkname (amends D29, D70)
 
-Next free number: D80.
+- D80 [distribution](distribution.md): the CRI-O module reads what go.podman.io/image reads, from the files its `configfile` searches; credential helpers are not run, aliases are not parsed (amends D66, D70)
+
+Next free number: D81.

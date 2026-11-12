@@ -298,7 +298,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** D61's revisit, in M6.
 
 
-## D70: The oracle lands with its pins and `version`; each subcommand lands with the port it checks (amends D29; amended by D79)
+## D70: The oracle lands with its pins and `version`; each subcommand lands with the port it checks (amends D29; amended by D79, D80)
 
 - **Decision:**
   - `oracle/` is the Go module `github.com/spnngl/speculaire/oracle`. M1 ships it with one subcommand, `speculaire-oracle version`, which prints the containerd and NRI versions it links, from its build info, as one JSON line: `{"containerd":"v2.4.2","nri":"v0.12.3"}`.
