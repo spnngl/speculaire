@@ -408,6 +408,24 @@ fn a_poll_reloads_a_changed_file() {
 }
 
 #[test]
+fn a_poll_reloads_a_file_changed_after_startup_read_it() {
+    let mut agent = Agent::start("[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"info\"\n");
+    // A write during preflight: after the config was read, before the listeners open.
+    let line = agent.line(&["preflight passed"]);
+    let (_, rest) = line.split_once(r#""timestamp":""#).unwrap();
+    let (stamp, _) = rest.split_once('"').unwrap();
+    let during = humantime::parse_rfc3339(stamp).unwrap();
+    agent.rewrite("[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n");
+    std::fs::File::options()
+        .write(true)
+        .open(&agent.config)
+        .unwrap()
+        .set_modified(during)
+        .unwrap();
+    agent.line(&[RELOADED]);
+}
+
+#[test]
 fn a_restart_key_keeps_its_running_value() {
     let mut agent = Agent::start("");
     let other = free_port();
