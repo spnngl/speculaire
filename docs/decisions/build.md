@@ -56,8 +56,8 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 ## D19: Dev loop is Docker plus CI (amended by D57)
 
 - **Decision:**
-  - Locally (macOS), build and test inside `rust:<channel>-alpine` containers, and run e2e with kind on Docker through `just e2e <containerd-version>`.
-  - CI runs the same recipes on native amd64 and arm64 runners, against containerd 2.3 and 2.4.
+  - Locally (macOS), build and test inside `rust:<channel>-alpine` containers, and run e2e with kind on Docker through `just e2e` (D63).
+  - CI runs the same recipes on native amd64 and arm64 runners.
 - **Because:**
   - Docker already gives a native Linux arm64 environment on the Mac.
   - kind nodes run systemd, so the agent runs as a real unit inside them.
@@ -130,7 +130,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Production code is pure Rust.
   - `oracle/` is a separate Go module whose `go.mod` pins `containerd/containerd` at the newest supported 2.4.x, and `containerd/nri` at the version that containerd vendors. Renovate tracks both pins. Containerd 2.3's NRI behaviour stays covered by e2e. The module builds one test-only binary, `speculaire-oracle`, with these subcommands:
     - `nri-runtime`: a fake NRI runtime on `pkg/adaptation` (`adaptation.New(name, version, …)`, `adaptation.go:172`). It drives the `nri` crate through registration, `Configure`, a `Synchronize` split into several requests, and `CreateContainer`, with no containerd running.
-    - `hosts`, `config`, `reference`, `platform` and `nri-version`: each reads cases as JSON lines on stdin and prints upstream's own result. The sources are, in order: `core/remotes/docker/config`, the config loader, `pkg/reference/docker`, `platforms`, and NRI's `api.InferVersionFromRuntime` (D9).
+    - `hosts`, `config`, `reference`, `platform` and `nri-version`: each reads cases as JSON lines on stdin and prints upstream's own result. The sources are, in order: `core/remotes/docker/config`, the config loader, `github.com/distribution/reference`, `platforms`, and NRI's `api.InferVersionFromRuntime` (D9).
   - Differential tests feed the same cases to our Rust ports and to the oracle, and require identical output. The cases are containerd's own test cases, the e2e node configs and the fuzz corpus.
   - `just oracle` builds and runs the oracle inside a digest-pinned `golang:<version>-alpine` image, so no Go is needed on the host. In CI it is the `oracle` job of `ci`, a dependency of `required`.
   - The oracle never appears in release artifacts, packages or images, and no Rust crate depends on it.
@@ -210,7 +210,6 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `rust-toolchain.toml` pins stable `1.99.1` with clippy and rustfmt; the justfile pins one nightly, for rustfmt (`rustfmt.toml` uses unstable options) and `-Z` flags. `rust-version` is `1.95`, which `just msrv` checks.
   - `build/Containerfile` is the one build image, from the digest-pinned `rust:<channel>-alpine` whose tag is the pinned stable. Its `build` stage has lld, mimalloc's C toolchain, just, cargo-auditable and rust-audit-info; its `dev` stage adds the nightly rustfmt and the tools of `just check` and the dependency checks.
   - On macOS, `just dev <recipe>` runs any recipe in the `dev` stage; `just musl <target>` builds in the `build` stage. Named volumes keep the cargo registry and each architecture's target directory between runs. `SPECULAIRE_CONTAINER` picks the engine, default `docker`.
-  - `crates/speculaire` is a binary crate only until a module needs a fuzz target or an integration test; then it gains `src/lib.rs`.
 - **Because:**
   - A new stable brings new clippy lints, which `-D warnings` turns into errors: an unpinned toolchain breaks the check without a change in the code. Renovate bumps the pin and the image tag together.
   - One image for both local runs and the musl build keeps one list of tool versions. Recipes that re-run themselves in a container when they detect macOS would hide where they run.

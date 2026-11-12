@@ -31,7 +31,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 
 - **Decision:**
   - After a stream drops, the agent waits a random delay between 0 and 5 s, then retries with exponential backoff and full jitter, from 1 s up to 60 s.
-  - `speculaire-loadgen` (crate `crates/loadgen`, `publish = false`, never packaged) simulates agents. Each simulated agent has its own node certificate from a test CA, made with `rcgen`, and sends `Hello`, a `Snapshot`, `Delta`s and `Lookup`s.
+  - `speculaire-loadgen` (crate `apps/loadgen` (D62), `publish = false`, never packaged) simulates agents. Each simulated agent has its own node certificate from a test CA, made with `rcgen`, and sends `Hello`, a `Snapshot`, `Delta`s and `Lookup`s.
   - **Targets** for one reflector with 10k simulated agents × 2k blobs (20M pairs), under 5k lookups/s and 1k deltas/s:
     - RSS, read by the load generator from `/proc/<pid>/status` (speculaire exports no process metrics, D34), at most 1 GiB. The goal is at most 256 MiB: the run reports it, but missing it does not fail the run;
     - server-side lookup p99 at most 500 µs;

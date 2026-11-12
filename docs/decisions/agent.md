@@ -84,7 +84,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 
 ## D42: `/metrics`, `/readyz` and `/livez` listen on `metrics.address`, plain HTTP (amended by D45)
 
-- **Decision:** one HTTP listener serves `/metrics`, `/readyz` and `/livez` on `metrics.address`, port 7482 (default address: D45). It is plain HTTP without authentication, and a restart key (D30).
+- **Decision:** one HTTP listener serves `/metrics`, `/readyz` and `/livez` on `metrics.address`, port 7482 (default address: D45). It is plain HTTP without authentication, and a restart key (D47).
 - **Because:**
   - It is what Prometheus scrapes on every node without extra credentials, as with node-exporter.
   - The catalog holds no secret and no per-pod or per-image label (D34), so the endpoints reveal only counts.
@@ -110,7 +110,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
     - `verify.policy = "/etc/speculaire/policy.yaml"` (D26);
     - `verify.trusted_root = ""`: empty follows the Sigstore public-good root through TUF; a path pins a `trusted_root.json` (D26);
     - `reflector.listen = "[::]:7483"`, and `prewarm.images = []` (image references, D26), both read only with `role = "reflector"`.
-  - **Restart keys:** `role`, `mirror.address` (D56), `metrics.address`, `reflector.listen`, `peer.address`, `reflector.url`, `reflector.members`, `nri.socket` and certificate paths. Every other key reloads live, including `config.poll_interval`, `shutdown.drain_timeout`, `verify.policy`, `verify.trusted_root` and `prewarm.*`.
+  - **Restart keys:** the fields of `Config` typed `Restart<T>` (`crates/agent/src/config.rs`), which `packaging/config.toml` marks with "Restart". Every other key reloads live.
 - **Because:**
   - D30 makes `packaging/config.toml` the only list of settings, so a key that exists only in prose cannot be checked.
   - A file of commented defaults parses to `Config::default()` whatever the defaults are; uncommenting makes the test compare values.
@@ -157,7 +157,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
     - `reflector.members = []`, a list of `{ node = "<node name>", address = "<ip:port>" }`.
   - **Value syntax:** durations are strings that `humantime` reads (`"300ms"`, `"10m"`); sizes are strings with a binary unit (`"64MiB"`; `B`, `KiB`, `MiB`, `GiB`, `TiB`); paths are absolute; `config.poll_interval` is longer than zero; `peer.max_uploads` and `prewarm.seeds` are at least 1; `log.filter` must parse as an `EnvFilter`. Each value parses once into a type that prints back as written. `gate.exempt.images` and `prewarm.images` stay strings until the gate compiles its globs and the reflector resolves its references.
   - The reload class lives in the type: each restart key (D47) is a `Restart<T>`.
-  - `check-config` reports the file, line, column and dotted key, such as `line 22, column 1: gate.unmached: unknown field`. It checks the file alone until the agent reads containerd's config (D41, D54) and the policy and trust root (D26).
+  - `check-config` reports the file, line, column and dotted key, such as `line 22, column 1: gate.unmached: unknown field`.
   - Two tests hold `packaging/config.toml` to the code: the uncommented file parses to `Config::default()` (D47), and its TOML equals `Config::default()` serialized, so a key missing from the file fails. A third fails when ARCHITECTURE.md, `docs/*.md` or `docs/decisions/*.md` names a dotted key in backticks that the file lacks; `docs/TODECIDE.md` is skipped, because its keys are not decided.
 - **Because:**
   - Parsing at the boundary keeps an invalid value from reaching the agent, and the type's `Display` is what the reference file shows, so the second test compares literals.
@@ -171,7 +171,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 
 - **Decision:**
   - `packaging/speculaire.service` runs `/usr/bin/speculaire agent` with `Type=notify`, `ExecReload=/bin/kill -HUP $MAINPID` (D30), `Restart=on-failure`, `WatchdogSec=30s` and `TimeoutStopSec=20s` (D39), `RuntimeDirectoryMode=0700` and `RuntimeDirectoryPreserve=yes` (D31), and D53's settings. It starts after `network-online.target`, `containerd.service` and `crio.service`, whichever exist.
-  - The agent sends `READY=1` once its status listener is open, `STOPPING=1` first on SIGTERM (D39, step 1), and `WATCHDOG=1` every half of `WATCHDOG_USEC` from a task of its tokio runtime. Outside systemd, without `NOTIFY_SOCKET`, it sends nothing.
+  - The agent sends `READY=1` once the mirror listens, when `/readyz` answers 200 (D45), `STOPPING=1` first on SIGTERM (D39, step 1), and `WATCHDOG=1` every half of `WATCHDOG_USEC` from a task of its tokio runtime. Outside systemd, without `NOTIFY_SOCKET`, it sends nothing.
   - e2e (D27) installs the unit, the binary and `packaging/config.toml` at the packages' paths on every node of every leg (D63), with `log.filter = "info"` so the journal holds entries to check, and runs the suites against the running unit.
 - **Because:**
   - `Type=notify` makes `systemctl start` wait for the listener, so a unit that cannot bind fails its start instead of running half-started.
@@ -217,7 +217,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Decision:**
   - **Keys:** `[runtime]` has `containerd_socket` (`/run/containerd/containerd.sock`), `containerd_config` (`/etc/containerd/config.toml`) and `crio_socket` (`/var/run/crio/crio.sock`), absolute paths, restart keys (D47). The agent, `configure`, `unconfigure` and `check-config` all read them, through `speculaire_agent::node::Node`, so a node whose runtime lives elsewhere is set up and checked the same way. The mirror's content service reads `runtime.containerd_socket` too.
   - **No `state.directory`:** the plan's third key has nothing to move: `mirror.directory` (D85) is where the agent keeps files under `/var/lib/speculaire`, and `/run/speculaire` (D31) is not used yet. The key arrives with the first file that needs it.
-  - **The fake:** `crates/fake-runtime` serves the CRI's `Version` and introspection's `Plugins` on a Unix socket, which is all preflight asks. `apps/speculaire/tests/agent.rs` starts one per test in a temporary directory with a `[runtime]` table naming it, so the agent starts on the CI runner and on macOS, where no runtime socket exists, and a fake that answers containerd 2.2 stops it. The `runtime` crate's own tests use it too, and its binary `fake-runtime <socket>` stands in for containerd in `just conformance` (D85), where no runtime runs. `.cargo/mutants.toml` leaves the crate out: it is test support.
+  - **The fake:** `crates/fake-runtime` answers on a Unix socket what preflight and the registry config ask of a runtime; its crate doc names the calls. `apps/speculaire/tests/agent.rs` starts one per test in a temporary directory with a `[runtime]` table naming it, so the agent starts on the CI runner and on macOS, where no runtime socket exists, and a fake that answers containerd 2.2 stops it. The `runtime` crate's own tests use it too, and its binary `fake-runtime <socket>` stands in for containerd in `just conformance` (D85), where no runtime runs. `.cargo/mutants.toml` leaves the crate out: it is test support.
   - **No bypass:** no flag and no key skips preflight (D86); the tests change what the node is.
   - **The agent's order:** preflight, then the status listener, then the mirror (D86's readiness).
 - **Because:**
@@ -240,7 +240,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Cost:** a `Node` carries both runtimes' paths whichever it is; `Required` names its runtime so that the refusal's text is unchanged.
 - **Revisit when:** a third runtime comes, or `Fallback` has a third value.
 
-## D91: The registry config is read into a snapshot that a reload swaps, and the request path never reads it from disk (amends D47; amended by D92)
+## D91: The registry config is read into a snapshot that a reload swaps, and the request path never reads it from disk (amends D47, D89; amended by D92)
 
 - **Decision:**
   - **Snapshots:** `Registries::reload` (D89) parses everything a source needs into one value held in an `arc_swap::ArcSwap`: containerd's `config.toml`, its imports and every `hosts.toml` under `config_path`; CRI-O's `registries.conf`, drop-ins, `certs.d` list and credential files, with `global_auth_file` read from `crio.sock`. `sources` loads the snapshot, takes no lock and reads no file, certificate files included (D92).
