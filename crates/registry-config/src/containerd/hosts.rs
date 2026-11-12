@@ -646,10 +646,8 @@ fn finish(
 /// certificate files instead: the point of holding the tree is to keep the last one that was right.
 #[derive(Clone, Debug, Default)]
 pub struct Tree {
-    /// How many roots were read.
-    roots: usize,
-    /// By the position of the root and the name of the directory.
-    dirs: std::collections::BTreeMap<(usize, String), Vec<HostConfig>>,
+    /// For each root that exists, in order, by the name of the directory.
+    dirs: Vec<std::collections::BTreeMap<String, Vec<HostConfig>>>,
 }
 
 impl Tree {
@@ -659,8 +657,9 @@ impl Tree {
     ///
     /// When a directory or file cannot be read, or a `hosts.toml` is not valid.
     pub fn load(roots: &[PathBuf]) -> Result<Self, HostsError> {
-        let mut dirs = std::collections::BTreeMap::new();
-        for (index, root) in roots.iter().enumerate() {
+        let mut tree = Vec::with_capacity(roots.len());
+        for root in roots {
+            let mut dirs = std::collections::BTreeMap::new();
             let entries = match std::fs::read_dir(root) {
                 Ok(entries) => entries,
                 Err(e) if e.kind() == ErrorKind::NotFound => continue,
@@ -688,30 +687,26 @@ impl Tree {
                     Some(configs) => configs,
                     None => load_cert_files(&path)?,
                 };
-                dirs.insert(
-                    (index, entry.file_name().to_string_lossy().into_owned()),
-                    configs,
-                );
+                dirs.insert(entry.file_name().to_string_lossy().into_owned(), configs);
             }
+            tree.push(dirs);
         }
-        Ok(Self {
-            roots: roots.len(),
-            dirs,
-        })
+        Ok(Self { dirs: tree })
     }
 
     /// Every host configuration of the tree, whichever host directory it is in.
     pub fn host_configs(&self) -> impl Iterator<Item = &HostConfig> {
-        self.dirs.values().flatten()
+        self.dirs.iter().flat_map(|dirs| dirs.values().flatten())
     }
 
     /// [`resolve`] over the tree: the endpoints of `host`, with no disk to read.
     #[must_use]
     pub fn resolve(&self, host: &str, default_scheme: Option<&str>) -> Vec<RegistryHost> {
         let names = host_dir_names(host);
-        let found = (0..self.roots)
-            .flat_map(|index| names.iter().map(move |name| (index, name.clone())))
-            .find_map(|key| self.dirs.get(&key));
+        let found = self
+            .dirs
+            .iter()
+            .find_map(|dirs| names.iter().find_map(|name| dirs.get(name)));
         finish(found.cloned(), host, default_scheme)
     }
 }
@@ -748,21 +743,19 @@ fn apply_defaults(last: &mut HostConfig, host: &str, default_scheme: Option<&str
 }
 
 fn registry_host(config: HostConfig) -> RegistryHost {
-    let mut scheme = config.scheme.clone();
-    let mut http_fallback = false;
-    if scheme == "http" && config.has_tls() {
-        let port = split_host_port(&config.host).map_or("", |(_, port)| port);
-        if port != "80" {
-            "https".clone_into(&mut scheme);
-            http_fallback = true;
-        }
-    }
+    let http_fallback = config.scheme == "http"
+        && config.has_tls()
+        && split_host_port(&config.host).map_or("", |(_, port)| port) != "80";
     RegistryHost {
-        scheme,
+        scheme: if http_fallback {
+            "https".to_owned()
+        } else {
+            config.scheme
+        },
         tls: Tls {
             skip_verify: config.skip_verify,
-            ca: config.ca().to_vec(),
-            client: config.client().to_vec(),
+            ca: config.ca.unwrap_or_default(),
+            client: config.client.unwrap_or_default(),
         },
         host: config.host,
         path: config.path,
