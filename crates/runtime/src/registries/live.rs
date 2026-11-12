@@ -79,7 +79,8 @@ impl<T> Live<T> {
     }
 
     /// Reads again by `read`, which returns the paths its result depends on, and the result. With `since`, only when a
-    /// watched path was modified at or after it. A read that fails keeps the value held, if there is one.
+    /// watched path was modified at or after it. A read that fails keeps the value held, if there is one, and adds the
+    /// paths it returns to those watched.
     ///
     /// Returns whether the value was replaced.
     ///
@@ -105,12 +106,19 @@ impl<T> Live<T> {
                 Ok(true)
             }
             Err(error) => {
-                if current.value.is_err() {
-                    self.state.store(Arc::new(Loaded {
-                        watch: Watch::new(paths),
-                        value: Err(error.to_string()),
-                    }));
-                }
+                // The held value's files and those the failed read named: a fix to either is read by the next poll.
+                let mut watched = current.watch.0.clone();
+                watched.extend(paths);
+                watched.sort_unstable();
+                watched.dedup();
+                self.state.store(Arc::new(Loaded {
+                    watch: Watch::new(watched),
+                    value: current
+                        .value
+                        .as_ref()
+                        .map(Arc::clone)
+                        .map_err(|_| error.to_string()),
+                }));
                 Err(error)
             }
         }
@@ -211,5 +219,34 @@ mod tests {
         );
         assert!(live.reload(Some(past), || ok(5)).expect("a read"));
         assert_eq!(*live.get().expect("a value"), 5);
+    }
+
+    #[test]
+    fn a_failed_read_while_a_value_is_held_adds_its_paths_to_those_watched() {
+        let held = tempfile::tempdir().expect("a temporary directory");
+        let new = tempfile::tempdir().expect("a temporary directory");
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        // A change to what the held value was read from, or to what the failed read named, is read by the next poll.
+        for changed in [&held, &new] {
+            let live = Live::new();
+            live.reload(None, || (vec![held.path().to_owned()], Ok(1)))
+                .expect("a read");
+            assert!(
+                live.reload(None, || broken(vec![new.path().to_owned()]))
+                    .is_err()
+            );
+            assert_eq!(*live.get().expect("a value"), 1);
+            assert!(!live.reload(Some(future), || ok(2)).expect("no read"));
+            let file = changed.path().join("file");
+            std::fs::write(&file, "a").expect("a file");
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .expect("the file")
+                .set_modified(future)
+                .expect("a modification time");
+            assert!(live.reload(Some(future), || ok(2)).expect("a read"));
+            std::fs::remove_file(&file).expect("removed");
+        }
     }
 }
