@@ -148,29 +148,34 @@ pub(crate) fn files(paths: &SearchPaths, extension: &str) -> Result<Vec<PathBuf>
         .iter()
         .filter(|path| !path.as_os_str().is_empty())
     {
-        match std::fs::File::open(path) {
-            Ok(_) => {
-                files.push(path.clone());
-                break;
-            }
-            Err(e) if paths.ignore_main_missing && e.kind() == ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(ReadError {
-                    path: path.clone(),
-                    source,
-                });
-            }
+        if opens(path, paths.ignore_main_missing)? {
+            files.push(path.clone());
+            break;
         }
     }
-    files.extend(drop_ins(&paths.drop_in_dirs, &format!(".{extension}"))?);
+    // A drop-in that is not found when opened, such as a dangling link, is skipped.
+    for path in drop_ins(&paths.drop_in_dirs, &format!(".{extension}"))? {
+        if opens(&path, true)? {
+            files.push(path);
+        }
+    }
     if let Some(path) = &paths.extra_override {
-        std::fs::File::open(path).map_err(|source| ReadError {
-            path: path.clone(),
-            source,
-        })?;
+        opens(path, false)?;
         files.push(path.clone());
     }
     Ok(files)
+}
+
+/// Whether `path` opens: a missing file is `false` when `may_be_missing`, else an error.
+fn opens(path: &Path, may_be_missing: bool) -> Result<bool, ReadError> {
+    match std::fs::File::open(path) {
+        Ok(_) => Ok(true),
+        Err(e) if may_be_missing && e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(ReadError {
+            path: path.to_owned(),
+            source,
+        }),
+    }
 }
 
 /// `readDropInsFromPaths`: the files that end in `suffix`, one per name, by name.
@@ -343,6 +348,13 @@ mod tests {
         write("usr/share/containers/registries.conf.d/10-a.conf", "");
         std::fs::create_dir_all(dir.path().join("etc/containers/registries.conf.d/dir.conf"))
             .expect("a directory");
+        // A drop-in that is gone when it is opened is skipped.
+        std::os::unix::fs::symlink(
+            dir.path().join("none"),
+            dir.path()
+                .join("etc/containers/registries.conf.d/05-gone.conf"),
+        )
+        .expect("a symbolic link");
         let ctx = Context {
             root: dir.path().to_owned(),
             home: dir.path().join("none"),
