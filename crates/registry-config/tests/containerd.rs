@@ -83,6 +83,22 @@ fn keys_are_matched_in_any_case_as_go_toml_does() {
 }
 
 #[test]
+fn two_spellings_of_a_table_merge_and_the_lower_case_one_is_set_last() {
+    let registry = registry_of(
+        "version = 3\n[plugins.\"io.containerd.cri.v1.images\".registry.mirrors.\"a.io\"]\nendpoint = [\"https://m.io\"]\n\
+         [plugins.\"io.containerd.cri.v1.images\".Registry.mirrors.\"b.io\"]\nendpoint = [\"https://n.io\"]\n\
+         [plugins.\"io.containerd.cri.v1.images\".Registry.Mirrors.\"a.io\"]\nEndpoint = [\"https://o.io\"]\n",
+    )
+    .expect("a config");
+    let Hosts::Mirrors(mirrors) = registry.hosts else {
+        panic!("mirrors expected");
+    };
+    assert_eq!(mirrors.len(), 2);
+    assert_eq!(mirrors["a.io"], ["https://m.io"]);
+    assert_eq!(mirrors["b.io"], ["https://n.io"]);
+}
+
+#[test]
 fn nri_required_plugins_come_from_the_default_validator_across_imports() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let required = |text: &str| {

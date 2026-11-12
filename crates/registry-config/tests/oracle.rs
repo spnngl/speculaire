@@ -851,6 +851,24 @@ ca = "/etc/path/default"
         )],
     );
     add(
+        "two spellings of host",
+        "docker.io",
+        "",
+        &[(
+            "docker.io/hosts.toml",
+            "[host.\"a.io\"]\ncapabilities = [\"pull\"]\n[HOST.\"b.io\"]\n[host.\"c.io\"]\n[Host.\"a.io\"]\nskip_verify = true\n",
+        )],
+    );
+    add(
+        "two spellings of a field",
+        "docker.io",
+        "",
+        &[(
+            "docker.io/hosts.toml",
+            "Server = \"https://a.io\"\nserver = \"https://b.io\"\nSERVER = \"https://c.io\"\n[host.\"d.io\"]\nskip_verify = true\nSkip_Verify = false\n",
+        )],
+    );
+    add(
         "duplicate key",
         "docker.io",
         "",
@@ -1173,6 +1191,13 @@ fn config_cases(root: &Path) -> Vec<(String, ConfigCase)> {
         &[(
             "config.toml",
             "Version = 4\n[plugins.\"io.containerd.cri.v1.images\".Registry]\nConfig_Path = \"/x\"\n",
+        )],
+    );
+    add(
+        "two spellings of registry",
+        &[(
+            "config.toml",
+            "version = 3\n[plugins.\"io.containerd.cri.v1.images\".registry.mirrors.\"a.io\"]\nendpoint = [\"https://m.io\"]\n[plugins.\"io.containerd.cri.v1.images\".Registry.mirrors.\"b.io\"]\nendpoint = [\"https://n.io\"]\n[plugins.\"io.containerd.cri.v1.images\".Registry.Mirrors.\"a.io\"]\nEndpoint = [\"https://o.io\"]\n",
         )],
     );
     add(
