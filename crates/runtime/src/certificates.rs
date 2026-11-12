@@ -12,7 +12,10 @@ use crate::wiring::{Error, Problem, Target, io_at};
 
 /// The mirror's certificates as the directory has them, if it has them all and they are readable.
 pub(crate) fn read(dir: &Path) -> Result<Option<Mirror>, Error> {
-    let read = |part: Part| files::read(&dir.join(part.file_name())).map_err(io_at(dir));
+    let read = |part: Part| {
+        let path = dir.join(part.file_name());
+        files::read(&path).map_err(io_at(&path))
+    };
     let (Some(ca), Some(server), Some(key), Some(client)) = (
         read(Part::Ca)?,
         read(Part::ServerCertificate)?,
@@ -98,5 +101,22 @@ pub fn check(target: &Target, now: SystemTime) -> Vec<Problem> {
             path: dir,
             message: other.to_string(),
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_part_that_cannot_be_read_is_an_error_naming_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join(Part::ServerKey.file_name());
+        std::fs::create_dir(&key).unwrap();
+        let err = read(dir.path()).unwrap_err();
+        assert!(
+            matches!(&err, Error::Io { path, .. } if *path == key),
+            "{err}"
+        );
     }
 }

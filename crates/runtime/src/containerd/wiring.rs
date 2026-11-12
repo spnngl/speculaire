@@ -51,7 +51,7 @@ impl Containerd {
 impl Wiring for Containerd {
     fn configure(&self, target: &Target, now: SystemTime) -> Result<Report, Error> {
         let roots = self.roots()?;
-        let (targets, skipped) = hosts::targets(&roots).map_err(io_at(&roots[0]))?;
+        let (targets, skipped) = hosts::targets(&roots)?;
         let entry = Self::entry(target);
         let mirror_dir = target.directory.clone();
         let mut edits = Vec::new();
@@ -88,7 +88,7 @@ impl Wiring for Containerd {
 
     fn unconfigure(&self, target: &Target) -> Result<Report, Error> {
         let roots = self.roots()?;
-        let (targets, _) = hosts::targets(&roots).map_err(io_at(&roots[0]))?;
+        let (targets, _) = hosts::targets(&roots)?;
         let mirror_dir = target.directory.clone();
         let mut report = Report::default();
         let mut edits = Vec::new();
@@ -130,7 +130,7 @@ impl Wiring for Containerd {
 
     fn check(&self, target: &Target) -> Result<Vec<Problem>, Error> {
         let roots = self.roots()?;
-        let (targets, _) = hosts::targets(&roots).map_err(io_at(&roots[0]))?;
+        let (targets, _) = hosts::targets(&roots)?;
         let entry = Self::entry(target);
         let mirror_dir = target.directory.clone();
         let mut problems = Vec::new();
