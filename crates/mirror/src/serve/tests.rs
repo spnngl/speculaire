@@ -470,7 +470,8 @@ async fn the_metrics_count_requests_bytes_and_first_byte_times() {
     use metrics_exporter_prometheus::PrometheusBuilder;
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
-    ::metrics::set_global_recorder(recorder).unwrap();
+    // This test thread only: the other tests of the process count into the global recorder, if there is one.
+    let _local = ::metrics::set_default_local_recorder(&recorder);
     metrics::describe();
     let held = digest_of(1);
     let server = start(Fake(HashMap::from([(held.clone(), pattern(1000))]))).await;
