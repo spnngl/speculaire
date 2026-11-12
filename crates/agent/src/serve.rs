@@ -65,6 +65,11 @@ async fn serve(
     logs: Logs,
     node: RuntimeNode,
 ) -> anyhow::Result<()> {
+    // Before any listener opens and before READY=1: a signal's default action would end the agent, and a signal that
+    // arrives during startup is handled once it is done.
+    let mut hangup = signal(SignalKind::hangup()).context("handling SIGHUP")?;
+    let mut terminate = signal(SignalKind::terminate()).context("handling SIGTERM")?;
+    let mut interrupt = signal(SignalKind::interrupt()).context("handling SIGINT")?;
     let metrics = telemetry::install()?;
     let status = Arc::new(Status::new(metrics.clone()));
     let address = *config.metrics.address.get();
@@ -99,9 +104,6 @@ async fn serve(
     systemd::watchdog();
     systemd::ready();
 
-    let mut hangup = signal(SignalKind::hangup()).context("handling SIGHUP")?;
-    let mut terminate = signal(SignalKind::terminate()).context("handling SIGTERM")?;
-    let mut interrupt = signal(SignalKind::interrupt()).context("handling SIGINT")?;
     let mut period = config.config.poll_interval.get();
     let mut poll = interval_at(Instant::now() + period, period);
     poll.set_missed_tick_behavior(MissedTickBehavior::Delay);

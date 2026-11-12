@@ -345,6 +345,19 @@ fn a_healthy_start_is_ready_and_logs_nothing_below_warn() {
 }
 
 #[test]
+fn a_sighup_as_the_status_listener_opens_is_a_reload_once_started() {
+    let port = free_port();
+    let mut agent = Agent::spawn(port, scratch_file(), "[log]\nfilter = \"debug\"\n", &[]);
+    // No pause: the signal comes as early as `/livez` answers.
+    let deadline = Instant::now() + WAIT;
+    while get(port, "/livez", "").is_none() {
+        assert!(Instant::now() < deadline, "timed out");
+    }
+    agent.signal("HUP");
+    agent.line(&[RELOADED]);
+}
+
+#[test]
 fn an_invalid_config_stops_startup_before_the_listener_opens() {
     let port = free_port();
     let mut agent = Agent::spawn(port, scratch_file(), "[gate]\nunmached = \"deny\"\n", &[]);
