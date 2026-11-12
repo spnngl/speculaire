@@ -98,7 +98,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - node-exporter listens on every address the same way.
 - **Revisit when:** an admin needs the endpoints on one interface only; `metrics.address` already allows it.
 
-## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56, D60)
+## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56, D60, D91)
 
 - **Decision:**
   - Each key in `packaging/config.toml` shows a literal default. A default computed at startup is written `"auto"`: `peer.max_uploads` (4 × CPUs, D24) and `peer.address` (D36).
@@ -239,3 +239,23 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The two differences that are not plumbing, who holds the blobs and so who verifies what is served, have to stay where a reader and a reviewer see them.
 - **Cost:** a `Node` carries both runtimes' paths whichever it is; `Required` names its runtime so that the refusal's text is unchanged.
 - **Revisit when:** a third runtime comes, or `Fallback` has a third value.
+
+## D91: The registry config is read into a snapshot that a reload swaps, and the request path never reads it from disk (amends D47)
+
+- **Decision:**
+  - **Snapshots:** `Registries::reload` (D89) parses everything a source needs into one value held in an `arc_swap::ArcSwap`: containerd's `config.toml`, its imports and every `hosts.toml` under `config_path`; CRI-O's `registries.conf`, drop-ins, `certs.d` list and credential files, with `global_auth_file` read from `crio.sock`. `sources` loads the snapshot, takes no lock and reads no file except a host's certificate files, which the TLS settings still read per request.
+  - **When:** at startup and on SIGHUP, unconditionally, so a file replaced by an older one is read (D30); on each poll of `config.poll_interval`, when a watched path changed at or after the previous check. A watched path is a file, a directory and what is below it down to four levels: the newest modification time of those counts.
+  - **A bad file keeps the previous snapshot:** the agent logs one `error` that names the file and the line and column (`invalid …/hosts.toml: line 1, column 25: …`), counts `speculaire_config_reload_failures_total` and goes on; `/readyz` does not change. The next poll finds the same file unchanged and says nothing more. Until a first read works, `sources` answers an error and the relay answers 404, so CRI-O pulls upstream.
+  - **A missing containerd `config.toml` is the defaults** (no `config_path`: the registry itself), as containerd runs. The deprecated `mirrors` table stays an error (D89).
+  - **Live keys:** a reload of the agent's config calls `Cache::set_max_size`, an atomic; the eviction task wakes when a blob is kept and the cache is over its bound, so a lowered `blob_cache.max_size` evicts at the next fill, least recently served first (D67).
+  - **No `watch` channel:** nothing waits for a change; every reader asks the snapshot. A task that must wake on one gets a `tokio::sync::watch` then.
+- **Because:**
+  - A request that parses TOML is slow and races with an editor; a snapshot is whole or it is the old one.
+  - `arc-swap` is a reader without a lock and a writer that never waits for readers, which `docs/research/checkers.md` names as the way for live keys.
+  - Comparing modification times to the last check is D30's rule; watching the whole tree is needed because an admin edits `hosts.toml` or an auth file, not the main file.
+- **Cost:**
+  - A credential file that does not parse fails the whole CRI-O snapshot, where D89 treated it as anonymous.
+  - A certificate file edited while a pull runs is read in the middle of the edit: the connection fails for that request and the next one succeeds.
+  - A change in a directory more than four levels below a watched root is read on SIGHUP only.
+- **Measured (M2 step 07, arm64, Docker, local runs):** on CRI-O 1.37 a login written to `/run/containers/0/auth.json` after an anonymous pull had failed was used by the next pull 15 s later (`config.poll_interval` is 10 s), with no signal, and the relay moved the blobs; `systemctl reload speculaire` with `blob_cache.max_size` lowered to 12 MiB evicted nothing until the next blob was kept, then the cache fell to the bound and the older blobs were gone (relay suite 11 of 11 on CRI-O 1.37 and containerd 2.4). The agent's own tests, with a fake containerd and `poll_interval = "1s"`, saw an invalid `hosts.toml` keep the previous config (`/readyz` 200, `speculaire_config_reload_failures_total 1`, one error naming the file, line 1 and column 25, no second error over three more polls), the corrected file read by the next poll, and a file replaced with a modification time of 2001 read on SIGHUP.
+- **Revisit when:** a key that cannot be an atomic or a snapshot is live, or a node has so many `hosts.toml` files that a poll costs measurable CPU.

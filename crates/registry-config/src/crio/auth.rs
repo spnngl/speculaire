@@ -400,7 +400,16 @@ fn decode(path: &AuthPath, key: &str, entry: &Entry) -> Result<Lookup, Error> {
 
 /// `findCredentialsInFile`.
 fn find_in_file(key: &str, registry: &str, path: &AuthPath) -> Result<Lookup, Error> {
-    let file = read_auth_file(path)?;
+    find_in_parsed(key, registry, path, &read_auth_file(path)?)
+}
+
+/// `findCredentialsInFile` on a file already read.
+fn find_in_parsed(
+    key: &str,
+    registry: &str,
+    path: &AuthPath,
+    file: &AuthFile,
+) -> Result<Lookup, Error> {
     if let Some(helper) = file.cred_helpers.get(registry) {
         return Ok(Lookup::Helper(helper.clone()));
     }
@@ -445,6 +454,54 @@ fn read_auth_file(path: &AuthPath) -> Result<AuthFile, Error> {
 ///
 /// When the key is invalid, or every helper fails and none finds a login.
 pub fn credentials(ctx: &Context, helpers: &[String], key: &str) -> Result<Lookup, Error> {
+    lookup(helpers, key, |key, registry| {
+        search_files(ctx, key, registry)
+    })
+}
+
+/// The credential files of a [`Context`], parsed once, so that a reader can hold the login of a moment when every file
+/// was valid (D91).
+#[derive(Debug, Default)]
+pub struct Files(Vec<(AuthPath, AuthFile)>);
+
+impl Files {
+    /// Reads [`auth_file_paths`]; a file that does not exist is an empty one.
+    ///
+    /// # Errors
+    ///
+    /// When a file cannot be read or is not valid. [`credentials`] fails only on the files it reaches.
+    pub fn load(ctx: &Context) -> Result<Self, Error> {
+        auth_file_paths(ctx)
+            .into_iter()
+            .map(|path| read_auth_file(&path).map(|file| (path, file)))
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+
+    /// [`credentials`] over the parsed files.
+    ///
+    /// # Errors
+    ///
+    /// As [`credentials`].
+    pub fn credentials(&self, helpers: &[String], key: &str) -> Result<Lookup, Error> {
+        lookup(helpers, key, |key, registry| {
+            for (path, file) in &self.0 {
+                match find_in_parsed(key, registry, path, file)? {
+                    Lookup::Found(auth) if auth.is_empty() => {}
+                    Lookup::NotFound => {}
+                    found => return Ok(found),
+                }
+            }
+            Ok(Lookup::NotFound)
+        })
+    }
+}
+
+fn lookup(
+    helpers: &[String],
+    key: &str,
+    mut search_files: impl FnMut(&str, &str) -> Result<Lookup, Error>,
+) -> Result<Lookup, Error> {
     validate_key(key)?;
     let registry = key.split('/').next().unwrap_or(key);
     let mut errors = Vec::new();
@@ -452,7 +509,7 @@ pub fn credentials(ctx: &Context, helpers: &[String], key: &str) -> Result<Looku
         if helper != AUTHENTICATION_FILE_HELPER {
             return Ok(Lookup::Helper(helper.clone()));
         }
-        match search_files(ctx, key, registry) {
+        match search_files(key, registry) {
             Ok(Lookup::NotFound) => {}
             Ok(found) => return Ok(found),
             Err(e) => errors.push(e),
@@ -587,6 +644,46 @@ mod tests {
             normalize_auth_file_key("docker.io", false),
             "index.docker.io"
         );
+    }
+
+    #[test]
+    fn parsed_files_answer_as_the_files_do_and_hold_what_they_read() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let ctx = context(dir.path());
+        write(
+            dir.path(),
+            "run/containers/0/auth.json",
+            r#"{"auths": {"a.io": {"auth": "dXNlcg=="}, "h.io": {"auth": "dTpw"}}, "credHelpers": {"h.io": "pass"}}"#,
+        );
+        write(
+            dir.path(),
+            "home/.docker/config.json",
+            r#"{"auths": {"a.io": {"auth": "dTpw"}, "b.io": {"auth": "dTpw"}}}"#,
+        );
+        let parsed = Files::load(&ctx).expect("valid files");
+        for key in ["a.io", "b.io", "h.io", "none.io", "b.io/ns/repo"] {
+            let from_files = credentials(&ctx, &files(), key).expect("a lookup");
+            let from_parsed = parsed.credentials(&files(), key).expect("a lookup");
+            assert_eq!(
+                format!("{from_files:?}"),
+                format!("{from_parsed:?}"),
+                "{key}"
+            );
+        }
+        // What the parsed files hold is what was read, whatever happens to the files.
+        std::fs::remove_dir_all(dir.path().join("home")).expect("removed");
+        assert!(matches!(
+            parsed.credentials(&files(), "b.io").expect("a lookup"),
+            Lookup::Found(_)
+        ));
+        write(dir.path(), "run/containers/0/auth.json", "{");
+        assert!(matches!(Files::load(&ctx), Err(Error::Parse { .. })));
+        assert!(matches!(
+            Files::default()
+                .credentials(&files(), "a.io")
+                .expect("a lookup"),
+            Lookup::NotFound
+        ));
     }
 
     #[test]

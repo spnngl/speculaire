@@ -26,8 +26,15 @@ impl Node {
         std::fs::write(path, text).unwrap();
     }
 
-    /// The registry config of this tree, with the CRI-O config `crio` as its socket serves it.
+    /// The registry config of this tree, read, with the CRI-O config `crio` as its socket serves it.
     fn registries_with(&self, crio: &str) -> CrioRegistries {
+        let registries = self.unread(crio);
+        registries.reload(None).unwrap();
+        registries
+    }
+
+    /// As `registries_with`, before anything is read.
+    fn unread(&self, crio: &str) -> CrioRegistries {
         let socket = self.dir.path().join("crio.sock");
         let _ = std::fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).unwrap();
@@ -190,8 +197,13 @@ fn a_name_without_a_registry_and_a_repository_is_an_error() {
 fn a_registry_config_that_is_invalid_is_an_error() {
     let node = Node::new();
     node.put("/etc/containers/registries.conf", "[[registry]]\nprefix = ");
-    let err = node
-        .registries()
+    let registries = node.unread("");
+    let err = registries.reload(None).unwrap_err();
+    assert!(
+        matches!(&err, Error::Config(text) if text.contains("registries.conf")),
+        "{err}"
+    );
+    let err = registries
         .sources("docker.io/library/busybox", tag("1"))
         .unwrap_err();
     assert!(matches!(err, Error::Config(_)), "{err}");
@@ -262,13 +274,14 @@ fn a_credential_helper_or_an_unreadable_file_means_anonymous() {
         .sources("quay.io/org/app", tag("1"))
         .unwrap();
     assert!(matches!(sources[0].credentials, Credentials::Anonymous));
+    // A credential file that is not valid is no registry config: the pull has none to use.
     let node = Node::new();
     node.put("/run/containers/0/auth.json", "not json");
-    let sources = node
-        .registries()
-        .sources("quay.io/org/app", tag("1"))
-        .unwrap();
-    assert!(matches!(sources[0].credentials, Credentials::Anonymous));
+    let err = node.unread("").reload(None).unwrap_err();
+    assert!(
+        matches!(&err, Error::Config(text) if text.contains("auth.json")),
+        "{err}"
+    );
 }
 
 #[test]
@@ -349,7 +362,7 @@ fn a_crio_that_cannot_be_asked_is_a_config_error() {
         ..Context::root()
     };
     let registries = CrioRegistries::new(context, node.dir.path().join("gone.sock"), "/none");
-    let err = registries.sources("quay.io/org/app", tag("1")).unwrap_err();
+    let err = registries.reload(None).unwrap_err();
     assert!(
         matches!(&err, Error::Config(text) if text.contains("gone.sock")),
         "{err}"

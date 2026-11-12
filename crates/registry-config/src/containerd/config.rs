@@ -417,6 +417,8 @@ struct File {
 /// The config of a containerd: what every file read contributes, merged as `mergeConfig` does.
 #[derive(Default)]
 struct Merged {
+    /// The files read, the config and its imports, in the order read.
+    files: Vec<PathBuf>,
     plugins: Table,
     disabled: Vec<String>,
     required: Vec<String>,
@@ -494,6 +496,7 @@ fn load_merged(path: &Path) -> Result<Merged, LoadError> {
         if !loaded.insert(file_path.clone()) {
             continue;
         }
+        merged.files.push(file_path.clone());
         let text = std::fs::read_to_string(&file_path).map_err(|source| LoadError::Read {
             path: file_path.clone(),
             source,
@@ -532,6 +535,20 @@ pub fn load(path: &Path) -> Result<Registry, LoadError> {
     let registry = Registry::try_from(load_raw(path)?)?;
     tracing::trace!(?registry, path = %path.display(), "read the containerd registry config");
     Ok(registry)
+}
+
+/// [`load`], and the files it read: the config and its imports. A config that cannot be read has no files to name, and
+/// the caller watches `path` alone.
+///
+/// # Errors
+///
+/// As [`load`].
+pub fn load_with_files(path: &Path) -> Result<(Registry, Vec<PathBuf>), LoadError> {
+    let mut merged = load_merged(path)?;
+    let files = std::mem::take(&mut merged.files);
+    let registry = Registry::try_from(images_section(&mut merged)?.registry)?;
+    tracing::trace!(?registry, path = %path.display(), "read the containerd registry config");
+    Ok((registry, files))
 }
 
 fn validate(merged: &Merged) -> Result<(), LoadError> {
@@ -746,6 +763,30 @@ fn merge_table(into: &mut Table, from: Table) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_files_read_are_the_config_and_its_imports() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let conf = dir.path().join("config.toml");
+        std::fs::create_dir(dir.path().join("conf.d")).expect("a directory");
+        std::fs::write(
+            &conf,
+            "version = 2\nimports = [\"conf.d/*.toml\"]\n[plugins.\"io.containerd.grpc.v1.cri\".registry]\nconfig_path = \"/etc/containerd/certs.d\"\n",
+        )
+        .expect("a file");
+        std::fs::write(dir.path().join("conf.d/a.toml"), "version = 2\n").expect("a file");
+        let (registry, files) = load_with_files(&conf).expect("a valid config");
+        assert_eq!(
+            registry.hosts,
+            Hosts::ConfigPath(vec![PathBuf::from("/etc/containerd/certs.d")])
+        );
+        assert_eq!(files, [conf.clone(), dir.path().join("conf.d/a.toml")]);
+        std::fs::write(dir.path().join("conf.d/a.toml"), "version = [").expect("a file");
+        assert!(matches!(
+            load_with_files(&conf),
+            Err(LoadError::Parse { .. })
+        ));
+    }
 
     #[test]
     fn nri_accepts_plugins_unless_any_one_switch_is_off() {

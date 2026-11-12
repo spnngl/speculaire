@@ -6,44 +6,43 @@
 //! host, and the credential files say who to be.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::SystemTime;
 
 use speculaire_registry_config::crio::auth::{self, Lookup};
 use speculaire_registry_config::crio::registries::{self, Config};
 use speculaire_registry_config::crio::{Context, certs};
 use tracing::warn;
 
+use super::live::Live;
 use super::{
     Credentials, Endpoint, Error, Reference, Registries, Source, Tls, read_tls, split_name,
 };
 use crate::crio;
-
-/// How long a read of `registries.conf` serves requests: an edit shows within this, with no signal to the agent.
-const RELOAD: Duration = Duration::from_secs(10);
+use crate::settings::chain;
 
 /// The host Docker Hub's API answers on, where `docker.io` names it.
 const DOCKER_HUB: &str = "registry-1.docker.io";
 
-/// What was read, and when.
-struct Read {
-    at: Instant,
+/// What `registries.conf`, the credential files and CRI-O's config held.
+struct Snapshot {
     context: Context,
-    config: Arc<Config>,
+    config: Config,
+    auth: auth::Files,
 }
 
-/// The registry config of a node that runs CRI-O, read again every 10 s.
+/// The registry config of a node that runs CRI-O, as `reload` last read it.
 pub struct CrioRegistries {
     context: Context,
     socket: PathBuf,
     skip: PathBuf,
-    read: Mutex<Option<Read>>,
+    live: Live<Snapshot>,
 }
 
 impl CrioRegistries {
     /// The registry config below `context`, without the file `own_dropin`, which sends pulls to the mirror. The auth
     /// file is the one `[crio.image] global_auth_file` names in the config CRI-O serves on `socket`; when it names
-    /// none, the default search of `context` applies (D89).
+    /// none, the default search of `context` applies (D89). Nothing is read until
+    /// [`reload`](Registries::reload).
     #[must_use]
     pub fn new(
         context: Context,
@@ -54,36 +53,37 @@ impl CrioRegistries {
             context,
             socket: socket.into(),
             skip: own_dropin.into(),
-            read: Mutex::new(None),
+            live: Live::new(),
         }
     }
 
-    fn read(&self) -> Result<(Context, Arc<Config>), Error> {
-        let mut held = self
-            .read
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(read) = &*held
-            && read.at.elapsed() < RELOAD
-        {
-            return Ok((read.context.clone(), Arc::clone(&read.config)));
-        }
-        let text = crio::config(&self.socket).map_err(|e| Error::Config(e.to_string()))?;
-        let auth_file = crio::global_auth_file(&text).map_err(|e| Error::Config(e.to_string()))?;
-        let context = Context {
-            auth_file,
-            ..self.context.clone()
-        };
-        let config = Arc::new(
-            registries::load_except(&context, Some(&self.skip))
-                .map_err(|e| Error::Config(e.to_string()))?,
+    /// The registry config below the auth file CRI-O names, and the paths it was read from: the places the files are
+    /// looked for, whether or not anything is there.
+    fn read(&self) -> (Vec<PathBuf>, Result<Snapshot, Error>) {
+        let mut paths = registries::watched(&self.context);
+        paths.extend(certs::watched(&self.context));
+        paths.extend(
+            auth::auth_file_paths(&self.context)
+                .into_iter()
+                .map(|auth| auth.path),
         );
-        *held = Some(Read {
-            at: Instant::now(),
-            context: context.clone(),
-            config: Arc::clone(&config),
-        });
-        Ok((context, config))
+        let snapshot = || -> Result<Snapshot, Error> {
+            let text = crio::config(&self.socket).map_err(|e| Error::Config(chain(&e)))?;
+            let auth_file = crio::global_auth_file(&text).map_err(|e| Error::Config(chain(&e)))?;
+            let context = Context {
+                auth_file,
+                ..self.context.clone()
+            };
+            let config = registries::load_except(&context, Some(&self.skip))
+                .map_err(|e| Error::Config(chain(&e)))?;
+            let auth = auth::Files::load(&context).map_err(|e| Error::Config(chain(&e)))?;
+            Ok(Snapshot {
+                context,
+                config,
+                auth,
+            })
+        };
+        (paths, snapshot())
     }
 }
 
@@ -91,7 +91,12 @@ impl Registries for CrioRegistries {
     /// The registries in the order CRI-O would try them: the mirrors the admin configured, then the registry itself.
     fn sources(&self, name: &str, reference: Reference<'_>) -> Result<Vec<Source>, Error> {
         let (host, _) = split_name(name)?;
-        let (context, config) = self.read()?;
+        let snapshot = self.live.get()?;
+        let Snapshot {
+            context,
+            config,
+            auth,
+        } = &*snapshot;
         let reference = match reference {
             Reference::Digest(digest) => format!("{name}@{digest}"),
             Reference::Tag(tag) => format!("{name}:{tag}"),
@@ -109,7 +114,7 @@ impl Registries for CrioRegistries {
         };
         let mut sources = Vec::new();
         for (reference, insecure) in pulls {
-            let Some(source) = source(&context, &config, &reference, insecure) else {
+            let Some(source) = source(context, config, auth, &reference, insecure) else {
                 warn!(
                     reference,
                     host, "a pull source is no registry and repository"
@@ -120,9 +125,19 @@ impl Registries for CrioRegistries {
         }
         Ok(sources)
     }
+
+    fn reload(&self, since: Option<SystemTime>) -> Result<bool, Error> {
+        self.live.reload(since, || self.read())
+    }
 }
 
-fn source(context: &Context, config: &Config, reference: &str, insecure: bool) -> Option<Source> {
+fn source(
+    context: &Context,
+    config: &Config,
+    auth: &auth::Files,
+    reference: &str,
+    insecure: bool,
+) -> Option<Source> {
     let (authority, rest) = reference.split_once('/')?;
     let repository = rest
         .split_once('@')
@@ -141,7 +156,7 @@ fn source(context: &Context, config: &Config, reference: &str, insecure: bool) -
         authority
     };
     let key = format!("{authority}/{repository}");
-    let credentials = credentials(context, config, &key, reference);
+    let credentials = credentials(config, auth, &key, reference);
     let trust = tls(context, authority);
     let candidates = if insecure {
         vec![
@@ -185,8 +200,8 @@ fn tls(context: &Context, authority: &str) -> Tls {
 
 /// Who to be at a registry: the first login of the credential files for the repository, its namespaces and its
 /// registry. A credential helper is not run (D80): its registry is reached anonymously, and logged.
-fn credentials(context: &Context, config: &Config, key: &str, reference: &str) -> Credentials {
-    match auth::credentials(context, &config.credential_helpers, key) {
+fn credentials(config: &Config, auth: &auth::Files, key: &str, reference: &str) -> Credentials {
+    match auth.credentials(&config.credential_helpers, key) {
         Ok(Lookup::Found(found)) => {
             use secrecy::ExposeSecret as _;
             let has_token = !found.identity_token.expose_secret().is_empty();

@@ -58,6 +58,21 @@ pub enum Error {
 ///
 /// When looking for a directory fails other than by its absence or a permission.
 pub fn cert_dir(ctx: &Context, host_port: &str) -> Result<Option<PathBuf>, Error> {
+    for base in watched(ctx) {
+        let dir = base.join(host_port.trim_start_matches('/'));
+        match std::fs::metadata(&dir) {
+            Ok(_) => return Ok(Some(dir)),
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied) => {}
+            Err(source) => return Err(Error::Read { path: dir, source }),
+        }
+    }
+    Ok(None)
+}
+
+/// The directories that hold one directory per registry, in the order [`cert_dir`] looks in them, whether or not they
+/// exist.
+#[must_use]
+pub fn watched(ctx: &Context) -> Vec<PathBuf> {
     let paths = configfile::search_paths(
         ctx,
         &Wanted {
@@ -70,16 +85,9 @@ pub fn cert_dir(ctx: &Context, host_port: &str) -> Result<Option<PathBuf>, Error
             env_override: None,
         },
     );
-    let docker = ctx.under_root("/etc/docker/certs.d");
-    for base in paths.drop_in_dirs.iter().chain([&docker]) {
-        let dir = base.join(host_port.trim_start_matches('/'));
-        match std::fs::metadata(&dir) {
-            Ok(_) => return Ok(Some(dir)),
-            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied) => {}
-            Err(source) => return Err(Error::Read { path: dir, source }),
-        }
-    }
-    Ok(None)
+    let mut dirs = paths.drop_in_dirs;
+    dirs.push(ctx.under_root("/etc/docker/certs.d"));
+    dirs
 }
 
 /// `SetupCertificates`: the files of `dir`. A missing or forbidden directory has none.
