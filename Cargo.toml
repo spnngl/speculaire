@@ -15,6 +15,10 @@ publish = false
 [workspace.dependencies]
 speculaire-agent = { path = "crates/agent" }
 speculaire-oracle-harness = { path = "crates/oracle-harness" }
+speculaire-pki = { path = "crates/pki" }
+speculaire-registry-config = { path = "crates/registry-config" }
+speculaire-runtime = { path = "crates/runtime" }
+speculaire-configure = { path = "crates/configure" }
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = [
   "http1",
@@ -23,6 +27,7 @@ axum = { version = "0.8.9", default-features = false, features = [
 clap = { version = "4.6.7", features = ["derive"] }
 http = "1.5.0"
 humantime = "2.4.0"
+insta = "1.49.0"
 metrics = "0.24.6"
 # D34: no HTTP listener or push gateway of its own; `protobuf` for native histograms.
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = [
@@ -33,6 +38,11 @@ mime = "0.3.18"
 oci-spec = { version = "0.10.0", default-features = false, features = [
   "image",
 ] }
+# D14: the local CA and certificates of the mirror, generated with the aws-lc-rs provider (D13).
+rcgen = { version = "0.14.10", default-features = false, features = [
+  "aws_lc_rs",
+  "pem",
+] }
 # D39: readiness, stopping and the watchdog.
 sd-notify = "0.5.0"
 # D37: every credential and header value is a `SecretString`: it never prints, in `Debug` or in a log.
@@ -41,6 +51,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_path_to_error = "0.1.20"
 tempfile = "3.27.0"
+time = { version = "0.3.55", default-features = false, features = ["std"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = [
   "macros",
@@ -51,11 +62,17 @@ tokio = { version = "1.54.1", features = [
   "time",
 ] }
 toml = "1.2.1"
+# D32: edits keep the admin comments and order.
+toml_edit = "0.25.19"
 # The low-level parser of `toml`: the order of a file's tables, which the typed result does not keep.
 toml_parser = "1.1.5"
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
 tracing = "0.1.44"
 tracing-journald = "0.3.2"
+# D14: reads the validity and names of the certificates `configure` made.
+x509-parser = { version = "0.18.1", default-features = false, features = [
+  "verify-aws",
+] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
   "env-filter",
   "fmt",

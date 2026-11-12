@@ -1,0 +1,15 @@
+---
+source: crates/configure/src/containerd.rs
+expression: out
+---
+server = "https://docker.io"
+
+# Added by `speculaire configure`; `speculaire unconfigure` removes it.
+[host."https://127.0.0.1:7480"]
+  capabilities = ["pull"]
+  ca = "/var/lib/speculaire/mirror/ca.crt"
+  client = "/var/lib/speculaire/mirror/client.pem"
+  dial_timeout = "200ms"
+
+[host."https://registry-1.docker.io"]
+  capabilities = ["pull", "resolve"]

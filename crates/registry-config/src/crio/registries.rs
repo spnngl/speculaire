@@ -520,6 +520,15 @@ impl Endpoint {
 ///
 /// When a file or directory cannot be read, or a file is not valid.
 pub fn load(ctx: &Context) -> Result<Config, Error> {
+    load_except(ctx, None)
+}
+
+/// [`load`] as if the file `skip` did not exist: what the admin's files alone say, for a drop-in that copies them.
+///
+/// # Errors
+///
+/// As [`load`].
+pub fn load_except(ctx: &Context, skip: Option<&Path>) -> Result<Config, Error> {
     let paths = configfile::search_paths(
         ctx,
         &Wanted {
@@ -540,7 +549,10 @@ pub fn load(ctx: &Context) -> Result<Config, Error> {
         registries: Vec::new(),
         credential_helpers: Vec::new(),
     };
-    for path in files {
+    for path in files
+        .into_iter()
+        .filter(|path| Some(path.as_path()) != skip)
+    {
         let file = read_file(&path)?;
         config.update(file);
     }

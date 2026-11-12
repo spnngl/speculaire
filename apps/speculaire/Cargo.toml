@@ -12,6 +12,11 @@ publish.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 speculaire-agent.workspace = true
+speculaire-configure.workspace = true
+speculaire-runtime.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 # D46: the global allocator on musl, `src/main.rs`.
 [target.'cfg(target_env = "musl")'.dependencies]

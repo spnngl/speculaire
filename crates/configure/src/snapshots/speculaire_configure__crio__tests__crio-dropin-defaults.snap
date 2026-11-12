@@ -1,0 +1,13 @@
+---
+source: crates/configure/src/crio.rs
+expression: render(&entries)
+---
+# Written by `speculaire configure`; `speculaire unconfigure` removes it (D66).
+
+[[registry]]
+prefix = "registry.k8s.io"
+location = "registry.k8s.io"
+
+[[registry.mirror]]
+location = "127.0.0.1:7480/registry.k8s.io"
+pull-from-mirror = "all"

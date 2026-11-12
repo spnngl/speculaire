@@ -1,0 +1,5 @@
+HTTP/1.0 404 Not Found
+Content-Type: text/plain; charset=utf-8
+X-Content-Type-Options: nosniff
+
+404 page not found

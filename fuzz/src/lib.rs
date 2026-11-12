@@ -31,8 +31,10 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("config_values", config_values),
     ("containerd_config", containerd_config),
     ("hosts_toml", hosts_toml),
+    ("hosts_edit", hosts_edit),
     ("registries_conf", registries_conf),
     ("auth_json", auth_json),
+    ("crio_inspect", crio_inspect),
     ("reference", reference),
     ("platform", platform),
 ];
@@ -77,6 +79,7 @@ pub fn containerd_config(data: &[u8]) {
     if let Ok(raw) = containerd_config_file::load_raw(&path) {
         let _ = Registry::try_from(raw);
     }
+    let _ = containerd_config_file::load_nri_required_plugins(&path);
 }
 
 /// A CRI-O `registries.conf` or drop-in (D66).
@@ -217,5 +220,59 @@ pub fn platform(data: &[u8]) {
         .is_some_and(|variant| variant.trim_start_matches('v').len() > 3);
     if !huge && let Ok(strict) = Matcher::only_strict(&parsed, &host) {
         assert!(strict.matches(&parsed), "{text}");
+    }
+}
+
+/// What CRI-O's inspect API answers to `GET /config`, as the agent reads it (D64).
+///
+/// A response that parses has a body, and the settings read from it are those of the body alone.
+///
+/// # Panics
+///
+/// When parsing panics, or the settings of a response differ from those of its body.
+pub fn crio_inspect(data: &[u8]) {
+    let Ok(body) = speculaire_runtime::crio::body(data) else {
+        assert!(speculaire_runtime::crio::Nri::from_response(data).is_err());
+        return;
+    };
+    assert_eq!(
+        speculaire_runtime::crio::Nri::from_response(data).ok(),
+        speculaire_runtime::crio::Nri::parse(body).ok()
+    );
+}
+
+/// A containerd `hosts.toml` as `configure` edits it (D32, D82).
+///
+/// Editing never panics. A file that gets the mirror's entry gets it once: editing the result changes nothing, taking
+/// the entry out leaves a file that still parses, and containerd reads the mirror first.
+///
+/// # Panics
+///
+/// When editing panics, or a result breaks one of those.
+pub fn hosts_edit(data: &[u8]) {
+    use speculaire_configure::containerd::{Entry, add, remove};
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let dir = std::path::Path::new("/var/lib/speculaire/mirror");
+    let entry = Entry {
+        url: "https://127.0.0.1:7480".to_owned(),
+        ca: dir.join("ca.crt"),
+        client: dir.join("client.pem"),
+    };
+    let _ = remove(text, dir);
+    let Ok(added) = add(text, &entry, dir) else {
+        return;
+    };
+    assert_eq!(
+        add(&added, &entry, dir).ok().as_deref(),
+        Some(added.as_str())
+    );
+    assert!(remove(&added, dir).is_ok());
+    let base = std::path::Path::new("/certs.d/x");
+    if hosts::parse_hosts_file(base, text).is_ok() {
+        let hosts = hosts::parse_hosts_file(base, &added)
+            .unwrap_or_else(|e| panic!("an edited hosts.toml parses: {e:?}\n{text:?}\n{added:?}"));
+        assert_eq!(hosts[0].host, "127.0.0.1:7480");
     }
 }

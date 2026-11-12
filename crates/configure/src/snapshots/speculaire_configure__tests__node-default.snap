@@ -1,0 +1,10 @@
+---
+source: crates/configure/src/tests.rs
+expression: "default.replace(node.dir.path().to_str().unwrap(), \"<root>\")"
+---
+# Added by `speculaire configure`; `speculaire unconfigure` removes it.
+[host."https://127.0.0.1:7480"]
+  capabilities = ["pull"]
+  ca = "<root>/var/lib/speculaire/mirror/ca.crt"
+  client = "<root>/var/lib/speculaire/mirror/client.pem"
+  dial_timeout = "200ms"

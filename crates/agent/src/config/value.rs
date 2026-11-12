@@ -37,6 +37,7 @@ string_conversions!(
     Interval,
     ByteSize,
     Loopback,
+    RegistryName,
     PeerAddress,
     Absolute,
     TrustedRoot,
@@ -208,6 +209,43 @@ impl FromStr for Loopback {
 impl fmt::Display for Loopback {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+/// A registry the runtime pulls from, as an image name starts with it: a host and an optional port, with no scheme,
+/// path or wildcard (D83).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RegistryName(pub(super) String);
+
+impl RegistryName {
+    /// The name, such as `docker.io` or `localhost:5000`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for RegistryName {
+    type Err = InvalidValue;
+    fn from_str(s: &str) -> Result<Self, InvalidValue> {
+        let valid = !s.is_empty()
+            && s.len() <= 255
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-.:[]".contains(&b));
+        if valid {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(InvalidValue(format!(
+                "expected a registry host and optional port such as \"docker.io\" or \"localhost:5000\", found {s:?}"
+            )))
+        }
+    }
+}
+
+impl fmt::Display for RegistryName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -518,6 +556,24 @@ mod tests {
         }
         for s in ["127.0.0.1:7480", "[::1]:7480"] {
             assert_eq!(s.parse::<Loopback>().unwrap().to_string(), s);
+        }
+        for s in [
+            "docker.io",
+            "localhost:5000",
+            "[::1]:5000",
+            "registry-1.docker.io",
+        ] {
+            assert_eq!(s.parse::<RegistryName>().unwrap().to_string(), s);
+        }
+        for s in [
+            "",
+            "https://docker.io",
+            "docker.io/library",
+            "*.example.com",
+            "a b",
+            "dock\u{e9}r.io",
+        ] {
+            assert!(s.parse::<RegistryName>().is_err(), "{s:?}");
         }
         for s in ["", "https://reflector.example:7483", "https://10.0.0.1"] {
             assert_eq!(s.parse::<ReflectorUrl>().unwrap().to_string(), s);

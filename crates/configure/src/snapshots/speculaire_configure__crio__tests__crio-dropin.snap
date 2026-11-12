@@ -1,0 +1,55 @@
+---
+source: crates/configure/src/crio.rs
+expression: render(&entries)
+---
+# Written by `speculaire configure`; `speculaire unconfigure` removes it (D66).
+
+[[registry]]
+prefix = "*.rewritten.example"
+location = "rewritten.corp"
+
+[[registry.mirror]]
+location = "127.0.0.1:7480/rewritten.corp"
+pull-from-mirror = "all"
+
+[[registry]]
+prefix = "docker.io"
+location = "registry-1.docker.io"
+
+[[registry.mirror]]
+location = "127.0.0.1:7480/registry-1.docker.io"
+pull-from-mirror = "all"
+
+[[registry.mirror]]
+location = "mirror.corp:5000/dockerhub"
+insecure = true
+pull-from-mirror = "digest-only"
+
+[[registry]]
+prefix = "ghcr.io"
+location = "ghcr.io"
+
+[[registry.mirror]]
+location = "127.0.0.1:7480/ghcr.io"
+pull-from-mirror = "all"
+
+[[registry]]
+prefix = "quay.io"
+location = "quay.io"
+
+[[registry.mirror]]
+location = "127.0.0.1:7480/quay.io"
+pull-from-mirror = "all"
+
+[[registry]]
+prefix = "registry.corp:5000"
+location = "registry.corp:5000"
+insecure = true
+
+[[registry.mirror]]
+location = "127.0.0.1:7480/registry.corp:5000"
+pull-from-mirror = "all"
+
+[[registry.mirror]]
+location = "digests.corp"
+pull-from-mirror = "digest-only"

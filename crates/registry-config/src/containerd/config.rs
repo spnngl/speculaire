@@ -30,6 +30,7 @@ pub const DEFAULT_PATH: &str = "/etc/containerd/config.toml";
 const CONFIG_VERSION: i64 = 4;
 const CRI_PLUGIN: &str = "io.containerd.grpc.v1.cri";
 const IMAGES_PLUGIN: &str = "io.containerd.cri.v1.images";
+const NRI_PLUGIN: &str = "io.containerd.nri.v1.nri";
 /// `config_path` when the config sets neither it nor `mirrors` (`plugins/cri/images/plugin.go:76`).
 const DEFAULT_CONFIG_PATH: &str = "/etc/containerd/certs.d:/etc/docker/certs.d";
 
@@ -245,6 +246,9 @@ pub enum LoadError {
     /// The registry section of the merged config is not valid.
     #[error("invalid registry section of the config")]
     Registry(#[source] ParseError),
+    /// The NRI section of the merged config is not valid.
+    #[error("invalid NRI section of the config")]
+    Nri(#[source] ParseError),
     /// containerd would refuse the registry section.
     #[error(transparent)]
     Refused(#[from] RegistryError),
@@ -292,6 +296,19 @@ struct Images {
     registry: RawRegistry,
 }
 
+/// The NRI plugin's section, of which only the default validator's `required_plugins` is read.
+#[derive(Deserialize, Default)]
+struct Nri {
+    #[serde(default)]
+    default_validator: DefaultValidator,
+}
+
+#[derive(Deserialize, Default)]
+struct DefaultValidator {
+    #[serde(default)]
+    required_plugins: Vec<String>,
+}
+
 #[derive(Deserialize, Default)]
 struct File {
     #[serde(default)]
@@ -320,6 +337,52 @@ struct Merged {
 ///
 /// When a file cannot be read or is not a valid config, or the merged config is one containerd refuses.
 pub fn load_raw(path: &Path) -> Result<RawRegistry, LoadError> {
+    let mut merged = load_merged(path)?;
+    let mut images = match merged.plugins.remove(IMAGES_PLUGIN) {
+        None => return Ok(RawRegistry::default()),
+        Some(Value::Table(images)) => images,
+        Some(_) => {
+            return Err(LoadError::Registry(ParseError::new(
+                format!("plugins.{IMAGES_PLUGIN:?}"),
+                "is not a table",
+            )));
+        }
+    };
+    fold_images(&mut images);
+    from_value::<Images>(Value::Table(images))
+        .map(|images| images.registry)
+        .map_err(LoadError::Registry)
+}
+
+/// The plugins containerd's NRI refuses to create a container without (D32, D64): `required_plugins` of
+/// `[plugins."io.containerd.nri.v1.nri".default_validator]`, in the merged config of `path` and its imports.
+///
+/// # Errors
+///
+/// As [`load_raw`], and when the NRI section is not a valid one.
+pub fn load_nri_required_plugins(path: &Path) -> Result<Vec<String>, LoadError> {
+    let mut merged = load_merged(path)?;
+    let mut nri = match merged.plugins.remove(NRI_PLUGIN) {
+        None => return Ok(Vec::new()),
+        Some(Value::Table(nri)) => nri,
+        Some(_) => {
+            return Err(LoadError::Nri(ParseError::new(
+                format!("plugins.{NRI_PLUGIN:?}"),
+                "is not a table",
+            )));
+        }
+    };
+    fold_value_fields(&mut nri, &["default_validator"]);
+    if let Some(validator) = value_table_at(&mut nri, "default_validator") {
+        fold_value_fields(validator, &["required_plugins"]);
+    }
+    from_value::<Nri>(Value::Table(nri))
+        .map(|nri| nri.default_validator.required_plugins)
+        .map_err(LoadError::Nri)
+}
+
+/// Reads `path` and its imports, migrates each file and merges them as containerd does.
+fn load_merged(path: &Path) -> Result<Merged, LoadError> {
     let mut merged = Merged::default();
     let mut loaded = HashSet::new();
     let mut pending = VecDeque::from([path.to_owned()]);
@@ -353,20 +416,7 @@ pub fn load_raw(path: &Path) -> Result<RawRegistry, LoadError> {
         merge(&mut merged, file);
     }
     validate(&merged)?;
-    let mut images = match merged.plugins.remove(IMAGES_PLUGIN) {
-        None => return Ok(RawRegistry::default()),
-        Some(Value::Table(images)) => images,
-        Some(_) => {
-            return Err(LoadError::Registry(ParseError::new(
-                format!("plugins.{IMAGES_PLUGIN:?}"),
-                "is not a table",
-            )));
-        }
-    };
-    fold_images(&mut images);
-    from_value::<Images>(Value::Table(images))
-        .map(|images| images.registry)
-        .map_err(LoadError::Registry)
+    Ok(merged)
 }
 
 /// Loads `path` and its imports, and returns the registry settings of containerd (D17).

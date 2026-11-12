@@ -1,0 +1,23 @@
+---
+source: crates/configure/src/containerd.rs
+expression: out
+---
+# registry config for docker.io
+
+server = "https://registry-1.docker.io"    # default: https://docker.io
+
+# Added by `speculaire configure`; `speculaire unconfigure` removes it.
+[host."https://127.0.0.1:7480"]
+  capabilities = ["pull"]
+  ca = "/var/lib/speculaire/mirror/ca.crt"
+  client = "/var/lib/speculaire/mirror/client.pem"
+  dial_timeout = "200ms"
+
+[host."https://public-mirror.example.com"]
+  capabilities = ["pull"]  # default: ["pull", "resolve"]
+
+# The internal mirror.
+[host."https://docker-mirror.internal"]
+  capabilities = ["pull", "resolve"]
+  ca = "docker-mirror.crt"  # or absolute path
+  skip_verify = false

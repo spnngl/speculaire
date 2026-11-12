@@ -116,6 +116,20 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
     ("sbom.max_size", SIZES),
     ("mirror.address", LOOPBACKS),
     (
+        "mirror.registries",
+        &[
+            r#"["docker.io", "registry.k8s.io"]"#,
+            "[]",
+            r#"["localhost:5000", "[::1]:5000"]"#,
+            r#"["https://docker.io"]"#,
+            r#"["docker.io/library"]"#,
+            r#"["*.example.com"]"#,
+            r#"[""]"#,
+            r#""docker.io""#,
+            "[1]",
+        ],
+    ),
+    (
         "peer.address",
         &[
             r#""auto""#,
