@@ -24,3 +24,6 @@ RUN sed -i 's/discard_unpacked_layers = true/discard_unpacked_layers = false/' /
     && grep -q 'discard_unpacked_layers = false' /etc/containerd/config.toml \
     && printf '\n[plugins."io.containerd.grpc.v1.cri".registry]\n  config_path = "/etc/containerd/certs.d"\n' \
         >> /etc/containerd/config.toml
+# kindest/node ships /etc/containerd as 0644, a directory the agent cannot enter: it runs as root without capabilities
+# (D53), and its preflight reads config.toml (D86).
+RUN chmod 0755 /etc/containerd
