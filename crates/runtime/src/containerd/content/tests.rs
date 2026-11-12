@@ -18,7 +18,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use speculaire_oci::reference::Digest;
 use tonic_prost::ProstCodec;
 
-use super::{Containerd, NAMESPACE};
+use super::Containerd;
+use crate::containerd::NAMESPACE;
 use crate::content::{Blob, Chunks, Content as _, Error};
 use crate::paths::Paths;
 

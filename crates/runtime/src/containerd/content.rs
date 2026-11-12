@@ -9,8 +9,8 @@ use containerd_client::tonic::transport::Channel;
 use containerd_client::tonic::{Code, Request};
 use speculaire_oci::reference::Digest;
 
-use super::{Containerd, NAMESPACE};
-use crate::content::{Blob, Content, Error, with_namespace};
+use super::{Containerd, with_namespace};
+use crate::content::{Blob, Content, Error};
 
 impl Containerd {
     fn blob_path(&self, digest: &Digest) -> PathBuf {
@@ -41,7 +41,7 @@ impl Containerd {
         let mut request = Request::new(InfoRequest {
             digest: digest.to_string(),
         });
-        with_namespace(&mut request, NAMESPACE);
+        with_namespace(&mut request);
         match ContentClient::new(channel.clone()).info(request).await {
             Ok(response) => Ok(response
                 .into_inner()
@@ -68,9 +68,10 @@ impl Content for Containerd {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(Error::Io(e)),
         }
-        Ok(self.info(digest).await?.map(|(channel, size)| {
-            Blob::from_grpc(channel, digest.to_string(), NAMESPACE.to_owned(), size)
-        }))
+        Ok(self
+            .info(digest)
+            .await?
+            .map(|(channel, size)| Blob::from_grpc(channel, digest.to_string(), size)))
     }
 }
 

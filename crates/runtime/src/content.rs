@@ -20,6 +20,8 @@ use speculaire_oci::reference::Digest;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 use tokio_util::io::ReaderStream;
 
+use crate::containerd::with_namespace;
+
 /// The size of a read from a file.
 const CHUNK: usize = 256 * 1024;
 
@@ -57,11 +59,7 @@ pub struct Blob {
 
 enum Source {
     File(PathBuf),
-    Grpc {
-        channel: Channel,
-        digest: String,
-        namespace: String,
-    },
+    Grpc { channel: Channel, digest: String },
     Memory(Bytes),
 }
 
@@ -94,20 +92,11 @@ impl Blob {
         }
     }
 
-    /// A blob that containerd's content service holds, read in `namespace`.
-    pub(crate) fn from_grpc(
-        channel: Channel,
-        digest: String,
-        namespace: String,
-        size: u64,
-    ) -> Self {
+    /// A blob that containerd's content service holds.
+    pub(crate) fn from_grpc(channel: Channel, digest: String, size: u64) -> Self {
         Self {
             size,
-            source: Source::Grpc {
-                channel,
-                digest,
-                namespace,
-            },
+            source: Source::Grpc { channel, digest },
         }
     }
 
@@ -139,18 +128,14 @@ impl Blob {
                     ReaderStream::with_capacity(file.take(length), CHUNK).map_err(Error::Io),
                 ))
             }
-            Source::Grpc {
-                channel,
-                digest,
-                namespace,
-            } => {
+            Source::Grpc { channel, digest } => {
                 let mut client = ContentClient::new(channel);
                 let mut request = Request::new(ReadContentRequest {
                     digest,
                     offset: i64::try_from(first).unwrap_or(i64::MAX),
                     size: i64::try_from(length).unwrap_or(i64::MAX),
                 });
-                with_namespace(&mut request, &namespace);
+                with_namespace(&mut request);
                 let stream = client.read(request).await?.into_inner();
                 Ok(Box::pin(stream.map(|message| {
                     message.map(|m| Bytes::from(m.data)).map_err(Error::Grpc)
@@ -181,12 +166,6 @@ impl Blob {
             all.extend_from_slice(&chunk?);
         }
         Ok(Bytes::from(all))
-    }
-}
-
-pub(crate) fn with_namespace<T>(request: &mut Request<T>, namespace: &str) {
-    if let Ok(value) = namespace.parse() {
-        request.metadata_mut().insert("containerd-namespace", value);
     }
 }
 
