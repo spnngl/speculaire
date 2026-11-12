@@ -13,7 +13,7 @@ use speculaire_runtime::registries::Registries;
 use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::time::{Instant, MissedTickBehavior, interval_at};
+use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{self, Config};
@@ -106,8 +106,7 @@ async fn serve(
     systemd::ready();
 
     let mut period = config.config.poll_interval.get();
-    let mut poll = interval_at(Instant::now() + period, period);
-    poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut poll = polls(period);
     // D93: a poll reads a file again when it differs from its stamp, taken before the last read; SIGHUP always does.
     loop {
         tokio::select! {
@@ -132,8 +131,7 @@ async fn serve(
         }
         if config.config.poll_interval.get() != period {
             period = config.config.poll_interval.get();
-            poll = interval_at(Instant::now() + period, period);
-            poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            poll = polls(period);
         }
     }
 
@@ -288,11 +286,29 @@ async fn start_mirror(
     Ok(Mirror { stop, task, relay })
 }
 
+/// The config polls (D30): the first one period from now.
+fn polls(period: Duration) -> Interval {
+    // `interval` caps a period past the clock's range, and `reset` moves its immediate first tick a period away.
+    let mut poll = interval(period);
+    poll.reset();
+    poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    poll
+}
+
 #[cfg(test)]
 mod tests {
     use speculaire_runtime::registries::ContainerdRegistries;
 
     use super::*;
+
+    #[test]
+    fn a_poll_interval_past_the_clocks_range_starts_the_polls() {
+        // humantime reads up to `u64::MAX` seconds; `Instant` holds fewer.
+        let config = config::parse("[config]\npoll_interval = \"500000000000y\"\n").unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            polls(config.config.poll_interval.get());
+        });
+    }
 
     #[test]
     fn the_live_keys_of_a_config_reach_the_relays_cache() {

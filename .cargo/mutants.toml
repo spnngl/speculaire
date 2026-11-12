@@ -12,9 +12,6 @@ test_workspace = true
 # matching; a function made generic matches with or without its parameters. `just mutants-stale` lists the patterns
 # that match nothing.
 exclude_re = [
-  # A poll that starts at once, not a period after the agent starts or the interval changes, finds nothing: no file has
-  # changed since the read before it, and the polls after it fall on the same instants.
-  'serve\.rs:\d+:\d+: replace \+ with - in serve$',
   # The mirror stops with the process: without `stop`, the runtime drops its task a moment later, and no client
   # outlives the agent in a test.
   'serve\.rs:\d+:\d+: replace Mirror::stop with \(\)$',
