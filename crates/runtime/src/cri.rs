@@ -22,7 +22,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_METHOD: &str = "/runtime.v1.RuntimeService/Version";
 const LIST_IMAGES_METHOD: &str = "/runtime.v1.ImageService/ListImages";
 
-/// The largest answer to `ListImages` that is read: a node with thousands of images lists them in megabytes.
+/// The largest answer that is read: a node with thousands of images lists them in megabytes.
 const MAX_LIST: usize = 64 << 20;
 
 /// `VersionRequest`.
@@ -53,28 +53,20 @@ struct ListImagesRequest {}
 #[derive(Clone, PartialEq, prost::Message)]
 struct ListImagesResponse {
     #[prost(message, repeated, tag = "1")]
-    images: Vec<Image>,
+    images: Vec<ListedImage>,
 }
 
-/// `Image`, of which the agent reads the names.
-#[derive(Clone, PartialEq, prost::Message)]
-struct Image {
-    #[prost(string, tag = "1")]
-    id: String,
-    #[prost(string, repeated, tag = "2")]
-    repo_tags: Vec<String>,
-    #[prost(string, repeated, tag = "3")]
-    repo_digests: Vec<String>,
-}
-
-/// An image of the runtime's list, by its names.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// An image of the runtime's list, by its names: the fields of the CRI's `Image` that the agent reads.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct ListedImage {
     /// The image ID: on CRI-O, the digest of its config, without the algorithm.
+    #[prost(string, tag = "1")]
     pub id: String,
     /// `repository:tag` names.
+    #[prost(string, repeated, tag = "2")]
     pub repo_tags: Vec<String>,
     /// `repository@digest` names.
+    #[prost(string, repeated, tag = "3")]
     pub repo_digests: Vec<String>,
 }
 
@@ -141,21 +133,50 @@ pub(crate) fn block_on<T>(
     method: &'static str,
     future: impl Future<Output = Result<T, Error>>,
 ) -> Result<T, Error> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::connect(path, &e))?;
-    runtime.block_on(async {
-        tokio::time::timeout(TIMEOUT, future)
-            .await
-            .unwrap_or_else(|_| {
-                Err(Error::Call {
-                    path: path.to_owned(),
-                    method,
-                    message: format!("no answer within {} s", TIMEOUT.as_secs()),
-                })
+        .map_err(|e| Error::connect(path, &e))?
+        .block_on(timed(path, method, future))
+}
+
+/// `future`, bounded by [`TIMEOUT`].
+async fn timed<T>(
+    path: &Path,
+    method: &'static str,
+    future: impl Future<Output = Result<T, Error>>,
+) -> Result<T, Error> {
+    tokio::time::timeout(TIMEOUT, future)
+        .await
+        .unwrap_or_else(|_| {
+            Err(Error::Call {
+                path: path.to_owned(),
+                method,
+                message: format!("no answer within {} s", TIMEOUT.as_secs()),
             })
-    })
+        })
+}
+
+/// The unary CRI `method` on the socket, with `request`.
+async fn unary<Q, A>(socket: &Path, method: &'static str, request: Q) -> Result<A, Error>
+where
+    Q: prost::Message + Send + Sync + 'static,
+    A: prost::Message + Default + Send + Sync + 'static,
+{
+    let mut client = Grpc::new(connect(socket).await?).max_decoding_message_size(MAX_LIST);
+    client
+        .ready()
+        .await
+        .map_err(|e| Error::connect(socket, &e))?;
+    Ok(client
+        .unary(
+            Request::new(request),
+            PathAndQuery::from_static(method),
+            ProstCodec::default(),
+        )
+        .await
+        .map_err(|status| Error::call(socket, method, &status))?
+        .into_inner())
 }
 
 /// A channel to the socket.
@@ -171,27 +192,17 @@ pub(crate) async fn connect(path: &Path) -> Result<Channel, Error> {
 ///
 /// When the socket cannot be connected to, or the runtime does not answer in 5 s.
 pub fn version(socket: &Path) -> Result<RuntimeVersion, Error> {
-    block_on(socket, VERSION_METHOD, async {
-        let mut client = Grpc::new(connect(socket).await?);
-        client
-            .ready()
-            .await
-            .map_err(|e| Error::connect(socket, &e))?;
-        let response: VersionResponse = client
-            .unary(
-                Request::new(VersionRequest {
-                    version: "v1".to_owned(),
-                }),
-                PathAndQuery::from_static(VERSION_METHOD),
-                ProstCodec::default(),
-            )
-            .await
-            .map_err(|status| Error::call(socket, VERSION_METHOD, &status))?
-            .into_inner();
-        Ok(RuntimeVersion {
-            name: response.runtime_name,
-            version: response.runtime_version,
-        })
+    let request = VersionRequest {
+        version: "v1".to_owned(),
+    };
+    let response: VersionResponse = block_on(
+        socket,
+        VERSION_METHOD,
+        unary(socket, VERSION_METHOD, request),
+    )?;
+    Ok(RuntimeVersion {
+        name: response.runtime_name,
+        version: response.runtime_version,
     })
 }
 
@@ -203,37 +214,11 @@ pub fn version(socket: &Path) -> Result<RuntimeVersion, Error> {
 ///
 /// When the socket cannot be connected to, or the runtime does not answer in 5 s.
 pub async fn list_images(socket: &Path) -> Result<Vec<ListedImage>, Error> {
-    tokio::time::timeout(TIMEOUT, async {
-        let mut client = Grpc::new(connect(socket).await?).max_decoding_message_size(MAX_LIST);
-        client
-            .ready()
-            .await
-            .map_err(|e| Error::connect(socket, &e))?;
-        let response: ListImagesResponse = client
-            .unary(
-                Request::new(ListImagesRequest {}),
-                PathAndQuery::from_static(LIST_IMAGES_METHOD),
-                ProstCodec::default(),
-            )
-            .await
-            .map_err(|status| Error::call(socket, LIST_IMAGES_METHOD, &status))?
-            .into_inner();
-        Ok(response
-            .images
-            .into_iter()
-            .map(|image| ListedImage {
-                id: image.id,
-                repo_tags: image.repo_tags,
-                repo_digests: image.repo_digests,
-            })
-            .collect())
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err(Error::Call {
-            path: socket.to_owned(),
-            method: LIST_IMAGES_METHOD,
-            message: format!("no answer within {} s", TIMEOUT.as_secs()),
-        })
-    })
+    let response: ListImagesResponse = timed(
+        socket,
+        LIST_IMAGES_METHOD,
+        unary(socket, LIST_IMAGES_METHOD, ListImagesRequest {}),
+    )
+    .await?;
+    Ok(response.images)
 }
