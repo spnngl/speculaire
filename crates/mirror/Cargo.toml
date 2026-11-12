@@ -1,0 +1,39 @@
+[package]
+name = "speculaire-mirror"
+description = "The local registry mirror: the distribution-spec pull API over mutual TLS, from the runtime content"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+containerd-client.workspace = true
+futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+metrics.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+speculaire-oci.workspace = true
+speculaire-pki.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hyper = { workspace = true, features = ["client", "http2"] }
+secrecy.workspace = true
+tempfile.workspace = true
+metrics-exporter-prometheus.workspace = true
+tonic-prost.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

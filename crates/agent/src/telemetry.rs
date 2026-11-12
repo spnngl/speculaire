@@ -41,5 +41,6 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
     // The runtime, its version and NRI's come from NRI's `Configure` (D9, D68); empty until then.
     gauge!(BUILD_INFO, "version" => env!("CARGO_PKG_VERSION"), "runtime" => "", "runtime_version" => "", "nri_version" => "").set(1);
     counter!(CONFIG_RELOAD_FAILURES).absolute(0);
+    speculaire_mirror::metrics::describe();
     Ok(handle)
 }

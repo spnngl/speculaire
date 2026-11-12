@@ -115,6 +115,7 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
     ("verify.stale_max", SPANS),
     ("sbom.max_size", SIZES),
     ("mirror.address", LOOPBACKS),
+    ("mirror.directory", PATHS),
     (
         "mirror.registries",
         &[
