@@ -20,6 +20,8 @@ use speculaire_fake_runtime::{Answers, Fake};
 use speculaire_pki::mirror::{Mirror, Part};
 
 const WAIT: Duration = Duration::from_secs(10);
+/// The agent's config reload line; a bare `config reloaded` also matches the registry config's.
+const RELOADED: &str = r#""message":"config reloaded""#;
 const PROTOBUF: &str =
     "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited";
 
@@ -382,14 +384,14 @@ fn sighup_applies_log_filter() {
     let mut agent = Agent::start("");
     agent.rewrite("[log]\nfilter = \"debug\"\n");
     agent.signal("HUP");
-    agent.line(&[r#""level":"DEBUG""#, "config reloaded"]);
+    agent.line(&[r#""level":"DEBUG""#, RELOADED]);
 }
 
 #[test]
 fn a_poll_reloads_a_changed_file() {
     let mut agent = Agent::start("[config]\npoll_interval = \"1s\"\n");
     agent.rewrite("[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n");
-    agent.line(&[r#""level":"DEBUG""#, "config reloaded"]);
+    agent.line(&[r#""level":"DEBUG""#, RELOADED]);
 }
 
 #[test]
@@ -491,12 +493,12 @@ fn a_new_poll_interval_applies_to_the_next_poll() {
     let fast = "[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n";
     agent.rewrite(fast);
     agent.signal("HUP");
-    agent.line(&[r#""level":"DEBUG""#, "config reloaded"]);
+    agent.line(&[r#""level":"DEBUG""#, RELOADED]);
     // Only a poll at the new interval sees this: the old one is an hour. The pause puts the write past the reload's
     // start even when the kernel's coarse file clock dates it a few milliseconds early.
     std::thread::sleep(Duration::from_millis(100));
     agent.rewrite(fast);
-    agent.line(&[r#""level":"DEBUG""#, "config reloaded"]);
+    agent.line(&[r#""level":"DEBUG""#, RELOADED]);
 }
 
 #[test]
