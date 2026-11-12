@@ -275,9 +275,6 @@ fn host_order(text: &str) -> Vec<String> {
             self.in_header = true;
             self.parts.clear();
         }
-        fn array_table_open(&mut self, _span: Span, _error: &mut dyn ErrorSink) {
-            self.in_header = false;
-        }
         fn simple_key(
             &mut self,
             span: Span,
@@ -676,5 +673,149 @@ fn registry_host(config: HostConfig) -> RegistryHost {
         header: config.header,
         dial_timeout: config.dial_timeout,
         http_fallback,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_combine_and_are_named_in_order() {
+        let pull_push = Capabilities::PULL | Capabilities::PUSH;
+        assert!(pull_push.contains(Capabilities::PULL));
+        assert!(pull_push.contains(Capabilities::PULL | Capabilities::PUSH));
+        assert!(!pull_push.contains(Capabilities::RESOLVE));
+        assert!(!pull_push.contains(Capabilities::PULL | Capabilities::REFERRERS));
+        assert!(Capabilities::NONE.contains(Capabilities::NONE));
+        assert!(!Capabilities::NONE.contains(Capabilities::PULL));
+        assert_eq!(Capabilities::PULL | Capabilities::PULL, Capabilities::PULL);
+        assert_eq!(pull_push.names(), ["pull", "push"]);
+        assert_eq!(
+            Capabilities::ALL.names(),
+            ["pull", "resolve", "push", "referrers"]
+        );
+        assert_eq!(Capabilities::NONE.names(), Vec::<&str>::new());
+        for (name, capability) in [
+            ("pull", Capabilities::PULL),
+            ("Resolve", Capabilities::RESOLVE),
+            ("PUSH", Capabilities::PUSH),
+            ("referrers", Capabilities::REFERRERS),
+        ] {
+            assert_eq!(Capabilities::named(name), Some(capability), "{name}");
+        }
+        assert_eq!(Capabilities::named("fly"), None);
+    }
+
+    #[test]
+    fn a_host_has_tls_settings_when_any_of_the_three_keys_is_present() {
+        let has_tls = |text: &str| {
+            let hosts = parse_hosts_file(Path::new("/b"), text).expect("a hosts.toml");
+            hosts[0].has_tls()
+        };
+        assert!(has_tls("ca = []\n"));
+        assert!(has_tls("client = []\n"));
+        assert!(has_tls("skip_verify = false\n"));
+        assert!(!has_tls("capabilities = [\"pull\"]\n"));
+    }
+
+    #[test]
+    fn keys_of_the_file_and_of_its_hosts_are_matched_in_any_case() {
+        let text = "SERVER = \"https://a.io\"\n[host.\"https://m.io\"]\nCapabilities = [\"pull\"]\nOverride_Path = true\n";
+        let hosts = parse_hosts_file(Path::new("/b"), text).expect("a hosts.toml");
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].capabilities, Capabilities::PULL);
+        assert_eq!(hosts[0].path, "");
+        assert_eq!(hosts[1].host, "a.io");
+    }
+
+    #[test]
+    fn the_api_root_gains_v2_unless_it_has_it_or_is_overridden() {
+        let path = |server: &str, extra: &str| {
+            let text = format!("server = \"{server}\"\n{extra}");
+            let hosts = parse_hosts_file(Path::new("/b"), &text).expect("a hosts.toml");
+            hosts[0].path.clone()
+        };
+        assert_eq!(path("https://a.io", ""), "/v2");
+        assert_eq!(path("https://a.io/x", ""), "/x/v2");
+        assert_eq!(path("https://a.io/x/v2", ""), "/x/v2");
+        assert_eq!(path("https://a.io/x", "override_path = true\n"), "/x");
+        assert_eq!(path("https://a.io", "override_path = true\n"), "");
+    }
+
+    #[test]
+    fn a_port_is_a_directory_name_of_its_own_unless_the_host_starts_with_it() {
+        let paths = |host: &str| host_paths(Path::new("/r"), host);
+        assert_eq!(
+            paths("a.io:5000"),
+            [
+                PathBuf::from("/r/a.io_5000_"),
+                PathBuf::from("/r/a.io:5000"),
+                PathBuf::from("/r/_default")
+            ]
+        );
+        assert_eq!(
+            paths(":5000"),
+            [PathBuf::from("/r/:5000"), PathBuf::from("/r/_default")]
+        );
+    }
+
+    #[test]
+    fn what_is_not_a_missing_file_is_an_error() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // A directory named `hosts.toml` cannot be read as a file.
+        std::fs::create_dir(dir.path().join("hosts.toml")).expect("a directory");
+        assert!(matches!(
+            read_hosts_toml(dir.path()),
+            Err(HostsError::Read { .. })
+        ));
+        assert!(matches!(
+            load_host_dir(dir.path()),
+            Err(HostsError::Read { .. })
+        ));
+        // A file where a directory should be: nothing below it can be looked up.
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").expect("a file");
+        assert!(matches!(
+            load_cert_files(&file),
+            Err(HostsError::Read { .. })
+        ));
+        assert!(matches!(
+            host_dir(std::slice::from_ref(&file), "a.io"),
+            Err(HostsError::Read { .. })
+        ));
+        // A key that is a link to itself: looking it up fails, and not because it is missing.
+        let certs = dir.path().join("certs");
+        std::fs::create_dir(&certs).expect("a directory");
+        std::fs::write(certs.join("c.cert"), "").expect("a file");
+        std::os::unix::fs::symlink(certs.join("c.key"), certs.join("c.key")).expect("a link");
+        assert!(matches!(
+            load_cert_files(&certs),
+            Err(HostsError::Read { .. })
+        ));
+    }
+
+    #[test]
+    fn a_missing_directory_has_no_certificate_files_and_a_missing_key_is_none() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let hosts = load_cert_files(&dir.path().join("none")).expect("an empty host");
+        assert!(hosts[0].ca().is_empty() && hosts[0].client().is_empty());
+        assert!(read_hosts_toml(dir.path()).expect("no file").is_none());
+        std::fs::write(dir.path().join("c.cert"), "").expect("a file");
+        let hosts = load_cert_files(dir.path()).expect("a host");
+        assert_eq!(hosts[0].client()[0].key, None);
+    }
+
+    #[test]
+    fn only_a_local_registry_on_the_default_ports_is_tried_without_fallback() {
+        let roots: [PathBuf; 0] = [];
+        let fallback = |host: &str| {
+            let found = resolve(&roots, host, None).expect("hosts");
+            (found[0].scheme.clone(), found[0].http_fallback)
+        };
+        assert_eq!(fallback("localhost"), ("https".to_owned(), false));
+        assert_eq!(fallback("localhost:443"), ("https".to_owned(), false));
+        assert_eq!(fallback("localhost:5000"), ("https".to_owned(), true));
+        assert_eq!(fallback("localhost:80"), ("http".to_owned(), false));
     }
 }

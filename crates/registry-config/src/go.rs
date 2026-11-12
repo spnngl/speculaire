@@ -412,15 +412,15 @@ fn leading_fraction(s: &str) -> (u64, f64, &str) {
         if overflow {
             continue;
         }
-        if x > (i64::MAX.unsigned_abs()) / 10 {
+        // Go also refuses `x > (1<<63-1)/10` first; any such `x` makes `y` exceed 1<<63 here, so one check does both.
+        let y = x
+            .checked_mul(10)
+            .and_then(|x| x.checked_add(u64::from(b - b'0')))
+            .filter(|&y| y <= 1 << 63);
+        let Some(y) = y else {
             overflow = true;
             continue;
-        }
-        let y = x * 10 + u64::from(b - b'0');
-        if y > 1 << 63 {
-            overflow = true;
-            continue;
-        }
+        };
         x = y;
         scale *= 10.0;
     }
@@ -768,6 +768,8 @@ mod tests {
             ("300ms", 0.3),
             ("0", 0.0),
             ("+2s", 2.0),
+            // A fraction longer than 63 bits drops its last digits.
+            ("0.12345678901234567890123456789s", 0.123_456_789),
         ] {
             let parsed = parse_duration(text).expect("a duration").as_secs_f64();
             assert!((parsed - seconds).abs() < 1e-9, "{text}: {parsed}");
@@ -783,6 +785,10 @@ mod tests {
         assert_eq!(split_host_port("[::1]:80"), Some(("::1", "80")));
         assert_eq!(split_host_port("a.io"), None);
         assert_eq!(split_host_port("::1"), None);
+        // A bracket anywhere else is an error, whichever of the two checks sees it.
+        for bad in ["a[b:80", "a]b:80", "[a[]:80", "[a]:8]0"] {
+            assert_eq!(split_host_port(bad), None, "{bad}");
+        }
     }
 
     #[test]
@@ -805,6 +811,12 @@ mod tests {
             ("[^a-c]x", "bx", false),
             (r"a\*", "a*", true),
             ("*", "", true),
+            // The star tries each start in the name, and a try that leaves a rest of the name is not the last.
+            ("*a", "aba", true),
+            ("*a", "xaab", false),
+            ("*a", "xaaa", true),
+            ("*/a", "x/a", true),
+            ("*/a", "x/b", false),
         ] {
             assert_eq!(
                 matches(pattern, name).ok(),

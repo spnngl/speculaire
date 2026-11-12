@@ -392,3 +392,71 @@ fn http_with_tls_settings_is_https_with_a_plain_http_fallback() {
         ("http", false)
     );
 }
+
+#[test]
+fn the_newest_version_is_read_and_a_file_without_one_is_version_one() {
+    let registry = registry_of(
+        "version = 4\n[plugins.\"io.containerd.cri.v1.images\".registry]\nconfig_path = \"/four\"\n",
+    )
+    .expect("a config");
+    assert_eq!(
+        registry.hosts,
+        Hosts::ConfigPath(vec![PathBuf::from("/four")])
+    );
+    for header in ["", "version = 1\n"] {
+        let registry = registry_of(&format!(
+            "{header}[plugins.cri.registry]\nconfig_path = \"/legacy\"\n"
+        ))
+        .expect("a config");
+        assert_eq!(
+            registry.hosts,
+            Hosts::ConfigPath(vec![PathBuf::from("/legacy")]),
+            "{header:?}"
+        );
+    }
+}
+
+#[test]
+fn plugin_lists_name_uris_unless_version_one_renames_them() {
+    let error = registry_of("version = 2\ndisabled_plugins = [\"cri\"]\n").expect_err("a refusal");
+    assert!(
+        matches!(
+            error,
+            LoadError::PluginUri {
+                list: "disabled",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let error = registry_of("version = 2\nrequired_plugins = [\"io.x.y\", \"cri\"]\n")
+        .expect_err("a refusal");
+    assert!(
+        matches!(
+            error,
+            LoadError::PluginUri {
+                list: "required",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    registry_of("version = 2\ndisabled_plugins = [\"io.x.y\"]\n").expect("a config");
+    registry_of("version = 1\ndisabled_plugins = [\"cri\"]\n").expect("a config");
+    // The lists of all files are merged, and the merge is checked.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    write(
+        dir.path(),
+        "extra.toml",
+        "version = 2\ndisabled_plugins = [\"cri\"]\n",
+    );
+    let main = write(
+        dir.path(),
+        "config.toml",
+        "version = 2\nimports = [\"extra.toml\"]\n",
+    );
+    assert!(matches!(
+        config::load(&main),
+        Err(LoadError::PluginUri { .. })
+    ));
+}
