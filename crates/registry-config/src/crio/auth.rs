@@ -10,10 +10,12 @@
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
+use std::marker::PhantomData;
 use std::path::PathBuf;
 
 use secrecy::{ExposeSecret, SecretString};
-use serde_json::Value;
+use serde::Deserialize;
+use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
 
 use super::Context;
 use super::registries::AUTHENTICATION_FILE_HELPER;
@@ -133,50 +135,109 @@ impl AuthFile {
     }
 }
 
-fn invalid(message: impl Into<String>) -> ParseError {
-    ParseError::new("", message)
+/// Whether `key` names the field `name`, as `encoding/json` matches it: by `bytes.EqualFold`, which also folds
+/// K (U+212A) to k and ſ (U+017F) to s. `name` is ASCII, its k and s lower case.
+fn names(key: &str, name: &str) -> bool {
+    let mut chars = key.chars();
+    name.chars().all(|n| {
+        chars.next().is_some_and(|c| {
+            c.eq_ignore_ascii_case(&n) || matches!((c, n), ('\u{212a}', 'k') | ('\u{17f}', 's'))
+        })
+    }) && chars.next().is_none()
 }
 
-/// The value of `name` in `object`, in any case as `encoding/json` matches keys.
-fn field<'a>(object: &'a serde_json::Map<String, Value>, name: &str) -> Option<&'a Value> {
-    object.get(name).or_else(|| {
-        object
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value)
-    })
+/// A struct as `encoding/json` fills it: each key, in the order of the text, sets the field it names; `null`
+/// leaves the zero value.
+trait Fields: Default {
+    /// Reads the value of `key` into the field it names, or skips it.
+    fn read<'de, A: MapAccess<'de>>(&mut self, key: &str, map: &mut A) -> Result<(), A::Error>;
 }
 
-/// A string, or `null` which leaves the zero value.
-fn string_of(value: Option<&Value>, what: &str) -> Result<String, ParseError> {
-    match value {
-        None | Some(Value::Null) => Ok(String::new()),
-        Some(Value::String(text)) => Ok(text.clone()),
-        Some(_) => Err(invalid(format!("{what} is not a string"))),
+fn fields<'de, D: Deserializer<'de>, T: Fields>(deserializer: D) -> Result<T, D::Error> {
+    Ok(Option::<Object<T>>::deserialize(deserializer)?
+        .map(|object| object.0)
+        .unwrap_or_default())
+}
+
+/// The object of a [`Fields`]; [`fields`] reads `null` too.
+struct Object<T>(T);
+
+impl<'de, T: Fields> Deserialize<'de> for Object<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Keys<T>(PhantomData<T>);
+        impl<'de, T: Fields> Visitor<'de> for Keys<T> {
+            type Value = Object<T>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Object<T>, A::Error> {
+                let mut fields = T::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    fields.read(&key, &mut map)?;
+                }
+                Ok(Object(fields))
+            }
+        }
+        deserializer.deserialize_map(Keys(PhantomData))
     }
 }
 
-fn entries_of(value: &Value) -> Result<BTreeMap<String, Entry>, ParseError> {
-    let object = match value {
-        Value::Null => return Ok(BTreeMap::new()),
-        Value::Object(object) => object,
-        _ => return Err(invalid("auths is not an object")),
-    };
-    object
-        .iter()
-        .map(|(key, entry)| {
-            let entry = match entry {
-                Value::Null => Entry::default(),
-                Value::Object(entry) => Entry {
-                    auth: string_of(field(entry, "auth"), "auth")?.into(),
-                    identity_token: string_of(field(entry, "identitytoken"), "identitytoken")?
-                        .into(),
-                },
-                _ => return Err(invalid(format!("entry {key:?} is not an object"))),
-            };
-            Ok((key.clone(), entry))
-        })
-        .collect()
+/// A string field: `null` leaves it as it is.
+fn read_string<'de, A: MapAccess<'de>>(
+    field: &mut impl From<String>,
+    map: &mut A,
+) -> Result<(), A::Error> {
+    if let Some(text) = map.next_value::<Option<String>>()? {
+        *field = text.into();
+    }
+    Ok(())
+}
+
+/// A map field: `null` empties it, and an object adds its entries, a `null` one as the zero value.
+fn read_map<'de, A: MapAccess<'de>, V: Deserialize<'de> + Default>(
+    field: &mut BTreeMap<String, V>,
+    map: &mut A,
+) -> Result<(), A::Error> {
+    match map.next_value::<Option<BTreeMap<String, Option<V>>>>()? {
+        None => field.clear(),
+        Some(entries) => field.extend(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key, value.unwrap_or_default())),
+        ),
+    }
+    Ok(())
+}
+
+impl Fields for Entry {
+    fn read<'de, A: MapAccess<'de>>(&mut self, key: &str, map: &mut A) -> Result<(), A::Error> {
+        let field = if names(key, "auth") {
+            &mut self.auth
+        } else if names(key, "identitytoken") {
+            &mut self.identity_token
+        } else {
+            return map.next_value::<IgnoredAny>().map(drop);
+        };
+        read_string(field, map)
+    }
+}
+
+impl<'de> Deserialize<'de> for Entry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        fields(deserializer)
+    }
+}
+
+impl Fields for AuthFile {
+    fn read<'de, A: MapAccess<'de>>(&mut self, key: &str, map: &mut A) -> Result<(), A::Error> {
+        if names(key, "auths") {
+            read_map(&mut self.auths, map)
+        } else if names(key, "credHelpers") {
+            read_map(&mut self.cred_helpers, map)
+        } else {
+            map.next_value::<IgnoredAny>().map(drop)
+        }
+    }
 }
 
 /// Parses a credential file (`authPath.parse`); `legacy` is the format of `~/.dockercfg`.
@@ -185,37 +246,17 @@ fn entries_of(value: &Value) -> Result<BTreeMap<String, Entry>, ParseError> {
 ///
 /// When the text is not JSON of the expected shape: a map of entries, with string `auth` and `identitytoken`.
 pub fn parse_auth_file(text: &str, legacy: bool) -> Result<AuthFile, ParseError> {
-    let value: Value = serde_json::from_str(text)
-        .map_err(|e| ParseError::new("", e.to_string()).at(e.line(), e.column()))?;
-    if legacy {
-        return Ok(AuthFile {
-            auths: entries_of(&value)?,
+    let mut json = serde_json::Deserializer::from_str(text);
+    let file = if legacy {
+        Option::<BTreeMap<String, Entry>>::deserialize(&mut json).map(|auths| AuthFile {
+            auths: auths.unwrap_or_default(),
             cred_helpers: BTreeMap::new(),
-        });
-    }
-    let object = match &value {
-        Value::Null => return Ok(AuthFile::default()),
-        Value::Object(object) => object,
-        _ => return Err(invalid("the file is not an object")),
+        })
+    } else {
+        fields(&mut json)
     };
-    let auths = field(object, "auths").map_or_else(|| Ok(BTreeMap::new()), entries_of)?;
-    let cred_helpers = match field(object, "credHelpers") {
-        None | Some(Value::Null) => BTreeMap::new(),
-        Some(Value::Object(helpers)) => helpers
-            .iter()
-            .map(|(registry, helper)| {
-                Ok((
-                    registry.clone(),
-                    string_of(Some(helper), "a credHelpers value")?,
-                ))
-            })
-            .collect::<Result<_, ParseError>>()?,
-        Some(_) => return Err(invalid("credHelpers is not an object")),
-    };
-    Ok(AuthFile {
-        auths,
-        cred_helpers,
-    })
+    file.and_then(|file| json.end().map(|()| file))
+        .map_err(|e| ParseError::new("", e.to_string()).at(e.line(), e.column()))
 }
 
 /// `getPathToAuth` on Linux: the file `ctx` names and whether it was named, or the per-user default.
@@ -766,10 +807,49 @@ mod tests {
         ] {
             assert!(parse_auth_file(bad, false).is_err(), "{bad:?} is accepted");
         }
+        let error = parse_auth_file(r#"{"auths": {"a": "x"}}"#, false).expect_err("a refusal");
+        assert!(error.to_string().contains("expected an object"), "{error}");
         assert!(parse_auth_file(r#"{"auths": {}}"#, true).is_ok());
         assert!(parse_auth_file(r#"{"a": 1}"#, true).is_err());
         let error = parse_auth_file("{\n  x", false).expect_err("a refusal");
         assert_eq!(error.position().map(|(line, _)| line), Some(2));
+    }
+
+    #[test]
+    fn the_spellings_of_a_field_are_read_in_order_as_encoding_json_does() {
+        let file = parse_auth_file(r#"{"auths": {"a.io": {"auth": "x", "AUTH": "y"}}, "AUTHS": {"b.io": {"Auth": "z", "auth": null}}, "credHelpers": {"c.io": "p"}, "CredHelpers": {"d.io": "q"}}"#, false).expect("a file");
+        assert_eq!(file.auths["a.io"].auth.expose_secret(), "y");
+        assert_eq!(file.auths["b.io"].auth.expose_secret(), "z");
+        assert_eq!(file.cred_helpers.len(), 2);
+        let emptied =
+            parse_auth_file(r#"{"auths": {"a.io": {}}, "Auths": null}"#, false).expect("a file");
+        assert!(emptied.auths.is_empty());
+        let replaced = parse_auth_file(
+            r#"{"a.io": {"auth": "x"}, "a.io": {"identitytoken": "t"}}"#,
+            true,
+        )
+        .expect("a file");
+        assert_eq!(replaced.auths["a.io"].auth.expose_secret(), "");
+        // `bytes.EqualFold` folds K (U+212A) to k and ſ (U+017F) to s.
+        let folded = parse_auth_file(
+            "{\"auth\u{17f}\": {\"a.io\": {\"identityto\u{212a}en\": \"t\"}}}",
+            false,
+        )
+        .expect("a file");
+        assert_eq!(folded.auths["a.io"].identity_token.expose_secret(), "t");
+        // A key names a field when the whole of it folds to the name, no less and no more.
+        let others = parse_auth_file(r#"{"auths": {"a.io": {"a": "x", "authx": "y"}}}"#, false)
+            .expect("a file");
+        assert_eq!(others.auths["a.io"].auth.expose_secret(), "");
+        // `null` is the zero value of an entry in both formats.
+        let legacy = parse_auth_file(r#"{"a.io": null}"#, true).expect("a file");
+        assert_eq!(legacy.auths["a.io"].auth.expose_secret(), "");
+        assert!(
+            parse_auth_file("null", false)
+                .expect("a file")
+                .auths
+                .is_empty()
+        );
     }
 
     #[test]

@@ -797,7 +797,10 @@ fn keys_for(text: &str) -> Vec<String> {
     let mut entries = Vec::new();
     if let Ok(Value::Object(file)) = serde_json::from_str::<Value>(text) {
         for (name, value) in &file {
-            if let (true, Value::Object(map)) = (name.eq_ignore_ascii_case("auths"), value) {
+            let field = ["auths", "credHelpers"]
+                .iter()
+                .any(|f| name.eq_ignore_ascii_case(f));
+            if let (true, Value::Object(map)) = (field, value) {
                 entries.extend(map.keys().cloned());
             } else {
                 entries.push(name.clone());
@@ -929,6 +932,33 @@ fn auth_layouts(root: &Path, uid: u32) -> Vec<(String, AuthCase)> {
             vec![(
                 run,
                 r#"{"AUTHS": {"docker.io": {"AUTH": "dXNlcjpwYXNz", "IdentityToken": "t"}}}"#,
+            )],
+            |_| {},
+        ),
+        (
+            "two spellings of a field, read in order",
+            vec![(
+                run,
+                r#"{"auths": {"docker.io": {"auth": "!!", "AUTH": "dXNlcjpwYXNz", "Auth": null}}, "Auths": {"quay.io/org": {"auth": "b3JnOnRva2Vu"}}, "credHelpers": {"helper.test": "nonexistent"}, "CREDHELPERS": {"other.test": "nonexistent"}}"#,
+            )],
+            |_| {},
+        ),
+        (
+            "null empties the entries before it",
+            vec![
+                (
+                    run,
+                    r#"{"auths": {"docker.io": {"auth": "b3RoZXI6b3RoZXI="}}, "AUTHS": null}"#,
+                ),
+                ("home/.docker/config.json", LOGIN),
+            ],
+            |_| {},
+        ),
+        (
+            "keys that fold as bytes.EqualFold does",
+            vec![(
+                run,
+                "{\"auth\u{17f}\": {\"example.com\": {\"auth\": \"ZXhhbXBsZTpwdw==\", \"identityto\u{212a}en\": \"tok\"}}}",
             )],
             |_| {},
         ),
