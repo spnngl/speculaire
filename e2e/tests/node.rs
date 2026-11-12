@@ -12,7 +12,10 @@ fn every_node_is_ready_on_the_pinned_runtime_and_kubernetes() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let nodes = loop {
         let nodes = cluster.nodes().unwrap();
-        if nodes.iter().all(|node| node.runtime == runtime) || std::time::Instant::now() > deadline
+        if nodes
+            .iter()
+            .all(|node| node.ready && node.runtime == runtime)
+            || std::time::Instant::now() > deadline
         {
             break nodes;
         }
