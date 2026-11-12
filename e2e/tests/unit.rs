@@ -1,4 +1,4 @@
-//! The agent as `packaging/speculaire.service` on every node (D39, D53): the unit, its endpoints, metrics and logs.
+//! The agent as `packaging/speculaire.service` on every node (D39, D53, D69): the unit, its endpoints, metrics and logs.
 //! Each test leaves the unit running and unchanged; `unit_reload.rs` and `unit_restart.rs`, test binaries of their
 //! own, reload and stop it.
 
@@ -41,8 +41,12 @@ const ANALYZED: [&str; 21] = [
 ];
 
 /// The unit's properties that `systemd-analyze security` does not report, as `systemctl show` prints them.
-const SHOWN: [&str; 10] = [
+const SHOWN: [&str; 12] = [
     "Type=notify",
+    // D69.
+    "WatchdogUSec=30s",
+    // Reported unset by `systemd-analyze security` (`UNSET_BY_DESIGN`), so checked here.
+    "ProtectHome=read-only",
     "User=root",
     "TimeoutStopUSec=20s",
     "Restart=on-failure",
@@ -74,11 +78,6 @@ fn the_unit_is_active_with_its_settings_and_a_watchdog() {
             let (property, _) = want.split_once('=').unwrap();
             assert_eq!(show(&cluster, &node, property).unwrap(), want, "{node}");
         }
-        let watchdog = show(&cluster, &node, "WatchdogUSec").unwrap();
-        assert!(
-            watchdog != "WatchdogUSec=0" && watchdog != "WatchdogUSec=infinity",
-            "{node}: {watchdog}"
-        );
     }
 }
 

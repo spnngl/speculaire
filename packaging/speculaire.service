@@ -1,4 +1,4 @@
-# The agent as a system service (D39, D53). Ported from dedens `deploy/packages/dedensd.service` at
+# The agent as a system service (D39, D53, D69). Ported from dedens `deploy/packages/dedensd.service` at
 # v0.1.0-131-gfd00747, with D53's settings.
 [Unit]
 Description=Spéculaire image mirror and gate
@@ -8,7 +8,7 @@ After=network-online.target containerd.service crio.service
 
 [Service]
 # The agent sends READY=1 once /readyz answers 200, STOPPING=1 on SIGTERM, and a watchdog ping every
-# WatchdogSec/2 from its runtime, so a stalled runtime is killed and restarted (D39).
+# WatchdogSec/2 from its runtime, so a stalled runtime is killed and restarted (D69).
 Type=notify
 ExecStart=/usr/bin/speculaire agent
 ExecReload=/bin/kill -HUP $MAINPID
