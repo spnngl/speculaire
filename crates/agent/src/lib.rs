@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod log;
+pub mod node;
 mod serve;
 pub mod status;
 mod systemd;

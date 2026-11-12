@@ -18,17 +18,25 @@ const PROTOBUF: &str =
 /// What the listener reports.
 pub struct Status {
     stopping: AtomicBool,
+    mirror: AtomicBool,
     metrics: PrometheusHandle,
 }
 
 impl Status {
-    /// A status that is ready: the agent opens the listener once its config is loaded (D45).
+    /// A status that is not ready: the agent opens the listener once its config is loaded, and each component it
+    /// starts makes the status ready when it is (D45).
     #[must_use]
     pub fn new(metrics: PrometheusHandle) -> Self {
         Self {
             stopping: AtomicBool::new(false),
+            mirror: AtomicBool::new(false),
             metrics,
         }
+    }
+
+    /// The mirror listens: `/readyz` no longer waits for it (D45, D86).
+    pub fn mirror_listening(&self) {
+        self.mirror.store(true, Ordering::Relaxed);
     }
 
     /// Makes `/readyz` answer 503 from now on (D39).
@@ -47,7 +55,7 @@ pub fn router(status: Arc<Status>) -> Router {
 }
 
 async fn readyz(State(status): State<Arc<Status>>) -> StatusCode {
-    if status.stopping.load(Ordering::Relaxed) {
+    if status.stopping.load(Ordering::Relaxed) || !status.mirror.load(Ordering::Relaxed) {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::OK
@@ -117,10 +125,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readyz_turns_503_on_stop_while_livez_stays_200() {
+    async fn readyz_is_503_until_the_mirror_listens_and_from_the_stop_while_livez_stays_200() {
         let status = Arc::new(Status::new(
             PrometheusBuilder::new().build_recorder().handle(),
         ));
+        assert_eq!(
+            get(&status, "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(get(&status, "/livez").await, StatusCode::OK);
+        status.mirror_listening();
         assert_eq!(get(&status, "/readyz").await, StatusCode::OK);
         status.stop();
         assert_eq!(

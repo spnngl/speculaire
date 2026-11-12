@@ -87,7 +87,7 @@ fn nri_required_plugins_come_from_the_default_validator_across_imports() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let required = |text: &str| {
         let path = write(dir.path(), "config.toml", text);
-        config::load_nri_required_plugins(&path)
+        config::load_plugins(&path).map(|plugins| plugins.nri.required_plugins)
     };
     assert_eq!(
         required("version = 3\n").expect("a config"),
@@ -98,7 +98,9 @@ fn nri_required_plugins_come_from_the_default_validator_across_imports() {
             .expect("a config"),
         ["speculaire"]
     );
-    // Keys match in any case, and a later file replaces the array.
+    // Keys match in any case, and a later file replaces the array of the same spelling. Spelled otherwise, the two
+    // keys stay side by side, and go-toml, which sees them in byte order, ends on the all-lower-case one (the
+    // oracle test has the same case).
     write(
         dir.path(),
         "conf.d/late.toml",
@@ -107,14 +109,14 @@ fn nri_required_plugins_come_from_the_default_validator_across_imports() {
     assert_eq!(
         required("imports = [\"conf.d/*.toml\"]\n[plugins.\"io.containerd.nri.v1.nri\".default_validator]\nrequired_plugins = [\"speculaire\"]\n")
             .expect("a config"),
-        ["a", "b"]
+        ["speculaire"]
     );
     let err = required("[plugins.\"io.containerd.nri.v1.nri\".default_validator]\nrequired_plugins = \"speculaire\"\n")
         .unwrap_err();
     assert!(matches!(err, LoadError::Nri(_)), "{err}");
     let err = required("[plugins]\n\"io.containerd.nri.v1.nri\" = 1\n").unwrap_err();
     assert!(matches!(err, LoadError::Nri(_)), "{err}");
-    assert!(config::load_nri_required_plugins(&dir.path().join("missing.toml")).is_err());
+    assert!(config::load_plugins(&dir.path().join("missing.toml")).is_err());
 }
 
 #[test]

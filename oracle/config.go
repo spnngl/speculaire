@@ -23,6 +23,9 @@ import (
 // imagesPlugin is the CRI image service, whose configuration holds the registry section of a version 3 or 4 config.
 const imagesPlugin = "io.containerd.cri.v1.images"
 
+// nriPlugin is containerd's NRI plugin.
+const nriPlugin = "io.containerd.nri.v1.nri"
+
 func init() {
 	// The loader warns about every unknown key; cases are not the place to read that.
 	logrus.SetOutput(io.Discard)
@@ -52,10 +55,39 @@ type Registry struct {
 	Headers    map[string][]string `json:"headers"`
 }
 
-// ConfigAnswer is the answer to a ConfigCase: the registry section, or the loader's refusal.
+// Plugins is what the agent reads of the plugin sections besides the registry.
+type Plugins struct {
+	DiscardUnpackedLayers bool `json:"discard_unpacked_layers"`
+	NRI                   NRI  `json:"nri"`
+}
+
+// NRI is the NRI plugin's settings, and whether the daemon's `disabled_plugins` names it.
+type NRI struct {
+	Disable            bool     `json:"disable"`
+	DisableConnections bool     `json:"disable_connections"`
+	PluginDisabled     bool     `json:"plugin_disabled"`
+	RequiredPlugins    []string `json:"required_plugins"`
+}
+
+// ConfigAnswer is the answer to a ConfigCase: the registry section and the other settings, or the loader's refusal.
 type ConfigAnswer struct {
 	Registry *Registry `json:"registry,omitempty"`
+	Plugins  *Plugins  `json:"plugins,omitempty"`
 	Error    string    `json:"error,omitempty"`
+}
+
+// criImages is the part of the CRI image config the oracle reads besides the registry.
+type criImages struct {
+	DiscardUnpackedLayers bool `json:"discardUnpackedLayers"`
+}
+
+// criNRI is the part of the NRI config the oracle reads, through its JSON tags.
+type criNRI struct {
+	Disable            bool `json:"disable"`
+	DisableConnections bool `json:"disableConnections"`
+	DefaultValidator   *struct {
+		RequiredPlugins []string
+	} `json:"defaultValidator"`
 }
 
 // criRegistry is the part of the CRI image config the oracle reads, through its JSON tags: the type is internal to
@@ -111,19 +143,104 @@ func loadRegistry(ctx context.Context, path string) ConfigAnswer {
 	if err := srvconfig.LoadConfigWithPlugins(ctx, path, plugins, config); err != nil {
 		return ConfigAnswer{Error: err.Error()}
 	}
+	images, err := decodePlugin(ctx, graph, config, imagesPlugin)
+	if err != nil {
+		return ConfigAnswer{Error: err.Error()}
+	}
+	nri, err := decodePlugin(ctx, graph, config, nriPlugin)
+	if err != nil {
+		return ConfigAnswer{Error: err.Error()}
+	}
+	return ConfigAnswer{Registry: registryOf(images), Plugins: pluginsOf(images, nri, config)}
+}
+
+// decodePlugin decodes the section of the plugin with this URI as the daemon does.
+func decodePlugin(ctx context.Context, graph []plugin.Registration, config *srvconfig.Config, uri string) (any, error) {
 	for _, p := range graph {
-		if p.URI() != imagesPlugin {
+		if p.URI() != uri {
 			continue
 		}
-		// Registration.Config is shared by every case: decode into a copy of it.
+		// Registration.Config is shared by every case: decode into a deep copy of it, since a decode writes through
+		// the pointers a config holds.
 		fresh := reflect.New(reflect.TypeOf(p.Config).Elem())
-		fresh.Elem().Set(reflect.ValueOf(p.Config).Elem())
+		fresh.Elem().Set(deepCopy(reflect.ValueOf(p.Config).Elem()))
 		if _, err := config.Decode(ctx, p.URI(), fresh.Interface()); err != nil {
-			return ConfigAnswer{Error: err.Error()}
+			return nil, err
 		}
-		return ConfigAnswer{Registry: registryOf(fresh.Interface())}
+		return fresh.Interface(), nil
 	}
-	return ConfigAnswer{Error: fmt.Sprintf("the daemon registers no %s plugin", imagesPlugin)}
+	return nil, fmt.Errorf("the daemon registers no %s plugin", uri)
+}
+
+// deepCopy copies a value with the structs, pointers, slices and maps it holds.
+func deepCopy(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.New(v.Type().Elem())
+		c.Elem().Set(deepCopy(v.Elem()))
+		return c
+	case reflect.Struct:
+		c := reflect.New(v.Type()).Elem()
+		for i := range v.NumField() {
+			if c.Field(i).CanSet() {
+				c.Field(i).Set(deepCopy(v.Field(i)))
+			}
+		}
+		return c
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := range v.Len() {
+			c.Index(i).Set(deepCopy(v.Index(i)))
+		}
+		return c
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for _, k := range v.MapKeys() {
+			c.SetMapIndex(k, deepCopy(v.MapIndex(k)))
+		}
+		return c
+	default:
+		return v
+	}
+}
+
+func pluginsOf(images, nri any, config *srvconfig.Config) *Plugins {
+	var i criImages
+	var n criNRI
+	for _, c := range []struct {
+		from any
+		to   any
+	}{{images, &i}, {nri, &n}} {
+		raw, err := json.Marshal(c.from)
+		if err != nil {
+			panic(err)
+		}
+		if err := json.Unmarshal(raw, c.to); err != nil {
+			panic(err)
+		}
+	}
+	required := []string{}
+	if n.DefaultValidator != nil && n.DefaultValidator.RequiredPlugins != nil {
+		required = n.DefaultValidator.RequiredPlugins
+	}
+	return &Plugins{
+		DiscardUnpackedLayers: i.DiscardUnpackedLayers,
+		NRI: NRI{
+			Disable:            n.Disable,
+			DisableConnections: n.DisableConnections,
+			PluginDisabled:     slices.Contains(config.DisabledPlugins, nriPlugin),
+			RequiredPlugins:    required,
+		},
+	}
 }
 
 func registryOf(imageConfig any) *Registry {

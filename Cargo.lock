@@ -1698,6 +1698,7 @@ dependencies = [
  "secrecy",
  "speculaire-agent",
  "speculaire-configure",
+ "speculaire-fake-runtime",
  "speculaire-pki",
  "speculaire-runtime",
  "tempfile",
@@ -1717,6 +1718,7 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_path_to_error",
+ "speculaire-configure",
  "speculaire-mirror",
  "speculaire-runtime",
  "thiserror",
@@ -1740,6 +1742,19 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml_edit",
+]
+
+[[package]]
+name = "speculaire-fake-runtime"
+version = "0.1.0"
+dependencies = [
+ "containerd-client",
+ "hyper",
+ "hyper-util",
+ "prost",
+ "tokio",
+ "tonic-prost",
+ "tower",
 ]
 
 [[package]]
@@ -1822,10 +1837,15 @@ dependencies = [
 name = "speculaire-runtime"
 version = "0.1.0"
 dependencies = [
+ "containerd-client",
+ "prost",
  "serde",
+ "speculaire-fake-runtime",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
+ "tonic-prost",
 ]
 
 [[package]]

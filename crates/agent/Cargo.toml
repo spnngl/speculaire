@@ -19,6 +19,7 @@ mime.workspace = true
 sd-notify.workspace = true
 serde.workspace = true
 serde_path_to_error.workspace = true
+speculaire-configure.workspace = true
 speculaire-mirror.workspace = true
 speculaire-runtime.workspace = true
 thiserror.workspace = true

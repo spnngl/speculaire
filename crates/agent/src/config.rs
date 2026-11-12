@@ -31,6 +31,8 @@ pub struct Config {
     pub identity: Identity,
     /// `[gate]`: the NRI admission gate.
     pub gate: Gate,
+    /// `[runtime]`: where the agent finds containerd and CRI-O (D64, D87).
+    pub runtime: Runtime,
     /// `[nri]`: the connection to the runtime's NRI (D9, D64).
     pub nri: Nri,
     /// `[verify]`: signature verification (D26, D21).
@@ -88,6 +90,12 @@ impl Config {
                     unmatched: _,
                     exempt: _,
                 },
+            runtime:
+                Runtime {
+                    containerd_socket,
+                    containerd_config,
+                    crio_socket,
+                },
             nri: Nri { socket },
             verify:
                 Verify {
@@ -134,6 +142,24 @@ impl Config {
             &running.identity.certificate,
         );
         keep(&mut kept, "identity.ca", ca, &running.identity.ca);
+        keep(
+            &mut kept,
+            "runtime.containerd_socket",
+            containerd_socket,
+            &running.runtime.containerd_socket,
+        );
+        keep(
+            &mut kept,
+            "runtime.containerd_config",
+            containerd_config,
+            &running.runtime.containerd_config,
+        );
+        keep(
+            &mut kept,
+            "runtime.crio_socket",
+            crio_socket,
+            &running.runtime.crio_socket,
+        );
         keep(&mut kept, "nri.socket", socket, &running.nri.socket);
         keep(&mut kept, "mirror.address", mirror, &running.mirror.address);
         keep(
@@ -287,6 +313,28 @@ pub struct Exempt {
     pub namespaces: Vec<String>,
     /// Globs on the normalised pod-spec image name (D11), checked when the gate compiles them.
     pub images: Vec<String>,
+}
+
+/// `[runtime]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Runtime {
+    /// containerd's socket (D64).
+    pub containerd_socket: Restart<Absolute>,
+    /// containerd's `config.toml`, which preflight and `configure` read (D17, D86, D87).
+    pub containerd_config: Restart<Absolute>,
+    /// CRI-O's socket, which also serves its inspect API (D64).
+    pub crio_socket: Restart<Absolute>,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self {
+            containerd_socket: Restart(Absolute::new("/run/containerd/containerd.sock")),
+            containerd_config: Restart(Absolute::new("/etc/containerd/config.toml")),
+            crio_socket: Restart(Absolute::new("/var/run/crio/crio.sock")),
+        }
+    }
 }
 
 /// `[nri]`.

@@ -7,6 +7,7 @@
 pub mod containerd;
 pub mod crio;
 pub mod files;
+mod preflight;
 
 use std::io;
 use std::net::SocketAddr;
@@ -15,18 +16,22 @@ use std::process::Command;
 use std::time::SystemTime;
 
 pub use files::Change;
+pub use preflight::{CONTAINERD_MINIMUM, CRIO_MINIMUM, preflight};
 use secrecy::ExposeSecret;
 use speculaire_pki::mirror::{self, Mirror, Part};
 use speculaire_registry_config::containerd::config as containerd_config;
 use speculaire_registry_config::containerd::config::Hosts;
 use speculaire_registry_config::crio::Context;
 use speculaire_registry_config::crio::registries::{self, Registry};
+use speculaire_runtime::containerd::ImageExports;
+use speculaire_runtime::cri::{self, RuntimeVersion};
 use speculaire_runtime::detect::Runtime;
 
 /// Where the files of a node are: the real root, or a directory standing in for it.
 #[derive(Clone, Debug)]
 pub struct Paths {
     root: PathBuf,
+    containerd_config: Option<PathBuf>,
 }
 
 impl Paths {
@@ -35,13 +40,24 @@ impl Paths {
     pub fn system() -> Self {
         Self {
             root: PathBuf::new(),
+            containerd_config: None,
         }
     }
 
     /// A directory standing for `/`.
     #[must_use]
     pub fn under(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            containerd_config: None,
+        }
+    }
+
+    /// The same node with containerd's `config.toml` somewhere else (`runtime.containerd_config`, D87).
+    #[must_use]
+    pub fn with_containerd_config(mut self, path: impl Into<PathBuf>) -> Self {
+        self.containerd_config = Some(path.into());
+        self
     }
 
     fn at(&self, path: &str) -> PathBuf {
@@ -70,7 +86,9 @@ impl Paths {
     /// containerd's `config.toml`.
     #[must_use]
     pub fn containerd_config(&self) -> PathBuf {
-        self.at(containerd_config::DEFAULT_PATH)
+        self.containerd_config
+            .clone()
+            .unwrap_or_else(|| self.at(containerd_config::DEFAULT_PATH))
     }
 
     /// The drop-in `configure` writes for CRI-O (D66).
@@ -112,11 +130,30 @@ pub trait Host {
     ///
     /// When CRI-O cannot be asked, or does not answer a config.
     fn crio_nri(&self) -> Result<speculaire_runtime::crio::Nri, speculaire_runtime::crio::Error>;
+
+    /// The socket of `runtime`.
+    fn socket(&self, runtime: Runtime) -> PathBuf;
+
+    /// What the runtime reports about itself over the CRI (D86).
+    ///
+    /// # Errors
+    ///
+    /// When the runtime cannot be asked.
+    fn runtime_version(&self, runtime: Runtime) -> Result<RuntimeVersion, cri::Error>;
+
+    /// The settings containerd's CRI image service exports, `None` when it lists none (D15, D86).
+    ///
+    /// # Errors
+    ///
+    /// When containerd cannot be asked.
+    fn containerd_image_exports(&self) -> Result<Option<ImageExports>, cri::Error>;
 }
 
-/// The node's own `systemctl` and CRI-O socket.
+/// The node's own `systemctl` and runtime sockets.
 #[derive(Clone, Debug)]
 pub struct System {
+    /// containerd's socket.
+    pub containerd_socket: PathBuf,
     /// CRI-O's socket.
     pub crio_socket: PathBuf,
     /// The `systemctl` to run.
@@ -138,6 +175,21 @@ impl Host for System {
     fn crio_nri(&self) -> Result<speculaire_runtime::crio::Nri, speculaire_runtime::crio::Error> {
         speculaire_runtime::crio::Nri::parse(&speculaire_runtime::crio::config(&self.crio_socket)?)
     }
+
+    fn socket(&self, runtime: Runtime) -> PathBuf {
+        match runtime {
+            Runtime::Containerd => self.containerd_socket.clone(),
+            Runtime::CriO => self.crio_socket.clone(),
+        }
+    }
+
+    fn runtime_version(&self, runtime: Runtime) -> Result<RuntimeVersion, cri::Error> {
+        cri::version(&self.socket(runtime))
+    }
+
+    fn containerd_image_exports(&self) -> Result<Option<ImageExports>, cri::Error> {
+        speculaire_runtime::containerd::image_exports(&self.containerd_socket)
+    }
 }
 
 /// What a run did.
@@ -149,10 +201,10 @@ pub struct Report {
     pub notes: Vec<String>,
 }
 
-/// A file the node's config should have, and does not.
-#[derive(Debug, PartialEq, Eq)]
+/// A file or socket of the node that is not as the agent needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Problem {
-    /// The file.
+    /// The file or socket.
     pub path: PathBuf,
     /// What is wrong.
     pub message: String,
@@ -300,22 +352,44 @@ pub fn check(
     })
 }
 
+/// What the agent's preflight and [`check`] find wrong, each once: what `check-config` reports.
+///
+/// # Errors
+///
+/// When a config cannot be read.
+pub fn check_all(
+    runtime: Runtime,
+    paths: &Paths,
+    settings: &Settings,
+    host: &dyn Host,
+    now: SystemTime,
+) -> Result<Vec<Problem>, Error> {
+    let mut problems = preflight(runtime, paths, settings, host, now);
+    for problem in check(runtime, paths, settings, now)? {
+        if !problems.contains(&problem) {
+            problems.push(problem);
+        }
+    }
+    Ok(problems)
+}
+
 fn refuse_while_required(runtime: Runtime, paths: &Paths, host: &dyn Host) -> Result<(), Error> {
     let (key, required) = match runtime {
         Runtime::Containerd => {
             let config = paths.containerd_config();
             // containerd without a config file has no NRI validator either.
-            let required = match containerd_config::load_nri_required_plugins(&config) {
-                Err(containerd_config::LoadError::Read { source, .. })
-                    if source.kind() == io::ErrorKind::NotFound =>
-                {
-                    Vec::new()
-                }
-                other => other.map_err(|source| Error::Containerd {
-                    path: config,
-                    source: Box::new(source),
-                })?,
-            };
+            let required =
+                match containerd_config::load_plugins(&config).map(|p| p.nri.required_plugins) {
+                    Err(containerd_config::LoadError::Read { source, .. })
+                        if source.kind() == io::ErrorKind::NotFound =>
+                    {
+                        Vec::new()
+                    }
+                    other => other.map_err(|source| Error::Containerd {
+                        path: config,
+                        source: Box::new(source),
+                    })?,
+                };
             (CONTAINERD_REQUIRED, required)
         }
         Runtime::CriO => (CRIO_REQUIRED, host.crio_nri()?.required_plugins),
@@ -682,6 +756,16 @@ fn unconfigure_crio(paths: &Paths, settings: &Settings, host: &dyn Host) -> Resu
     Ok(report)
 }
 
+/// The problem of CRI-O's drop-in not being there, if it is not (D66).
+fn crio_dropin_missing(paths: &Paths) -> Option<Problem> {
+    let path = paths.crio_dropin();
+    (!path.exists()).then(|| Problem {
+        path,
+        message: "is missing: CRI-O does not pull through the mirror; run `speculaire configure`"
+            .to_owned(),
+    })
+}
+
 fn check_crio(paths: &Paths, settings: &Settings) -> Result<Vec<Problem>, Error> {
     let dropin_path = paths.crio_dropin();
     let (entries, _, wanted) = crio_dropin(paths, settings)?;
@@ -691,12 +775,7 @@ fn check_crio(paths: &Paths, settings: &Settings) -> Result<Vec<Problem>, Error>
         message,
     };
     match files::read(&dropin_path).map_err(io_at(&dropin_path))? {
-        None => {
-            return Ok(vec![problem(
-                "is missing: CRI-O does not pull through the mirror; run `speculaire configure`"
-                    .to_owned(),
-            )]);
-        }
+        None => return Ok(crio_dropin_missing(paths).into_iter().collect()),
         Some(text) if text != wanted => problems.push(problem(
             "differs from what `speculaire configure` writes for the registries now (the admin's entry changed, or the file was edited): run `speculaire configure`"
                 .to_owned(),
