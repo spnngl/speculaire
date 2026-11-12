@@ -45,7 +45,15 @@ impl Paths {
     }
 
     fn at(&self, path: &str) -> PathBuf {
-        self.context().under_root(path)
+        self.root_path(path)
+    }
+
+    fn root_path(&self, path: &str) -> PathBuf {
+        if self.root.as_os_str().is_empty() {
+            PathBuf::from(path)
+        } else {
+            self.root.join(path.trim_start_matches('/'))
+        }
     }
 
     /// The context CRI-O's files are read in.
@@ -53,6 +61,8 @@ impl Paths {
     pub fn context(&self) -> Context {
         Context {
             root: self.root.clone(),
+            // root's home, below the stand-in root too: the user's own files are read.
+            home: self.root_path("/root"),
             ..Context::root()
         }
     }
