@@ -104,3 +104,6 @@ testdata/zones/**                  -binary text eol=lf diff merge
 
 # Verbatim RFC copies (`just rfc-archive`): collapsed in diffs.
 docs/rfc/archive/** -diff
+
+# Fuzz seeds are byte-exact: HTTP responses end their lines with CRLF.
+fuzz/seeds/crio_inspect/** -text
