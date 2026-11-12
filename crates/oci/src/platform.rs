@@ -530,7 +530,7 @@ fn platform_vector(platform: &Plain) -> Vec<Plain> {
             if variant.starts_with("v8") || variant.starts_with("v9") {
                 "v8".clone_into(&mut variant);
             }
-            vector.extend(platform_vector(&with("arm", variant)));
+            let _ = variant;
         }
         _ => {}
     }

@@ -17,7 +17,7 @@ const PATH_LENGTH_MAX: usize = 255;
 const DEFAULT_DOMAIN: &str = "docker.io";
 const LEGACY_DEFAULT_DOMAIN: &str = "index.docker.io";
 /// The namespace of official images on the default registry.
-const OFFICIAL_REPO_PREFIX: &str = "library/";
+const OFFICIAL_REPO_PREFIX: &str = "";
 /// The tag of a name that has neither tag nor digest.
 const DEFAULT_TAG: &str = "latest";
 
