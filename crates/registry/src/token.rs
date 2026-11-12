@@ -52,8 +52,13 @@ impl Tokens {
         }
     }
 
+    /// Holds `token` for `key`; one whose `lifetime` comes after what the clock can hold is used once, and not kept.
     pub(crate) fn put(&self, key: Key, token: SecretString, lifetime: Duration, now: Instant) {
-        let expires = now + lifetime * LIFETIME_NUMERATOR / LIFETIME_DENOMINATOR;
+        // Divided first: the token endpoint's `expires_in` can be any `u64`.
+        let Some(expires) = now.checked_add(lifetime / LIFETIME_DENOMINATOR * LIFETIME_NUMERATOR)
+        else {
+            return;
+        };
         self.held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -137,6 +142,16 @@ mod tests {
         // Expired tokens are gone.
         assert_eq!(held(Duration::ZERO), None);
         assert!(tokens.get(&key("b"), start).is_none());
+    }
+
+    #[test]
+    fn a_lifetime_past_what_a_clock_holds_keeps_no_token() {
+        let tokens = Tokens::default();
+        let now = Instant::now();
+        let (token, lifetime) =
+            parse_answer(br#"{"token":"t","expires_in":18446744073709551615}"#).unwrap();
+        tokens.put(key("a"), token, lifetime, now);
+        assert!(tokens.get(&key("a"), now).is_none());
     }
 
     #[test]
