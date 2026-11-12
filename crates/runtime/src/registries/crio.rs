@@ -7,7 +7,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::time::SystemTime;
 
 use speculaire_registry_config::crio::auth::{self, Lookup};
 use speculaire_registry_config::crio::registries::{self, Config};
@@ -131,10 +130,14 @@ impl Registries for CrioRegistries {
         Ok(sources)
     }
 
-    fn reload(&self, since: Option<SystemTime>) -> Result<Reloaded, Error> {
+    fn changed(&self) -> bool {
+        self.live.changed()
+    }
+
+    fn reload(&self) -> Result<Reloaded, Error> {
         let mut problems = Vec::new();
-        let changed = self.live.reload(since, || self.read(&mut problems))?;
-        Ok(Reloaded { changed, problems })
+        self.live.reload(|| self.read(&mut problems))?;
+        Ok(Reloaded { problems })
     }
 }
 

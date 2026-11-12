@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use secrecy::SecretString;
 use speculaire_registry_config::Headers;
@@ -173,12 +172,14 @@ impl Registries for ContainerdRegistries {
             .collect())
     }
 
-    fn reload(&self, since: Option<SystemTime>) -> Result<Reloaded, Error> {
+    fn changed(&self) -> bool {
+        self.live.changed()
+    }
+
+    fn reload(&self) -> Result<Reloaded, Error> {
         let mut problems = Vec::new();
-        let changed = self
-            .live
-            .reload(since, || read(&self.config, &mut problems))?;
-        Ok(Reloaded { changed, problems })
+        self.live.reload(|| read(&self.config, &mut problems))?;
+        Ok(Reloaded { problems })
     }
 }
 

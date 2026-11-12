@@ -19,6 +19,7 @@ pub mod paths;
 pub mod registries;
 pub mod settings;
 pub mod version;
+pub mod watch;
 pub mod wiring;
 
 pub use node::{Fallback, Node, NodeContent};

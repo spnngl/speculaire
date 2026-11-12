@@ -2,19 +2,13 @@
 
 The agent process on a node: its settings, and how it installs into and leaves containerd's config. Index: `docs/decisions/README.md`.
 
-## D30: One strict config file, reloaded on SIGHUP and when a file changes (amended by D37, D47)
+## D30: One strict config file, reloaded on SIGHUP and when a file changes (amended by D37, D47, D93)
 
 - **Decision:**
   - Settings live in `/etc/speculaire/config.toml`, or the file given by `--config`. They parse into typed structs that reject unknown fields. An unknown key or a bad value stops startup, and the error names the key.
   - `packaging/config.toml` is the reference: it lists every key, commented, at its default value. A test checks that it parses to `Config::default()` once uncommented (D47). No other file lists the settings.
   - `speculaire check-config [path]` checks a config file, plus the policy and trust root it names, without starting the agent. It exits 0 when all are valid and 1 otherwise.
-  - **Triggers:** a reload runs on SIGHUP (`ExecReload` in the unit). It also runs from a poll every `config.poll_interval` (default 10 s):
-    1. The agent keeps `last_check`, the epoch time at which the previous poll started.
-    2. Each poll records its own start time first, then `stat`s every watched file, following symlinks.
-    3. If any file's modification time is at or after `last_check`, the poll reloads.
-    4. The poll then stores its start time as the new `last_check`.
-
-    `>=` covers filesystems with coarse timestamps, and recording the start time first covers a write made during the poll. A file replaced with its old modification time kept (`cp -p`, `rsync -t`) is not seen; SIGHUP covers it.
+  - **Triggers:** a reload runs on SIGHUP (`ExecReload` in the unit). It also runs from a poll every `config.poll_interval` (default 10 s), when a watched file's `stat`, following symlinks, differs from the one taken before the previous read (D93).
   - **Watched files:**
     - the agent config;
     - `policy.yaml` and `trusted_root.json` (D26);
@@ -25,7 +19,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - **Live keys:** the restart keys are listed in D47; every other key reloads live. A reload that changes a restart key keeps the old value and logs a warning that names the key.
   - A changed policy or trust root starts re-verification (D21).
 - **Because:**
-  - The user chose both triggers, and change detection by comparing modification times with the last check time. SIGHUP lets config management apply a change at once. The poll catches edits that nobody signalled and works on every filesystem. Because `stat` follows symlinks, it also sees a ConfigMap symlink swap, which an inotify watch misses (D26, DaemonSet phase).
+  - The user chose both triggers, and change detection by `stat` (D93 says what is compared). SIGHUP lets config management apply a change at once. The poll catches edits that nobody signalled and works on every filesystem. Because `stat` follows symlinks, it also sees a ConfigMap symlink swap, which an inotify watch misses (D26, DaemonSet phase).
   - A typo in a security setting (`gate.unmached`) must stop the agent, not quietly fall back to a default.
   - A bad reload keeps the old config because the gate must keep deciding. Failing closed on a typo would block every container creation on the node.
 - **Revisit when:** —
@@ -240,11 +234,11 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Cost:** a `Node` carries both runtimes' paths whichever it is; `Required` names its runtime so that the refusal's text is unchanged.
 - **Revisit when:** a third runtime comes, or `Fallback` has a third value.
 
-## D91: The registry config is read into a snapshot that a reload swaps, and the request path never reads it from disk (amends D47, D89; amended by D92)
+## D91: The registry config is read into a snapshot that a reload swaps, and the request path never reads it from disk (amends D47, D89; amended by D92, D93)
 
 - **Decision:**
   - **Snapshots:** `Registries::reload` (D89) parses everything a source needs into one value held in an `arc_swap::ArcSwap`: containerd's `config.toml`, its imports and every `hosts.toml` under `config_path`; CRI-O's `registries.conf`, drop-ins, `certs.d` list and credential files, with `global_auth_file` read from `crio.sock`. `sources` loads the snapshot, takes no lock and reads no file, certificate files included (D92).
-  - **When:** at startup and on SIGHUP, unconditionally, so a file replaced by an older one is read (D30); on each poll of `config.poll_interval`, when a watched path changed at or after the previous check. A watched path is a file, a directory and what is below it down to four levels: the newest modification time of those counts.
+  - **When:** at startup and on SIGHUP, unconditionally, so a file replaced by an older one is read (D30); on each poll of `config.poll_interval`, when a watched path differs from its stamp taken before the previous read (D93). A watched path is a file, a directory and what is below it down to four levels, each with its own stamp.
   - **A bad file keeps the previous snapshot:** the agent logs one `error` that names the file and the line and column (`invalid …/hosts.toml: line 1, column 25: …`), counts `speculaire_config_reload_failures_total` and goes on; `/readyz` does not change. The next poll finds the same file unchanged and says nothing more. Until a first read works, `sources` answers an error and the relay answers 404, so CRI-O pulls upstream.
   - **A missing containerd `config.toml` is the defaults** (no `config_path`: the registry itself), as containerd runs. The deprecated `mirrors` table stays an error (D89).
   - **Live keys:** a reload of the agent's config calls `Cache::set_max_size`, an atomic; the eviction task wakes when a blob is kept and the cache is over its bound, so a lowered `blob_cache.max_size` evicts at the next fill, least recently served first (D67).
@@ -252,7 +246,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Because:**
   - A request that parses TOML is slow and races with an editor; a snapshot is whole or it is the old one.
   - `arc-swap` is a reader without a lock and a writer that never waits for readers, which `docs/research/checkers.md` names as the way for live keys.
-  - Comparing modification times to the last check is D30's rule; watching the whole tree is needed because an admin edits `hosts.toml` or an auth file, not the main file.
+  - Polling `stat` is D30's rule; watching the whole tree is needed because an admin edits `hosts.toml` or an auth file, not the main file.
 - **Cost:**
   - A credential file that does not parse fails the whole CRI-O snapshot, where D89 treated it as anonymous (D92 restores that).
   - A certificate file edited while a pull runs is read in the middle of the edit: the connection fails for that request and the next one succeeds (D92 reads them at reload).
@@ -260,12 +254,12 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Measured (M2 step 07, arm64, Docker, local runs):** on CRI-O 1.37 a login written to `/run/containers/0/auth.json` after an anonymous pull had failed was used by the next pull 15 s later (`config.poll_interval` is 10 s), with no signal, and the relay moved the blobs; `systemctl reload speculaire` with `blob_cache.max_size` lowered to 12 MiB evicted nothing until the next blob was kept, then the cache fell to the bound and the older blobs were gone (relay suite 11 of 11 on CRI-O 1.37 and containerd 2.4). The agent's own tests, with a fake containerd and `poll_interval = "1s"`, saw an invalid `hosts.toml` keep the previous config (`/readyz` 200, `speculaire_config_reload_failures_total 1`, one error naming the file, line 1 and column 25, no second error over three more polls), the corrected file read by the next poll, and a file replaced with a modification time of 2001 read on SIGHUP.
 - **Revisit when:** a key that cannot be an atomic or a snapshot is live, or a node has so many `hosts.toml` files that a poll costs measurable CPU.
 
-## D92: A credential, certificate or key file that cannot be used leaves its hosts without it, and certificate files are read at reload (amends D89, D91)
+## D92: A credential, certificate or key file that cannot be used leaves its hosts without it, and certificate files are read at reload (amends D89, D91; amended by D93)
 
 - **Decision:**
   - **Credentials:** a file that holds credentials and cannot be used does not fail the snapshot. On CRI-O that is a credential file that cannot be read or parsed, or an entry whose `auth` is not Base64. On containerd it is a `registry.configs.<host>.auth` that is no `user:password`. The registries that would have taken a login from it are asked anonymously, as D89 did with an unreadable file, and the rest of the snapshot is built. On CRI-O the registries that reach a bad file in the search order are anonymous, including those a later file would serve, as `go.podman.io/image` stops at the file. Routing files (`registries.conf`, `hosts.toml`, `config.toml`, `crio.sock`) still fail the snapshot (D91): a wrong route is no anonymous pull.
   - **Certificates:** a host's `ca` files and its first client certificate with its key are read into the snapshot at reload and parsed as PEM there; a request reads no file. A CA file that holds no certificate is left out, the others stay; a client certificate or key that cannot be used leaves the host without a client certificate; a `certs.d` directory that cannot be listed leaves its host with no extra trust. The key is held as a `SecretString` and `Debug` never prints it.
-  - **Reported:** one `error` per file that was left out, naming the file, the line and column where there are any, and what the registries get (`registry config reloaded with a file left out`). `speculaire_config_reload_failures_total` counts reloads that left something out, once each however many files. `Registries::reload` returns what changed and these problems; the agent logs and counts them. A reload that finds the same files unchanged says nothing more (D91). A fixed file is read by the next poll.
+  - **Reported:** one `error` per file that was left out, naming the file, the line and column where there are any, and what the registries get (`registry config reloaded with a file left out`). `speculaire_config_reload_failures_total` counts reloads that left something out, once each however many files. `Registries::reload` returns these problems; the agent logs and counts them. A poll that finds the same files unchanged reads nothing and says nothing more (D91, D93). A fixed file is read by the next poll.
   - **Watched:** on CRI-O the `certs.d` directories were watched (D91). On containerd every `ca`, `client` certificate and key path of every `hosts.toml` is a watched path as well, whether or not it is below `config_path`. A rotation is read by the next poll or by SIGHUP.
   - **No scope beyond that:** a bad CRI-O or containerd *route* is not softened.
 - **Because:**
@@ -273,9 +267,25 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A request that reads a certificate reads it mid-edit and fails; a snapshot holds the pair that was whole, or none (D91).
   - Reporting at reload says it once, where a request reports it at every pull.
 - **Cost:**
-  - A certificate file edited at the moment of a poll may be read half-written: it is reported once, and the end of the edit changes the modification time, so the next poll reads it again.
-  - A certificate file named by an absolute path outside `config_path` that is missing at reload is watched as that path; one that appears later is read by the next poll only if its modification time is newer than the last check, and by SIGHUP in any case.
+  - A certificate file edited at the moment of a poll may be read half-written: it is reported once, and the end of the edit changes its stamp, so the next poll reads it again (D93).
+  - A certificate file named by an absolute path outside `config_path` that is missing at reload is watched as that path; one that appears later is read by the next poll (D93).
   - A bad credential file hides the logins of the files after it, for the registries that reach it.
   - Private keys stay in the agent's memory for the life of its snapshot; D91's request-time reads kept them for a request. The copy the PEM parser makes to check a key is not wiped (`docs/security.md`).
 - **Measured (M2 step 08, arm64, Docker, local runs):** `just e2e crio 1.37` and `just e2e containerd 2.4` pass (relay suite 11 of 11 on containerd 2.4), the request path no longer reads a certificate file. Unit tests in `speculaire-runtime` and the agent's own test with a fake containerd, `poll_interval = "1s"`: a `configs.'quay.io'.auth` of `***` gave one error naming quay.io, `speculaire_config_reload_failures_total 1`, `/readyz` 200 and no second error over three more polls.
 - **Revisit when:** a bad routing file should degrade too, or a node has client certificates for more than the first pair of a host.
+
+## D93: A poll compares each watched path's `stat` with the one taken before the previous read (amends D30, D91, D92)
+
+- **Decision:**
+  - **Stamp:** for each watched path, `stat` through symlinks gives its modification time, length, device and inode; a directory has its own and one for each entry down to four levels below (D91); a path that cannot be looked at has none. `speculaire_runtime::watch::Watch` holds them, for the agent's config and the registry config alike.
+  - **Taken before each read:** at startup, on SIGHUP and before a poll's read. A poll reads again when a stamp differs, or a path appeared or went; SIGHUP reads unconditionally (D30). A write during a read differs from the stamp taken before it, so the next poll reads again.
+  - **A read that fails** keeps the stamps taken before it, and the registry config watches the paths it reached with those of the snapshot held: the same bad file is no change and is reported once, a fix to either is one (D91, D92).
+- **Because:**
+  - Linux dates a write with its coarse clock (`ktime_get_coarse_real_ts64`), which can be behind the agent's `SystemTime::now()`: D30's `mtime >= last_check` missed a write made just after a poll began, and the agent's tests needed a sleep for it (#90). A stamp compared with a stamp has no clock to race.
+  - Length and inode see a file replaced with its modification time kept (`cp -p`, `rsync -t`, a rename over it), which D30 left to SIGHUP.
+- **Cost:**
+  - A write in place that keeps the length and the modification time, as two writes within one clock tick or `touch -r` can, is read at the next change or on SIGHUP.
+  - A poll holds a stamp per path below each root, where D91 kept the newest time; a node with very many `hosts.toml` files pays it in memory.
+  - The mirror's own certificate files are still compared by modification time (D85's reload, `crates/mirror/src/tls.rs`).
+- **Measured (arm64, local runs):** both agent tests that write a file after a read, with the file's modification time set back to before the write as a coarse clock dates it, failed on the previous code (timeout after 10 s) and pass now, without a sleep. Linux, `just dev`: `cargo nextest run --stress-count 200` of those two tests passed 200 of 200.
+- **Revisit when:** a filesystem keeps length, inode and modification time across edits the agent must see, or the mirror's certificates join this watch.

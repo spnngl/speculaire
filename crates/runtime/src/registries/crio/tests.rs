@@ -37,7 +37,7 @@ impl Node {
     /// The registry config of this tree, read, with the CRI-O config `crio` as its socket serves it.
     fn registries_with(&self, crio: &str) -> CrioRegistries {
         let registries = self.unread(crio);
-        registries.reload(None).unwrap();
+        registries.reload().unwrap();
         registries
     }
 
@@ -206,7 +206,7 @@ fn a_registry_config_that_is_invalid_is_an_error() {
     let node = Node::new();
     node.put("/etc/containers/registries.conf", "[[registry]]\nprefix = ");
     let registries = node.unread("");
-    let err = registries.reload(None).unwrap_err();
+    let err = registries.reload().unwrap_err();
     assert!(
         matches!(&err, Error::Config(text) if text.contains("registries.conf")),
         "{err}"
@@ -292,10 +292,6 @@ fn user_at(registries: &CrioRegistries, name: &str) -> Option<String> {
     }
 }
 
-fn later() -> std::time::SystemTime {
-    std::time::SystemTime::now() + std::time::Duration::from_secs(60)
-}
-
 #[test]
 fn a_credential_file_that_is_not_valid_leaves_the_hosts_that_reach_it_anonymous_and_is_reported_once()
  {
@@ -311,8 +307,7 @@ fn a_credential_file_that_is_not_valid_leaves_the_hosts_that_reach_it_anonymous_
         "[[registry]]\nprefix = \"docker.io\"\nlocation = \"docker.io\"\n\n[[registry.mirror]]\nlocation = \"mirror.corp\"\n",
     );
     let registries = node.unread("");
-    let reloaded = registries.reload(None).unwrap();
-    assert!(reloaded.changed);
+    let reloaded = registries.reload().unwrap();
     assert_eq!(reloaded.problems.len(), 1, "{:?}", reloaded.problems);
     let problem = &reloaded.problems[0];
     assert!(
@@ -330,12 +325,9 @@ fn a_credential_file_that_is_not_valid_leaves_the_hosts_that_reach_it_anonymous_
         .sources("docker.io/library/busybox", tag("1"))
         .unwrap();
     assert_eq!(sources.len(), 2);
-    // A poll that finds the files unchanged says nothing; a reload that reads them says it again.
-    assert_eq!(
-        registries.reload(Some(later())).unwrap(),
-        Reloaded::default()
-    );
-    assert_eq!(registries.reload(None).unwrap().problems.len(), 1);
+    // A poll that finds the files unchanged reads nothing; a reload that reads them says it again.
+    assert!(!registries.changed());
+    assert_eq!(registries.reload().unwrap().problems.len(), 1);
 }
 
 #[test]
@@ -347,7 +339,7 @@ fn a_bad_credential_file_ahead_of_a_good_one_hides_the_login_behind_it() {
         r#"{"auths":{"quay.io":{"auth":"YWxpY2U6czNjcmV0"}}}"#,
     );
     let registries = node.unread("");
-    assert_eq!(registries.reload(None).unwrap().problems.len(), 1);
+    assert_eq!(registries.reload().unwrap().problems.len(), 1);
     assert_eq!(user_at(&registries, "quay.io/org/app"), None);
 }
 
@@ -359,7 +351,7 @@ fn an_auth_that_is_not_base64_is_reported_and_anonymous() {
         r#"{"auths":{"quay.io":{"auth":"***"},"ghcr.io":{"auth":"Ym9iOmh1bnRlcjI="}}}"#,
     );
     let registries = node.unread("");
-    let reloaded = registries.reload(None).unwrap();
+    let reloaded = registries.reload().unwrap();
     assert_eq!(reloaded.problems.len(), 1, "{:?}", reloaded.problems);
     assert!(reloaded.problems[0].contains("quay.io"));
     assert_eq!(user_at(&registries, "quay.io/org/app"), None);
@@ -409,17 +401,14 @@ fn a_client_key_that_is_not_pem_leaves_the_host_without_a_client_certificate_and
     node.put("/etc/containers/certs.d/good.test/client.cert", CERT);
     node.put("/etc/containers/certs.d/good.test/client.key", KEY);
     let registries = node.unread("");
-    let reloaded = registries.reload(None).unwrap();
+    let reloaded = registries.reload().unwrap();
     assert_eq!(reloaded.problems.len(), 1, "{:?}", reloaded.problems);
     assert!(reloaded.problems[0].contains("client.key"));
     let bad = trust(&registries, "bad.test/app");
     assert_eq!(bad.roots, [CERT.as_bytes()]);
     assert!(bad.client.is_none());
     assert!(trust(&registries, "good.test/app").client.is_some());
-    assert_eq!(
-        registries.reload(Some(later())).unwrap(),
-        Reloaded::default()
-    );
+    assert!(!registries.changed());
 }
 
 #[test]
@@ -428,7 +417,7 @@ fn a_ca_file_without_a_certificate_is_left_out_and_reported() {
     node.put("/etc/containers/certs.d/reg.test/a.crt", "junk");
     node.put("/etc/containers/certs.d/reg.test/b.crt", CERT);
     let registries = node.unread("");
-    let reloaded = registries.reload(None).unwrap();
+    let reloaded = registries.reload().unwrap();
     assert_eq!(reloaded.problems.len(), 1, "{:?}", reloaded.problems);
     assert!(reloaded.problems[0].contains("a.crt"));
     assert_eq!(trust(&registries, "reg.test/app").roots, [CERT.as_bytes()]);
@@ -448,12 +437,10 @@ fn certificates_are_read_at_reload_and_a_rotation_is_picked_up_by_the_next_poll(
     let held = trust(&registries, "reg.test/app");
     assert_eq!(held.roots, [CERT.as_bytes()]);
     assert!(held.client.is_some());
-    // A rotation changes a watched path, and the next poll that looks since the last read finds it.
-    let since = std::time::SystemTime::now();
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    // A rotation changes a watched path, and the next poll finds it.
     node.put(ca, ROTATED);
-    let reloaded = registries.reload(Some(since)).unwrap();
-    assert!(reloaded.changed && reloaded.problems.is_empty());
+    assert!(registries.changed());
+    assert_eq!(registries.reload().unwrap().problems, Vec::<String>::new());
     assert_eq!(
         trust(&registries, "reg.test/app").roots,
         [ROTATED.as_bytes()]
@@ -504,7 +491,7 @@ fn a_crio_that_cannot_be_asked_is_a_config_error() {
         ..Context::root()
     };
     let registries = CrioRegistries::new(context, node.dir.path().join("gone.sock"), "/none");
-    let err = registries.reload(None).unwrap_err();
+    let err = registries.reload().unwrap_err();
     assert!(
         matches!(&err, Error::Config(text) if text.contains("gone.sock")),
         "{err}"
