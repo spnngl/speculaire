@@ -39,7 +39,7 @@ On CRI-O every pull of a mirrored registry goes through the agent, which fetches
 
 ## Startup refusals
 
-`speculaire agent` stops before it opens a listener, and `speculaire check-config` exits 1, with one line per problem: `<file or socket>: <message>` (D86). Each message names the key. Restart the runtime after changing its config.
+`speculaire agent` stops before it serves, and `speculaire check-config` exits 1, with one line per problem: `<file or socket>: <message>` (D86). Each message names the key. The last two rows come from `agent` only, which listens and opens the blob cache where `check-config` does not. Restart the runtime after changing its config.
 
 | Message | Meaning | Action |
 |---|---|---|
@@ -55,10 +55,12 @@ On CRI-O every pull of a mirrored registry goes through the agent, which fetches
 | `` `enable_nri = false` `` or `` `nri_disable_connections = true` `` | CRI-O's NRI is off or closed (D54, D64) | Set `enable_nri = true` and `nri_disable_connections = false` under `[crio.nri]` |
 | `CRI-O's inspect API answered ...` | `GET /config` on `crio.sock` failed | Check CRI-O |
 | `cannot read containerd's config` | `config.toml` or an import is not valid | Fix the file named |
-| `<mirror.directory>/<file>: is missing: run `speculaire configure`` (also: expires within 30 days, not for `mirror.address`) | The mirror's certificates are absent or no longer fit (D55) | Run `speculaire configure` |
+| `the registry section is invalid: ...` | containerd would refuse its registry section | Fix the section in the file named |
+| `<mirror.directory>/<file>: is missing: run `speculaire configure`` (also: expires within 30 days, not for `mirror.address`, not issued by the CA, not a certificate followed by a key) | The mirror's certificates are absent or no longer fit (D55) | Run `speculaire configure` |
 | `99-speculaire.conf: is missing` | CRI-O pulls do not go through the mirror (D66) | Run `speculaire configure` |
-| `listening on mirror.address ...` | Another process holds the address | Free it or change `mirror.address` (D56) |
 | `mirror.address` is not loopback | The mirror would listen beyond the node (D56) | Use a loopback address |
+| `listening on mirror.address ...` (also `metrics.address`) | Another process holds the address | Free it or change the address (D56) |
+| `opening the blob cache <directory>` | On CRI-O, the agent cannot create or read `blob_cache.directory` (D67) | Fix the directory or `blob_cache.directory` |
 
 ## Break glass: containers do not start
 
