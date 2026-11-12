@@ -25,9 +25,6 @@ const DEFAULT_TAG: &str = "latest";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReferenceError {
-    /// The text is empty.
-    #[error("repository name must have at least one component")]
-    Empty,
     /// The text is not `[domain/]path[:tag][@digest]`.
     #[error("invalid reference format")]
     InvalidFormat,
@@ -161,12 +158,11 @@ impl Reference {
         Self::parse(&format!("{domain}/{remainder}"))
     }
 
-    /// `Parse`: the reference as written, without normalization.
+    /// `Parse`: the reference as written, without normalization. Its `ErrNameEmpty` is left out: the text always has
+    /// a domain and a slash.
     fn parse(text: &str) -> Result<Self, ReferenceError> {
         let Some((name, tag, digest)) = split_reference(text) else {
-            return Err(if text.is_empty() {
-                ReferenceError::Empty
-            } else if split_reference(&text.to_lowercase()).is_some() {
+            return Err(if split_reference(&text.to_lowercase()).is_some() {
                 ReferenceError::Uppercase
             } else {
                 ReferenceError::InvalidFormat
