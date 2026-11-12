@@ -133,7 +133,7 @@ async fn handle<P: Pulls>(pulls: &P, request: &Request<Incoming>) -> Response<Bo
     let answered = pulls
         .pull(Pull {
             kind,
-            name: &name,
+            name,
             reference: reference.as_ref(),
             head,
             range: header(RANGE),
