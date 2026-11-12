@@ -62,7 +62,7 @@ impl Reference {
 
 /// A request the mirror answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Route {
+pub enum Route<'a> {
     /// `GET /v2/`: the runtime's check that this is a registry.
     Ping,
     /// A pull of `kind`.
@@ -71,7 +71,7 @@ pub enum Route {
         kind: Kind,
         /// The repository name, `docker.io/library/busybox` on CRI-O, where the first segment is the registry the
         /// image comes from (D66).
-        name: String,
+        name: &'a str,
         /// What the name is pulled by; `None` when it is no digest and no tag, which is a miss.
         reference: Option<Reference>,
         /// Whether only the head of the response is wanted.
@@ -83,7 +83,7 @@ pub enum Route {
 ///
 /// Query parameters, such as containerd's `ns`, are ignored.
 #[must_use]
-pub fn route(method: &Method, path: &str) -> Option<Route> {
+pub fn route<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
     let head = match *method {
         Method::GET => false,
         Method::HEAD => true,
@@ -93,14 +93,12 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
     if rest.is_empty() {
         return Some(Route::Ping);
     }
-    let segments: Vec<&str> = rest.split('/').collect();
-    let [name @ .., kind, reference] = segments.as_slice() else {
-        return None;
-    };
-    if name.is_empty() || name.iter().any(|segment| segment.is_empty()) {
+    let (rest, reference) = rest.rsplit_once('/')?;
+    let (name, kind) = rest.rsplit_once('/')?;
+    if name.split('/').any(str::is_empty) {
         return None;
     }
-    let kind = match *kind {
+    let kind = match kind {
         "manifests" => Kind::Manifest,
         "blobs" => Kind::Blob,
         "referrers" => Kind::Referrers,
@@ -108,7 +106,7 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
     };
     Some(Route::Pull {
         kind,
-        name: name.join("/"),
+        name,
         reference: Reference::parse(reference),
         head,
     })
