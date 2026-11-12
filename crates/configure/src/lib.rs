@@ -67,12 +67,6 @@ impl Paths {
         }
     }
 
-    /// Where the mirror's CA and certificates live (D14).
-    #[must_use]
-    pub fn mirror_dir(&self) -> PathBuf {
-        self.at("/var/lib/speculaire/mirror")
-    }
-
     /// containerd's `config.toml`.
     #[must_use]
     pub fn containerd_config(&self) -> PathBuf {
@@ -99,6 +93,8 @@ pub struct Settings {
     pub address: SocketAddr,
     /// `mirror.registries`.
     pub registries: Vec<String>,
+    /// `mirror.directory`: where the mirror's CA and certificates live (D14).
+    pub directory: PathBuf,
 }
 
 /// What `configure` and `unconfigure` call out to.
@@ -278,7 +274,7 @@ pub fn unconfigure(
         refuse_while_required(runtime, paths, host)?;
     }
     match runtime {
-        Runtime::Containerd => unconfigure_containerd(paths),
+        Runtime::Containerd => unconfigure_containerd(paths, settings),
         Runtime::CriO => unconfigure_crio(paths, settings, host),
     }
 }
@@ -299,7 +295,7 @@ pub fn check(
         Runtime::CriO => check_crio(paths, settings),
     }
     .map(|mut problems| {
-        problems.extend(check_certificates(paths, settings, now));
+        problems.extend(check_certificates(settings, now));
         problems
     })
 }
@@ -383,8 +379,8 @@ fn remove_certificates(dir: &Path, changes: &mut Vec<Change>) -> Result<(), Erro
     files::remove_dir_if_empty(dir).map_err(io_at(dir))
 }
 
-fn check_certificates(paths: &Paths, settings: &Settings, now: SystemTime) -> Vec<Problem> {
-    let dir = paths.mirror_dir();
+fn check_certificates(settings: &Settings, now: SystemTime) -> Vec<Problem> {
+    let dir = settings.directory.clone();
     let problem = |part: Part, message: String| Problem {
         path: dir.join(part.file_name()),
         message,
@@ -423,8 +419,8 @@ fn check_certificates(paths: &Paths, settings: &Settings, now: SystemTime) -> Ve
 // ---- containerd ----
 
 /// The entry `configure` writes into every `hosts.toml`.
-fn containerd_entry(paths: &Paths, settings: &Settings) -> containerd::Entry {
-    let dir = paths.mirror_dir();
+fn containerd_entry(settings: &Settings) -> containerd::Entry {
+    let dir = settings.directory.clone();
     containerd::Entry {
         url: format!("https://{}", settings.address),
         ca: dir.join(Part::Ca.file_name()),
@@ -463,8 +459,8 @@ fn configure_containerd(
 ) -> Result<Report, Error> {
     let roots = containerd_roots(paths)?;
     let (targets, skipped) = containerd::targets(&roots).map_err(io_at(&roots[0]))?;
-    let entry = containerd_entry(paths, settings);
-    let mirror_dir = paths.mirror_dir();
+    let entry = containerd_entry(settings);
+    let mirror_dir = settings.directory.clone();
     let mut edits = Vec::new();
     for target in targets {
         let old = files::read(&target.path)
@@ -495,10 +491,10 @@ fn configure_containerd(
     Ok(report)
 }
 
-fn unconfigure_containerd(paths: &Paths) -> Result<Report, Error> {
+fn unconfigure_containerd(paths: &Paths, settings: &Settings) -> Result<Report, Error> {
     let roots = containerd_roots(paths)?;
     let (targets, _) = containerd::targets(&roots).map_err(io_at(&roots[0]))?;
-    let mirror_dir = paths.mirror_dir();
+    let mirror_dir = settings.directory.clone();
     let mut report = Report::default();
     let mut edits = Vec::new();
     for target in targets.iter().filter(|t| t.exists) {
@@ -539,8 +535,8 @@ fn unconfigure_containerd(paths: &Paths) -> Result<Report, Error> {
 fn check_containerd(paths: &Paths, settings: &Settings) -> Result<Vec<Problem>, Error> {
     let roots = containerd_roots(paths)?;
     let (targets, _) = containerd::targets(&roots).map_err(io_at(&roots[0]))?;
-    let entry = containerd_entry(paths, settings);
-    let mirror_dir = paths.mirror_dir();
+    let entry = containerd_entry(settings);
+    let mirror_dir = settings.directory.clone();
     let mut problems = Vec::new();
     for target in targets {
         let problem = |message: String| Problem {
@@ -610,7 +606,7 @@ fn configure_crio(
     host: &dyn Host,
 ) -> Result<Report, Error> {
     let (_, left, dropin) = crio_dropin(paths, settings)?;
-    let mirror_dir = paths.mirror_dir();
+    let mirror_dir = settings.directory.clone();
     let old_ca = read_certificates(&mirror_dir)?.map(|m| m.ca().to_owned());
     let mut report = Report {
         notes: left
@@ -671,7 +667,7 @@ fn unconfigure_crio(paths: &Paths, settings: &Settings, host: &dyn Host) -> Resu
         .extend(files::remove(&dropin_path).map_err(io_at(&dropin_path))?);
     // Always, for the reason `configure` does: the certificates go only once CRI-O has stopped using them.
     host.reload_crio().map_err(Error::Reload)?;
-    let mirror_dir = paths.mirror_dir();
+    let mirror_dir = settings.directory.clone();
     let certs = paths.crio_certs();
     let mut dirs = vec![certs.join(settings.address.to_string())];
     if let Some(mirror) = read_certificates(&mirror_dir)? {

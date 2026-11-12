@@ -171,6 +171,7 @@ fn settings(path: &std::path::Path) -> anyhow::Result<Settings> {
             .iter()
             .map(|name| name.as_str().to_owned())
             .collect(),
+        directory: config.mirror.directory.get().get().to_owned(),
     })
 }
 

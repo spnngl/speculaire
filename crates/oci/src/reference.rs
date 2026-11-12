@@ -61,7 +61,11 @@ pub struct Digest {
 impl Digest {
     /// `Digest.Validate`: the algorithm must be one go-digest registers by default, and the hash lower-case hex of
     /// its size.
-    fn parse(text: &str) -> Result<Self, ReferenceError> {
+    ///
+    /// # Errors
+    ///
+    /// When `text` is not `<algorithm>:<hex>`, names another algorithm, or has a hash of the wrong length.
+    pub fn parse(text: &str) -> Result<Self, ReferenceError> {
         let (algorithm, encoded) = match text.split_once(':') {
             Some((algorithm, encoded)) if !algorithm.is_empty() && !encoded.is_empty() => {
                 (algorithm, encoded)

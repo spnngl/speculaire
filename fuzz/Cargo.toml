@@ -18,6 +18,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 speculaire-agent = { path = "../crates/agent" }
 speculaire-configure = { path = "../crates/configure" }
+speculaire-mirror = { path = "../crates/mirror" }
 speculaire-oci = { path = "../crates/oci" }
 speculaire-registry-config = { path = "../crates/registry-config" }
 speculaire-runtime = { path = "../crates/runtime" }
@@ -57,6 +58,13 @@ bench = false
 [[bin]]
 name = "hosts_edit"
 path = "fuzz_targets/hosts_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mirror_request"
+path = "fuzz_targets/mirror_request.rs"
 test = false
 doc = false
 bench = false

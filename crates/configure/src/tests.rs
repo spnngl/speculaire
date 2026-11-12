@@ -73,13 +73,15 @@ struct Node {
 impl Node {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            address: "127.0.0.1:7480".parse().unwrap(),
+            registries: ["docker.io", "registry.k8s.io"].map(str::to_owned).to_vec(),
+            directory: dir.path().join("var/lib/speculaire/mirror"),
+        };
         Self {
             paths: Paths::under(dir.path()),
             dir,
-            settings: Settings {
-                address: "127.0.0.1:7480".parse().unwrap(),
-                registries: ["docker.io", "registry.k8s.io"].map(str::to_owned).to_vec(),
-            },
+            settings,
         }
     }
 

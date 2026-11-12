@@ -61,6 +61,10 @@ impl Config {
     /// Puts back the running value of every restart key (D47) that `self` changes, and returns their names.
     ///
     /// The destructuring names every key, so a new key does not compile until it is classed here.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one destructured line per key, so that a new key is classed"
+    )]
     pub fn keep_restart_keys(&mut self, running: &Self) -> Vec<&'static str> {
         fn keep<T: Clone + PartialEq>(
             kept: &mut Vec<&'static str>,
@@ -96,6 +100,7 @@ impl Config {
                 Mirror {
                     address: mirror,
                     registries,
+                    directory,
                 },
             peer:
                 Peer {
@@ -136,6 +141,12 @@ impl Config {
             "mirror.registries",
             registries,
             &running.mirror.registries,
+        );
+        keep(
+            &mut kept,
+            "mirror.directory",
+            directory,
+            &running.mirror.directory,
         );
         keep(&mut kept, "peer.address", peer, &running.peer.address);
         keep(
@@ -357,6 +368,8 @@ pub struct Mirror {
     /// The registries `configure` points CRI-O at the mirror for, besides the ones the admin's own `registries.conf`
     /// names (D83).
     pub registries: Restart<Vec<RegistryName>>,
+    /// Where `configure` puts the mirror's CA and certificates, and the agent reads them (D14).
+    pub directory: Restart<Absolute>,
 }
 
 impl Default for Mirror {
@@ -368,6 +381,7 @@ impl Default for Mirror {
                     .map(|name| RegistryName(name.to_owned()))
                     .to_vec(),
             ),
+            directory: Restart(Absolute::new("/var/lib/speculaire/mirror")),
         }
     }
 }

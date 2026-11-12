@@ -10,9 +10,13 @@ use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+use secrecy::ExposeSecret as _;
+use speculaire_pki::mirror::{Mirror, Part};
 
 const WAIT: Duration = Duration::from_secs(10);
 const PROTOBUF: &str =
@@ -22,6 +26,7 @@ const PROTOBUF: &str =
 struct Agent {
     child: Child,
     port: u16,
+    mirror_port: u16,
     config: PathBuf,
     stderr: Receiver<String>,
     seen: Vec<String>,
@@ -43,7 +48,8 @@ impl Agent {
     }
 
     fn spawn(port: u16, config: PathBuf, extra: &str, env: &[(&str, &str)]) -> Self {
-        write_config(&config, port, extra);
+        let mirror_port = free_port();
+        write_config(&config, port, mirror_port, extra);
         let mut child = Command::new(env!("CARGO_BIN_EXE_speculaire"))
             .args(["agent", "--config"])
             .arg(&config)
@@ -66,6 +72,7 @@ impl Agent {
         Self {
             child,
             port,
+            mirror_port,
             config,
             stderr,
             seen: Vec::new(),
@@ -73,7 +80,7 @@ impl Agent {
     }
 
     fn rewrite(&self, extra: &str) {
-        write_config(&self.config, self.port, extra);
+        write_config(&self.config, self.port, self.mirror_port, extra);
     }
 
     fn signal(&self, name: &str) {
@@ -188,11 +195,35 @@ fn scratch_file() -> PathBuf {
     ))
 }
 
-/// Writes a config listening on `port`; `extra` holds further tables.
-fn write_config(path: &Path, port: u16, extra: &str) {
+/// The mirror's certificates, made once: `configure` makes them on a node (D82); these tests do not run as root.
+fn mirror_certificates() -> &'static Path {
+    static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+    DIRECTORY.get_or_init(|| {
+        let directory = std::env::temp_dir().join(format!(
+            "speculaire-agent-test-{}-mirror",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mirror = Mirror::generate(Ipv4Addr::LOCALHOST.into(), SystemTime::now()).unwrap();
+        for part in Part::ALL {
+            std::fs::write(
+                directory.join(part.file_name()),
+                mirror.contents(part).expose_secret(),
+            )
+            .unwrap();
+        }
+        directory
+    })
+}
+
+/// Writes a config listening on `port` and, for the mirror, on `mirror_port`; `extra` holds further tables.
+fn write_config(path: &Path, port: u16, mirror_port: u16, extra: &str) {
     std::fs::write(
         path,
-        format!("[metrics]\naddress = \"127.0.0.1:{port}\"\n{extra}"),
+        format!(
+            "[metrics]\naddress = \"127.0.0.1:{port}\"\n{extra}\n[mirror]\naddress = \"127.0.0.1:{mirror_port}\"\ndirectory = \"{}\"\n",
+            mirror_certificates().display()
+        ),
     )
     .unwrap();
 }
@@ -424,4 +455,45 @@ fn a_new_poll_interval_applies_to_the_next_poll() {
     std::thread::sleep(Duration::from_millis(100));
     agent.rewrite(fast);
     agent.line(&[r#""level":"DEBUG""#, "config reloaded"]);
+}
+
+#[test]
+fn the_mirror_listens_while_the_agent_runs_and_stops_with_it() {
+    let agent = Agent::start("");
+    let mirror = (Ipv4Addr::LOCALHOST, agent.mirror_port);
+    assert!(
+        TcpStream::connect(mirror).is_ok(),
+        "nothing listens on the mirror address"
+    );
+    let mirror_port = agent.mirror_port;
+    let (status, _) = agent.stop();
+    assert!(status.success(), "{status}");
+    assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, mirror_port)).is_err());
+}
+
+#[test]
+fn the_agent_stops_at_startup_without_the_mirror_certificates_and_says_how_to_make_them() {
+    let config = scratch_file();
+    std::fs::write(
+        &config,
+        format!(
+            "[metrics]\naddress = \"127.0.0.1:{}\"\n[mirror]\naddress = \"127.0.0.1:{}\"\ndirectory = \"/nonexistent/mirror\"\n",
+            free_port(),
+            free_port()
+        ),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_speculaire"))
+        .args(["agent", "--config"])
+        .arg(&config)
+        .env_remove("JOURNAL_STREAM")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("/nonexistent/mirror") && stderr.contains("speculaire configure"),
+        "{stderr}"
+    );
 }

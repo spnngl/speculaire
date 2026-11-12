@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
+use speculaire_mirror::content::{CONTAINERD_CONTENT_DIR, Containerd};
+use speculaire_mirror::tls::Tls;
+use speculaire_runtime::detect::CONTAINERD_SOCKET;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tracing::{debug, error, info, warn};
@@ -29,6 +32,8 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
 
 async fn serve(path: &Path, mut config: Config, logs: Logs) -> anyhow::Result<()> {
     let metrics = telemetry::install()?;
+    // The mirror first: an agent that cannot serve the runtime stops before it reports anything (D45, D55).
+    let mirror = start_mirror(&config).await?;
     let status = Arc::new(Status::new(metrics.clone()));
     let address = *config.metrics.address.get();
     let listener = tokio::net::TcpListener::bind(address)
@@ -88,10 +93,11 @@ async fn serve(path: &Path, mut config: Config, logs: Logs) -> anyhow::Result<()
         }
     }
 
-    // D39, step 1. Steps 2 to 6 arrive with the mirror, peers, reflector, cache and gate.
+    // D39, step 1. Steps 2 to 6 arrive with peers, reflector, cache and gate.
     systemd::stopping();
     status.stop();
     info!("stopping");
+    mirror.stop().await;
     // An error means the server already ended; its result says why.
     let _ = stop.send(());
     server
@@ -123,4 +129,48 @@ fn reload(path: &Path, running: &mut Config, logs: &Logs) {
             debug!(path = %path.display(), "config reloaded");
         }
     }
+}
+
+/// The mirror, listening, and what stops it.
+struct Mirror {
+    stop: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Mirror {
+    async fn stop(self) {
+        // An error means the mirror already ended.
+        let _ = self.stop.send(());
+        if let Err(err) = self.task.await {
+            error!(error = %err, "the mirror panicked");
+        }
+    }
+}
+
+/// Opens the mirror on `mirror.address` with the certificates of `configure` (D14, D55).
+async fn start_mirror(config: &Config) -> anyhow::Result<Mirror> {
+    let directory = config.mirror.directory.get().get();
+    let tls = Tls::load(directory).with_context(|| {
+        format!(
+            "loading the mirror's certificates from {}: run `speculaire configure`",
+            directory.display()
+        )
+    })?;
+    let address = config.mirror.address.get().get();
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("listening on mirror.address {address}"))?;
+    let content = Containerd::new(CONTAINERD_CONTENT_DIR, CONTAINERD_SOCKET);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(speculaire_mirror::serve(
+        listener,
+        Arc::new(tls),
+        Arc::new(content),
+        async {
+            // An error means the sender is gone, which also means stop.
+            let _ = stopped.await;
+        },
+    ));
+    info!(%address, "mirror open");
+    Ok(Mirror { stop, task })
 }

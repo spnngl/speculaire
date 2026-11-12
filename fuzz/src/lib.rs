@@ -35,6 +35,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("registries_conf", registries_conf),
     ("auth_json", auth_json),
     ("crio_inspect", crio_inspect),
+    ("mirror_request", mirror_request),
     ("reference", reference),
     ("platform", platform),
 ];
@@ -275,4 +276,33 @@ pub fn hosts_edit(data: &[u8]) {
             .unwrap_or_else(|e| panic!("an edited hosts.toml parses: {e:?}\n{text:?}\n{added:?}"));
         assert_eq!(hosts[0].host, "127.0.0.1:7480");
     }
+}
+
+/// A request of the runtime to the mirror: its path, then a line with its `Range` header (D85).
+///
+/// Routing never panics. A range lies inside a body of any size: it starts at or before its end, and its end is the
+/// body's last byte at most; the whole of an empty body has no range.
+///
+/// # Panics
+///
+/// When routing or reading a range panics, or a range does not lie in the body.
+pub fn mirror_request(data: &[u8]) {
+    use speculaire_mirror::request::{Method, Ranged, Span, range, route};
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let (path, header) = text.split_once('\n').unwrap_or((text, ""));
+    for method in [Method::GET, Method::HEAD] {
+        let _ = route(&method, path);
+    }
+    for size in [0, 1, 2, 1000, u64::MAX] {
+        if let Ranged::Part(span) = range(Some(header), size) {
+            assert!(
+                span.first <= span.last && span.last < size,
+                "{header:?} of {size}"
+            );
+            assert_eq!(span.bytes(), span.last - span.first + 1);
+        }
+    }
+    assert_eq!(Span::whole(0), None);
 }

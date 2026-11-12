@@ -1,0 +1,2 @@
+/v2/docker.io/library/busybox/manifests/latest
+bytes=-500

@@ -34,6 +34,10 @@ criteria = "safe-to-deploy"
 version = "0.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.async-trait]]
+version = "0.1.92"
+criteria = "safe-to-deploy"
+
 [[exemptions.autocfg]]
 version = "1.5.1"
 criteria = "safe-to-deploy"
@@ -88,6 +92,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.const_format_proc_macros]]
 version = "0.2.37"
+criteria = "safe-to-deploy"
+
+[[exemptions.containerd-client]]
+version = "0.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.crossbeam-epoch]]
@@ -171,15 +179,23 @@ version = "0.8.12"
 criteria = "safe-to-deploy"
 
 [[exemptions.getrandom]]
-version = "0.3.4"
+version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.getset]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
 
+[[exemptions.h2]]
+version = "0.4.20"
+criteria = "safe-to-deploy"
+
 [[exemptions.hashbag]]
 version = "0.1.13"
+criteria = "safe-to-deploy"
+
+[[exemptions.hyper-timeout]]
+version = "0.5.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.insta]]
@@ -290,6 +306,14 @@ criteria = "safe-to-deploy"
 version = "0.8.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.pin-project]]
+version = "1.1.13"
+criteria = "safe-to-deploy"
+
+[[exemptions.pin-project-internal]]
+version = "1.1.13"
+criteria = "safe-to-deploy"
+
 [[exemptions.pin-project-lite]]
 version = "0.2.17"
 criteria = "safe-to-deploy"
@@ -304,6 +328,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.ppv-lite86]]
 version = "0.2.21"
+criteria = "safe-to-deploy"
+
+[[exemptions.prettyplease]]
+version = "0.2.37"
+criteria = "safe-to-deploy"
+
+[[exemptions.prettyplease]]
+version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.prost]]
@@ -350,12 +382,24 @@ criteria = "safe-to-deploy"
 version = "0.14.10"
 criteria = "safe-to-deploy"
 
+[[exemptions.ring]]
+version = "0.17.11"
+criteria = "safe-to-deploy"
+
 [[exemptions.rusticata-macros]]
 version = "4.1.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.rustls]]
+version = "0.23.37"
+criteria = "safe-to-deploy"
+
 [[exemptions.rustls-pki-types]]
 version = "1.16.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.rustls-webpki]]
+version = "0.103.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.sd-notify]]
@@ -406,8 +450,36 @@ criteria = "safe-to-deploy"
 version = "2.7.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.tokio-rustls]]
+version = "0.26.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.tokio-stream]]
+version = "0.1.19"
+criteria = "safe-to-deploy"
+
+[[exemptions.tokio-util]]
+version = "0.7.20"
+criteria = "safe-to-deploy"
+
 [[exemptions.toml_edit]]
 version = "0.25.19+spec-1.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.tonic]]
+version = "0.14.9"
+criteria = "safe-to-deploy"
+
+[[exemptions.tonic-build]]
+version = "0.14.9"
+criteria = "safe-to-deploy"
+
+[[exemptions.tonic-prost]]
+version = "0.14.9"
+criteria = "safe-to-deploy"
+
+[[exemptions.tonic-prost-build]]
+version = "0.14.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.tower-layer]]
@@ -468,6 +540,42 @@ criteria = "safe-to-deploy"
 
 [[exemptions.winapi-x86_64-pc-windows-gnu]]
 version = "0.4.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-targets]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows_aarch64_gnullvm]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows_aarch64_msvc]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows_i686_gnu]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows_i686_gnullvm]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows_i686_msvc]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows_x86_64_gnu]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows_x86_64_gnullvm]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows_x86_64_msvc]]
+version = "0.52.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.x509-parser]]
