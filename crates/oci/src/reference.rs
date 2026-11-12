@@ -272,10 +272,8 @@ fn split_reference(text: &str) -> Option<(&str, Option<&str>, Option<&str>)> {
         return None;
     }
     // A colon starts the tag unless a slash follows it: that colon is a port.
-    let (name, tag) = match head.rfind(':') {
-        Some(colon) if !head[colon + 1..].contains('/') => {
-            (&head[..colon], Some(&head[colon + 1..]))
-        }
+    let (name, tag) = match head.rsplit_once(':') {
+        Some((name, tag)) if !tag.contains('/') => (name, Some(tag)),
         _ => (head, None),
     };
     if tag.is_some_and(|tag| !is_tag(tag)) {
@@ -388,6 +386,33 @@ fn is_digest(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_digest_algorithm_starts_with_a_letter_and_a_digest_is_hexadecimal() {
+        let hex = "a".repeat(32);
+        assert!(is_digest(&format!("sha256:{hex}")));
+        assert!(is_digest(&format!("sha256+b64.u_x-y:{hex}")));
+        assert!(!is_digest(&format!("9sha:{hex}")));
+        assert!(!is_digest(&format!("sha-:{hex}")));
+        assert!(
+            !is_digest(&format!("sh__a:{hex}")),
+            "a separator is followed by a letter"
+        );
+        assert!(!is_digest(&format!("sha256:{}", "g".repeat(32))));
+        assert!(!is_digest(&format!("sha256:{}", "a".repeat(31))));
+        assert!(!is_digest(&hex));
+    }
+
+    #[test]
+    fn a_colon_at_either_end_is_no_reference() {
+        assert_eq!(split_reference(":"), None);
+        assert_eq!(split_reference(":tag"), None);
+        assert_eq!(split_reference("a/:tag"), None);
+        assert_eq!(
+            split_reference("a:5000/b:t"),
+            Some(("a:5000/b", Some("t"), None))
+        );
+    }
 
     const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
