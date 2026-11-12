@@ -294,8 +294,16 @@ conformance:
         echo "conformance: no $bin: run just musl {{ arch() }}-unknown-linux-musl" >&2
         exit 1
     fi
-    mkdir -p target/conformance
+    mkdir -p target/conformance target/musl-fake
+    # The fake containerd of the agent's tests (D87): the node of this run has no runtime.
+    {{ container }} build --quiet --target build -t localhost/speculaire-build -f build/Containerfile build >/dev/null
+    {{ container }} run --rm -v "$(pwd):/src:ro" -v "$(pwd)/target/musl-fake:/out" \
+        -v speculaire-registry:/usr/local/cargo/registry -v "speculaire-musl-{{ arch() }}:/target" \
+        -e CARGO_TARGET_DIR=/target localhost/speculaire-build \
+        sh -c 'cargo build --release --locked --target "$1" -p speculaire-fake-runtime \
+            && cp "/target/$1/release/fake-runtime" /out/' sh '{{ arch() }}-unknown-linux-musl'
     {{ container }} run --rm -e CONFORMANCE_REV='{{ conformance_rev }}' -v "$(pwd)/$bin:/usr/bin/speculaire:ro" \
+        -v "$(pwd)/target/musl-fake/fake-runtime:/usr/bin/fake-runtime:ro" \
         -v "$(pwd)/conformance:/conformance:ro" -v "$(pwd)/packaging:/packaging:ro" \
         -v "$(pwd)/target/conformance:/results" -v speculaire-go-mod:/go/pkg/mod \
         -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" docker.io/library/golang:{{ golang }} \
