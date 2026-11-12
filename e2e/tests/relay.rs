@@ -41,8 +41,12 @@ struct Worker {
 }
 
 impl Worker {
-    fn new() -> Self {
+    /// The worker, on a cluster of `runtime`; `None` on the other runtime, where the test has nothing to check.
+    fn on(runtime: Runtime) -> Option<Self> {
         let cluster = Cluster::from_env();
+        if cluster.runtime() != runtime {
+            return None;
+        }
         let name = cluster
             .nodes()
             .unwrap()
@@ -60,14 +64,14 @@ impl Worker {
         // A test that failed before the guard dropped leaves the agent as it was: start from a ready one, with an empty
         // blob cache (the agent counts what it holds, so it restarts).
         worker.wait_ready();
-        if worker.crio() {
+        if runtime == Runtime::Crio {
             worker.sh(&format!(
                 "systemctl stop speculaire && rm -rf {CACHE}/blobs {CACHE}/tmp && systemctl reset-failed speculaire; systemctl start speculaire"
             ));
             worker.wait_ready();
         }
         worker.forget();
-        worker
+        Some(worker)
     }
 
     fn sh(&self, script: &str) -> String {
@@ -80,10 +84,6 @@ impl Worker {
         self.cluster
             .exec_output(&self.name, &["sh", "-c", script])
             .unwrap()
-    }
-
-    fn crio(&self) -> bool {
-        self.cluster.runtime() == Runtime::Crio
     }
 
     fn wait_ready(&self) {
@@ -277,7 +277,10 @@ impl Drop for Worker {
                 "journalctl --rotate && journalctl --vacuum-time=1s; systemctl reset-failed speculaire; systemctl restart speculaire",
             ],
         );
-        self.wait_ready();
+        // A second panic while a failed test unwinds would abort the whole binary; the next `Worker::on` waits anyway.
+        if !std::thread::panicking() {
+            self.wait_ready();
+        }
     }
 }
 
@@ -296,10 +299,9 @@ fn assert_pulled(pull: &Output) {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_a_pull_by_tag_goes_through_the_mirror_and_a_second_one_is_served_from_the_blob_cache() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let upstream = seeded("open.e2e.test", TEST_IMAGE);
     let image = format!("{}/app/web:1", upstream.address());
     worker.registry_conf("open", &upstream.address(), false);
@@ -359,10 +361,9 @@ fn on_crio_a_pull_by_tag_goes_through_the_mirror_and_a_second_one_is_served_from
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_a_kubelet_pod_by_tag_goes_through_the_mirror() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let upstream = seeded("open.e2e.test", TEST_IMAGE);
     let image = format!("{}/app/web:1", upstream.address());
     worker.registry_conf("open", &upstream.address(), false);
@@ -410,10 +411,9 @@ fn on_crio_a_kubelet_pod_by_tag_goes_through_the_mirror() {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_an_image_that_needs_a_pull_secret_is_pulled_from_upstream_with_it() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let open = seeded("seed.e2e.test", TEST_IMAGE);
     let basic = Registry::start(
         "basic.e2e.test",
@@ -518,10 +518,9 @@ fn auth_file(address: &str, basic: &str) -> String {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_the_relay_logs_in_with_the_nodes_credentials_and_ca_and_logs_no_secret() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let private = Private::start(&mut worker);
     let image = private.image.clone();
     let basic = basic_credentials();
@@ -565,10 +564,9 @@ fn on_crio_the_relay_logs_in_with_the_nodes_credentials_and_ca_and_logs_no_secre
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_a_login_added_to_the_auth_file_is_used_by_the_next_pull_without_a_restart() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let private = Private::start(&mut worker);
     let image = private.image.clone();
     // Nobody has a login yet.
@@ -596,10 +594,9 @@ fn on_crio_a_login_added_to_the_auth_file_is_used_by_the_next_pull_without_a_res
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_lowering_the_bound_of_the_blob_cache_evicts_at_the_next_fill_without_a_restart() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let small = seeded("open.e2e.test", TEST_IMAGE);
     small.copy_in(LARGE_IMAGE, "app/large:1").unwrap();
     worker.registry_conf("open", &small.address(), false);
@@ -637,10 +634,9 @@ fn on_crio_lowering_the_bound_of_the_blob_cache_evicts_at_the_next_fill_without_
 fn on_crio_a_corrupt_upstream_leaves_nothing_in_the_cache_and_the_client_never_gets_the_whole_blob()
 {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let upstream = seeded("open.e2e.test", TEST_IMAGE);
     // A proxy that flips the 100th byte of every blob.
     let proxy = Proxy::start("proxy.e2e.test", &upstream.address(), Some(100), None).unwrap();
@@ -711,10 +707,9 @@ fn first_layer(worker: &Worker, path: &str, body: &str) -> Layer {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_above_the_bound_the_least_recently_served_blobs_go_first() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let small = seeded("open.e2e.test", TEST_IMAGE);
     small.copy_in(LARGE_IMAGE, "app/large:1").unwrap();
     worker.registry_conf("open", &small.address(), false);
@@ -761,10 +756,9 @@ fn on_crio_above_the_bound_the_least_recently_served_blobs_go_first() {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_killing_the_agent_mid_pull_fails_that_pull_and_the_next_one_succeeds() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let upstream = seeded("open.e2e.test", TEST_IMAGE);
     upstream.copy_in(LARGE_IMAGE, "app/large:1").unwrap();
     // 2 MB/s a blob: the pull takes seconds.
@@ -803,10 +797,9 @@ fn on_crio_killing_the_agent_mid_pull_fails_that_pull_and_the_next_one_succeeds(
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_crio_the_relay_costs_at_most_18_ms_of_cpu_per_mb() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if !worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
         return;
-    }
+    };
     let upstream = Registry::start("open.e2e.test", &Access::Open, None).unwrap();
     upstream.copy_in(LARGE_IMAGE, "app/large:1").unwrap();
     worker.registry_conf("open", &upstream.address(), false);
@@ -842,10 +835,9 @@ fn on_crio_the_relay_costs_at_most_18_ms_of_cpu_per_mb() {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn on_containerd_the_mirror_sends_no_upstream_request() {
     let _serial = serial();
-    let mut worker = Worker::new();
-    if worker.crio() {
+    let Some(mut worker) = Worker::on(Runtime::Containerd) else {
         return;
-    }
+    };
     let upstream = seeded("open.e2e.test", TEST_IMAGE);
     let address = upstream.address();
     worker.file(
