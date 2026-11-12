@@ -37,6 +37,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("crio_inspect", crio_inspect),
     ("runtime_version", runtime_version),
     ("www_authenticate", www_authenticate),
+    ("token_answer", token_answer),
     ("manifest", manifest),
     ("mirror_request", mirror_request),
     ("reference", reference),
@@ -352,6 +353,24 @@ pub fn www_authenticate(data: &[u8]) {
             assert_ne!(name, "");
             assert_eq!(*name, name.to_ascii_lowercase());
         }
+    }
+}
+
+/// The body of a token endpoint's answer, as the upstream client reads it (D88).
+///
+/// Reading never panics. A token read is not empty and lasts at least the distribution spec's default minute.
+///
+/// # Panics
+///
+/// When reading panics, or an answer read breaks one of those.
+pub fn token_answer(data: &[u8]) {
+    use secrecy::ExposeSecret as _;
+    if let Some((token, lifetime)) = speculaire_registry::token::parse_answer(data) {
+        assert_ne!(token.expose_secret(), "");
+        assert!(
+            lifetime >= std::time::Duration::from_secs(60),
+            "{lifetime:?}"
+        );
     }
 }
 

@@ -81,7 +81,8 @@ struct Answer {
 ///
 /// `token` is the distribution spec's name for it, `access_token` `OAuth2`'s; the first wins. A lifetime under 60 s is
 /// raised to the default, as the spec says clients may assume.
-pub(crate) fn parse_answer(body: &[u8]) -> Option<(SecretString, Duration)> {
+#[must_use]
+pub fn parse_answer(body: &[u8]) -> Option<(SecretString, Duration)> {
     let answer: Answer = serde_json::from_slice(body).ok()?;
     let token = [answer.token, answer.access_token]
         .into_iter()
