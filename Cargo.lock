@@ -1944,6 +1944,7 @@ dependencies = [
  "hyper-util",
  "insta",
  "prost",
+ "rustls-pki-types",
  "secrecy",
  "serde",
  "speculaire-fake-runtime",

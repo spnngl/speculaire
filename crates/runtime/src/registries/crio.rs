@@ -5,17 +5,19 @@
 //! own, say where `docker.io` is, which mirrors it has and whether it is insecure; `certs.d` says how to trust each
 //! host, and the credential files say who to be.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 use speculaire_registry_config::crio::auth::{self, Lookup};
 use speculaire_registry_config::crio::registries::{self, Config};
 use speculaire_registry_config::crio::{Context, certs};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::live::Live;
 use super::{
-    Credentials, Endpoint, Error, Reference, Registries, Source, Tls, read_tls, split_name,
+    Credentials, Endpoint, Error, Reference, Registries, Reloaded, Source, Tls, read_ca,
+    read_client, split_name,
 };
 use crate::crio;
 use crate::settings::chain;
@@ -23,11 +25,12 @@ use crate::settings::chain;
 /// The host Docker Hub's API answers on, where `docker.io` names it.
 const DOCKER_HUB: &str = "registry-1.docker.io";
 
-/// What `registries.conf`, the credential files and CRI-O's config held.
+/// What `registries.conf`, the credential files, the certificate files and CRI-O's config held.
 struct Snapshot {
-    context: Context,
     config: Config,
     auth: auth::Files,
+    /// The trust of each host that has a directory in `certs.d`, by the name of the directory (D92).
+    tls: BTreeMap<String, Tls>,
 }
 
 /// The registry config of a node that runs CRI-O, as `reload` last read it.
@@ -59,7 +62,10 @@ impl CrioRegistries {
 
     /// The registry config below the auth file CRI-O names, and the paths it was read from: the places the files are
     /// looked for, whether or not anything is there.
-    fn read(&self) -> (Vec<PathBuf>, Result<Snapshot, Error>) {
+    ///
+    /// A credential, certificate or key file that cannot be used does not fail the read: `problems` says which, and the
+    /// hosts it is for are anonymous or without it (D92).
+    fn read(&self, problems: &mut Vec<String>) -> (Vec<PathBuf>, Result<Snapshot, Error>) {
         let mut paths = registries::watched(&self.context);
         paths.extend(certs::watched(&self.context));
         paths.extend(
@@ -67,7 +73,7 @@ impl CrioRegistries {
                 .into_iter()
                 .map(|auth| auth.path),
         );
-        let snapshot = || -> Result<Snapshot, Error> {
+        let mut snapshot = || -> Result<Snapshot, Error> {
             let text = crio::config(&self.socket).map_err(|e| Error::Config(chain(&e)))?;
             let auth_file = crio::global_auth_file(&text).map_err(|e| Error::Config(chain(&e)))?;
             let context = Context {
@@ -76,12 +82,15 @@ impl CrioRegistries {
             };
             let config = registries::load_except(&context, Some(&self.skip))
                 .map_err(|e| Error::Config(chain(&e)))?;
-            let auth = auth::Files::load(&context).map_err(|e| Error::Config(chain(&e)))?;
-            Ok(Snapshot {
-                context,
-                config,
-                auth,
-            })
+            let (auth, unusable) = auth::Files::load(&context);
+            problems.extend(unusable.iter().map(|error| {
+                format!(
+                    "{}; the registries that reach it are asked anonymously",
+                    chain(error)
+                )
+            }));
+            let tls = read_trust(&context, problems);
+            Ok(Snapshot { config, auth, tls })
         };
         (paths, snapshot())
     }
@@ -92,11 +101,7 @@ impl Registries for CrioRegistries {
     fn sources(&self, name: &str, reference: Reference<'_>) -> Result<Vec<Source>, Error> {
         let (host, _) = split_name(name)?;
         let snapshot = self.live.get()?;
-        let Snapshot {
-            context,
-            config,
-            auth,
-        } = &*snapshot;
+        let config = &snapshot.config;
         let reference = match reference {
             Reference::Digest(digest) => format!("{name}@{digest}"),
             Reference::Tag(tag) => format!("{name}:{tag}"),
@@ -114,7 +119,7 @@ impl Registries for CrioRegistries {
         };
         let mut sources = Vec::new();
         for (reference, insecure) in pulls {
-            let Some(source) = source(context, config, auth, &reference, insecure) else {
+            let Some(source) = source(&snapshot, &reference, insecure) else {
                 warn!(
                     reference,
                     host, "a pull source is no registry and repository"
@@ -126,18 +131,14 @@ impl Registries for CrioRegistries {
         Ok(sources)
     }
 
-    fn reload(&self, since: Option<SystemTime>) -> Result<bool, Error> {
-        self.live.reload(since, || self.read())
+    fn reload(&self, since: Option<SystemTime>) -> Result<Reloaded, Error> {
+        let mut problems = Vec::new();
+        let changed = self.live.reload(since, || self.read(&mut problems))?;
+        Ok(Reloaded { changed, problems })
     }
 }
 
-fn source(
-    context: &Context,
-    config: &Config,
-    auth: &auth::Files,
-    reference: &str,
-    insecure: bool,
-) -> Option<Source> {
+fn source(snapshot: &Snapshot, reference: &str, insecure: bool) -> Option<Source> {
     let (authority, rest) = reference.split_once('/')?;
     let repository = rest
         .split_once('@')
@@ -156,8 +157,8 @@ fn source(
         authority
     };
     let key = format!("{authority}/{repository}");
-    let credentials = credentials(config, auth, &key, reference);
-    let trust = tls(context, authority);
+    let credentials = credentials(&snapshot.config, &snapshot.auth, &key, reference);
+    let trust = snapshot.tls.get(authority).cloned().unwrap_or_default();
     let candidates = if insecure {
         vec![
             Endpoint {
@@ -182,20 +183,42 @@ fn source(
     })
 }
 
-/// The trust of a host: the CA files and the first client certificate of its `certs.d` directory.
-fn tls(context: &Context, authority: &str) -> Tls {
-    let found = match certs::load(context, authority) {
-        Ok(found) => found,
-        Err(err) => {
-            warn!(authority, error = %err, "the certificate directory of a registry cannot be read");
-            return Tls::default();
-        }
-    };
-    let client = found
-        .client
-        .first()
-        .map(|pair| (pair.cert.as_path(), pair.key.as_path()));
-    read_tls(authority, &found.ca, client)
+/// The trust of each host with a directory in `certs.d`: its CA files and first client certificate, read now so that
+/// no request reads them (D92). What cannot be used is left out and noted in `problems`.
+fn read_trust(context: &Context, problems: &mut Vec<String>) -> BTreeMap<String, Tls> {
+    let hosts: BTreeSet<String> = certs::watched(context)
+        .iter()
+        .flat_map(|base| std::fs::read_dir(base).into_iter().flatten().flatten())
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    hosts
+        .into_iter()
+        .map(|host| {
+            let trust = match certs::load(context, &host) {
+                Ok(found) => Tls {
+                    roots: found
+                        .ca
+                        .iter()
+                        .filter_map(|path| read_ca(path, problems))
+                        .collect(),
+                    client: found
+                        .client
+                        .first()
+                        .and_then(|pair| read_client(&pair.cert, &pair.key, problems)),
+                    skip_verify: false,
+                },
+                Err(err) => {
+                    problems.push(format!(
+                        "the certificate directory of {host} is not used: {}",
+                        chain(&err)
+                    ));
+                    Tls::default()
+                }
+            };
+            (host, trust)
+        })
+        .collect()
 }
 
 /// Who to be at a registry: the first login of the credential files for the repository, its namespaces and its
@@ -219,8 +242,9 @@ fn credentials(config: &Config, auth: &auth::Files, key: &str, reference: &str) 
             );
             Credentials::Anonymous
         }
+        // Reported when the files were read (D92), not at every request.
         Err(err) => {
-            warn!(reference, error = %err, "the credential files cannot be read");
+            debug!(reference, error = %err, "the credential files cannot be used");
             Credentials::Anonymous
         }
     }

@@ -23,6 +23,7 @@ On CRI-O every pull of a mirrored registry goes through the agent, which fetches
 - `a registry does not answer the relay` (warning) names a failure to reach every endpoint of a source; `speculaire_mirror_requests_total{result="error"}` counts the requests the relay could not answer, and the agent stops at startup, naming the directory, when it cannot open `blob_cache.directory`.
 - A credential that lives in a credential helper is not used (D80, D89): the log says which helper, and the registry is asked anonymously.
 - A registry config that does not parse (`registry config reload failed`, one error naming the file, the line and the column) leaves the previous one in use and does not make the agent unready; fix the file, and the next poll reads it (D91).
+- A credential, certificate or key file that cannot be used (`registry config reloaded with a file left out`, one error per file, naming it and the line and column) does not fail the config: the registries that need it are asked anonymously or without a client certificate, until the file is fixed and the next poll reads it (D92).
 
 ## Before turning on `enforce`
 
@@ -101,7 +102,7 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | `speculaire_gate_total{mode="enforce",result=~"rejected\|unverifiable\|pending\|unmatched"}` | The rate rises above its usual level |
 | `speculaire_peer_fetches_total{result="digest_mismatch"}` | It increases: a peer sent bytes that do not match their digest; the warning log, and the `peer` audit event if on, name its node (D52) |
 | `speculaire_mirror_requests_total{result="error"}` | It increases: the mirror could not read content it may hold, and answered 404; the warning log names the error (D85) |
-| `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, or on its previous registry config; the error log names the file and the line (D30, D91) |
+| `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, or on its previous registry config, or a registry config read left a credential, certificate or key file out; the error log names the file and the line (D30, D91, D92) |
 | `speculaire_identity_path{path="annotation"}` | It is 1: the node runs containerd 2.3, with its known identity gap (D15) |
 | `speculaire_trust_root_expiry_timestamp_seconds` | Less than 7 days away: once it passes, new verifications become `unverifiable`; cached verdicts keep serving |
 | `speculaire_p2p_enabled` | 0 for more than 10 min: the node has no kubelet certificate and pulls only from upstream (D16) |

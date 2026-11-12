@@ -697,6 +697,11 @@ impl Tree {
         })
     }
 
+    /// Every host configuration of the tree, whichever host directory it is in.
+    pub fn host_configs(&self) -> impl Iterator<Item = &HostConfig> {
+        self.dirs.values().flatten()
+    }
+
     /// [`resolve`] over the tree: the endpoints of `host`, with no disk to read.
     #[must_use]
     pub fn resolve(&self, host: &str, default_scheme: Option<&str>) -> Vec<RegistryHost> {
