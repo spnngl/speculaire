@@ -40,6 +40,8 @@ kubectl_version := "1.37.2"
 # The image that builds and runs the Go oracle (D29).
 # renovate: datasource=docker depName=docker.io/library/golang
 golang := "1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf"
+# The build tags of go.podman.io/image: OpenPGP in Go instead of gpgme (cgo), and no storage drivers.
+go_tags := "containers_image_openpgp,exclude_graphdriver_btrfs,exclude_graphdriver_devicemapper"
 # `just e2e-tools` downloads kind and kubectl here; the e2e recipes put them first in PATH.
 e2e_dir := justfile_directory() / "target/e2e"
 e2e_path := (e2e_dir / "kind-" + kind_version) + ":" + (e2e_dir / "kubectl-" + kubectl_version)
@@ -261,7 +263,7 @@ oracle: oracle-build
 oracle-build:
     mkdir -p target/oracle
     {{ container }} run --rm -v "$(pwd)/oracle:/src" -w /src -v "$(pwd)/target/oracle:/out" -v speculaire-go-mod:/go/pkg/mod \
-        -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" docker.io/library/golang:{{ golang }} sh -euc ' \
+        -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" -e CGO_ENABLED=0 -e GOFLAGS=-tags={{ go_tags }} docker.io/library/golang:{{ golang }} sh -euc ' \
             unformatted=$(gofmt -l .); [ -z "$unformatted" ] || { echo "gofmt: $unformatted" >&2; exit 1; }; \
             go mod verify; go vet ./...; go test ./...; \
             go build -trimpath -o /out/speculaire-oracle .; /out/speculaire-oracle version'

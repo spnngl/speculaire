@@ -37,6 +37,12 @@ impl ParseError {
         }
     }
 
+    /// The same error at a line and column (both from 1).
+    pub(crate) fn at(mut self, line: usize, column: usize) -> Self {
+        self.position = Some((line, column));
+        self
+    }
+
     /// The dotted key that holds the error, such as `host."a.io".ca`; empty for a syntax error outside any key.
     #[must_use]
     pub fn key(&self) -> &str {

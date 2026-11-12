@@ -51,6 +51,20 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "registries_conf"
+path = "fuzz_targets/registries_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_json"
+path = "fuzz_targets/auth_json.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 
 # The workspace's lint tables, copied: this crate is a workspace of its own.

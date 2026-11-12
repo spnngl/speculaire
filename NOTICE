@@ -7,6 +7,12 @@ Copyright 2026 Lola Delannoy, licensed under the Apache License, Version 2.0.
 This product includes software ported from containerd (https://github.com/containerd/containerd),
 Copyright The containerd Authors, licensed under the Apache License, Version 2.0.
 
+This product includes software ported from containers/image (go.podman.io/image, https://github.com/containers/container-libs),
+Copyright The containers/image Authors, licensed under the Apache License, Version 2.0.
+
+This product includes software ported from containers/storage (go.podman.io/storage, https://github.com/containers/container-libs),
+Copyright The containers/storage Authors, licensed under the Apache License, Version 2.0.
+
 This product includes software ported from the Go standard library (https://go.dev),
 Copyright 2009 The Go Authors, licensed under the BSD 3-Clause License, reproduced below.
 

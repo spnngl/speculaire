@@ -3,7 +3,7 @@
 //
 // `version` reads nothing and prints the containerd and NRI versions the oracle links. Every other subcommand reads
 // cases as JSON lines on stdin and prints one JSON line per case on stdout (D70): `hosts` and `config` run containerd's
-// registry configuration code.
+// registry configuration code, `registries`, `certs` and `auth` that of go.podman.io/image, which CRI-O links.
 package main
 
 import (
@@ -41,8 +41,11 @@ func main() {
 
 // subcommands maps a name to the function that answers one case.
 var subcommands = map[string]func(line []byte) (any, error){
-	"hosts":  hostsCase,
-	"config": configCase,
+	"hosts":      hostsCase,
+	"config":     configCase,
+	"registries": registriesCase,
+	"certs":      certsCase,
+	"auth":       authCase,
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -60,7 +63,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func usage(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "usage: speculaire-oracle version | hosts | config")
+	fmt.Fprintln(stderr, "usage: speculaire-oracle version | hosts | config | registries | certs | auth")
 	return 2
 }
 

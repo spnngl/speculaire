@@ -61,6 +61,12 @@
             "enabled": false,
         },
         {
+            "description": "The oracle's go.podman.io/image and its storage stay on the versions of the newest supported CRI-O minor (D80); a CRI-O release moves them by hand.",
+            "matchManagers": ["gomod"],
+            "matchDepNames": ["go.podman.io/image/v5", "go.podman.io/storage"],
+            "enabled": false,
+        },
+        {
             "description": "The oracle's NRI moves only with its containerd: `go mod tidy` raises it to what containerd requires, and the oracle's tests fail when the two differ (D29).",
             "matchManagers": ["gomod"],
             "matchDepNames": ["github.com/containerd/nri"],
