@@ -221,24 +221,22 @@ impl<I: Images> Relay<I> {
             return from_content(&*self.cache, Kind::Manifest, digest, pull.head, None).await;
         }
         for source in &sources {
-            if let Some(answer) = self.relay_manifest(source, pull, reference).await {
+            if let Some(answer) = self.relay_manifest(source, pull, reference, &text).await {
                 return answer;
             }
         }
         Answer::Missing
     }
 
-    /// The manifest from one source, or `None` when it does not give one: the next source is tried.
+    /// The manifest from one source, or `None` when it does not give one: the next source is tried. `text` is
+    /// `reference` as the path names it.
     async fn relay_manifest(
         &self,
         source: &Source,
         pull: &Pull<'_>,
         reference: &Reference,
+        text: &str,
     ) -> Option<Answer> {
-        let text = match reference {
-            Reference::Digest(digest) => digest.to_string(),
-            Reference::Tag(tag) => tag.clone(),
-        };
         // The head of a tag is asked as a head: it costs no pull, and the body is not read.
         let head = pull.head && matches!(reference, Reference::Tag(_));
         let request = Request {
@@ -266,14 +264,17 @@ impl<I: Images> Relay<I> {
             .map_err(|err| debug!(error = %err, "reading a manifest from upstream failed"))
             .ok()?
             .to_bytes();
+        // A manifest by tag is named by its sha256; one by digest has to hash to it.
         let digest = match reference {
-            Reference::Digest(digest) => digest.clone(),
             Reference::Tag(_) => hash_of("sha256", &bytes)?,
+            Reference::Digest(digest) => {
+                if hash_of(digest.algorithm(), &bytes).as_ref() != Some(digest) {
+                    warn!(name = pull.name, digest = %digest, "upstream sent a manifest that is not the digest asked for");
+                    return None;
+                }
+                digest.clone()
+            }
         };
-        if hash_of(digest.algorithm(), &bytes).as_ref() != Some(&digest) {
-            warn!(name = pull.name, digest = %digest, "upstream sent a manifest that is not the digest asked for");
-            return None;
-        }
         let children = manifest::children(&bytes)
             .map_err(|err| debug!(error = %err, name = pull.name, "the manifest is of a kind the relay does not read"))
             .ok()?;
