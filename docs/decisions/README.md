@@ -12,7 +12,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51)
 - D3 [distribution](distribution.md): every agent announces its own peer address and port (amended by D36)
 - D4 [build](build.md): no io_uring in v1, and the unit denies its syscalls
-- D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67)
+- D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85)
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66)
 - D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73)
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43)
@@ -21,7 +21,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57)
-- D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82)
+- D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
 - D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81)
 - D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60)
 - D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable` (amended by D66, D78)
@@ -63,7 +63,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D73 [distribution](distribution.md): a peer fetch silent for `peer.stall_timeout` moves to the next peer or falls through, without denying the peer (amends D7)
 - D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69)
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64)
-- D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32; amended by D82)
+- D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32; amended by D82, D85)
 - D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47; amended by D82)
 - D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62)
 - D58 [build](build.md): CI runs the check on the runner with prebuilt tools, and the musl build in the build image; `ci` jobs land with their content (amends D27, D57)
@@ -95,5 +95,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D82 [agent](agent.md): `configure` makes one set of four certificate files, edits every `hosts.toml` under `config_path` with the mirror first, and `unconfigure` removes only what it added (amends D14, D32, D55, D56)
 - D83 [distribution](distribution.md): the CRI-O drop-in copies the admin's entry of every mirrored registry (`mirror.registries` and the admin's prefixes), with the mirror's location the entry's own (amends D66)
 - D84 [agent](agent.md): `configure`, `unconfigure` and `check-config` find the runtime by its socket, `--runtime` names it, and `unconfigure` stops while the runtime's NRI config requires `speculaire` (amends D32, D64)
+- D85 [distribution](distribution.md): the mirror is hyper over TLS 1.3 with a required client certificate, finds a held blob by its digest in the content directory, answers every miss with a 404, and is checked by the distribution-spec conformance suite (amends D5, D14, D55, D82)
 
-Next free number: D85.
+Next free number: D86.
