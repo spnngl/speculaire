@@ -168,7 +168,7 @@ impl Registry {
         // On the default port of its scheme: a name with a port is not mirrored on CRI-O (D88).
         let mut env: Vec<(&str, &str)> = Vec::new();
         let mut files: Vec<(&Path, &str)> = Vec::new();
-        let (crt, key);
+        let (crt, key, storage);
         match access {
             Access::Open => env.push(("REGISTRY_HTTP_ADDR", ":80")),
             Access::Basic(line) => {
@@ -200,28 +200,21 @@ impl Registry {
             }
         }
         // The storage of `from` goes in before the registry starts: a registry indexes nothing, it reads the tree.
-        let storage = scratch.join("storage");
         if let Some(from) = from {
             docker(&[
                 "cp",
                 &format!("{}:/var/lib/registry", from.container.name),
-                &storage.display().to_string(),
+                &scratch.join("storage").display().to_string(),
             ])?;
+            // `/.`: the directory's content, not the directory.
+            storage = scratch.join("storage").join(".");
+            files.push((&storage, "/var/lib/registry"));
         }
         let image = match access {
             Access::Token { .. } => TOKEN_REGISTRY_IMAGE,
             _ => REGISTRY_IMAGE,
         };
         let container = Container::start(name, image, &env, &files, &[])?;
-        if from.is_some() {
-            docker(&["stop", name])?;
-            docker(&[
-                "cp",
-                &format!("{}/.", storage.display()),
-                &format!("{name}:/var/lib/registry"),
-            ])?;
-            docker(&["start", name])?;
-        }
         container.wait_for_log("listening on")?;
         let _ = std::fs::remove_dir_all(&scratch);
         Ok(Self {
