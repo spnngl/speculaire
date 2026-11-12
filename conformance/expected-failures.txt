@@ -1,0 +1,4 @@
+# The tests that fail on purpose: each is a pull by tag, and the mirror resolves no tag (D6, D85). One per line, with its
+# reason after ` # `; `check` fails when this list and the suite's failures differ.
+OCI Conformance Test/read-only/head/manifest-head-by-tag # the mirror does not resolve tags (D6)
+OCI Conformance Test/read-only/pull/manifest-by-tag # the mirror does not resolve tags (D6)

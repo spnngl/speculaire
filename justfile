@@ -40,6 +40,9 @@ kubectl_version := "1.37.2"
 # The image that builds and runs the Go oracle (D29).
 # renovate: datasource=docker depName=docker.io/library/golang
 golang := "1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf"
+# The commit of the distribution-spec conformance suite that `just conformance` runs (D85); the mirror serves its pull half.
+# renovate: datasource=git-refs depName=https://github.com/opencontainers/distribution-spec
+conformance_rev := "97274622c11112caa21efb8c52acca3c6b8fa7f1"
 # The build tags of go.podman.io/image: OpenPGP in Go instead of gpgme (cgo), and no storage drivers.
 go_tags := "containers_image_openpgp,exclude_graphdriver_btrfs,exclude_graphdriver_devicemapper"
 # `just e2e-tools` downloads kind and kubectl here; the e2e recipes put them first in PATH.
@@ -280,6 +283,23 @@ dev *recipe:
     {{ container }} build --quiet --target dev --build-arg NIGHTLY={{ nightly }} -t localhost/speculaire-dev -f build/Containerfile build >/dev/null
     {{ container }} run --rm -v "$(pwd):/src" -v speculaire-registry:/usr/local/cargo/registry \
         -v "speculaire-dev-{{ arch() }}:/target" -e CARGO_TARGET_DIR=/target localhost/speculaire-dev just {{ recipe }}
+
+# The distribution-spec conformance suite against the mirror of the musl binary, in the Go image (D85): the agent runs in
+# a container seeded with content, and the suite pulls from it. Needs Docker and `just musl <arch>-unknown-linux-musl`.
+conformance:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin='target/musl/{{ arch() }}-unknown-linux-musl/speculaire'
+    if [[ ! -x "$bin" ]]; then
+        echo "conformance: no $bin: run just musl {{ arch() }}-unknown-linux-musl" >&2
+        exit 1
+    fi
+    mkdir -p target/conformance
+    {{ container }} run --rm -e CONFORMANCE_REV='{{ conformance_rev }}' -v "$(pwd)/$bin:/usr/bin/speculaire:ro" \
+        -v "$(pwd)/conformance:/conformance:ro" -v "$(pwd)/packaging:/packaging:ro" \
+        -v "$(pwd)/target/conformance:/results" -v speculaire-go-mod:/go/pkg/mod \
+        -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" docker.io/library/golang:{{ golang }} \
+        sh /conformance/run.sh
 
 # The binary embeds its dependency list through cargo-auditable (D13, D46); the recipe fails unless it is static-pie
 # and carries that list. Volumes speculaire-registry and speculaire-musl-<arch> keep the registry and the build.

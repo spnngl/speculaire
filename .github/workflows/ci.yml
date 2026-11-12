@@ -125,6 +125,8 @@ jobs:
       - env:
           TARGET: ${{ matrix.target }}
         run: just musl "$TARGET"
+      # The distribution-spec conformance suite against the mirror of this binary (D85).
+      - run: just conformance
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: speculaire-${{ matrix.target }}
