@@ -28,17 +28,17 @@ pub const LARGE_IMAGE: &str = "docker.io/library/nginx:alpine@sha256:713fc2ebfd9
 /// The label of every container the suite starts.
 const LABEL: &str = "speculaire-e2e";
 /// kind's Docker network.
-const NETWORK: &str = "kind";
+pub(crate) const NETWORK: &str = "kind";
 /// The user and the password of the registries that want a login.
 pub const USER: &str = "alice";
 /// See [`USER`].
 pub const PASSWORD: &str = "s3cret";
 
-fn docker(args: &[&str]) -> Result<String, Failure> {
+pub(crate) fn docker(args: &[&str]) -> Result<String, Failure> {
     run(Command::new("docker").args(args))
 }
 
-fn fail(command: &str, detail: &dyn ToString) -> Failure {
+pub(crate) fn fail(command: &str, detail: &dyn ToString) -> Failure {
     Failure {
         command: command.to_owned(),
         detail: detail.to_string(),
@@ -262,28 +262,42 @@ impl Registry {
     ///
     /// When `docker` fails.
     pub fn copy_in(&self, source: &str, reference: &str) -> Result<(), Failure> {
-        let platform = match std::env::consts::ARCH {
-            "aarch64" => "linux/arm64",
-            _ => "linux/amd64",
-        };
-        let address = self.address();
-        docker(&[
-            "run",
-            "--rm",
-            "--network",
-            NETWORK,
-            "--label",
-            LABEL,
-            "--entrypoint",
-            "sh",
-            COPY_IMAGE,
-            "-c",
-            &format!(
-                "regctl registry set --tls disabled {address} && regctl image copy --platform {platform} {source} {address}/{reference}"
-            ),
-        ])
-        .map(drop)
+        copy_in(&self.address(), source, reference)
     }
+}
+
+/// [`Registry::copy_in`], into the plain-HTTP registry at `address`.
+pub(crate) fn copy_in(address: &str, source: &str, reference: &str) -> Result<(), Failure> {
+    regctl(
+        address,
+        &format!("regctl image copy --platform {PLATFORM} {source} {address}/{reference}"),
+    )
+    .map(drop)
+}
+
+/// The host's platform, which is the nodes'.
+pub(crate) const PLATFORM: &str = if cfg!(target_arch = "aarch64") {
+    "linux/arm64"
+} else {
+    "linux/amd64"
+};
+
+/// Runs `script` in a [`COPY_IMAGE`] container on kind's network, with `regctl` set to reach `address` over plain HTTP,
+/// and returns its stdout. A container does it: the Docker daemon cannot always reach a port it published.
+pub(crate) fn regctl(address: &str, script: &str) -> Result<String, Failure> {
+    docker(&[
+        "run",
+        "--rm",
+        "--network",
+        NETWORK,
+        "--label",
+        LABEL,
+        "--entrypoint",
+        "sh",
+        COPY_IMAGE,
+        "-c",
+        &format!("regctl registry set --tls disabled {address} >/dev/null && {script}"),
+    ])
 }
 
 /// A line of an `htpasswd` file for [`USER`] with [`PASSWORD`], bcrypt-hashed.

@@ -227,6 +227,13 @@ jobs:
           VERSION: ${{ matrix.leg.version }}
           KUBERNETES: ${{ matrix.leg.kubernetes }}
         run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
+      # The same suites on a dual-stack cluster (D94).
+      - env:
+          RUNTIME: ${{ matrix.leg.runtime }}
+          VERSION: ${{ matrix.leg.version }}
+          KUBERNETES: ${{ matrix.leg.kubernetes }}
+          SPECULAIRE_E2E_IP_FAMILY: dual
+        run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
 
   # The Go test oracle (D29): built, vetted and tested in the pinned Go image, then the Rust differential tests that ask
   # it (D70) on the runner.

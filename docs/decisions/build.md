@@ -269,7 +269,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `e2e/` and `oracle/` stay at the top level.
 - **Because:** the user asked for libraries and binaries apart. A library holds code a fuzz target, a test or another binary can reuse; a binary-only crate cannot be linked by them.
 
-## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59)
+## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94)
 
 - **Decision:**
   - **Runtimes:** containerd and CRI-O. cri-dockerd has no NRI, so the gate cannot run there.
@@ -445,3 +445,25 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `workflow_dispatch` on `main` after the merge (run 43115119048): green in 2 min 7 s, the install 76 s, `check` 20 s, `opt` 1 s.
   - Install: building RAPx from source against a Z3 that Homebrew later upgraded left `cargo-rapx` unable to start (`Library not loaded: libz3.5.3.dylib`); `cargo install --force` with the recipe's variables repairs it.
 - **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
+
+
+## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63)
+
+- **Decision:**
+  - **Reflectors:** the agents of the control plane and of the first worker run `role = "reflector"` (D2 puts reflectors on control-plane nodes; kind's second control plane would add an etcd member and kind's own balancer for nothing the peer suites test). Both are in every agent's `reflector.members`, by node name and kind-network address, port 7483; the second worker is the client no reflector runs on.
+  - **Balancer:** `just e2e-up` starts `<cluster>-lb` on kind's network: Envoy at the release kind v0.33.0 runs in front of its API servers (`pkg/cluster/internal/loadbalancer/const.go:20`, a tag there, a digest in the justfile), with a static config that passes TCP through on 7483 to both reflectors' `reflector.listen`, round robin, with a TCP health check every second. Every agent's `reflector.url` is `https://<balancer address>:7483`. To stop a backend, `e2e::balancer::Balancer::stop` rejects the balancer's connections to port 7483 on that node with a TCP reset, until its guard drops; the health check fails and the balancer moves on. The agent stays up, so the same helper serves "a reflector is gone for discovery" and an outage of the agent itself (`Cluster::stop_agent`) stays a separate case.
+  - **Upstream:** `just e2e-up` starts `<cluster>-upstream.e2e.test`, D88's registry image on port 80, and points every node's runtime at it over plain HTTP before `speculaire configure`. `e2e::upstream::Upstream::push` creates an image of one random layer, so no node holds its blobs; `requests` parses the access log into (method, path, status), and `blob_gets` counts the `GET`s of each blob of an image.
+  - **Node helpers** (`e2e::node`): stop, start, kill and reset (empty journal, restart) an agent; a `tc netem` qdisc on the node's `eth0` until its guard drops; corrupt the file a node serves a blob from (containerd's content store, the agent's blob cache on CRI-O); read a node's metrics.
+  - **Dual stack:** `SPECULAIRE_E2E_IP_FAMILY=dual` makes `just e2e-up` write `networking.ipFamily: dual` and name the cluster `<cluster>-dual`; the balancer, `reflector.url` and `reflector.members` then use IPv6 addresses. The Kubernetes argument stays last, and the variable selects the family for `e2e-test` and `e2e-down` too.
+  - **Legs:** each of the 14 legs runs the suites twice, IPv4 then dual stack, netem included. `e2e-down` with arguments removes only its cluster's containers, by the label `speculaire-e2e.cluster=<cluster>`.
+- **Because:**
+  - Step 00 of M3 asks for a cluster where peers are testable: nodes that pull from each other, two reflectors behind an L4 balancer as D2 deploys them, and an upstream whose access log tells which blobs did not come from a peer.
+  - Rejecting at the node rather than rewriting Envoy's endpoints keeps one generator of Envoy's config, the recipe.
+  - A fresh random image is the only one no node can hold: containerd shares content by digest across images, and CRI-O reuses layers.
+  - **Measured:** on Docker Desktop arm64, `just e2e-up` brings up both runtimes in both families, and the suites pass on containerd 2.4 (IPv4 and dual) and CRI-O 1.36 (IPv4) and 1.37 (dual); a pull of a new image through the mirror `GET`s each of its blobs once from the upstream; a 300 ms netem delay raises the TCP connect time from a node to the kubelet of another to 0.3 s. In CI (run 43424016737), the 14 legs passed both passes, netem included on `ubuntu-26.04` and `ubuntu-26.04-arm`; containerd legs took 2.8 to 3.2 minutes and CRI-O legs 5.5 to 6.3, against 1.5 to 2.1 and 3.3 to 3.5 before (run 43408250321).
+  - On the runners, `systemd-socket-activate --inetd` closed its connections before the child's output arrived, so the stand-in listener is a Perl one-liner.
+- **Cost:**
+  - Every leg runs the suites twice: containerd legs take about 1.5 times as long and CRI-O legs 1.8 times, still under a quarter of D63's 30-minute timeout.
+  - `tc netem` needs `sch_netem` in the host's kernel: Docker Desktop's and the runners' have it.
+  - Until step 02 of M3 the reflectors listen on nothing, so `tests/harness.rs` puts a stand-in listener on port 7483 to check the balancer.
+- **Revisit when:** a leg passes 20 minutes (then the dual-stack pass and the slowest peer suites move to a nightly workflow), or kind's balancer image changes.

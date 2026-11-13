@@ -3,11 +3,17 @@
 //! Suites live in `tests/`, each test `#[ignore]`d so that `just check` builds them without a cluster;
 //! `just e2e-test` runs them with `--ignored`. They drive the cluster through `kubectl` and `docker exec`:
 //! kind names each node's container after the node.
+//!
+//! The peer harness (D94): `just e2e-up` also starts the cluster's [`upstream`] registry and its reflectors'
+//! [`balancer`]; [`node`] stops, slows and corrupts a node for the peer suites.
 
 use std::fmt;
 use std::process::Command;
 
+pub mod balancer;
+pub mod node;
 pub mod registry;
+pub mod upstream;
 
 /// The image of the suites' plain pods, pinned by digest; Renovate moves it (renovate.json5, which skips `tests/`).
 pub const TEST_IMAGE: &str = "docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec";
@@ -32,9 +38,20 @@ impl Runtime {
     }
 }
 
+/// The addresses of the cluster's nodes, which `SPECULAIRE_E2E_IP_FAMILY` picks (D94).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpFamily {
+    /// IPv4 only.
+    Ipv4,
+    /// IPv4 and IPv6; the load balancer and `reflector.members` are on IPv6.
+    Dual,
+}
+
 /// The cluster named by `just e2e-test` in the `SPECULAIRE_E2E_*` variables.
 pub struct Cluster {
+    name: String,
     context: String,
+    family: IpFamily,
     runtime: Runtime,
     release: String,
     kubernetes: String,
@@ -62,8 +79,16 @@ impl Cluster {
             "crio" => Runtime::Crio,
             other => panic!("SPECULAIRE_E2E_RUNTIME is {other:?}, not containerd or crio"),
         };
+        let family = match var("SPECULAIRE_E2E_IP_FAMILY").as_str() {
+            "ipv4" => IpFamily::Ipv4,
+            "dual" => IpFamily::Dual,
+            other => panic!("SPECULAIRE_E2E_IP_FAMILY is {other:?}, not ipv4 or dual"),
+        };
+        let name = var("SPECULAIRE_E2E_CLUSTER");
         Self {
-            context: format!("kind-{}", var("SPECULAIRE_E2E_CLUSTER")),
+            context: format!("kind-{name}"),
+            name,
+            family,
             runtime,
             release: var("SPECULAIRE_E2E_RELEASE"),
             kubernetes: var("SPECULAIRE_E2E_KUBERNETES"),
@@ -74,6 +99,21 @@ impl Cluster {
     #[must_use]
     pub fn runtime(&self) -> Runtime {
         self.runtime
+    }
+
+    /// The addresses of its nodes.
+    #[must_use]
+    pub fn ip_family(&self) -> IpFamily {
+        self.family
+    }
+
+    /// The nodes whose agents are reflectors: the control plane and the first worker (D94).
+    #[must_use]
+    pub fn reflectors(&self) -> [String; 2] {
+        [
+            format!("{}-control-plane", self.name),
+            format!("{}-worker", self.name),
+        ]
     }
 
     /// The runtime release the node image runs, such as `2.4.2` or `1.37.2`.
@@ -155,6 +195,7 @@ impl Cluster {
                     runtime: fields.next()?.to_owned(),
                     kubelet: fields.next()?.to_owned(),
                     address: fields.next()?.to_owned(),
+                    ipv6: fields.next().map(str::to_owned),
                 })
             })
             .collect())
@@ -183,8 +224,10 @@ pub struct Node {
     pub runtime: String,
     /// Its `kubeletVersion`, such as `v1.37.0`.
     pub kubelet: String,
-    /// Its `InternalIP`, on kind's Docker network.
+    /// Its first `InternalIP`, on kind's Docker network: IPv4 on both families.
     pub address: String,
+    /// Its second `InternalIP`, IPv6, on a dual-stack cluster.
+    pub ipv6: Option<String>,
 }
 
 /// A command that could not start or exited non-zero.

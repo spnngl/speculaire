@@ -294,7 +294,14 @@ fn unconfigure_removes_only_its_own_and_pulls_still_work() {
         kept.contains("edited by the admin after configure") && !kept.contains("speculaire"),
         "{kept}"
     );
-    assert!(!left.contains("speculaire"), "unconfigure left {left}");
+    // The harness's entry for the upstream is named after the cluster, `speculaire-...` (D94).
+    let upstream = cluster.upstream();
+    assert!(
+        !left
+            .lines()
+            .any(|f| f.contains("speculaire") && !f.contains(upstream.address())),
+        "unconfigure left {left}"
+    );
     assert!(!mirror_dir.contains("ca.crt"), "{mirror_dir}");
     assert!(pull.success, "a pull failed after unconfigure: {pull:?}");
 

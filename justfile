@@ -37,6 +37,9 @@ kubernetes_newest := "1.37"
 kind_version := "0.33.0"
 # renovate: datasource=github-releases depName=kubernetes/kubernetes
 kubectl_version := "1.37.2"
+# The reflectors' load balancer of an e2e cluster (D94): the Envoy release kind v0.33.0 runs in front of its API servers.
+# renovate: datasource=docker depName=docker.io/envoyproxy/envoy
+envoy := "v1.36.2@sha256:4972515dd9a069b44beb43cebba7851596e72a8c61cd7a7c33d8f48efc5280ba"
 # The image that builds and runs the Go oracle (D29).
 # renovate: datasource=docker depName=docker.io/library/golang
 golang := "1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf"
@@ -353,22 +356,98 @@ e2e-up runtime version kubernetes="": e2e-tools
     image="localhost/speculaire-node:{{ runtime }}-$release-k$kubernetes"
     docker build --quiet --build-arg "NODE=docker.io/kindest/node:$node" --build-arg "RELEASE=$release" -t "$image" \
         -f 'e2e/node/{{ runtime }}/Containerfile' 'e2e/node/{{ runtime }}' >/dev/null
-    config=e2e/kind.yaml
-    if [[ '{{ runtime }}' == crio ]]; then
-        config='{{ e2e_dir }}/kind-crio.yaml'
-        cat e2e/kind.yaml e2e/node/crio/kind-patches.yaml >"$config"
-    fi
+    mkdir -p '{{ e2e_dir }}'
+    config="{{ e2e_dir }}/$cluster.yaml"
+    {
+        if [[ "$family" == dual ]]; then
+            printf 'networking:\n  ipFamily: dual\n'
+        fi
+        cat e2e/kind.yaml
+        if [[ '{{ runtime }}' == crio ]]; then
+            cat e2e/node/crio/kind-patches.yaml
+        fi
+    } >"$config"
     kind create cluster --name "$cluster" --image "$image" --config "$config" --wait 180s
-    # The reference config, at log.filter "info" so that a healthy start leaves entries in the journal.
-    agent_config='{{ e2e_dir }}/config.toml'
-    sed 's/^#filter = "warn"$/filter = "info"/' packaging/config.toml >"$agent_config"
+    # The peer harness (D94): an upstream registry, and a load balancer in front of the reflectors, the agents of the
+    # control plane and of the first worker. Every container of the cluster has its label, for `e2e-down`.
+    labels=(--network kind --label speculaire-e2e --label "speculaire-e2e.cluster=$cluster")
+    address() { # <container>: its address on kind's network, IPv6 on a dual-stack cluster
+        local field=IPAddress
+        [[ "$family" == dual ]] && field=GlobalIPv6Address
+        docker inspect -f "{{{{(index .NetworkSettings.Networks \"kind\").$field}}" "$1"
+    }
+    socket() { # <address> <port>
+        [[ "$1" == *:* ]] && echo "[$1]:$2" || echo "$1:$2"
+    }
+    upstream="$cluster-upstream.e2e.test"
+    registry_image="$(sed -n 's/^pub const REGISTRY_IMAGE: &str = "\(.*\)";$/\1/p' e2e/src/registry.rs)"
+    [[ -n "$registry_image" ]]
+    docker rm -f -v "$upstream" "$cluster-lb" >/dev/null 2>&1 || true
+    # On port 80: a name with a port is not mirrored on CRI-O (D88).
+    docker run -d --name "$upstream" "${labels[@]}" -e REGISTRY_HTTP_ADDR=:80 "$registry_image" >/dev/null
+    members=''
+    envoy_config="{{ e2e_dir }}/$cluster-envoy.yaml"
+    listen='address: 0.0.0.0'
+    [[ "$family" == dual ]] && listen='address: "::", ipv4_compat: true'
+    cat >"$envoy_config" <<EOF
+    static_resources:
+      listeners:
+        - name: reflectors
+          address:
+            socket_address: { $listen, port_value: 7483 }
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.tcp_proxy
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                    stat_prefix: reflectors
+                    cluster: reflectors
+      clusters:
+        - name: reflectors
+          connect_timeout: 1s
+          type: STATIC
+          lb_policy: ROUND_ROBIN
+          health_checks:
+            - { timeout: 1s, interval: 1s, no_traffic_interval: 1s, unhealthy_threshold: 1, healthy_threshold: 1, tcp_health_check: {} }
+          load_assignment:
+            cluster_name: reflectors
+            endpoints:
+              - lb_endpoints:
+    EOF
+    for node in "$cluster-control-plane" "$cluster-worker"; do
+        a="$(address "$node")"
+        members+="${members:+, }{ node = \"$node\", address = \"$(socket "$a" 7483)\" }"
+        echo "              - endpoint: { address: { socket_address: { address: \"$a\", port_value: 7483 } } }" >>"$envoy_config"
+    done
+    docker create --name "$cluster-lb" "${labels[@]}" "docker.io/envoyproxy/envoy:{{ envoy }}" >/dev/null
+    docker cp "$envoy_config" "$cluster-lb:/etc/envoy/envoy.yaml"
+    docker start "$cluster-lb" >/dev/null
+    url="https://$(socket "$(address "$cluster-lb")" 7483)"
+    # The reference config, at log.filter "info" so that a healthy start leaves entries in the journal, with peers on.
+    agent_config="{{ e2e_dir }}/$cluster.toml"
+    sed -e 's/^#filter = "warn"$/filter = "info"/' -e "s|^#url = \"\"$|url = \"$url\"|" \
+        -e "s|^#members = \[\]$|members = [$members]|" packaging/config.toml >"$agent_config"
     grep -q '^filter = "info"$' "$agent_config"
+    grep -q '^url = ' "$agent_config"
+    grep -q '^members = ' "$agent_config"
     # The packages' paths: the binary, the unit and the config (D69).
     for node in $(kind get nodes --name "$cluster"); do
         docker cp "$bin" "$node:/usr/bin/speculaire"
         docker cp packaging/speculaire.service "$node:/usr/lib/systemd/system/speculaire.service"
         docker exec "$node" mkdir -p /etc/speculaire
         docker cp "$agent_config" "$node:/etc/speculaire/config.toml"
+        if [[ "$node" == "$cluster-control-plane" || "$node" == "$cluster-worker" ]]; then
+            docker exec "$node" sed -i 's/^#role = "agent"$/role = "reflector"/' /etc/speculaire/config.toml
+            docker exec "$node" grep -q '^role = "reflector"$' /etc/speculaire/config.toml
+        fi
+        # The upstream, over plain HTTP.
+        if [[ '{{ runtime }}' == crio ]]; then
+            printf '[[registry]]\nprefix = "%s"\nlocation = "%s"\ninsecure = true\n' "$upstream" "$upstream" |
+                docker exec -i "$node" sh -c 'mkdir -p /etc/containers/registries.conf.d && cat >/etc/containers/registries.conf.d/50-e2e-upstream.conf'
+        else
+            printf 'server = "http://%s"\n\n[host."http://%s"]\n  capabilities = ["pull", "resolve"]\n' "$upstream" \
+                "$upstream" | docker exec -i "$node" sh -c "mkdir -p /etc/containerd/certs.d/$upstream && cat >/etc/containerd/certs.d/$upstream/hosts.toml"
+        fi
         # The admin's step of docs/operations.md § Install (D55): the mirror's certificates and the runtime's entries
         # come before the agent, whose preflight looks for them.
         docker exec "$node" speculaire configure
@@ -383,34 +462,44 @@ e2e-test runtime version kubernetes="" *args:
     set -euo pipefail
     eval "$({{ just_executable() }} e2e-cluster {{ runtime }} {{ version }} {{ quote(kubernetes) }})"
     PATH="{{ e2e_path }}:$PATH" SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' \
-        SPECULAIRE_E2E_RELEASE="$release" SPECULAIRE_E2E_KUBERNETES="$kubernetes" \
+        SPECULAIRE_E2E_RELEASE="$release" SPECULAIRE_E2E_KUBERNETES="$kubernetes" SPECULAIRE_E2E_IP_FAMILY="$family" \
         cargo test -p e2e --locked -- --ignored {{ args }}
 
-# The containers a killed suite left go too.
-# Delete the e2e cluster `just e2e-up` made with the same arguments, or every e2e cluster: just e2e-down
+# The cluster's upstream and load balancer go too; without arguments, so do the containers a killed suite left.
+# Delete the e2e cluster `just e2e-up` made with the same arguments and SPECULAIRE_E2E_IP_FAMILY, or every e2e
+# cluster: just e2e-down
 e2e-down runtime="" version="" kubernetes="":
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{ e2e_path }}:$PATH"
-    prefix=speculaire-
+    pattern='speculaire-*'
+    label=speculaire-e2e
     if [[ -n '{{ runtime }}' ]]; then
         eval "$({{ just_executable() }} e2e-cluster {{ runtime }} {{ version }} {{ quote(kubernetes) }})"
-        prefix="$cluster"
+        pattern="$cluster"
+        label="speculaire-e2e.cluster=$cluster"
     fi
     for c in $(kind get clusters 2>/dev/null); do
-        if [[ "$c" == "$prefix"* ]]; then
+        # Unquoted: a glob.
+        if [[ "$c" == $pattern ]]; then
             kind delete cluster --name "$c"
         fi
     done
-    # The registries and proxies of a killed run (e2e/src/registry.rs).
-    docker ps -aq --filter label=speculaire-e2e | xargs -r docker rm -f -v >/dev/null
+    docker ps -aq --filter "label=$label" | xargs -r docker rm -f -v >/dev/null
 
-# Print the shell variables of an e2e cluster: `release`, `kubernetes`, `node` (the kindest/node tag and digest) and
-# `cluster`. CRI-O runs on its own Kubernetes minor; containerd on the one named, by default the newest (D63).
+# Print the shell variables of an e2e cluster: `release`, `kubernetes`, `node` (the kindest/node tag and digest),
+# `family` and `cluster`. CRI-O runs on its own Kubernetes minor; containerd on the one named, by default the newest
+# (D63). SPECULAIRE_E2E_IP_FAMILY=dual makes a dual-stack cluster, whose name ends in `-dual` (D94).
 [private]
 e2e-cluster runtime version kubernetes="":
     #!/usr/bin/env bash
     set -euo pipefail
+    family="${SPECULAIRE_E2E_IP_FAMILY:-ipv4}"
+    case "$family" in
+        ipv4) suffix='' ;;
+        dual) suffix=-dual ;;
+        *) echo "e2e: SPECULAIRE_E2E_IP_FAMILY is $family: ipv4 or dual" >&2; exit 1 ;;
+    esac
     case '{{ runtime }} {{ version }}' in
         'containerd 2.3') release='{{ containerd_2_3 }}' ;;
         'containerd 2.4') release='{{ containerd_2_4 }}' ;;
@@ -434,8 +523,8 @@ e2e-cluster runtime version kubernetes="":
         1.37) node='{{ node_1_37 }}' ;;
         *) echo "e2e: no Kubernetes $kubernetes: 1.35, 1.36 or 1.37" >&2; exit 1 ;;
     esac
-    printf 'release=%s\nkubernetes=%s\nnode=%s\ncluster=%s\n' "$release" "$kubernetes" "$node" \
-        "speculaire-{{ runtime }}{{ replace(version, ".", "") }}-k${kubernetes//./}"
+    printf 'release=%s\nkubernetes=%s\nnode=%s\nfamily=%s\ncluster=%s\n' "$release" "$kubernetes" "$node" "$family" \
+        "speculaire-{{ runtime }}{{ replace(version, ".", "") }}-k${kubernetes//./}$suffix"
 
 # Download the pinned kind and kubectl into target/e2e, checking their published SHA-256.
 e2e-tools:

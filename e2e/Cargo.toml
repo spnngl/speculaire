@@ -11,8 +11,7 @@ publish.workspace = true
 [dependencies]
 # The certificates of the Bearer registry that the relay suite pulls from.
 rcgen.workspace = true
-
-[dev-dependencies]
+# The manifests the peer harness pushes to its upstream.
 serde_json.workspace = true
 
 [lints]
