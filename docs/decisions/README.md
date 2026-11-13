@@ -9,7 +9,7 @@ Each decision has three parts: the choice (**Decision**), its reasons (**Because
 Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 
 - D1 [reflector](reflector.md): reflectors replace the DHT; no libp2p
-- D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51, D97)
+- D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51, D97, D98)
 - D3 [distribution](distribution.md): every agent announces its own peer address and port (amended by D36)
 - D4 [build](build.md): no io_uring in v1, and the unit denies its syscalls
 - D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85)
@@ -40,7 +40,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
-- D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2)
+- D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98)
 - D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61)
 - D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower
 - D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56)
@@ -97,7 +97,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D87 [agent](agent.md): `runtime.containerd_socket`, `runtime.containerd_config` and `runtime.crio_socket` are restart keys that every command reads, and the agent's tests run against a fake containerd; no switch skips preflight (amends D60)
 - D88 [distribution](distribution.md): the upstream client is our own on hyper, with Bearer tokens kept per host and scope; the CRI-O relay serves what its served manifests point to and keeps it in the blob cache (amends D17, D53, D67, D83)
 - D89 [distribution](distribution.md): a `Registries` trait gives the client its sources from either runtime's registry config; CRI-O's auth file is the one its own config names, read from `crio.sock` (amends D17, D80; amended by D91, D92)
-- D90 [agent](agent.md): all runtime-specific code sits in `speculaire-runtime` behind four traits (`Wiring`, `Settings`, `Registries`, `Content`) that a `Node` hands out; only the relay-or-per-blob `Fallback` is visible to the agent (amends D64, D84, D86)
+- D90 [agent](agent.md): all runtime-specific code sits in `speculaire-runtime` behind four traits (`Wiring`, `Settings`, `Registries`, `Content`) that a `Node` hands out; only the relay-or-per-blob `Fallback` is visible to the agent (amends D64, D84, D86; amended by D99)
 - D91 [agent](agent.md): the registry config is parsed into a snapshot that a reload swaps (SIGHUP, or a poll that finds a watched file changed); a bad file keeps the previous one and is logged once and counted; `blob_cache.max_size` is live (amends D47, D89; amended by D92, D93)
 - D92 [agent](agent.md): a credential, certificate or key file that cannot be used leaves its hosts anonymous or without it, logged and counted once per reload, and the rest of the snapshot is built; certificate files are read at reload, never per request (amends D89, D91; amended by D93)
 - D93 [agent](agent.md): a poll reads a file again when its `stat` (modification time, length, device, inode) differs from the one taken before the previous read, or it appeared or went (amends D30, D91, D92; amended by D96)
@@ -105,5 +105,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
 - D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76)
+- D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33)
+- D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90)
 
-Next free number: D98.
+Next free number: D100.

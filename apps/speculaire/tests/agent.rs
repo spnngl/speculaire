@@ -1041,3 +1041,54 @@ fn p2p_waits_for_the_kubelet_certificate_and_a_bad_one_is_one_error_naming_it() 
         "{lines:#?}"
     );
 }
+
+#[test]
+fn an_agent_announces_what_containerd_holds_to_the_reflectors_of_its_url() {
+    let files = tempfile::tempdir().unwrap();
+    let cluster = Cluster::new("kubernetes");
+    let certificate = files.path().join("kubelet-client-current.pem");
+    let ca = files.path().join("ca.crt");
+    put(&ca, cluster.ca());
+    put(&certificate, &cluster.kubelet("cp-1"));
+    let mut answers = Answers::containerd("v2.4.2");
+    answers.content = vec![
+        format!("sha256:{}", "a".repeat(64)),
+        format!("sha256:{}", "b".repeat(64)),
+    ];
+    // The agent is the only reflector, and announces to itself.
+    let listen = free_port();
+    let mut agent = Agent::spawn_on(
+        Node::new(answers, None),
+        free_port(),
+        scratch_file(),
+        &format!(
+            "role = \"reflector\"\n[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[reflector]\nurl = \"https://127.0.0.1:{listen}\"\nmembers = [{{ node = \"cp-1\", address = \"127.0.0.1:{listen}\" }}]\nlisten = \"127.0.0.1:{listen}\"\n[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n",
+            certificate.display(),
+            ca.display()
+        ),
+        &[],
+    );
+    agent.line(&["mirror open"]);
+    wait_until(|| {
+        metric(&agent, "speculaire_reflector_digests").as_deref()
+            == Some("speculaire_reflector_digests 2")
+    });
+    let text = agent.get("/metrics", "").text();
+    assert!(
+        text.contains("speculaire_reflector_connected{member=\"cp-1\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("# HELP speculaire_reflector_connected "),
+        "{text}"
+    );
+    // Polls find the client running and leave it be.
+    std::thread::sleep(Duration::from_millis(2500));
+    let (status, lines) = agent.stop();
+    assert!(status.success(), "{status}: {lines:#?}");
+    let up = lines
+        .iter()
+        .filter(|l| l.contains("reflector stream up"))
+        .count();
+    assert_eq!(up, 1, "{lines:#?}");
+}

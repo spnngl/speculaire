@@ -44,6 +44,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("platform", platform),
     ("node_subject", node_subject),
     ("reflect", reflect),
+    ("containerd_event", containerd_event),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -412,18 +413,22 @@ pub fn node_subject(data: &[u8]) {
     }
 }
 
-/// Every message the reflector reads from an agent: `Announce`'s, `Lookup`'s and `Members`' (D2, D97).
+/// Every message of the reflector API: those the reflector reads from an agent, `Announce`'s, `Lookup`'s and
+/// `Members`', and the answers the agent reads (D2, D97, D98).
 ///
 /// Decoding and parsing never panic. An announcement that parses encodes back to protobuf that parses to it again,
-/// and a digest a lookup names prints as the text it parsed from.
+/// a digest a lookup names prints as the text it parsed from, and every member or peer an answer keeps has a node.
 ///
 /// # Panics
 ///
 /// When decoding or parsing panics, or what parses does not survive the round trip.
 pub fn reflect(data: &[u8]) {
     use prost::Message as _;
+    use speculaire_reflect::client::{members, peers};
     use speculaire_reflect::message::{Announcement, digest};
-    use speculaire_reflect::proto::{AgentMessage, LookupRequest, MembersRequest};
+    use speculaire_reflect::proto::{
+        AgentMessage, LookupRequest, LookupResponse, MembersRequest, MembersResponse,
+    };
     if let Ok(message) = AgentMessage::decode(data)
         && let Ok(announcement) = Announcement::try_from(message)
     {
@@ -436,4 +441,37 @@ pub fn reflect(data: &[u8]) {
         assert_eq!(parsed.to_string(), request.digest);
     }
     drop(MembersRequest::decode(data));
+    if let Ok(response) = MembersResponse::decode(data) {
+        assert!(
+            members(response)
+                .iter()
+                .all(|member| !member.node.is_empty())
+        );
+    }
+    if let Ok(response) = LookupResponse::decode(data) {
+        assert!(peers(response).iter().all(|peer| !peer.node.is_empty()));
+    }
+}
+
+/// An event of containerd's `Subscribe`, as the inventory reads it (D99).
+///
+/// Decoding never panics, and an event is a change only for content of `k8s.io` created or deleted.
+///
+/// # Panics
+///
+/// When decoding panics, or another event is a change.
+pub fn containerd_event(data: &[u8]) {
+    use containerd_client::types::Envelope;
+    use prost::Message as _;
+    use speculaire_runtime::containerd::inventory::change;
+    if let Ok(envelope) = Envelope::decode(data)
+        && change(&envelope).is_some()
+    {
+        assert_eq!(envelope.namespace, "k8s.io");
+        assert!(
+            ["/content/create", "/content/delete"].contains(&envelope.topic.as_str()),
+            "{}",
+            envelope.topic
+        );
+    }
 }

@@ -34,6 +34,7 @@ tonic-prost-build.workspace = true
 metrics-exporter-prometheus.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 # D97: the index's lock in the tests of `just shuttle`.
 [target.'cfg(shuttle)'.dev-dependencies]

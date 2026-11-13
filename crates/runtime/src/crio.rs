@@ -7,16 +7,21 @@ pub mod dropin;
 mod settings;
 mod wiring;
 
+use std::collections::HashSet;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use serde::Deserialize;
 pub use settings::MINIMUM;
 use speculaire_registry_config::crio::Context;
+use tokio::sync::mpsc;
 
 use crate::content::{Blob, Content};
+use crate::inventory::{Inventory, Update};
 use crate::paths::Paths;
 
 /// A node that runs CRI-O: the files it reads, its socket and `systemctl` (D90).
@@ -75,6 +80,18 @@ impl Content for CriO {
         _digest: &speculaire_oci::reference::Digest,
     ) -> impl Future<Output = Result<Option<Blob>, crate::content::Error>> + Send {
         std::future::ready(Ok(None))
+    }
+}
+
+/// CRI-O keeps no blob a peer can read: under [`Fallback::Relay`](crate::Fallback::Relay) the blob cache is what the
+/// node serves, and it follows itself (D67).
+impl Inventory for CriO {
+    fn follow(self: Arc<Self>, updates: mpsc::Sender<Update>) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            if updates.send(Update::Listing(HashSet::new())).await.is_ok() {
+                updates.closed().await;
+            }
+        })
     }
 }
 

@@ -220,7 +220,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Reading the same keys everywhere keeps `check-config` honest: it checks the node the agent would run on.
 - **Revisit when:** a second thing needs a directory, such as the blob cache (D67) or the verdict cache (D31).
 
-## D90: A `Node` hands out four traits, and everything that differs between containerd and CRI-O sits behind them (amends D64, D84, D86)
+## D90: A `Node` hands out four traits, and everything that differs between containerd and CRI-O sits behind them (amends D64, D84, D86; amended by D99)
 
 - **Decision:**
   - **Traits** (`speculaire-runtime`): `Wiring` (`configure`, `unconfigure`, `check`: containerd's `hosts.toml` files; CRI-O's drop-in, `certs.d` and `systemctl reload crio`), `Settings` (`required_plugins`, which `unconfigure` reads (D84), and `preflight` (D86)), `Registries` (the sources of an image name, D89) and `Content` (a blob by digest). `Containerd` and `CriO` implement them and hold their socket and paths. `detect` still returns the `Runtime` enum; a `Node` is built from it once at startup, or by a command after `--runtime`, and hands out each trait. Nothing outside `speculaire-runtime` and the parsing of `--runtime` matches on `Runtime`.
@@ -302,3 +302,17 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Two writes within one tick of the coarse clock still look the same, since the change time comes from that clock (D93).
 - **Measured (arm64, local runs):** `speculaire-runtime`'s test of a write in place of the same length with the old modification time put back failed on the previous code, on macOS (APFS) and on Linux (`just dev`, kernel 7.0.14-linuxkit), and passes now; `cargo nextest run --stress-count 200` of it passed 200 of 200 on both.
 - **Revisit when:** a watched filesystem moves the change time without a change, so polls read for nothing.
+
+
+## D99: What a node serves to peers is a fifth trait, `Inventory` (amends D90)
+
+- **Decision:**
+  - **Trait:** `Inventory::follow` sends a listing, then each blob added or removed, until its receiver closes; a later listing replaces the earlier one. A `Node` hands it out, and the agent turns it into what it announces (D98). The M5 `Images` trait becomes the sixth.
+  - **containerd:** `List` of the content service, then `Subscribe` filtered to `/content/create` and `/content/delete` in the `k8s.io` namespace. The content is listed again every 60 s, and whenever the subscription ends or containerd comes back. Content of other namespaces is never announced.
+  - **CRI-O:** an empty listing: its blobs are the mirror's cache (D67). Where the node relays, the agent follows the blob cache instead, which announces each blob it keeps and each one it evicts or forgets.
+- **Because:**
+  - containerd's garbage collector deletes content without an event: `core/metadata/db.go:348-365` at v2.4.2 publishes only `/images/delete` and `/snapshot/remove`. The 60 s listing bounds how long a deleted blob stays announced; until then the node answers a peer's fetch of it with a 404, as for any blob it lacks.
+  - `Subscribe` sends nothing until the first event, so a subscription cannot be known to be live before a listing; listing on each new subscription closes the gap.
+  - kubelet pulls into `k8s.io`; content of other namespaces is not what pods use, and serving it would leak it to every node.
+  - Content events are per blob, so no image walk is needed, unlike Spegel's (`docs/research/spegel.md`).
+- **Revisit when:** containerd publishes deletions by its garbage collector, or the 60 s listing costs containerd measurably on a node with many blobs.

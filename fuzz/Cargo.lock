@@ -1699,6 +1699,7 @@ dependencies = [
 name = "speculaire-fuzz"
 version = "0.0.0"
 dependencies = [
+ "containerd-client",
  "libfuzzer-sys",
  "prost",
  "secrecy",

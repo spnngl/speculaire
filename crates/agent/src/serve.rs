@@ -9,7 +9,9 @@ use speculaire_mirror::Local;
 use speculaire_mirror::cache::Cache;
 use speculaire_mirror::relay::{CriImages, Relay};
 use speculaire_mirror::tls::Tls;
+use speculaire_reflect::client::{self, Client, Holdings};
 use speculaire_reflect::{Member, Reflector, Settings};
+use speculaire_runtime::inventory::{Change, Inventory, Update};
 use speculaire_runtime::registries::Registries;
 use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode};
@@ -17,7 +19,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
 
-use crate::config::{self, Config, Role};
+use crate::config::{self, Config, PeerAddress, Role};
 use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
@@ -112,6 +114,9 @@ async fn serve(
     status.mirror_listening();
     let mut reflector = None;
     open_reflector(&config, &identity, &mut reflector, &status).await;
+    let inventory = mirror.inventory(&node);
+    let mut announcer = None;
+    open_client(&config, &identity, &inventory, &mut announcer);
     systemd::watchdog();
     systemd::ready();
 
@@ -129,6 +134,7 @@ async fn serve(
                 reload_registries(&*registries);
                 identity.reload();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
+                open_client(&config, &identity, &inventory, &mut announcer);
             }
             _ = poll.tick() => {
                 if watch.changed() {
@@ -141,6 +147,7 @@ async fn serve(
                 }
                 identity.poll();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
+                open_client(&config, &identity, &inventory, &mut announcer);
             }
         }
         if config.config.poll_interval.get() != period {
@@ -149,11 +156,14 @@ async fn serve(
         }
     }
 
-    // D39, step 1, and a stopping reflector closes the streams of its agents. Steps 2 to 6 arrive with peers, the
-    // reflector client, cache and gate.
+    // D39, steps 1 and 3, and a stopping reflector closes the streams of its agents. Steps 2 and 4 to 6 arrive with
+    // peers, cache and gate.
     systemd::stopping();
     status.stop();
     info!("stopping");
+    if let Some(announcer) = announcer {
+        announcer.stop().await;
+    }
     if let Some(reflector) = reflector {
         reflector.stop().await;
     }
@@ -231,6 +241,14 @@ impl Mirror {
     fn apply(&self, config: &Config) {
         if let Some(relay) = &self.relay {
             relay.cache().set_max_size(config.blob_cache.max_size.get());
+        }
+    }
+
+    /// What the node serves to peers: the blob cache where the node relays (D67), else the runtime's content.
+    fn inventory(&self, node: &RuntimeNode) -> Arc<dyn Inventory> {
+        match &self.relay {
+            Some(relay) => Arc::<Cache>::clone(relay.cache()),
+            None => node.inventory(),
         }
     }
 
@@ -346,6 +364,61 @@ async fn open_reflector(
     }
 }
 
+/// Follows `inventory` into the holdings the agent announces (D99).
+fn follow(inventory: Arc<dyn Inventory>) -> Arc<Holdings> {
+    let holdings = Arc::new(Holdings::default());
+    let (updates, mut received) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(inventory.follow(updates));
+    tokio::spawn({
+        let holdings = Arc::clone(&holdings);
+        async move {
+            while let Some(update) = received.recv().await {
+                match update {
+                    Update::Listing(digests) => holdings.replace(digests),
+                    Update::Change(Change::Added(digest)) => holdings.add(digest),
+                    Update::Change(Change::Removed(digest)) => holdings.remove(&digest),
+                }
+            }
+        }
+    });
+    holdings
+}
+
+/// Starts following `inventory` and announcing it to the reflectors of `reflector.url`, when one is set, once the
+/// identity allows peer links (D2, D16, D99).
+fn open_client(
+    config: &Config,
+    identity: &Identity,
+    inventory: &Arc<dyn Inventory>,
+    announcer: &mut Option<Client>,
+) {
+    if announcer.is_some() || !identity.enabled(SystemTime::now()) {
+        return;
+    }
+    if let Some(settings) = client_config(config) {
+        *announcer = Some(Client::spawn(
+            settings,
+            Arc::clone(identity.credentials()),
+            follow(Arc::clone(inventory)),
+        ));
+    }
+}
+
+/// The client's settings: the host and port of `reflector.url`, and `peer.address` (D2, D56).
+fn client_config(config: &Config) -> Option<client::Config> {
+    let url = config.reflector.url.get().get()?;
+    // `ReflectorUrl` holds an `https://` URL with a host; an IPv6 host comes in brackets.
+    let host = url.host()?.trim_start_matches('[').trim_end_matches(']');
+    Some(client::Config {
+        host: host.to_owned(),
+        port: url.port_u16().unwrap_or(443),
+        peer: match config.peer.address.get() {
+            PeerAddress::Auto => None,
+            PeerAddress::Fixed(address) => Some(*address),
+        },
+    })
+}
+
 /// The config polls (D30): the first one period from now.
 fn polls(period: Duration) -> Interval {
     // `interval` caps a period past the clock's range, and `reset` moves its immediate first tick a period away.
@@ -368,6 +441,25 @@ mod tests {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             polls(config.config.poll_interval.get());
         });
+    }
+
+    #[test]
+    fn the_client_reads_the_host_and_port_of_the_url_and_the_peer_address() {
+        let client = |text: &str| client_config(&config::parse(text).unwrap());
+        assert!(client("").is_none());
+        let found = client("[reflector]\nurl = \"https://reflector.example\"\n").unwrap();
+        assert_eq!(
+            (found.host.as_str(), found.port, found.peer),
+            ("reflector.example", 443, None)
+        );
+        let found = client(
+            "[reflector]\nurl = \"https://[fd00::1]:7483\"\n[peer]\naddress = \"10.0.0.1:9000\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (found.host.as_str(), found.port, found.peer),
+            ("fd00::1", 7483, Some("10.0.0.1:9000".parse().unwrap()))
+        );
     }
 
     #[test]

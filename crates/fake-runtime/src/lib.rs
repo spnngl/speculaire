@@ -1,6 +1,6 @@
 //! A fake containerd or CRI-O, for tests that run where there is no runtime (the CI runner, macOS): it answers the CRI's
-//! `Version` and `ListImages`, containerd's introspection `Plugins` and CRI-O's `GET /config` on a Unix socket, which
-//! is all preflight and the registry config ask (D86).
+//! `Version` and `ListImages`, containerd's introspection `Plugins`, content `List` and events `Subscribe`, and CRI-O's
+//! `GET /config` on a Unix socket, which is all preflight, the registry config and the inventory ask (D86, D99).
 
 use std::convert::Infallible;
 use std::io;
@@ -11,10 +11,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
 use bytes::Bytes;
-use containerd_client::services::v1::{Plugin, PluginsRequest, PluginsResponse};
+use containerd_client::services::v1::{
+    Info, ListContentRequest, ListContentResponse, Plugin, PluginsRequest, PluginsResponse,
+    SubscribeRequest,
+};
 use containerd_client::tonic::codegen::http;
 use containerd_client::tonic::server::Grpc;
 use containerd_client::tonic::{Request, Response, Status};
+use containerd_client::types::Envelope;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
@@ -83,6 +87,8 @@ pub struct Answers {
     pub images: Vec<(String, Vec<String>, Vec<String>)>,
     /// The body of CRI-O's `GET /config`, its merged TOML; `None` answers 503.
     pub crio_config: Option<String>,
+    /// The digests of containerd's content `List`, whatever the namespace; `Subscribe` sends no event.
+    pub content: Vec<String>,
 }
 
 impl Answers {
@@ -95,6 +101,7 @@ impl Answers {
             image_exports: Some((false, "/etc/containerd/certs.d".to_owned())),
             plugins_unavailable: false,
             images: Vec::new(),
+            content: Vec::new(),
             crio_config: None,
         }
     }
@@ -108,6 +115,7 @@ impl Answers {
             image_exports: None,
             plugins_unavailable: false,
             images: Vec::new(),
+            content: Vec::new(),
             crio_config: Some(
                 "[crio.nri]\nenable_nri = true\nnri_disable_connections = false\n".to_owned(),
             ),
@@ -313,6 +321,47 @@ async fn route(
                 .unary(service, request)
                 .await
         }
+        "/containerd.services.content.v1.Content/List" => content(answers, request).await,
+        "/containerd.services.events.v1.Events/Subscribe" => events(request).await,
         other => Status::unimplemented(format!("the fake runtime has no {other}")).into_http(),
     }
+}
+
+/// containerd'"'"'s content `List`: every digest of `Answers::content`, in one message.
+async fn content(
+    answers: Arc<Answers>,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let service = tower::service_fn(move |_: Request<ListContentRequest>| {
+        let answers = Arc::clone(&answers);
+        async move {
+            let info = answers
+                .content
+                .iter()
+                .map(|digest| Info {
+                    digest: digest.clone(),
+                    ..Info::default()
+                })
+                .collect();
+            let messages = [Ok::<_, Status>(ListContentResponse { info })];
+            Ok::<_, Status>(Response::new(futures_util::stream::iter(messages)))
+        }
+    });
+    Grpc::new(ProstCodec::<ListContentResponse, ListContentRequest>::default())
+        .server_streaming(service, request)
+        .await
+}
+
+/// containerd'"'"'s events `Subscribe`: a stream that sends nothing.
+async fn events(
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let service = tower::service_fn(|_: Request<SubscribeRequest>| async {
+        Ok::<_, Status>(Response::new(futures_util::stream::pending::<
+            Result<Envelope, Status>,
+        >()))
+    });
+    Grpc::new(ProstCodec::<Envelope, SubscribeRequest>::default())
+        .server_streaming(service, request)
+        .await
 }

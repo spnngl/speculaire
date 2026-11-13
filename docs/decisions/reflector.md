@@ -10,7 +10,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - A reflector outage degrades to *fall through*, never to a failed pull.
 - **Revisit when:** we need clusters without a stable control plane, or multi-cluster sharing (`docs/proposals/federation.md`).
 
-## D2: Reflector topology and protocol (amended by D33, D51, D97)
+## D2: Reflector topology and protocol (amended by D33, D51, D97, D98)
 
 - **Decision:**
   - **Placement:** reflectors are the agents on the control-plane nodes, with `role = "reflector"`. Every agent knows one URL, `reflector.url`: a load balancer in front of the control-plane nodes. It must be L4 TCP passthrough, because mTLS ends at the reflector.
@@ -27,7 +27,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Reflector RSS exceeds 1 GiB.
   - Keeping `reflector.members` in sync by hand becomes painful. Then derive it from control-plane `Node` objects.
 
-## D33: Reconnects are jittered, and reflector scale is load-tested (amends D2)
+## D33: Reconnects are jittered, and reflector scale is load-tested (amends D2; amended by D98)
 
 - **Decision:**
   - After a stream drops, the agent waits a random delay between 0 and 5 s, then retries with exponential backoff and full jitter, from 1 s up to 60 s.
@@ -71,3 +71,21 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - An IP literal needs no DNS on the fetching side and cannot point at a name the node does not own.
   - Withdrawing on a stream's end is D2's liveness signal; taking over on a new stream lets a restarted agent replace its entry before the old connection's keepalive times out.
 - **Revisit when:** D33's load test misses a target, or a node legitimately holds more than 100k digests.
+
+
+## D98: The agent's reflector client (amends D2, D33)
+
+- **Decision:**
+  - **Members:** the agent dials `reflector.url` itself, accepting any node of the cluster (`Credentials::client_any`), and reads the node of the certificate that answered. A `Members` answer whose node is not in its own list is ignored, like a failed call: the agent keeps the last list and retries with D33's backoff. The channel is never dialled again behind the agent's back, so every answer comes from the checked connection.
+  - **Streams:** one per member, dialled at the member's address and expecting the member's node. Each stream starts with `Hello` and a whole `Snapshot`; so does the answer to a `Resync`, and so does a stream that fell more than 1024 changes behind. Changes made while no stream is up are dropped: the next stream's snapshot carries them. Deltas send removals before additions.
+  - **Peer address:** `peer.address`, else the local IP of the first stream that opens, on port 7481 (D36). It stays the same for the agent's life.
+  - **Reconnects:** a stream that ran 5 s or more and ended is a drop: the agent refreshes `Members` and waits D33's 0 to 5 s, and its backoff starts again. A stream that ended sooner, or never opened, is a failed attempt: D33's backoff, 1 s doubling to 60 s with full jitter. `speculaire_reflector_reconnects_total{member}` counts every retry. A failure logs at `info` until the member, or the load balancer, has failed for 60 s, then at `warn`.
+  - **Lookup:** to a random member whose stream is up, hedged to a second after 20 ms; the first answer wins, and a failed first call goes to the second at once. Each call gives up after 5 s. With no stream up, the lookup fails and the fetcher goes upstream.
+  - **Stop:** the agent closes every stream at shutdown, D39's step 3, so each reflector withdraws it at once.
+- **Because:**
+  - tonic hides the peer certificate and redials on its own; dialling the TCP and TLS by hand is the only way to know which reflector answered `Members` (D16).
+  - A snapshot replaces what the reflector held, so changes queued while disconnected would only be sent again.
+  - D33's 0 to 5 s delay is for a reflector restart; a reflector that refuses each stream at once would otherwise get a retry every 2.5 s from each agent.
+  - A rollout restarts every reflector, and an agent starts before its own: failures shorter than that are expected, and D37's default `warn` level is for what needs the operator.
+  - D33's target puts the server's lookup p99 at 500 µs; with a LAN round trip, 20 ms is far past the normal answer, so the hedge fires only for a slow or gone member.
+- **Revisit when:** D33's load test shows snapshots at reconnect dominate, or the agents' `speculaire_lookup_seconds` p99 exceeds 20 ms without a member down.

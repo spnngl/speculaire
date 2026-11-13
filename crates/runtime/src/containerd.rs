@@ -6,6 +6,7 @@
 
 pub mod content;
 pub mod hosts;
+pub mod inventory;
 mod settings;
 mod wiring;
 
@@ -74,6 +75,20 @@ impl Containerd {
         self.config
             .clone()
             .unwrap_or_else(|| self.paths.at(containerd_config::DEFAULT_PATH))
+    }
+
+    /// A channel to containerd, made once and kept; `None` while there is no containerd to connect to.
+    pub(crate) async fn channel(&self) -> Option<Channel> {
+        let mut held = self.channel.lock().await;
+        if held.is_none() {
+            *held = containerd_client::connect(&self.socket).await.ok();
+        }
+        held.clone()
+    }
+
+    /// Drops the channel: containerd went away or restarted, and the next call connects again.
+    pub(crate) async fn forget_channel(&self) {
+        *self.channel.lock().await = None;
     }
 }
 
