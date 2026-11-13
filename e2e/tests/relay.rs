@@ -170,10 +170,10 @@ impl Worker {
     }
 
     fn series(&self, name: &str) -> f64 {
-        let text = self.sh("curl -sf http://127.0.0.1:7482/metrics");
-        text.lines()
-            .find_map(|line| line.strip_prefix(name))
-            .and_then(|rest| rest.trim().parse().ok())
+        self.cluster
+            .metrics(&self.name)
+            .unwrap()
+            .get(name)
             .unwrap_or(0.0)
     }
 

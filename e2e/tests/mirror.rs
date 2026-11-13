@@ -38,11 +38,7 @@ fn workers(cluster: &Cluster) -> Vec<String> {
 
 /// The value of a series of the node's `/metrics`, 0 when it is not there.
 fn series(cluster: &Cluster, node: &str, name: &str) -> f64 {
-    let text = sh(cluster, node, "curl -sf http://127.0.0.1:7482/metrics");
-    text.lines()
-        .find_map(|line| line.strip_prefix(name))
-        .and_then(|rest| rest.trim().parse().ok())
-        .unwrap_or(0.0)
+    cluster.metrics(node).unwrap().get(name).unwrap_or(0.0)
 }
 
 #[test]
