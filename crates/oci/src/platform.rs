@@ -489,7 +489,13 @@ fn platform_vector(platform: &Plain) -> Vec<Plain> {
         os_version: platform.os_version.clone(),
         os_features: platform.os_features.clone(),
     };
-    let level = |variant: &str| variant.trim_start_matches('v').parse::<i64>().ok();
+    let level = |variant: &str| {
+        variant
+            .strip_prefix('v')
+            .unwrap_or(variant)
+            .parse::<i64>()
+            .ok()
+    };
     let mut vector = vec![platform.clone()];
     match platform.architecture.as_str() {
         "amd64" => {
@@ -775,6 +781,20 @@ mod tests {
         let unknown =
             Matcher::only(&platform("linux", "arm64", "v8.10"), &host()).expect("a matcher");
         assert!(!unknown.matches(&platform("linux", "arm64", "v8.10")));
+        // One `v` is a prefix, as `strings.TrimPrefix` removes it: `vv3` is no level, and runs nothing older.
+        for (arch, variant) in [("amd64", "vv3"), ("arm", "vv7")] {
+            let doubled =
+                Matcher::only(&platform("linux", arch, variant), &host()).expect("a matcher");
+            assert!(doubled.matches(&platform("linux", arch, variant)));
+            assert!(
+                !doubled.matches(&platform("linux", arch, "v2")),
+                "{arch}/{variant}"
+            );
+            assert!(
+                !doubled.matches(&platform("linux", arch, "v6")),
+                "{arch}/{variant}"
+            );
+        }
     }
 
     #[test]

@@ -218,12 +218,7 @@ pub fn platform(data: &[u8]) {
     };
     let normal = oci_platform::normalize(&parsed, &host);
     assert_eq!(oci_platform::normalize(&normal, &host), normal, "{text}");
-    // A variant that counts to a million makes `Only` list a million platforms, as it does in Go.
-    let huge = parsed
-        .variant()
-        .as_deref()
-        .is_some_and(|variant| variant.trim_start_matches('v').len() > 3);
-    if !huge && let Ok(strict) = Matcher::only_strict(&parsed, &host) {
+    if let Ok(strict) = Matcher::only_strict(&parsed, &host) {
         assert!(strict.matches(&parsed), "{text}");
     }
 }
