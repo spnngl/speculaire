@@ -298,9 +298,12 @@ func authCase(line []byte) (any, error) {
 	}
 	defer restore()
 	// An auth file with two entries for one registry is searched in map order, and a small map starts
-	// at a random one of eight slots: ask again and again, and say so when the answers differ.
+	// at a random one of eight slots (go1.26.1 src/internal/runtime/maps/table.go:694,826): ask again and again,
+	// and say so when the answers differ. Each entry comes first with a chance of at least 1/8, so 64 tries
+	// miss the other answer once in 5000 cases ((7/8)^64), which a run of 800 cases hit; 512 tries miss it
+	// once in 10^29.
 	var first []byte
-	for range 64 {
+	for range 512 {
 		answer := []AuthResult{}
 		for _, key := range c.Keys {
 			result := AuthResult{Key: key}
