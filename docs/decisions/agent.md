@@ -274,19 +274,31 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Measured (M2 step 08, arm64, Docker, local runs):** `just e2e crio 1.37` and `just e2e containerd 2.4` pass (relay suite 11 of 11 on containerd 2.4), the request path no longer reads a certificate file. Unit tests in `speculaire-runtime` and the agent's own test with a fake containerd, `poll_interval = "1s"`: a `configs.'quay.io'.auth` of `***` gave one error naming quay.io, `speculaire_config_reload_failures_total 1`, `/readyz` 200 and no second error over three more polls.
 - **Revisit when:** a bad routing file should degrade too, or a node has client certificates for more than the first pair of a host.
 
-## D93: A poll compares each watched path's `stat` with the one taken before the previous read (amends D30, D91, D92)
+## D93: A poll compares each watched path's `stat` with the one taken before the previous read (amends D30, D91, D92; amended by D96)
 
 - **Decision:**
-  - **Stamp:** for each watched path, `stat` through symlinks gives its modification time, length, device and inode; a directory has its own and one for each entry down to four levels below (D91); a path that cannot be looked at has none. `speculaire_runtime::watch::Watch` holds them, for the agent's config and the registry config alike.
+  - **Stamp:** for each watched path, `stat` through symlinks gives its modification time, change time (D96), length, device and inode; a directory has its own and one for each entry down to four levels below (D91); a path that cannot be looked at has none. `speculaire_runtime::watch::Watch` holds them, for the agent's config and the registry config alike.
   - **Taken before each read:** at startup, on SIGHUP and before a poll's read. A poll reads again when a stamp differs, or a path appeared or went; SIGHUP reads unconditionally (D30). A write during a read differs from the stamp taken before it, so the next poll reads again. A registry config read that names a path without a stamp, as the first read names all of them, is read again once it has one.
   - **A read that fails** keeps the stamps taken before it, and the registry config watches the paths it reached with those of the snapshot held: the same bad file is no change and is reported once, a fix to either is one (D91, D92).
 - **Because:**
   - Linux dates a write with its coarse clock (`ktime_get_coarse_real_ts64`), which can be behind the agent's `SystemTime::now()`: D30's `mtime >= last_check` missed a write made just after a poll began, and the agent's tests needed a sleep for it (#90). A stamp compared with a stamp has no clock to race.
   - Length and inode see a file replaced with its modification time kept (`cp -p`, `rsync -t`, a rename over it), which D30 left to SIGHUP.
 - **Cost:**
-  - A write in place that keeps the length and the modification time, as two writes within one clock tick or `touch -r` can, is read at the next change or on SIGHUP.
+  - A write in place that keeps the length and the modification time changes the change time (D96), which catches `touch -r` and a time restored after writing. Two writes within one tick of the coarse clock still look the same, as both times come from it: the second is read at the next change or on SIGHUP.
   - The registry config is read twice at startup, and whenever a read names a new path.
   - A poll holds a stamp per path below each root, where D91 kept the newest time; a node with very many `hosts.toml` files pays it in memory.
   - The mirror's own certificate files are still compared by modification time (D85's reload, `crates/mirror/src/tls.rs`).
 - **Measured (arm64, local runs):** both agent tests that write a file after a read, with the file's modification time set back to before the write as a coarse clock dates it, failed on the previous code (timeout after 10 s) and pass now, without a sleep. Linux, `just dev`: `cargo nextest run --stress-count 200` of those two tests passed 200 of 200.
 - **Revisit when:** a filesystem keeps length, inode and modification time across edits the agent must see, or the mirror's certificates join this watch.
+
+## D96: A stamp also holds the change time (amends D93)
+
+- **Decision:** each D93 stamp also holds the path's change time with its nanoseconds (`std::os::unix::fs::MetadataExt::ctime`, `ctime_nsec`). `speculaire_runtime::watch` is the one stamp, so the agent's config, the registry config and the node identity (D95) all get it.
+- **Because:**
+  - The kernel sets a file's change time on every write and metadata change, and no syscall sets it back: a write in place that keeps the length and restores the modification time (`touch -r`, a tool that restores the time after writing) is a change, which D93 left to the next change or SIGHUP.
+  - The user chose the default of the question.
+- **Cost:**
+  - A `chmod` or `chown` is a change too: it triggers a read that changes nothing.
+  - Two writes within one tick of the coarse clock still look the same, since the change time comes from that clock (D93).
+- **Measured (arm64, local runs):** `speculaire-runtime`'s test of a write in place of the same length with the old modification time put back failed on the previous code, on macOS (APFS) and on Linux (`just dev`, kernel 7.0.14-linuxkit), and passes now; `cargo nextest run --stress-count 200` of it passed 200 of 200 on both.
+- **Revisit when:** a watched filesystem moves the change time without a change, so polls read for nothing.
