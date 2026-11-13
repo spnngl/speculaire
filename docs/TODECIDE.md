@@ -2,6 +2,12 @@
 
 Open questions, each with a proposed default. Once a question is answered, record the answer as a decision (`docs/decisions/README.md`) and delete the question.
 
+## Before M3
+
+- **How does the catalog test treat metrics not built yet?** D34 says the test fails when a metric is listed in `docs/metrics.md` but never emitted. About 24 listed metrics belong to later milestones (peers, gate, verification), so the tests check one direction only: `apps/speculaire/tests/agent.rs:492` and `e2e/tests/unit.rs:152` fail on an exported metric missing from the catalog, and nothing fails on a listed metric that is never registered. [Each catalog row of a metric not built yet names its milestone (`M3`, …) in a `Planned` column. Both tests check both directions for the other rows, and the milestone that builds a metric removes its mark. Amends D34.]
+- **Does the mirror reload its certificates by `stat` fingerprint?** D85 checks only the three files' modification times, so a certificate written within one kernel tick of the previous check, or replaced with its time kept (`cp -p`), is not taken up until the next change or a restart: the flaw D93 fixed for the config poll. [The mirror compares the files' D93 fingerprints (`crates/runtime/src/watch.rs`), at most once a second as now. Amends D85.]
+- **What does a negative `dial_timeout` in a containerd `hosts.toml` mean?** Go's `time.ParseDuration` accepts `"-1s"` (containerd v2.3.7 `core/remotes/docker/config/hosts.go:539-545`), and `net.Dialer` then sets a deadline in the past (`net/dial.go:252` at go1.26.1), so every dial to that host fails at once and containerd tries the next host. `crates/registry-config/src/go.rs:381` refuses it, which rejects the whole file and keeps the previous registry config. [Read a negative `dial_timeout` as a host that cannot be dialled: the relay skips it, as containerd does. Amends D78.]
+
 ## Before M5
 
 - **Do identity regexes match the whole string?** D8 makes regex identity matching ours, and no decision says whether a policy's `subjectRegExp` and `issuerRegExp` must cover the whole SAN and issuer. Rust's `Regex::is_match`, like Go's `MatchString` in policy-controller and cosign, matches a substring, so `https://github.com/myorg/` also matches `https://github.com/myorg-evil/`. [Each regex is compiled as `^(?:…)$`, so it matches the whole string. A policy ported from policy-controller can only become stricter, and `docs/operations.md` says so. Amends D11.]
