@@ -21,7 +21,8 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 | `speculaire_peer_uploads_total` | counter | `result` = `served`\|`busy` | Requests served to other agents; `busy` answered `503` (D24) |
 | `speculaire_peer_uploads_in_flight` | gauge | — | Uploads now in progress |
 | `speculaire_peer_upload_bytes_total` | counter | — | Bytes served to other agents |
-| `speculaire_p2p_enabled` | gauge | — | 1 once the kubelet certificate exists, 0 before (D16) |
+| `speculaire_p2p_enabled` | gauge | — | 1 while the kubelet certificate and the cluster CA are loaded and the certificate has not expired, 0 otherwise (D16, D95) |
+| `speculaire_identity_expiry_timestamp_seconds` | gauge | — | When the kubelet certificate in use expires, as a Unix time; absent until one is loaded (D95) |
 
 ## Reflector client (every agent)
 
@@ -67,6 +68,6 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `speculaire_build_info` | gauge | `version`, `runtime` = `containerd`\|`cri-o`, `runtime_version`, `nri_version` | Always 1; the last three are empty until NRI's `Configure` (D68) |
-| `speculaire_config_reload_failures_total` | counter | — | Reloads rejected, of the agent's config or of the node's registry config, which the previous one then serves, and registry config reloads that left a credential, certificate or key file out, once per reload (D30, D91, D92) |
+| `speculaire_config_reload_failures_total` | counter | — | Reloads rejected, of the agent's config or of the node's registry config, which the previous one then serves, and registry config reloads that left a credential, certificate or key file out, once per reload, and reads of the kubelet certificate or the cluster CA that failed, once per file (D30, D91, D92, D95) |
 
 Memory, CPU and file descriptors come from node-exporter and systemd (D34).

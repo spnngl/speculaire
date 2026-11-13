@@ -1,5 +1,8 @@
-//! The certificates the agent and the runtime use between themselves (D14, D16).
+//! The certificates the agent and the runtime use between themselves, and those of peer links (D14, D16).
 //!
-//! Today that is the mirror's local CA, [`mirror`]; the kubelet identity of the peer API joins it later.
+//! [`mirror`] is the mirror's local CA; [`node`] is the kubelet identity that nodes present to each other.
 
 pub mod mirror;
+pub mod node;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;

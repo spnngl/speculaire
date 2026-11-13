@@ -21,6 +21,7 @@ serde.workspace = true
 serde_path_to_error.workspace = true
 speculaire-configure.workspace = true
 speculaire-mirror.workspace = true
+speculaire-pki.workspace = true
 speculaire-runtime.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -30,6 +31,7 @@ tracing-journald.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+speculaire-pki = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tower.workspace = true
 

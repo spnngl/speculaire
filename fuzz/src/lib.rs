@@ -42,6 +42,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("mirror_request", mirror_request),
     ("reference", reference),
     ("platform", platform),
+    ("node_subject", node_subject),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -384,5 +385,28 @@ pub fn manifest(data: &[u8]) {
     }
     if let Children::Image { layers, .. } = &found {
         assert_eq!(found.digests().len(), layers.len() + 1);
+    }
+}
+
+/// A peer certificate's subject, as both sides of a peer link read it to know which node it is (D16).
+///
+/// Reading never panics. A node it names is not empty, and the subject's common name is that node's.
+///
+/// # Panics
+///
+/// When reading panics, or a node it names breaks one of those.
+pub fn node_subject(data: &[u8]) {
+    use speculaire_pki::node::{COMMON_NAME_PREFIX, node_subject};
+    use x509_parser::prelude::{AttributeTypeAndValue, FromDer as _, X509Certificate};
+    if let Ok(node) = node_subject(data) {
+        assert_ne!(node, "");
+        let (_, cert) =
+            X509Certificate::from_der(data).expect("a certificate whose subject was read parses");
+        let names: Vec<_> = cert
+            .subject()
+            .iter_common_name()
+            .map(AttributeTypeAndValue::as_str)
+            .collect();
+        assert_eq!(names, [Ok(format!("{COMMON_NAME_PREFIX}{node}").as_str())]);
     }
 }

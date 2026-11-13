@@ -18,7 +18,7 @@ speculaire-runtime.workspace = true
 [dev-dependencies]
 secrecy.workspace = true
 speculaire-fake-runtime.workspace = true
-speculaire-pki.workspace = true
+speculaire-pki = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 # D46: the global allocator on musl, `src/main.rs`.

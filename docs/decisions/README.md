@@ -23,7 +23,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
 - D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81, D86)
-- D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60)
+- D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60, D95)
 - D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable` (amended by D66, D78, D88, D89)
 - D18 [gate](gate.md): `gate.exempt` is explicit and empty by default
 - D19 [build](build.md): the dev loop is Docker on macOS plus CI on native runners (amended by D57)
@@ -102,5 +102,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D92 [agent](agent.md): a credential, certificate or key file that cannot be used leaves its hosts anonymous or without it, logged and counted once per reload, and the rest of the snapshot is built; certificate files are read at reload, never per request (amends D89, D91; amended by D93)
 - D93 [agent](agent.md): a poll reads a file again when its `stat` (modification time, length, device, inode) differs from the one taken before the previous read, or it appeared or went (amends D30, D91, D92)
 - D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63)
+- D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 
-Next free number: D95.
+Next free number: D96.

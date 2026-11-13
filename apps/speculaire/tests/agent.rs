@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use secrecy::ExposeSecret as _;
 use speculaire_fake_runtime::{Answers, Fake};
 use speculaire_pki::mirror::{Mirror, Part};
+use speculaire_pki::testing::Cluster;
 
 const WAIT: Duration = Duration::from_secs(10);
 /// The agent's config reload line; a bare `config reloaded` also matches the registry config's.
@@ -339,11 +340,25 @@ fn get(port: u16, path: &str, accept: &str) -> Option<Response> {
 }
 
 fn reload_failures(agent: &Agent) -> String {
+    metric(agent, "speculaire_config_reload_failures_total").unwrap()
+}
+
+/// The line of `/metrics` that holds `name`, with no labels.
+fn metric(agent: &Agent, name: &str) -> Option<String> {
     let text = agent.get("/metrics", "").text();
     text.lines()
-        .find(|l| l.starts_with("speculaire_config_reload_failures_total "))
-        .unwrap()
-        .to_owned()
+        .find(|l| {
+            l.strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with(' '))
+        })
+        .map(str::to_owned)
+}
+
+/// Replaces `path` with `text` in one rename, as kubelet does: a poll never reads it half written.
+fn put(path: &Path, text: &str) {
+    let partial = path.with_extension("partial");
+    std::fs::write(&partial, text).unwrap();
+    std::fs::rename(&partial, path).unwrap();
 }
 
 #[test]
@@ -899,4 +914,79 @@ fn sighup_reads_the_registry_config_again_whatever_the_modification_times_say() 
         .unwrap();
     agent.signal("HUP");
     agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
+}
+
+#[test]
+fn p2p_waits_for_the_kubelet_certificate_and_a_bad_one_is_one_error_naming_it() {
+    let files = tempfile::tempdir().unwrap();
+    let cluster = Cluster::new("kubernetes");
+    let certificate = files.path().join("kubelet-client-current.pem");
+    let ca = files.path().join("ca.crt");
+    put(&ca, cluster.ca());
+    let mut agent = Agent::start(&format!(
+        "[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n",
+        certificate.display(),
+        ca.display()
+    ));
+    assert_eq!(
+        metric(&agent, "speculaire_p2p_enabled").unwrap(),
+        "speculaire_p2p_enabled 0"
+    );
+    assert_eq!(
+        metric(&agent, "speculaire_identity_expiry_timestamp_seconds"),
+        None
+    );
+    // The certificate is read before the CA: the CA's line ends a read of both.
+    agent.line(&["the cluster CA loaded"]);
+    assert!(
+        agent
+            .seen
+            .iter()
+            .any(|l| l.contains("the kubelet certificate does not exist")),
+        "said at startup: {:#?}",
+        agent.seen
+    );
+    agent.signal("HUP");
+    agent.line(&["the cluster CA loaded"]);
+
+    let first = cluster.kubelet("a");
+    put(&certificate, &first);
+    wait_until(|| metric(&agent, "speculaire_p2p_enabled").unwrap() == "speculaire_p2p_enabled 1");
+    assert!(metric(&agent, "speculaire_identity_expiry_timestamp_seconds").is_some());
+
+    let other = cluster.kubelet("a");
+    let key = |pem: &str| pem.find("-----BEGIN PRIVATE KEY").unwrap();
+    put(
+        &certificate,
+        &format!("{}{}", &other[..key(&other)], &first[key(&first)..]),
+    );
+    let line = agent.line(&[r#""level":"ERROR""#, "does not match"]);
+    assert!(line.contains(&certificate.display().to_string()), "{line}");
+    assert_eq!(
+        reload_failures(&agent),
+        "speculaire_config_reload_failures_total 1"
+    );
+    assert_eq!(
+        metric(&agent, "speculaire_p2p_enabled").unwrap(),
+        "speculaire_p2p_enabled 1",
+        "the pair loaded before stays"
+    );
+    assert_eq!(agent.get("/readyz", "").status, 200);
+
+    let (status, lines) = agent.stop();
+    assert!(status.success(), "{status}");
+    let count = |needle: &str| lines.iter().filter(|l| l.contains(needle)).count();
+    assert_eq!(count(r#""level":"ERROR""#), 1, "{lines:#?}");
+    assert_eq!(
+        count("the kubelet certificate does not exist"),
+        1,
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.contains("does not exist"))
+            .all(|l| l.contains(r#""level":"INFO""#)),
+        "{lines:#?}"
+    );
 }

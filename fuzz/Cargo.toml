@@ -19,6 +19,7 @@ libfuzzer-sys = "0.4.13"
 speculaire-agent = { path = "../crates/agent" }
 speculaire-mirror = { path = "../crates/mirror" }
 speculaire-oci = { path = "../crates/oci" }
+speculaire-pki = { path = "../crates/pki" }
 speculaire-registry = { path = "../crates/registry" }
 speculaire-registry-config = { path = "../crates/registry-config" }
 speculaire-runtime = { path = "../crates/runtime" }
@@ -28,6 +29,8 @@ secrecy = "0.10.3"
 tempfile = "3.27.0"
 # The serializer of the round trip in `config`; the same version as the workspace's.
 toml = "1.2.1"
+# `node_subject` reads the common name again; the same version as the workspace's.
+x509-parser = { version = "0.18.1", default-features = false }
 
 [[bin]]
 name = "config"
@@ -153,6 +156,13 @@ bench = false
 [[bin]]
 name = "manifest"
 path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_subject"
+path = "fuzz_targets/node_subject.rs"
 test = false
 doc = false
 bench = false

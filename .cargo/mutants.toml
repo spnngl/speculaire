@@ -17,7 +17,14 @@ exclude_re = [
   'serve\.rs:\d+:\d+: replace Mirror::stop with \(\)$',
   # `Default::default()` of a body is an empty body: the same bytes and headers.
   'serve\.rs:\d+:\d+: replace empty -> Body with Default::default\(\)$',
+  # A leaked empty `Vec` is the same empty list of hints.
+  'node\.rs:\d+:\d+: replace <impl ClientCertVerifier for Verifier>::root_hint_subjects -> &\[DistinguishedName\] with Vec::leak\(Vec::new\(\)\)$',
 ]
-# `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/` is test support
-# (D87). `fuzz/` is a workspace of its own, which cargo-mutants never lists.
-exclude_globs = ["e2e/**", "crates/fake-runtime/**"]
+# `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/` and
+# `crates/pki/src/testing.rs` are test support (D87, D95). `fuzz/` is a workspace of its own, which cargo-mutants
+# never lists.
+exclude_globs = [
+  "e2e/**",
+  "crates/fake-runtime/**",
+  "crates/pki/src/testing.rs",
+]

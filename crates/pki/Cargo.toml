@@ -1,6 +1,6 @@
 [package]
 name = "speculaire-pki"
-description = "The mirror's local CA and certificates"
+description = "The mirror's local CA and certificates, and the node identity of peer links"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +8,21 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# A cluster CA that issues kubelet-like certificates, and an in-memory handshake, for other crates' tests.
+testing = []
+
 [dependencies]
+arc-swap.workspace = true
 rcgen.workspace = true
+rustls.workspace = true
 secrecy.workspace = true
 thiserror.workspace = true
 time.workspace = true
 x509-parser.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
