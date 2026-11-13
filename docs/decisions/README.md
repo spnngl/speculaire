@@ -100,8 +100,9 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D90 [agent](agent.md): all runtime-specific code sits in `speculaire-runtime` behind four traits (`Wiring`, `Settings`, `Registries`, `Content`) that a `Node` hands out; only the relay-or-per-blob `Fallback` is visible to the agent (amends D64, D84, D86)
 - D91 [agent](agent.md): the registry config is parsed into a snapshot that a reload swaps (SIGHUP, or a poll that finds a watched file changed); a bad file keeps the previous one and is logged once and counted; `blob_cache.max_size` is live (amends D47, D89; amended by D92, D93)
 - D92 [agent](agent.md): a credential, certificate or key file that cannot be used leaves its hosts anonymous or without it, logged and counted once per reload, and the rest of the snapshot is built; certificate files are read at reload, never per request (amends D89, D91; amended by D93)
-- D93 [agent](agent.md): a poll reads a file again when its `stat` (modification time, length, device, inode) differs from the one taken before the previous read, or it appeared or went (amends D30, D91, D92)
+- D93 [agent](agent.md): a poll reads a file again when its `stat` (modification time, length, device, inode) differs from the one taken before the previous read, or it appeared or went (amends D30, D91, D92; amended by D96)
 - D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63)
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
+- D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
 
-Next free number: D96.
+Next free number: D97.

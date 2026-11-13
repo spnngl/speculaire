@@ -18,6 +18,9 @@ const DEPTH: usize = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stamp {
     modified: Option<SystemTime>,
+    /// The change time, seconds and nanoseconds: no syscall sets it back, so it sees a write whose modification time
+    /// was restored (D96).
+    ctime: (i64, i64),
     len: u64,
     dev: u64,
     ino: u64,
@@ -83,6 +86,7 @@ fn stamp(path: &Path, depth: usize, stamps: &mut BTreeMap<PathBuf, Option<Stamp>
         path.to_owned(),
         meta.as_ref().map(|meta| Stamp {
             modified: meta.modified().ok(),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
             len: meta.len(),
             dev: meta.dev(),
             ino: meta.ino(),
@@ -131,6 +135,40 @@ mod tests {
         set_modified(&other, old);
         std::fs::rename(&other, &file).expect("a rename");
         assert!(watch.changed());
+    }
+
+    #[test]
+    fn a_write_in_place_with_its_modification_time_restored_is_a_change() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("file");
+        std::fs::write(&file, "a").expect("a file");
+        let old = std::fs::metadata(&file)
+            .and_then(|meta| meta.modified())
+            .expect("a modification time");
+        let watch = Watch::new(vec![file.clone()]);
+        next_tick(dir.path(), &file);
+        // Same length, same inode, and the old time put back, as `touch -r` or an editor that keeps it does.
+        std::fs::write(&file, "b").expect("a write");
+        set_modified(&file, old);
+        assert!(watch.changed());
+    }
+
+    /// Waits until the file clock has ticked past `file`'s change time: a coarse one dates writes within one tick alike
+    /// (D93), and a kernel with fine-grained timestamps returns at once.
+    fn next_tick(dir: &Path, file: &Path) {
+        let ctime = |path: &Path| {
+            let meta = std::fs::metadata(path).expect("a file");
+            (meta.ctime(), meta.ctime_nsec())
+        };
+        let stamped = ctime(file);
+        let probe = dir.join("probe");
+        loop {
+            std::fs::write(&probe, "x").expect("a probe");
+            if ctime(&probe) > stamped {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]
