@@ -484,6 +484,24 @@ fn the_auth_file_crio_names_is_the_only_credential_file() {
 }
 
 #[test]
+fn a_change_to_the_auth_file_crio_names_is_found_by_the_next_poll() {
+    let node = Node::new();
+    node.put("/srv/kubelet.json", r#"{"auths":{}}"#);
+    let named = node.dir.path().join("srv/kubelet.json");
+    let crio = format!(
+        "[crio.image]\nglobal_auth_file = {:?}\n",
+        named.display().to_string()
+    );
+    let registries = node.registries_with(&crio);
+    assert!(!registries.changed());
+    node.put(
+        "/srv/kubelet.json",
+        r#"{"auths":{"quay.io":{"auth":"Ym9iOmh1bnRlcjI="}}}"#,
+    );
+    assert!(registries.changed());
+}
+
+#[test]
 fn a_crio_that_cannot_be_asked_is_a_config_error() {
     let node = Node::new();
     let context = Context {
