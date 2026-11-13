@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97)
 
 - **Decision:**
   - **Workflow:**
@@ -87,7 +87,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
     - `fuzz` (nightly cron);
     - `load` (nightly cron): `just load`, the reflector load test (D33);
     - `bench`: nightly on kind, and by `workflow_dispatch` on a real cluster, `just bench` against Spegel (D35);
-    - `mutants` and `deep` (careful), both informational;
+    - `mutants` and `deep` (careful, shuttle), both informational;
     - `advisories`, `codeql`, `betterleaks`, `renovate`;
     - `release`, which reuses `ci`.
   - **Hygiene:**
@@ -405,11 +405,11 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The `fuzz` workflow, dispatched on PR #27's branch (run 43106442458): `targets` and one job per target, `fuzz (config)` and `fuzz (config_values)`, green in 6 minutes each.
 - **Revisit when:** a target's coverage stops growing before its parsers' last lines, or `KEYS` falls behind its smoke test too often.
 
-## D76: cargo-careful runs the tests under AddressSanitizer on each pull request, in one job (amends D27)
+## D76: cargo-careful runs the tests under AddressSanitizer on each pull request, in one job (amends D27; amended by D97)
 
 - **Decision:**
   - `just careful [sanitizer] [package]` runs `cargo careful test` on the pinned nightly (`nightly`), with its own target dir `target/careful` and no leak check (`detect_leaks=0`: a leak is no memory error). It names the host target, as `just fuzz` does (dedens D141). Without a package it runs `--workspace --exclude e2e`: every package but `e2e`, which needs a kind cluster. `fuzz/` is not a member; `just check` replays its seeds (D27).
-  - `.github/workflows/deep.yml` has one job, `careful`, running `just careful address` on `ubuntu-26.04`, on pull requests that change a Rust file, a manifest, `Cargo.lock`, `rust-toolchain.toml`, the justfile or the workflow. It is informational, outside `required`.
+  - `.github/workflows/deep.yml` has the job `careful`, running `just careful address` on `ubuntu-26.04`, on pull requests that change a Rust file, a manifest, `Cargo.lock`, `rust-toolchain.toml`, the justfile or the workflow. It is informational, outside `required`.
   - cargo-careful is pinned in `deep.yml` (`CARGO_CAREFUL_VERSION`, with a renovate depName). `just toolchains` adds `rust-src` to the nightly, for the standard library rebuild.
   - The musl allocator's `secure` feature (D46) is out of scope: careful builds for the host's glibc target, with no mimalloc.
   - It runs on glibc Linux only, and not in `just dev` (D57): the build image is musl, where a sanitized sysroot refuses a static libc (`sanitizer is incompatible with statically linked libc`), and without `crt-static` the ASan runtime (`librustc-nightly_rt.asan.a`) is missing for the musl target. A rebuilt sysroot there lacks the C runtime objects too, with no sanitizer (`cannot open crt1.o`). macOS cannot link the sanitized builds. The image gains no cargo-careful.

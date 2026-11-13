@@ -40,7 +40,7 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 | `speculaire_reflector_digests` | gauge | — | Distinct digests in the index |
 | `speculaire_reflector_pairs` | gauge | — | (digest, node) pairs in the index |
 | `speculaire_reflector_lookup_seconds` | histogram | — | Server-side `Lookup` latency (D33 target: p99 at most 500 µs) |
-| `speculaire_reflector_announce_rejected_total` | counter | `reason` = `identity`\|`version` | Rejected streams or announcements (D2, D16) |
+| `speculaire_reflector_announce_rejected_total` | counter | `reason` = `identity`\|`version`\|`address`\|`size`\|`digests`\|`malformed` | Refused `Announce` streams (D2, D16, D97); `docs/operations.md` § Reflector refusals |
 
 ## Verification
 

@@ -1,0 +1,89 @@
+// The reflector API (D2, D97): agents announce what they hold, and look up who holds a digest.
+//
+// Changes are additive only: a reflector accepts its own protocol version and the previous one.
+syntax = "proto3";
+
+package speculaire.reflect.v1;
+
+service Reflector {
+  // The reflectors, as `reflector.members` lists them; agents call it through the load balancer.
+  rpc Members(MembersRequest) returns (MembersResponse);
+  // One stream per agent and member: `Hello`, a `Snapshot`, then `Delta`s. Its end withdraws the agent.
+  rpc Announce(stream AgentMessage) returns (stream ReflectorMessage);
+  // Up to 8 agents that announced `digest`, never the one asking.
+  rpc Lookup(LookupRequest) returns (LookupResponse);
+}
+
+message MembersRequest {}
+
+message MembersResponse {
+  repeated Member members = 1;
+}
+
+message Member {
+  // The node name its kubelet certificate holds.
+  string node = 1;
+  // `ip:port` of its reflector API.
+  string address = 2;
+}
+
+message AgentMessage {
+  oneof message {
+    Hello hello = 1;
+    Snapshot snapshot = 2;
+    Delta delta = 3;
+  }
+}
+
+// The first message of a stream.
+message Hello {
+  uint32 protocol_version = 1;
+  // The node of the TLS peer: another is refused.
+  string node = 2;
+  // `ip:port` of the agent's peer API.
+  string peer_address = 3;
+}
+
+// Every digest the agent holds, in chunks; the chunk with `last` replaces what the reflector held for it.
+message Snapshot {
+  repeated string digests = 1;
+  bool last = 2;
+  // The sequence number of the first `Delta` after it.
+  uint64 seq = 3;
+}
+
+// A change since the snapshot, numbered from its `seq` without gaps.
+message Delta {
+  uint64 seq = 1;
+  repeated string added = 2;
+  repeated string removed = 3;
+}
+
+message ReflectorMessage {
+  oneof message {
+    Resync resync = 1;
+    Prewarm prewarm = 2;
+  }
+}
+
+// Send a new `Snapshot`: a `Delta` arrived out of sequence.
+message Resync {}
+
+// Pull `image` ahead of use (D51); never sent before M7.
+message Prewarm {
+  string image = 1;
+}
+
+message LookupRequest {
+  string digest = 1;
+}
+
+message LookupResponse {
+  repeated Peer peers = 1;
+}
+
+message Peer {
+  string node = 1;
+  // `ip:port` of its peer API.
+  string address = 2;
+}

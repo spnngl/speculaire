@@ -10,7 +10,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - A reflector outage degrades to *fall through*, never to a failed pull.
 - **Revisit when:** we need clusters without a stable control plane, or multi-cluster sharing (`docs/proposals/federation.md`).
 
-## D2: Reflector topology and protocol (amended by D33, D51)
+## D2: Reflector topology and protocol (amended by D33, D51, D97)
 
 - **Decision:**
   - **Placement:** reflectors are the agents on the control-plane nodes, with `role = "reflector"`. Every agent knows one URL, `reflector.url`: a load balancer in front of the control-plane nodes. It must be L4 TCP passthrough, because mTLS ends at the reflector.
@@ -53,3 +53,21 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Members share no protocol (D2), so they cannot agree by talking. Every agent streams to every member, so all members hash the same inputs and choose the same seeds without a message.
   - While an agent reconnects, members can disagree for a moment; the cost is one extra seed pulling from upstream.
 - **Revisit when:** benchmarks show extra upstream pulls during prewarm.
+
+## D97: The reflector's wire, index and limits (amends D2, D27, D76)
+
+- **Decision:**
+  - **Wire:** protobuf package `speculaire.reflect.v1`, in `crates/reflect/proto/`. `protocol_version` is an integer, 1 for now. Digests travel as their text, and the reflector parses each one as an OCI digest (sha256, sha384 or sha512).
+  - **Stream:** the first message is `Hello`, and only the first. Its node must be the TLS peer's, and its peer address an IP literal with a port. A `Snapshot` comes in chunks of at most 10k digests (`SNAPSHOT_CHUNK`); the chunk marked `last` replaces what the reflector held for the agent and names the `seq` of the next `Delta`. A `Delta` out of sequence gets one `Resync`, and later deltas are ignored until the next snapshot ends. A node's new stream takes its entry over, and the old one ends with `ABORTED`. A stream's end withdraws everything it announced.
+  - **Lookup:** unary, hedged by the agent to a second member. It answers at most 8 holders (`LOOKUP_PEERS`), from a random position among them, never the agent asking.
+  - **Limits**, each refusing the stream and counted in `speculaire_reflector_announce_rejected_total{reason}`: a TLS handshake longer than 5 s (closed, not counted: no stream exists yet), a message over 4 MiB (`size`), more than 100k digests for one node (`digests`), a peer address that is not `ip:port` (`address`), a `Hello` naming another node (`identity`), a version outside the reflector's and the previous one (`version`), anything else unparsable (`malformed`).
+  - **Index:** one lock over an interned digest table, one `roaring` bitmap of node slots per digest and one of digest ids per node. Its lock comes from `crate::sync`, Shuttle's under `--cfg shuttle`, so Shuttle explores concurrent snapshots, deltas and stream ends: `just shuttle` runs 2000 random schedules, and so does the `shuttle` job of `deep.yml`, informational like `careful` (D76).
+  - **Server:** handshakes run in their own tasks, so a stalled one delays no other. HTTP/2 pings every 30 s, and a connection silent 10 s after one is closed. A stopping reflector ends every stream with `UNAVAILABLE` (D39).
+- **Because:**
+  - 10k sha512 digests encode to about 1.4 MB, so a chunk stays well under 4 MiB, and a whole snapshot of 2k blobs is one message.
+  - 100k digests is 50 times the 2k blobs a node holds in D2's estimate: no honest node reaches it, and one bad node holds at most 100k pairs.
+  - A random start spreads the load of a popular blob over its holders; 8 is enough for the fetcher to skip slow or failed peers without a second lookup.
+  - A unary call is cancelled and hedged cleanly, which a stream is not.
+  - An IP literal needs no DNS on the fetching side and cannot point at a name the node does not own.
+  - Withdrawing on a stream's end is D2's liveness signal; taking over on a new stream lets a restarted agent replace its entry before the old connection's keepalive times out.
+- **Revisit when:** D33's load test misses a target, or a node legitimately holds more than 100k digests.

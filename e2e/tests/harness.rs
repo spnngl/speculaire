@@ -5,12 +5,13 @@
 )]
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::balancer::PORT;
 use e2e::node::Metrics;
+use e2e::reflector::KUBELET;
 use e2e::{Cluster, IpFamily};
 
 /// The tests share the node no reflector runs on: one at a time.
@@ -36,55 +37,13 @@ fn client(cluster: &Cluster) -> String {
         .expect("a node with no reflector")
 }
 
-/// A listener on the reflectors' port of `node` that answers each connection with the node's name, until it drops.
-/// It stands in for the reflector, which listens there from step 02 of M3 on.
-struct Responder<'a> {
-    cluster: &'a Cluster,
-    node: String,
-}
-
-impl<'a> Responder<'a> {
-    fn start(cluster: &'a Cluster, node: &str) -> Self {
-        // Perl, which every Debian has: with `systemd-socket-activate --inetd hostname`, connections on the CI runners
-        // closed before the name arrived. `--expand-environment=no` keeps systemd off Perl's `$`.
-        let server = format!(
-            r#"$s = IO::Socket::IP->new(LocalHost => "::", LocalPort => {PORT}, V6Only => 0, Listen => 64, ReuseAddr => 1) or die $@; chomp($n = `hostname`); while ($c = $s->accept) {{ $c->send("$n\n"); $c->shutdown(1); close $c }}"#
-        );
-        sh(
-            cluster,
-            node,
-            &format!(
-                "systemctl stop e2e-responder 2>/dev/null; systemd-run --unit=e2e-responder --collect --expand-environment=no perl -MIO::Socket::IP -e '{server}'"
-            ),
-        );
-        Self {
-            cluster,
-            node: node.to_owned(),
-        }
-    }
-}
-
-impl Drop for Responder<'_> {
-    fn drop(&mut self) {
-        let _ = self
-            .cluster
-            .exec(&self.node, &["systemctl", "stop", "e2e-responder"]);
-    }
-}
-
-/// The nodes that answered 6 connections from `client` through the balancer.
+/// The reflectors that answered 6 `Members` calls from `client` through the balancer.
 fn answers(cluster: &Cluster, client: &str) -> BTreeSet<String> {
-    let balancer = cluster.balancer().address().unwrap();
-    sh(
-        cluster,
-        client,
-        &format!(
-            "for i in 1 2 3 4 5 6; do timeout 5 bash -c 'exec 3<>/dev/tcp/{balancer}/{PORT}; head -1 <&3' || true; done"
-        ),
-    )
-    .lines()
-    .map(str::to_owned)
-    .collect()
+    let balancer = SocketAddr::new(cluster.balancer().address().unwrap(), PORT);
+    (0..6)
+        .filter_map(|_| cluster.members(client, balancer, KUBELET, None).ok())
+        .map(|answer| answer.node)
+        .collect()
 }
 
 /// Waits until the connections through the balancer reach `expected` only: it checks its backends every second.
@@ -105,16 +64,11 @@ fn wait_answers(cluster: &Cluster, client: &str, expected: &[&str]) {
     }
 }
 
-/// The responders' units, a connection from `client` to each reflector and to the balancer, and Envoy's log.
+/// The reflectors' logs, a `Members` call from `client` to each reflector and to the balancer, and Envoy's log.
 fn diagnostics(cluster: &Cluster, client: &str) -> String {
-    let connect = |address: &str| {
-        sh(
-            cluster,
-            client,
-            &format!(
-                "timeout 5 bash -c 'exec 3<>/dev/tcp/{address}/{PORT}; head -1 <&3' 2>&1; echo \"{address}: exit $?\""
-            ),
-        )
+    let call = |address: IpAddr| {
+        let answer = cluster.members(client, SocketAddr::new(address, PORT), KUBELET, None);
+        format!("{address}: {answer:?}")
     };
     let nodes = cluster.nodes().unwrap();
     let mut out: Vec<String> = Vec::new();
@@ -122,12 +76,12 @@ fn diagnostics(cluster: &Cluster, client: &str) -> String {
         out.push(sh(
             cluster,
             &reflector,
-            &format!("systemctl status e2e-responder 2>&1; ss -ltn | grep {PORT}; true"),
+            &format!("journalctl -u speculaire --no-pager | tail -20; ss -ltn | grep {PORT}; true"),
         ));
         let node = nodes.iter().find(|n| n.name == reflector).unwrap();
-        out.push(connect(&node.address));
+        out.push(call(node.address.parse().unwrap()));
     }
-    out.push(connect(&cluster.balancer().address().unwrap().to_string()));
+    out.push(call(cluster.balancer().address().unwrap()));
     out.push(cluster.balancer().logs().unwrap_or_else(|e| e.to_string()));
     out.join("\n")
 }
@@ -139,10 +93,6 @@ fn the_balancer_reaches_each_reflector_and_skips_a_stopped_one() {
     let cluster = Cluster::from_env();
     let client = client(&cluster);
     let [first, second] = cluster.reflectors();
-    let _responders = [
-        Responder::start(&cluster, &first),
-        Responder::start(&cluster, &second),
-    ];
     wait_answers(&cluster, &client, &[&first, &second]);
     let balancer = cluster.balancer();
     {
