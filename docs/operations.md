@@ -104,10 +104,11 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | `speculaire_gate_total{mode="enforce",result=~"rejected\|unverifiable\|pending\|unmatched"}` | The rate rises above its usual level |
 | `speculaire_peer_fetches_total{result="digest_mismatch"}` | It increases: a peer sent bytes that do not match their digest; the warning log, and the `peer` audit event if on, name its node (D52) |
 | `speculaire_mirror_requests_total{result="error"}` | It increases: the mirror could not read content it may hold, and answered 404; the warning log names the error (D85) |
-| `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, or on its previous registry config, or a registry config read left a credential, certificate or key file out; the error log names the file and the line (D30, D91, D92) |
+| `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, or on its previous registry config, or a registry config read left a credential, certificate or key file out, or the kubelet certificate or the cluster CA cannot be loaded and the previous one stays; the error log names the file and the line (D30, D91, D92, D95) |
 | `speculaire_identity_path{path="annotation"}` | It is 1: the node runs containerd 2.3, with its known identity gap (D15) |
 | `speculaire_trust_root_expiry_timestamp_seconds` | Less than 7 days away: once it passes, new verifications become `unverifiable`; cached verdicts keep serving |
-| `speculaire_p2p_enabled` | 0 for more than 10 min: the node has no kubelet certificate and pulls only from upstream (D16) |
+| `speculaire_p2p_enabled` | 0 for more than 10 min: the node has no usable kubelet certificate or cluster CA, or its certificate expired, and pulls only from upstream; the info log names an absent file, the error log a bad one (D16, D95) |
+| `speculaire_identity_expiry_timestamp_seconds` | Less than a tenth of the certificate's lifetime away: kubelet renews it once 70 to 90% of its lifetime has passed, so it stopped renewing; once it passes, P2P stops on the node (D95) |
 | `speculaire_reflector_connected` | 0 for any `member` for more than 5 min |
 | `speculaire_nri_connected` | 0 for more than 1 min: with `required_plugins`, container creation is rejected (D41) |
 | `speculaire_gate_seconds` | p99 above half of `plugin_request_timeout`: a timeout lets a container start ungated (D41) |

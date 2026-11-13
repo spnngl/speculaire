@@ -17,6 +17,7 @@ use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{self, Config};
+use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
 use crate::status::{self, Status};
@@ -97,6 +98,8 @@ async fn serve(
         }
     });
     info!(%address, "status listener open");
+    // P2P waits for the identity; readiness does not (D16, D45).
+    let mut identity = Identity::load(&config.identity);
     // `/readyz` answers 503 until the mirror listens (D45); an agent that cannot open it stops (D55).
     let registries = node.registries();
     reload_registries(&*registries);
@@ -117,6 +120,7 @@ async fn serve(
                 reload(path, &mut config, &logs);
                 mirror.apply(&config);
                 reload_registries(&*registries);
+                identity.reload();
             }
             _ = poll.tick() => {
                 if watch.changed() {
@@ -127,6 +131,7 @@ async fn serve(
                 if registries.changed() {
                     reload_registries(&*registries);
                 }
+                identity.poll();
             }
         }
         if config.config.poll_interval.get() != period {

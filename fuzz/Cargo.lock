@@ -1627,6 +1627,7 @@ dependencies = [
  "serde_path_to_error",
  "speculaire-configure",
  "speculaire-mirror",
+ "speculaire-pki",
  "speculaire-runtime",
  "thiserror",
  "tokio",
@@ -1652,11 +1653,13 @@ dependencies = [
  "speculaire-agent",
  "speculaire-mirror",
  "speculaire-oci",
+ "speculaire-pki",
  "speculaire-registry",
  "speculaire-registry-config",
  "speculaire-runtime",
  "tempfile",
  "toml",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1699,7 +1702,9 @@ dependencies = [
 name = "speculaire-pki"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "rcgen",
+ "rustls",
  "secrecy",
  "thiserror",
  "time",
