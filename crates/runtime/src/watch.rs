@@ -70,6 +70,11 @@ impl Watch {
     pub(crate) fn roots(&self) -> &[PathBuf] {
         &self.roots
     }
+
+    /// Whether `path` has a stamp: it is watched, or was below a watched directory.
+    pub(crate) fn stamped(&self, path: &Path) -> bool {
+        self.stamps.contains_key(path)
+    }
 }
 
 fn stamp(path: &Path, depth: usize, stamps: &mut BTreeMap<PathBuf, Option<Stamp>>) {
