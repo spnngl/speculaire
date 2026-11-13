@@ -16,6 +16,13 @@ pub const CACHE_BYTES: &str = "speculaire_blob_cache_bytes";
 /// `speculaire_blob_cache_evictions_total`: blobs evicted above `blob_cache.max_size` (D67).
 pub const CACHE_EVICTIONS: &str = "speculaire_blob_cache_evictions_total";
 
+/// `speculaire_peer_uploads_total`: requests from other agents, by `result` (D24).
+pub const UPLOADS: &str = "speculaire_peer_uploads_total";
+/// `speculaire_peer_uploads_in_flight`: blob bodies the peer API is sending.
+pub const UPLOADS_IN_FLIGHT: &str = "speculaire_peer_uploads_in_flight";
+/// `speculaire_peer_upload_bytes_total`: blob bytes the peer API sent.
+pub const UPLOAD_BYTES: &str = "speculaire_peer_upload_bytes_total";
+
 /// What became of a pull request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -61,6 +68,60 @@ pub fn describe() {
         drop(metrics::histogram!(FIRST_BYTE, "kind" => kind.label()));
     }
     counter!(BYTES, "source" => "local").absolute(0);
+}
+
+/// What became of a peer request: served from what the node holds, or turned away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Uploaded {
+    /// The peer API served it.
+    Served,
+    /// The peer API answered 503: at `peer.max_uploads`, or stopping (D24, D39).
+    Busy,
+}
+
+impl Uploaded {
+    /// The `result` label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Served => "served",
+            Self::Busy => "busy",
+        }
+    }
+}
+
+/// Describes the peer API's metrics and gives each its zero, on every agent.
+pub fn describe_peer() {
+    describe_counter!(
+        UPLOADS,
+        "Requests to the peer API that found what they named; busy answered 503"
+    );
+    describe_gauge!(UPLOADS_IN_FLIGHT, "Blob bodies now being sent");
+    describe_counter!(UPLOAD_BYTES, "Blob bytes sent to other agents");
+    for result in [Uploaded::Served, Uploaded::Busy] {
+        counter!(UPLOADS, "result" => result.label()).absolute(0);
+    }
+    gauge!(UPLOADS_IN_FLIGHT).set(0.0);
+    counter!(UPLOAD_BYTES).absolute(0);
+}
+
+/// Counts a peer request.
+pub fn upload(result: Uploaded) {
+    counter!(UPLOADS, "result" => result.label()).increment(1);
+}
+
+/// Sets the blob bodies in flight.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a count of uploads, far below 2^53"
+)]
+pub fn uploads_in_flight(uploads: usize) {
+    gauge!(UPLOADS_IN_FLIGHT).set(uploads as f64);
+}
+
+/// Counts bytes sent to another agent.
+pub fn upload_bytes(bytes: usize) {
+    counter!(UPLOAD_BYTES).increment(bytes as u64);
 }
 
 /// Describes the relay's metrics and gives each its zero, on a node whose mirror relays (CRI-O, D66).

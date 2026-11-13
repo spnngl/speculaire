@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
@@ -16,6 +16,7 @@ use rustls::pki_types::ServerName;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::{Credentials, node_subject};
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
@@ -98,8 +99,8 @@ struct Shared {
     holdings: Arc<Holdings>,
     /// The channel of each member whose stream is up, by node.
     links: Mutex<HashMap<String, Channel>>,
-    /// The peer address, fixed by the first stream unless set (D36).
-    peer: OnceLock<SocketAddr>,
+    /// The peer address, fixed by the first stream unless set (D36): `None` until then, and never changed after.
+    peer: watch::Sender<Option<SocketAddr>>,
     /// Woken when a stream drops, to ask for the members again (D2).
     dropped: tokio::sync::Notify,
 }
@@ -108,10 +109,7 @@ impl Client {
     /// Starts asking for the members, and announces `holdings` to each, as this node per `credentials`.
     #[must_use]
     pub fn spawn(config: Config, credentials: Arc<Credentials>, holdings: Arc<Holdings>) -> Self {
-        let peer = OnceLock::new();
-        if let Some(address) = config.peer {
-            let _ = peer.set(address);
-        }
+        let peer = watch::Sender::new(config.peer);
         let shared = Arc::new(Shared {
             config,
             credentials,
@@ -125,10 +123,16 @@ impl Client {
         Self { shared, stop, task }
     }
 
-    /// The address the agent announces as its peer API, once known (D36).
-    #[must_use]
-    pub fn peer_address(&self) -> Option<SocketAddr> {
-        self.shared.peer.get().copied()
+    /// The address the agent announces as its peer API, once fixed: at once when set, else by the first stream (D36);
+    /// `None` when the client stops first. The peer API listens only then.
+    pub fn fixed_peer_address(&self) -> impl Future<Output = Option<SocketAddr>> + Send + 'static {
+        let mut peer = self.shared.peer.subscribe();
+        async move {
+            peer.wait_for(Option::is_some)
+                .await
+                .ok()
+                .and_then(|peer| *peer)
+        }
     }
 
     /// Up to `LOOKUP_PEERS` agents that announced `digest`, from a member the agent streams to, hedged to a second

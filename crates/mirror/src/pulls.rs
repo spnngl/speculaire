@@ -9,6 +9,7 @@ use hyper::Response;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::content::{Content, Error};
 
+use crate::metrics;
 use crate::request::{Kind, Reference};
 
 /// The body of an answer.
@@ -64,17 +65,26 @@ impl<C: Content> Pulls for Local<C> {
         else {
             return Answer::Missing;
         };
-        from_content(&self.0, pull.kind, digest, pull.head, pull.range).await
+        from_content(
+            &self.0,
+            pull.kind,
+            digest,
+            pull.head,
+            pull.range,
+            metrics::local_bytes,
+        )
+        .await
     }
 }
 
-/// The answer of a pull of `digest` from `content`.
+/// The answer of a pull of `digest` from `content`; `sent` counts the bytes of a blob's body as they go.
 pub(crate) async fn from_content<C: Content>(
     content: &C,
     kind: Kind,
     digest: &Digest,
     head: bool,
     range: Option<&str>,
+    sent: fn(usize),
 ) -> Answer {
     let blob = match content.open(digest).await {
         Ok(Some(blob)) => blob,
@@ -83,7 +93,7 @@ pub(crate) async fn from_content<C: Content>(
     };
     let served = match kind {
         Kind::Manifest => crate::serve::manifest(blob, digest, head).await,
-        _ => crate::serve::blob_response(blob, digest, head, range).await,
+        _ => crate::serve::blob_response(blob, digest, head, range, sent).await,
     };
     match served {
         Ok(response) => Answer::Served(response),

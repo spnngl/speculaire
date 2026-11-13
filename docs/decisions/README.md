@@ -31,7 +31,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D21 [verification](verification.md): stale verdicts keep serving during re-verification, for up to `verify.stale_max` (amended by D31, D65)
 - D22 [verification](verification.md): verification starts at the manifest fetch (amended by D65, D66)
 - D23 [gate](gate.md): `gate.unmatched` (default `deny`) decides images that no policy matches
-- D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap
+- D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100)
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
 - D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97)
@@ -43,7 +43,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98)
 - D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61)
 - D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower
-- D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56)
+- D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56, D100)
 - D37 [agent](agent.md): logs through `tracing` to journald or JSON, default `warn`; an audit log of gate decisions and verdict changes, off by default; secrets never logged (amends D30; amended by D52)
 - D38 [verification](verification.md): upstream `429` pauses discovery to that host until `Retry-After`; fallback and `.sig` tags are probed with `HEAD` (amends D20; amended by D43)
 - D39 [agent](agent.md): shutdown withdraws from reflectors, drains for 10 s, saves the cache, and leaves NRI last (amended by D69)
@@ -107,5 +107,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76)
 - D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33)
 - D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90)
+- D100 [distribution](distribution.md): the peer API routes `GET` and `HEAD` by digest through the mirror's parser, caps only blob bodies, answers `503` while the agent stops, and opens on the peer address the client fixes (amends D24, D36)
 
-Next free number: D100.
+Next free number: D101.

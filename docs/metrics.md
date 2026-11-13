@@ -18,9 +18,9 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 |---|---|---|---|
 | `speculaire_peer_fetches_total` | counter | `result` = `ok`\|`digest_mismatch`\|`busy`\|`timeout`\|`error` | Fetches from other agents; `timeout` includes a stalled one (D7, D24, D73) |
 | `speculaire_peer_hedges_total` | counter | — | Hedged extra fetches started |
-| `speculaire_peer_uploads_total` | counter | `result` = `served`\|`busy` | Requests served to other agents; `busy` answered `503` (D24) |
-| `speculaire_peer_uploads_in_flight` | gauge | — | Uploads now in progress |
-| `speculaire_peer_upload_bytes_total` | counter | — | Bytes served to other agents |
+| `speculaire_peer_uploads_total` | counter | `result` = `served`\|`busy` | Requests to the peer API that found what they named; `busy` answered `503`, at `peer.max_uploads` or while the agent stops (D24, D39, D100) |
+| `speculaire_peer_uploads_in_flight` | gauge | — | Blob bodies now being sent, which `peer.max_uploads` caps (D24) |
+| `speculaire_peer_upload_bytes_total` | counter | — | Blob bytes sent to other agents |
 | `speculaire_p2p_enabled` | gauge | — | 1 while the kubelet certificate and the cluster CA are loaded and the certificate has not expired, 0 otherwise (D16, D95) |
 | `speculaire_identity_expiry_timestamp_seconds` | gauge | — | When the kubelet certificate in use expires, as a Unix time; absent until one is loaded (D95) |
 

@@ -218,7 +218,15 @@ impl<I: Images> Relay<I> {
             && self.known.has(digest, pull.name)
             && self.cache.contains(digest)
         {
-            return from_content(&*self.cache, Kind::Manifest, digest, pull.head, None).await;
+            return from_content(
+                &*self.cache,
+                Kind::Manifest,
+                digest,
+                pull.head,
+                None,
+                metrics::local_bytes,
+            )
+            .await;
         }
         for source in &sources {
             if let Some(answer) = self.relay_manifest(source, pull, reference, &text).await {
@@ -320,7 +328,15 @@ impl<I: Images> Relay<I> {
             return Answer::Missing;
         }
         if self.cache.contains(digest) {
-            return from_content(&*self.cache, Kind::Blob, digest, pull.head, pull.range).await;
+            return from_content(
+                &*self.cache,
+                Kind::Blob,
+                digest,
+                pull.head,
+                pull.range,
+                metrics::local_bytes,
+            )
+            .await;
         }
         let digest_text = digest.to_string();
         let sources = match self

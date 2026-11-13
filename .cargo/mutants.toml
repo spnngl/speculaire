@@ -12,9 +12,12 @@ test_workspace = true
 # matching; a function made generic matches with or without its parameters. `just mutants-stale` lists the patterns
 # that match nothing.
 exclude_re = [
-  # The mirror stops with the process: without `stop`, the runtime drops its task a moment later, and no client
-  # outlives the agent in a test.
-  'serve\.rs:\d+:\d+: replace Mirror::stop with \(\)$',
+  # The mirror and the peer API stop with the process: without `stop`, the runtime drops their tasks a moment later,
+  # and no client outlives the agent in a test.
+  'serve\.rs:\d+:\d+: replace (Mirror|Peers)::stop with \(\)$',
+  # D39's steps 2 and 4 in the agent: no agent test can serve a blob, the node's content being the host's
+  # (docs/TODECIDE.md); `crates/mirror/src/peer/tests.rs` checks the 503s and the drain of `Uploads`.
+  'serve\.rs:\d+:\d+: replace shut_down with \(\)$',
   # `Default::default()` of a body is an empty body: the same bytes and headers.
   'serve\.rs:\d+:\d+: replace empty -> Body with Default::default\(\)$',
   # A leaked empty `Vec` is the same empty list of hints.

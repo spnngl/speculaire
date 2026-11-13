@@ -166,8 +166,8 @@ async fn an_agent_announces_to_every_member_and_keeps_both_maps_the_same() {
     let a = test.agent("node-a", &holdings, None);
     // The peer address is the local IP of the first stream, on 7481 (D36).
     let peer = SocketAddr::from(([127, 0, 0, 1], PEER_PORT));
+    assert_eq!(a.fixed_peer_address().await, Some(peer));
     test.wait(&digest(1), &[("node-a", peer)]).await;
-    assert_eq!(a.peer_address(), Some(peer));
     for member in ["cp-1", "cp-2"] {
         let connected = format!("speculaire_reflector_connected{{member=\"{member}\"}}");
         assert_eq!(test.metric(&connected).as_deref(), Some("1"));
@@ -212,9 +212,29 @@ async fn peer_address_overrides_the_address_found() {
     holdings.add(digest(1));
     let peer: SocketAddr = "[fd00::7]:9000".parse().unwrap();
     let a = test.agent("node-a", &holdings, Some(peer));
-    assert_eq!(a.peer_address(), Some(peer));
+    assert_eq!(a.fixed_peer_address().await, Some(peer));
     test.wait(&digest(1), &[("node-a", peer)]).await;
     a.stop().await;
+}
+
+#[tokio::test]
+async fn a_client_stopped_before_its_first_stream_fixes_no_peer_address() {
+    let test = Test::start(&[]).await;
+    // Nothing listens on port 1: no stream opens.
+    let config = Config {
+        host: "127.0.0.1".to_owned(),
+        port: 1,
+        peer: None,
+    };
+    let a = Client::spawn(
+        config,
+        credentials(&test.cluster, &test.dir, "node-a"),
+        Arc::new(Holdings::default()),
+    );
+    let fixed = a.fixed_peer_address();
+    a.stop().await;
+    let fixed = tokio::time::timeout(Duration::from_secs(5), fixed).await;
+    assert_eq!(fixed.unwrap(), None);
 }
 
 #[tokio::test]

@@ -17,6 +17,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
+use rustls::ServerConfig;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use speculaire_oci::reference::Digest;
@@ -45,21 +46,48 @@ pub async fn serve<P: Pulls>(
     pulls: Arc<P>,
     stop: impl Future<Output = ()>,
 ) {
+    listen(listener, move || tls.config(), pulls, stop).await;
+}
+
+/// What answers the requests of a listener: the pull API, or the peer API.
+pub(crate) trait Api: Send + Sync + 'static {
+    /// The response to `request`.
+    fn answer(&self, request: &Request<Incoming>) -> impl Future<Output = Response<Body>> + Send;
+}
+
+impl<P: Pulls> Api for P {
+    fn answer(&self, request: &Request<Incoming>) -> impl Future<Output = Response<Body>> + Send {
+        handle(self, request)
+    }
+}
+
+/// Serves `api` over HTTP/1.1 on `listener`, each connection with the TLS config `tls` gives then, until `stop`
+/// completes.
+pub(crate) async fn listen<A: Api>(
+    listener: TcpListener,
+    tls: impl Fn() -> Arc<ServerConfig>,
+    api: Arc<A>,
+    stop: impl Future<Output = ()>,
+) {
     tokio::pin!(stop);
     loop {
         tokio::select! {
             () = &mut stop => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
-                    let config = tls.config();
-                    let pulls = Arc::clone(&pulls);
+                    let acceptor = TlsAcceptor::from(tls());
+                    let api = Arc::clone(&api);
                     tokio::spawn(async move {
-                        connection(stream, TlsAcceptor::from(config), pulls).await;
+                        connection(stream, acceptor, api).await;
                     });
                 }
                 // A connection that was reset before it was accepted, or no file descriptor left: log and go on.
                 Err(err) => {
-                    warn!(error = %err, "the mirror could not accept a connection");
+                    warn!(
+                        address = ?listener.local_addr().ok(),
+                        error = %err,
+                        "could not accept a connection"
+                    );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             },
@@ -67,22 +95,22 @@ pub async fn serve<P: Pulls>(
     }
 }
 
-async fn connection<P: Pulls>(stream: TcpStream, acceptor: TlsAcceptor, pulls: Arc<P>) {
+async fn connection<A: Api>(stream: TcpStream, acceptor: TlsAcceptor, api: Arc<A>) {
     let Ok(accepted) = tokio::time::timeout(CLIENT_TIME, acceptor.accept(stream)).await else {
         debug!("a client did not finish the TLS handshake in time");
         return;
     };
     let tls = match accepted {
         Ok(tls) => tls,
-        // Most often a client without the local certificate: the handshake fails, which is the point.
+        // Most often a client without the expected certificate: the handshake fails, which is the point.
         Err(err) => {
             debug!(error = %err, "a client was refused");
             return;
         }
     };
     let service = service_fn(move |request: Request<Incoming>| {
-        let pulls = Arc::clone(&pulls);
-        async move { Ok::<_, Infallible>(handle(&*pulls, &request).await) }
+        let api = Arc::clone(&api);
+        async move { Ok::<_, Infallible>(api.answer(&request).await) }
     });
     let served = http1::Builder::new()
         .timer(TokioTimer::new())
@@ -183,11 +211,13 @@ pub(crate) fn manifest_response(
     response
 }
 
+/// The response that serves `blob`, or the span of it `range_header` asks for; `sent` counts the body's bytes.
 pub(crate) async fn blob_response(
     blob: Blob,
     digest: &Digest,
     head: bool,
     range_header: Option<&str>,
+    sent: fn(usize),
 ) -> Result<Response<Body>, Miss> {
     let size = blob.size();
     let ranged = if head {
@@ -234,7 +264,7 @@ pub(crate) async fn blob_response(
             .await
             .map_err(Miss::Failed)?;
         let frames = chunks
-            .inspect_ok(|chunk| metrics::local_bytes(chunk.len()))
+            .inspect_ok(move |chunk| sent(chunk.len()))
             .map_ok(Frame::data)
             .map_err(io::Error::other);
         *response.body_mut() = StreamBody::new(frames).boxed_unsync();
