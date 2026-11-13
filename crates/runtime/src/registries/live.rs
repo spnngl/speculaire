@@ -48,27 +48,42 @@ impl<T> Live<T> {
         self.state.load().watch.changed()
     }
 
-    /// Reads again by `read`, which returns the paths its result depends on, and the result. A read that fails keeps
-    /// the value held, if there is one, and watches the paths it returns with those already watched: a fix to either is
-    /// a change, the same failure is not.
+    /// Reads again by `read`, which returns the paths its result depends on, and the result, and adds the problems it
+    /// found to the list it is given; returns the problems. A read that names a path not stamped before it is read
+    /// again once it is, so that a write to the path during the read is a change (D93). A read that fails keeps the
+    /// value held, if there is one, and watches the paths it returns with those already watched: a fix to either is a
+    /// change, the same failure is not.
     ///
     /// # Errors
     ///
     /// When the read fails.
     pub(crate) fn reload(
         &self,
-        read: impl FnOnce() -> (Vec<PathBuf>, Result<T, Error>),
-    ) -> Result<(), Error> {
+        mut read: impl FnMut(&mut Vec<String>) -> (Vec<PathBuf>, Result<T, Error>),
+    ) -> Result<Vec<String>, Error> {
         let current = self.state.load();
-        let before = current.watch.again();
-        let (mut paths, value) = read();
+        let mut before = current.watch.again();
+        // Each turn watches more paths, and a read names only the paths its files name: the turns end once those stop
+        // naming new ones.
+        let (mut paths, value, problems) = loop {
+            let mut problems = Vec::new();
+            let (paths, value) = read(&mut problems);
+            if paths.iter().all(|path| before.stamped(path)) {
+                break (paths, value, problems);
+            }
+            let mut roots = before.roots().to_vec();
+            roots.extend(paths);
+            roots.sort_unstable();
+            roots.dedup();
+            before = Watch::new(roots);
+        };
         match value {
             Ok(value) => {
                 self.state.store(Arc::new(Loaded {
                     watch: before.follow(paths),
                     value: Ok(Arc::new(value)),
                 }));
-                Ok(())
+                Ok(problems)
             }
             Err(error) => {
                 paths.extend_from_slice(before.roots());
@@ -103,19 +118,19 @@ mod tests {
     fn nothing_is_read_until_a_read_works() {
         let live = Live::<u32>::new();
         assert!(matches!(live.get(), Err(Error::Config(_))));
-        assert!(live.reload(|| broken(Vec::new())).is_err());
+        assert!(live.reload(|_| broken(Vec::new())).is_err());
         assert!(matches!(live.get(), Err(Error::Config(why)) if why == "registry config: bad"));
-        live.reload(|| ok(1)).expect("a read");
+        live.reload(|_| ok(1)).expect("a read");
         assert_eq!(*live.get().expect("a value"), 1);
     }
 
     #[test]
     fn a_read_that_fails_keeps_the_value_held() {
         let live = Live::new();
-        live.reload(|| ok(1)).expect("a read");
-        assert!(live.reload(|| broken(Vec::new())).is_err());
+        live.reload(|_| ok(1)).expect("a read");
+        assert!(live.reload(|_| broken(Vec::new())).is_err());
         assert_eq!(*live.get().expect("a value"), 1);
-        live.reload(|| ok(2)).expect("a read");
+        live.reload(|_| ok(2)).expect("a read");
         assert_eq!(*live.get().expect("a value"), 2);
     }
 
@@ -125,18 +140,44 @@ mod tests {
         let file = dir.path().join("file");
         std::fs::write(&file, "a").expect("a file");
         let live = Live::new();
-        live.reload(|| (vec![dir.path().to_owned()], Ok(0)))
+        live.reload(|_| (vec![dir.path().to_owned()], Ok(0)))
             .expect("a read");
         assert!(!live.changed());
         // A write during the read: the read saw the old file, so the next look finds a change.
-        live.reload(|| {
+        live.reload(|_| {
             std::fs::write(&file, "ab").expect("a write");
             (vec![dir.path().to_owned()], Ok(1))
         })
         .expect("a read");
         assert!(live.changed());
-        live.reload(|| (vec![dir.path().to_owned()], Ok(2)))
+        live.reload(|_| (vec![dir.path().to_owned()], Ok(2)))
             .expect("a read");
+        assert!(!live.changed());
+    }
+
+    #[test]
+    fn a_write_during_the_read_that_first_names_a_path_is_read() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("file");
+        std::fs::write(&file, "a").expect("a file");
+        let live = Live::new();
+        let mut reads = 0;
+        let problems = live
+            .reload(|problems| {
+                let text = std::fs::read_to_string(&file).expect("the file");
+                problems.push(text.clone());
+                // Written once the first read has the file, before it ends.
+                if reads == 0 {
+                    std::fs::write(&file, "ab").expect("a write");
+                }
+                reads += 1;
+                (vec![file.clone()], Ok(text))
+            })
+            .expect("a read");
+        // Read again once stamped: the value is the file as written, and the problems are those of that read.
+        assert_eq!(reads, 2);
+        assert_eq!(*live.get().expect("a value"), "ab");
+        assert_eq!(problems, ["ab"]);
         assert!(!live.changed());
     }
 
@@ -146,9 +187,12 @@ mod tests {
         let new = tempfile::tempdir().expect("a temporary directory");
         for changed in [&held, &new] {
             let live = Live::new();
-            live.reload(|| (vec![held.path().to_owned()], Ok(1)))
+            live.reload(|_| (vec![held.path().to_owned()], Ok(1)))
                 .expect("a read");
-            assert!(live.reload(|| broken(vec![new.path().to_owned()])).is_err());
+            assert!(
+                live.reload(|_| broken(vec![new.path().to_owned()]))
+                    .is_err()
+            );
             // The failure is not a change: the next poll says nothing more.
             assert!(!live.changed());
             let file = changed.path().join("file");

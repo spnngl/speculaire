@@ -136,8 +136,7 @@ impl Registries for CrioRegistries {
     }
 
     fn reload(&self) -> Result<Reloaded, Error> {
-        let mut problems = Vec::new();
-        self.live.reload(|| self.read(&mut problems))?;
+        let problems = self.live.reload(|problems| self.read(problems))?;
         Ok(Reloaded { problems })
     }
 }

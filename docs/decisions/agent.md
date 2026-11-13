@@ -278,13 +278,14 @@ The agent process on a node: its settings, and how it installs into and leaves c
 
 - **Decision:**
   - **Stamp:** for each watched path, `stat` through symlinks gives its modification time, length, device and inode; a directory has its own and one for each entry down to four levels below (D91); a path that cannot be looked at has none. `speculaire_runtime::watch::Watch` holds them, for the agent's config and the registry config alike.
-  - **Taken before each read:** at startup, on SIGHUP and before a poll's read. A poll reads again when a stamp differs, or a path appeared or went; SIGHUP reads unconditionally (D30). A write during a read differs from the stamp taken before it, so the next poll reads again.
+  - **Taken before each read:** at startup, on SIGHUP and before a poll's read. A poll reads again when a stamp differs, or a path appeared or went; SIGHUP reads unconditionally (D30). A write during a read differs from the stamp taken before it, so the next poll reads again. A registry config read that names a path without a stamp, as the first read names all of them, is read again once it has one.
   - **A read that fails** keeps the stamps taken before it, and the registry config watches the paths it reached with those of the snapshot held: the same bad file is no change and is reported once, a fix to either is one (D91, D92).
 - **Because:**
   - Linux dates a write with its coarse clock (`ktime_get_coarse_real_ts64`), which can be behind the agent's `SystemTime::now()`: D30's `mtime >= last_check` missed a write made just after a poll began, and the agent's tests needed a sleep for it (#90). A stamp compared with a stamp has no clock to race.
   - Length and inode see a file replaced with its modification time kept (`cp -p`, `rsync -t`, a rename over it), which D30 left to SIGHUP.
 - **Cost:**
   - A write in place that keeps the length and the modification time, as two writes within one clock tick or `touch -r` can, is read at the next change or on SIGHUP.
+  - The registry config is read twice at startup, and whenever a read names a new path.
   - A poll holds a stamp per path below each root, where D91 kept the newest time; a node with very many `hosts.toml` files pays it in memory.
   - The mirror's own certificate files are still compared by modification time (D85's reload, `crates/mirror/src/tls.rs`).
 - **Measured (arm64, local runs):** both agent tests that write a file after a read, with the file's modification time set back to before the write as a coarse clock dates it, failed on the previous code (timeout after 10 s) and pass now, without a sleep. Linux, `just dev`: `cargo nextest run --stress-count 200` of those two tests passed 200 of 200.

@@ -175,8 +175,7 @@ impl Registries for ContainerdRegistries {
     }
 
     fn reload(&self) -> Result<Reloaded, Error> {
-        let mut problems = Vec::new();
-        self.live.reload(|| read(&self.config, &mut problems))?;
+        let problems = self.live.reload(|problems| read(&self.config, problems))?;
         Ok(Reloaded { problems })
     }
 }
