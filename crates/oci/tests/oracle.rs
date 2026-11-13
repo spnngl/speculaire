@@ -386,7 +386,7 @@ fn platforms_for_matching() -> Vec<Plat> {
     let mut platforms = Vec::new();
     for os in ["linux", "windows", "Linux"] {
         for (arch, variants) in [
-            ("amd64", &["", "v1", "v2", "v3", "v4"][..]),
+            ("amd64", &["", "v1", "v2", "v3", "v4", "vv3"][..]),
             ("386", &[""][..]),
             (
                 "arm64",
@@ -394,7 +394,7 @@ fn platforms_for_matching() -> Vec<Plat> {
                     "", "v8", "v8.1", "v8.9", "v9", "v9.2", "v9.7", "v8.10", "v10",
                 ][..],
             ),
-            ("arm", &["", "v5", "v6", "v7", "v8"][..]),
+            ("arm", &["", "v5", "v6", "v7", "v8", "vv7"][..]),
             ("x86_64", &[""][..]),
             ("aarch64", &["8"][..]),
             ("ppc64le", &[""][..]),
@@ -457,7 +457,8 @@ fn platforms_agree_with_containerd() {
     for node in &candidates {
         let numeric_variant = node
             .variant
-            .trim_start_matches('v')
+            .strip_prefix('v')
+            .unwrap_or(&node.variant)
             .parse::<i64>()
             .is_ok_and(|n| n > 1000);
         if node.os.eq_ignore_ascii_case("windows") || numeric_variant {
