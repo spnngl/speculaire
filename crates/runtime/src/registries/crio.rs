@@ -67,11 +67,6 @@ impl CrioRegistries {
     fn read(&self, problems: &mut Vec<String>) -> (Vec<PathBuf>, Result<Snapshot, Error>) {
         let mut paths = registries::watched(&self.context);
         paths.extend(certs::watched(&self.context));
-        paths.extend(
-            auth::auth_file_paths(&self.context)
-                .into_iter()
-                .map(|auth| auth.path),
-        );
         let mut snapshot = || -> Result<Snapshot, Error> {
             let text = crio::config(&self.socket).map_err(|e| Error::Config(chain(&e)))?;
             let auth_file = crio::global_auth_file(&text).map_err(|e| Error::Config(chain(&e)))?;
@@ -79,6 +74,11 @@ impl CrioRegistries {
                 auth_file,
                 ..self.context.clone()
             };
+            paths.extend(
+                auth::auth_file_paths(&context)
+                    .into_iter()
+                    .map(|auth| auth.path),
+            );
             let config = registries::load_except(&context, Some(&self.skip))
                 .map_err(|e| Error::Config(chain(&e)))?;
             let (auth, unusable) = auth::Files::load(&context);
@@ -91,7 +91,8 @@ impl CrioRegistries {
             let tls = read_trust(&context, problems);
             Ok(Snapshot { config, auth, tls })
         };
-        (paths, snapshot())
+        let snapshot = snapshot();
+        (paths, snapshot)
     }
 }
 
