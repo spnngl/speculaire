@@ -64,7 +64,7 @@ The trust boundaries and the risks we accept are in [`docs/security.md`](docs/se
    - If a peer dies mid-copy, or sends nothing for `peer.stall_timeout`, the agent resumes from the next peer with `Range` (D73).
    - A `503` from a busy peer moves the agent to the next peer at once (D24).
 4. Any miss, timeout or unreachable reflector makes the agent *fall through*.
-5. containerd commits the blob and emits `/content/create`. The agent announces the new digest to every reflector.
+5. containerd commits the blob and emits `/content/create` (on CRI-O, the blob cache keeps it). The agent announces the new digest to every reflector (D99).
 
 On CRI-O, the mirror also fetches what peers lack from upstream, and keeps each blob it serves in the *blob cache* once its digest matches; it announces what it keeps (D66, D67).
 
@@ -117,11 +117,11 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/mirror` | The local mirror: the pull half of the distribution API over TLS 1.3 with a client certificate, from the runtime's `Content`, or the relay and the *blob cache* where the runtime keeps none (D5, D66, D67, D85, D88, D90); later peers |
 | `crates/registry` | The upstream client the relay fetches with: HTTP/1.1 and TLS 1.2 or 1.3 on hyper, the Bearer challenge, Basic, identity token, redirects (D88); it takes its endpoints and credentials from the runtime's `Registries` (D89) |
 | `crates/oci` | Image references and platforms as containerd parses them (D81), and the children of a manifest or index (D88); later referrers and media types, on `oci-spec` |
-| `crates/runtime` | containerd and CRI-O behind four traits a `Node` hands out (D90): `Wiring` (certificates, `hosts.toml`, CRI-O's drop-in; D82, D83), `Settings` (required plugins, preflight; D84, D86), `Registries` (the registry config the relay fetches with, held as a snapshot that a reload swaps, D88, D89, D91), `Content` (containerd's directory + gRPC); which one runs on the node (D64), the CRI calls; later image events, in-memory copy of the image store (planned) |
+| `crates/runtime` | containerd and CRI-O behind four traits a `Node` hands out (D90): `Wiring` (certificates, `hosts.toml`, CRI-O's drop-in; D82, D83), `Settings` (required plugins, preflight; D84, D86), `Registries` (the registry config the relay fetches with, held as a snapshot that a reload swaps, D88, D89, D91), `Content` (containerd's directory + gRPC), and a fifth, `Inventory` (what peers can fetch, D99); which one runs on the node (D64), the CRI calls; later image events, in-memory copy of the image store (planned) |
 | `crates/configure` | `configure`, `unconfigure`, the preflight and the node half of `check-config`, as thin functions over the runtime's `Wiring` and `Settings` traits; it names no runtime (D82, D83, D86, D90) |
 | `crates/fake-runtime` | Test support: a fake containerd on a socket, answering the CRI `Version`, `ListImages` and introspection `Plugins` (D87), and CRI-O's `GET /config` (D89, D90) |
 | `crates/pki` | the mirror's local CA and certificates (D14, D82); later kubelet certificate loading and rotation, rustls verifiers (D16) |
-| `crates/reflect` | Protobuf, reflector server, agent client, membership (D2) (planned) |
+| `crates/reflect` | Protobuf, the reflector's server and index (D97), and the agent's client: `Members`, one `Announce` stream per member, hedged `Lookup` (D2, D98) |
 | `crates/verify` | Artifact discovery and *artifact store*, sigstore glue, policy, SBOM checks, verdict cache (planned) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data, a workspace of its own, run by `just fuzz <target>` and nightly; `just check` replays their seeds on stable (D27). `config` takes raw bytes and `config_values` a config file written from the keys (D75) |

@@ -7,12 +7,15 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use futures_util::future::BoxFuture;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::content::{Blob, Content, Error};
+use speculaire_runtime::inventory::{Change, Inventory, Update};
 use tokio::io::AsyncWriteExt as _;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
 
 use crate::metrics;
@@ -43,7 +46,12 @@ pub struct Cache {
     max_size: AtomicU64,
     state: Mutex<State>,
     parts: AtomicU64,
+    /// Each blob kept and each blob gone, sent while the state is locked, so in the order the state changed.
+    changes: broadcast::Sender<Change>,
 }
+
+/// Changes a follower of the cache may lag behind before it lists the cache again.
+const BACKLOG: usize = 1024;
 
 /// A blob being written: a file in `tmp/` that [`Writer::commit`] moves into the cache, and that is deleted otherwise.
 pub struct Writer {
@@ -107,6 +115,7 @@ impl Cache {
             max_size: AtomicU64::new(max_size),
             state: Mutex::new(state),
             parts: AtomicU64::new(0),
+            changes: broadcast::channel(BACKLOG).0,
         };
         cache.report();
         Ok(cache)
@@ -219,6 +228,8 @@ impl Cache {
             if let Some(entry) = state.entries.remove(&digest) {
                 state.total -= entry.size;
                 metrics::cache_eviction();
+                // Nobody following is no error.
+                let _ = self.changes.send(Change::Removed(digest.clone()));
                 evicted.push(digest);
             }
         }
@@ -266,6 +277,8 @@ impl Writer {
             },
         ) {
             state.total -= old.size;
+        } else {
+            let _ = cache.changes.send(Change::Added(digest.clone()));
         }
         state.total += self.written;
         drop(state);
@@ -333,9 +346,42 @@ impl Cache {
         let mut state = self.state();
         if let Some(entry) = state.entries.remove(digest) {
             state.total -= entry.size;
+            let _ = self.changes.send(Change::Removed(digest.clone()));
         }
         drop(state);
         self.report();
+    }
+}
+
+/// What the node serves on CRI-O: each blob kept, until it is evicted (D67).
+impl Inventory for Cache {
+    fn follow(self: Arc<Self>, updates: mpsc::Sender<Update>) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            // Subscribed before the listing: a change made meanwhile comes again after it, which changes nothing.
+            let mut changes = self.changes.subscribe();
+            loop {
+                let listing = self.digests().into_iter().collect();
+                if updates.send(Update::Listing(listing)).await.is_err() {
+                    return;
+                }
+                loop {
+                    let change = tokio::select! {
+                        () = updates.closed() => return,
+                        change = changes.recv() => change,
+                    };
+                    match change {
+                        Ok(change) => {
+                            if updates.send(Update::Change(change)).await.is_err() {
+                                return;
+                            }
+                        }
+                        // Changes were missed: list again.
+                        Err(broadcast::error::RecvError::Lagged(_)) => break,
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        })
     }
 }
 

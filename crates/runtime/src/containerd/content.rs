@@ -20,19 +20,6 @@ impl Containerd {
             .join(digest.encoded())
     }
 
-    /// A channel to containerd, made once and kept; `None` while there is no containerd to connect to.
-    async fn channel(&self) -> Option<Channel> {
-        let mut held = self.channel.lock().await;
-        if held.is_none() {
-            *held = containerd_client::connect(&self.socket).await.ok();
-        }
-        held.clone()
-    }
-
-    async fn forget_channel(&self) {
-        *self.channel.lock().await = None;
-    }
-
     /// The size of the blob if containerd's content service has it.
     async fn info(&self, digest: &Digest) -> Result<Option<(Channel, u64)>, Error> {
         let Some(channel) = self.channel().await else {

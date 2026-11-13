@@ -153,7 +153,7 @@ impl<I: Images> Relay<I> {
 
     /// The blob cache.
     #[must_use]
-    pub fn cache(&self) -> &Cache {
+    pub const fn cache(&self) -> &Arc<Cache> {
         &self.cache
     }
 

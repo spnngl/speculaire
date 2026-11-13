@@ -56,5 +56,6 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
     counter!(CONFIG_RELOAD_FAILURES).absolute(0);
     gauge!(P2P_ENABLED).set(0);
     speculaire_mirror::metrics::describe();
+    speculaire_reflect::metrics::describe_client();
     Ok(handle)
 }

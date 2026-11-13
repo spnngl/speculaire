@@ -319,11 +319,26 @@ impl Credentials {
     /// Never: aws-lc-rs supports TLS 1.3.
     #[must_use]
     pub fn client(self: &Arc<Self>, node: &str) -> ClientConfig {
+        self.client_of(Some(node.to_owned()))
+    }
+
+    /// The client side of a link to any node of the cluster, such as a load balancer's backend: the caller reads which
+    /// node answered from the handshake (D2).
+    ///
+    /// # Panics
+    ///
+    /// Never: aws-lc-rs supports TLS 1.3.
+    #[must_use]
+    pub fn client_any(self: &Arc<Self>) -> ClientConfig {
+        self.client_of(None)
+    }
+
+    fn client_of(self: &Arc<Self>, node: Option<String>) -> ClientConfig {
         ClientConfig::builder_with_provider(Arc::clone(&self.provider))
             .with_protocol_versions(&[&rustls::version::TLS13])
             .expect("aws-lc-rs supports TLS 1.3")
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(self.verifier(Some(node.to_owned()))))
+            .with_custom_certificate_verifier(Arc::new(self.verifier(node)))
             .with_client_cert_resolver(Arc::<Self>::clone(self))
     }
 
@@ -733,6 +748,18 @@ mod tests {
             CertificateError::UnknownIssuer.into(),
             "the server refuses"
         );
+    }
+
+    #[test]
+    fn a_client_of_any_node_accepts_every_node_of_the_cluster_and_no_stranger() {
+        let cluster = Cluster::new("kubernetes");
+        let a = Node::new(&cluster, &cluster.kubelet("a"));
+        let b = Node::new(&cluster, &cluster.kubelet("b"));
+        handshake(b.credentials.server(), a.credentials.client_any()).unwrap();
+        let stranger = Cluster::new("other");
+        let stranger = Node::new(&stranger, &stranger.kubelet("b"));
+        let err = handshake(stranger.credentials.server(), a.credentials.client_any()).unwrap_err();
+        assert_eq!(err, CertificateError::UnknownIssuer.into());
     }
 
     #[test]

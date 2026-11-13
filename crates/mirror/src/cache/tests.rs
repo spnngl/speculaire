@@ -182,3 +182,58 @@ async fn the_order_of_service_survives_a_restart() {
     let cache = Cache::open(dir.path(), 25).unwrap();
     assert_eq!(cache.evict(&HashSet::new()), [digest(2)]);
 }
+
+#[tokio::test]
+async fn a_follower_gets_the_blobs_kept_then_each_kept_and_evicted_and_a_listing_after_it_lags() {
+    use std::sync::Arc;
+
+    use speculaire_runtime::inventory::{Change, Inventory as _, Update};
+    use tokio::sync::mpsc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(Cache::open(dir.path(), 10).unwrap());
+    keep(&cache, &digest(1), b"12345").await;
+    let (sender, mut updates) = mpsc::channel(1);
+    let following = tokio::spawn(Arc::clone(&cache).follow(sender));
+    assert_eq!(
+        updates.recv().await,
+        Some(Update::Listing(HashSet::from([digest(1)])))
+    );
+    keep(&cache, &digest(2), b"12345").await;
+    // Kept again: no change.
+    keep(&cache, &digest(2), b"12345").await;
+    keep(&cache, &digest(3), b"12345").await;
+    assert_eq!(cache.evict(&HashSet::new()), [digest(1)]);
+    for change in [
+        Change::Added(digest(2)),
+        Change::Added(digest(3)),
+        Change::Removed(digest(1)),
+    ] {
+        assert_eq!(updates.recv().await, Some(Update::Change(change)));
+    }
+    // A blob deleted behind the cache's back is gone too.
+    std::fs::remove_file(cache.path(&digest(2))).unwrap();
+    assert!(cache.open(&digest(2)).await.unwrap().is_none());
+    assert_eq!(
+        updates.recv().await,
+        Some(Update::Change(Change::Removed(digest(2))))
+    );
+    // More changes than the backlog, while the follower is blocked on its full channel: it lists again.
+    cache.set_max_size(u64::MAX);
+    for n in 0..u16::try_from(2 * super::BACKLOG).unwrap() {
+        let many = Digest::parse(&format!("sha256:{}", format!("{n:04x}").repeat(16))).unwrap();
+        keep(&cache, &many, b"x").await;
+    }
+    let listing = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(Update::Listing(listing)) = updates.recv().await {
+                break listing;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(listing, cache.digests().into_iter().collect());
+    drop(updates);
+    following.await.unwrap();
+}

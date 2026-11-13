@@ -2049,6 +2049,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "containerd-client",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",

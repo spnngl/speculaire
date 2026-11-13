@@ -1,4 +1,4 @@
-//! The reflector's metrics (D34); `docs/metrics.md` lists them.
+//! The metrics of the reflector and of its client (D34); `docs/metrics.md` lists them.
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge};
 
@@ -12,6 +12,13 @@ pub const PAIRS: &str = "speculaire_reflector_pairs";
 pub const LOOKUP: &str = "speculaire_reflector_lookup_seconds";
 /// `speculaire_reflector_announce_rejected_total`: `Announce` streams refused, by `reason`.
 pub const REJECTED: &str = "speculaire_reflector_announce_rejected_total";
+
+/// `speculaire_reflector_connected`: 1 while the `Announce` stream to the `member` is up.
+pub const CONNECTED: &str = "speculaire_reflector_connected";
+/// `speculaire_reflector_reconnects_total`: streams opened again to the `member` (D33).
+pub const RECONNECTS: &str = "speculaire_reflector_reconnects_total";
+/// `speculaire_lookup_seconds`: the time a `Lookup` takes for the agent, hedge included.
+pub const CLIENT_LOOKUP: &str = "speculaire_lookup_seconds";
 
 /// Why the reflector ended an `Announce` stream; `docs/operations.md` explains each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +78,17 @@ pub fn describe() {
     for reason in Reason::ALL {
         counter!(REJECTED, "reason" => reason.label()).absolute(0);
     }
+}
+
+/// Describes the client's metrics. Its series are by member, so they appear with the first `Members` answer.
+pub fn describe_client() {
+    describe_gauge!(CONNECTED, "1 while the Announce stream to the member is up");
+    describe_counter!(RECONNECTS, "Announce streams opened again to the member");
+    describe_histogram!(
+        CLIENT_LOOKUP,
+        "Time a Lookup takes for the agent, hedge included"
+    );
+    drop(metrics::histogram!(CLIENT_LOOKUP));
 }
 
 /// Counts a refused stream.

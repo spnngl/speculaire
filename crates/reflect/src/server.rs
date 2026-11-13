@@ -41,7 +41,7 @@ pub const LOOKUP_PEERS: usize = 8;
 pub const SNAPSHOT_CHUNK: usize = 10_000;
 
 /// A reflector, as `reflector.members` lists it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Member {
     /// The node name its kubelet certificate holds.
     pub node: String,

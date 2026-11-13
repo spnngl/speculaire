@@ -1,6 +1,6 @@
 //! The reflector: which agents hold which digests, as each announces for itself over mutual TLS (D2, D16, D97).
 //!
-//! An agent with `role = "reflector"` serves its API, [`Reflector`]; every agent calls it with [`connect`].
+//! An agent with `role = "reflector"` serves its API, [`Reflector`]; every agent calls it with its [`client::Client`].
 
 use std::io;
 use std::net::SocketAddr;
@@ -13,6 +13,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tonic::transport::{Channel, Endpoint};
 
+pub mod client;
 pub mod message;
 pub mod metrics;
 pub use server::{
