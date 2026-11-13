@@ -1,0 +1,47 @@
+[package]
+name = "speculaire-reflect"
+description = "The reflector: which agents hold which digests, over mutual TLS with node identities"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+fastrand.workspace = true
+futures-util.workspace = true
+hyper-util.workspace = true
+metrics.workspace = true
+prost.workspace = true
+roaring.workspace = true
+rustls.workspace = true
+speculaire-oci.workspace = true
+speculaire-pki.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+
+[dev-dependencies]
+metrics-exporter-prometheus.workspace = true
+speculaire-pki = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+
+# D97: the index's lock in the tests of `just shuttle`.
+[target.'cfg(shuttle)'.dev-dependencies]
+shuttle.workspace = true
+
+[lints]
+workspace = true
+
+# The code `build.rs` generates names `tonic_prost`, which cargo-shear does not read.
+[package.metadata.cargo-shear]
+ignored = ["tonic-prost"]

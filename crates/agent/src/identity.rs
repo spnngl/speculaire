@@ -53,6 +53,11 @@ impl Identity {
         self.show();
     }
 
+    /// The credentials of peer links, which follow the files.
+    pub(crate) const fn credentials(&self) -> &Arc<Credentials> {
+        &self.credentials
+    }
+
     /// Sets the metrics of the identity in use: its expiry, and whether peer links can be made.
     fn show(&self) {
         if let Some(identity) = self.credentials.identity() {
@@ -67,7 +72,7 @@ impl Identity {
     }
 
     /// Whether peer links can be made at `now`: the identity and the CA are loaded, and the identity has not expired.
-    fn enabled(&self, now: SystemTime) -> bool {
+    pub(crate) fn enabled(&self, now: SystemTime) -> bool {
         self.credentials.is_ready()
             && self
                 .credentials

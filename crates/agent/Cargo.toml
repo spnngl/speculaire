@@ -22,6 +22,7 @@ serde_path_to_error.workspace = true
 speculaire-configure.workspace = true
 speculaire-mirror.workspace = true
 speculaire-pki.workspace = true
+speculaire-reflect.workspace = true
 speculaire-runtime.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

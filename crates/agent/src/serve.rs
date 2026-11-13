@@ -9,6 +9,7 @@ use speculaire_mirror::Local;
 use speculaire_mirror::cache::Cache;
 use speculaire_mirror::relay::{CriImages, Relay};
 use speculaire_mirror::tls::Tls;
+use speculaire_reflect::{Member, Reflector, Settings};
 use speculaire_runtime::registries::Registries;
 use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode};
@@ -16,7 +17,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
 
-use crate::config::{self, Config};
+use crate::config::{self, Config, Role};
 use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
@@ -76,7 +77,11 @@ async fn serve(
     let mut terminate = signal(SignalKind::terminate()).context("handling SIGTERM")?;
     let mut interrupt = signal(SignalKind::interrupt()).context("handling SIGINT")?;
     let metrics = telemetry::install()?;
-    let status = Arc::new(Status::new(metrics.clone()));
+    let role = *config.role.get();
+    if role == Role::Reflector {
+        speculaire_reflect::metrics::describe();
+    }
+    let status = Arc::new(Status::new(metrics.clone(), role == Role::Reflector));
     let address = *config.metrics.address.get();
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -105,6 +110,8 @@ async fn serve(
     reload_registries(&*registries);
     let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
     status.mirror_listening();
+    let mut reflector = None;
+    open_reflector(&config, &identity, &mut reflector, &status).await;
     systemd::watchdog();
     systemd::ready();
 
@@ -121,6 +128,7 @@ async fn serve(
                 mirror.apply(&config);
                 reload_registries(&*registries);
                 identity.reload();
+                open_reflector(&config, &identity, &mut reflector, &status).await;
             }
             _ = poll.tick() => {
                 if watch.changed() {
@@ -132,6 +140,7 @@ async fn serve(
                     reload_registries(&*registries);
                 }
                 identity.poll();
+                open_reflector(&config, &identity, &mut reflector, &status).await;
             }
         }
         if config.config.poll_interval.get() != period {
@@ -140,10 +149,14 @@ async fn serve(
         }
     }
 
-    // D39, step 1. Steps 2 to 6 arrive with peers, reflector, cache and gate.
+    // D39, step 1, and a stopping reflector closes the streams of its agents. Steps 2 to 6 arrive with peers, the
+    // reflector client, cache and gate.
     systemd::stopping();
     status.stop();
     info!("stopping");
+    if let Some(reflector) = reflector {
+        reflector.stop().await;
+    }
     mirror.stop().await;
     // An error means the server already ended; its result says why.
     let _ = stop.send(());
@@ -289,6 +302,48 @@ async fn start_mirror(
     };
     info!(%address, "mirror open");
     Ok(Mirror { stop, task, relay })
+}
+
+/// Opens the reflector on `reflector.listen`, on a node whose role is reflector, once its identity allows peer links
+/// (D2, D16); `/readyz` waits for it. A listener that cannot open is logged, and tried again at the next poll.
+async fn open_reflector(
+    config: &Config,
+    identity: &Identity,
+    reflector: &mut Option<Reflector>,
+    status: &Status,
+) {
+    if *config.role.get() != Role::Reflector
+        || reflector.is_some()
+        || !identity.enabled(SystemTime::now())
+    {
+        return;
+    }
+    let address = *config.reflector.listen.get();
+    let members = config
+        .reflector
+        .members
+        .get()
+        .iter()
+        .map(|member| Member {
+            node: member.node.as_str().to_owned(),
+            address: member.address,
+        })
+        .collect();
+    let opened = match tokio::net::TcpListener::bind(address).await {
+        Ok(listener) => Reflector::spawn(listener, identity.credentials(), Settings::new(members)),
+        Err(err) => Err(err),
+    };
+    match opened {
+        Ok(opened) => {
+            *reflector = Some(opened);
+            status.reflector_listening();
+        }
+        Err(err) => error!(
+            %address,
+            error = %err,
+            "cannot listen on reflector.listen; trying again at the next poll"
+        ),
+    }
 }
 
 /// The config polls (D30): the first one period from now.

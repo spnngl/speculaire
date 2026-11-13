@@ -594,6 +594,11 @@ fuzz-all seconds="60":
         just fuzz "$target" {{ seconds }}
     done
 
+# The reflector's index under Shuttle's randomised schedules (D97), in its own target directory: `--cfg shuttle`
+# rebuilds every crate.
+shuttle:
+    RUSTFLAGS='--cfg shuttle' CARGO_TARGET_DIR=target/shuttle cargo test -p speculaire-reflect --lib --locked schedules
+
 # Replay every target's seeds, their truncations and bit flips on stable (part of `just check`).
 fuzz-smoke:
     cargo test --manifest-path fuzz/Cargo.toml --lib --locked

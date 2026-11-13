@@ -20,9 +20,12 @@ speculaire-agent = { path = "../crates/agent" }
 speculaire-mirror = { path = "../crates/mirror" }
 speculaire-oci = { path = "../crates/oci" }
 speculaire-pki = { path = "../crates/pki" }
+speculaire-reflect = { path = "../crates/reflect" }
 speculaire-registry = { path = "../crates/registry" }
 speculaire-registry-config = { path = "../crates/registry-config" }
 speculaire-runtime = { path = "../crates/runtime" }
+# `reflect` decodes protobuf; the same version as the workspace's.
+prost = "0.14.5"
 # `token_answer` reads the token it parsed; the same version as the workspace's.
 secrecy = "0.10.3"
 # `containerd_config` reads files: it writes the input to a temporary directory.
@@ -163,6 +166,13 @@ bench = false
 [[bin]]
 name = "node_subject"
 path = "fuzz_targets/node_subject.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reflect"
+path = "fuzz_targets/reflect.rs"
 test = false
 doc = false
 bench = false

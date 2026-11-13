@@ -450,6 +450,13 @@ user-login = "kennykerr"
 user-name = "Kenny Kerr"
 
 [[publisher.windows-sys]]
+version = "0.59.0"
+when = "2024-07-30"
+user-id = 64539
+user-login = "kennykerr"
+user-name = "Kenny Kerr"
+
+[[publisher.windows-sys]]
 version = "0.61.2"
 when = "2025-10-06"
 user-id = 64539
@@ -760,6 +767,12 @@ criteria = "safe-to-deploy"
 version = "2.2.1"
 notes = "No unsafe usage or ambient capabilities"
 
+[[audits.embark-studios.audits.tap]]
+who = "Johan Andersson <opensource@embark-studios.com>"
+criteria = "safe-to-deploy"
+version = "1.0.1"
+notes = "No unsafe usage or ambient capabilities"
+
 [[audits.embark-studios.audits.valuable]]
 who = "Johan Andersson <opensource@embark-studios.com>"
 criteria = "safe-to-deploy"
@@ -770,6 +783,13 @@ notes = "No unsafe usage or ambient capabilities, sane build script"
 who = "amarjotgill <amarjotgill@google.com>"
 criteria = "safe-to-deploy"
 version = "0.22.1"
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.byteorder]]
+who = "danakj <danakj@chromium.org>"
+criteria = "safe-to-deploy"
+version = "1.5.0"
+notes = "Unsafe review in https://crrev.com/c/5838022"
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
 
 [[audits.google.audits.core-foundation-sys]]
@@ -824,6 +844,12 @@ and there were no hits.
 https://source.chromium.org/chromium/chromium/src/+/28841c33c77833cc30b286f9ae24c97e7a8f4057
 """
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.hex]]
+who = "ChromeOS"
+criteria = "safe-to-run"
+version = "0.4.3"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
 
 [[audits.google.audits.httpdate]]
 who = "George Burgess IV <gbiv@google.com>"
@@ -907,6 +933,23 @@ notes = """
 For more detailed unsafe review notes please see https://crrev.com/c/6362797
 """
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.rand_pcg]]
+who = "danakj@chromium.org"
+criteria = "safe-to-run"
+version = "0.3.1"
+notes = """
+Reviewed in https://crrev.com/c/5171063
+
+Previously reviewed during security review and the audit is grandparented in.
+"""
+aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.scopeguard]]
+who = "Android Legacy"
+criteria = "safe-to-run"
+version = "1.1.0"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
 
 [[audits.google.audits.strsim]]
 who = "danakj@chromium.org"
@@ -1500,6 +1543,13 @@ criteria = "safe-to-deploy"
 delta = "5.2.0 -> 5.3.0"
 aggregated-from = "https://raw.githubusercontent.com/zcash/wallet/main/supply-chain/audits.toml"
 
+[[audits.zcash.audits.scopeguard]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.1.0 -> 1.2.0"
+notes = "Only change to an `unsafe` block is to replace a `mem::forget` with `ManuallyDrop`."
+aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
+
 [[audits.zcash.audits.strum]]
 who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-deploy"
@@ -1539,3 +1589,10 @@ criteria = "safe-to-deploy"
 delta = "0.2.0 -> 0.2.1"
 notes = "No code changes at all."
 aggregated-from = "https://raw.githubusercontent.com/zcash/librustzcash/main/supply-chain/audits.toml"
+
+[[audits.zcash.audits.wyz]]
+who = "Jack Grigg <jack@z.cash>"
+criteria = "safe-to-deploy"
+delta = "0.5.0 -> 0.5.1"
+notes = "Only change to unsafe code is to extract a drop impl into a method. I note however that most of the changes in the published 0.5.1 are not present in the v0.5.1 tag on the GitHub repository."
+aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"

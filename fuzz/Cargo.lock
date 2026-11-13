@@ -198,6 +198,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -445,6 +457,26 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "fearless_simd"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "629c9d6b6f30b5604089e0980f4d924a013aacb1654a6cdf5d3d852224f68651"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "fearless_simd_macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e91d94c6885390b81782d7ee60fd6583b33907333a8b340de25ccf468353315"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -841,6 +873,12 @@ dependencies = [
  "arbitrary",
  "cc",
 ]
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1364,6 +1402,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "roaring"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eccfaa25083dbde9444486adda410c9cd23565d7f54a2df916c0bdf4bee44931"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+ "fearless_simd",
+ "fearless_simd_macros",
+]
+
+[[package]]
 name = "rusticata-macros"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1628,6 +1678,7 @@ dependencies = [
  "speculaire-configure",
  "speculaire-mirror",
  "speculaire-pki",
+ "speculaire-reflect",
  "speculaire-runtime",
  "thiserror",
  "tokio",
@@ -1649,11 +1700,13 @@ name = "speculaire-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "prost",
  "secrecy",
  "speculaire-agent",
  "speculaire-mirror",
  "speculaire-oci",
  "speculaire-pki",
+ "speculaire-reflect",
  "speculaire-registry",
  "speculaire-registry-config",
  "speculaire-runtime",
@@ -1709,6 +1762,30 @@ dependencies = [
  "thiserror",
  "time",
  "x509-parser",
+]
+
+[[package]]
+name = "speculaire-reflect"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "futures-util",
+ "hyper-util",
+ "metrics",
+ "prost",
+ "roaring",
+ "rustls",
+ "speculaire-oci",
+ "speculaire-pki",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -2035,6 +2112,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2cdfc673aabd30fe8fee92e65837b644c37c5d47f0f97ae6d5e0f1237d15e1b"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "h2",
@@ -2046,6 +2124,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
+ "socket2",
  "sync_wrapper",
  "tokio",
  "tokio-stream",

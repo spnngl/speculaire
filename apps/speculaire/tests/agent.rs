@@ -276,12 +276,13 @@ fn mirror_certificates() -> &'static Path {
     })
 }
 
-/// Writes a config listening on `port` and, for the mirror, on `mirror_port`, on `node`; `extra` holds further tables.
+/// Writes a config listening on `port` and, for the mirror, on `mirror_port`, on `node`; `extra`, first, holds top-level
+/// keys and further tables.
 fn write_config(path: &Path, port: u16, mirror_port: u16, node: &Node, extra: &str) {
     std::fs::write(
         path,
         format!(
-            "[metrics]\naddress = \"127.0.0.1:{port}\"\n{extra}\n{}\n[mirror]\naddress = \"127.0.0.1:{mirror_port}\"\ndirectory = \"{}\"\n",
+            "{extra}\n[metrics]\naddress = \"127.0.0.1:{port}\"\n{}\n[mirror]\naddress = \"127.0.0.1:{mirror_port}\"\ndirectory = \"{}\"\n",
             node.table(),
             mirror_certificates().display()
         ),
@@ -407,7 +408,7 @@ fn an_invalid_reload_keeps_the_previous_config() {
     agent.rewrite("[gate]\nunmached = \"deny\"\n");
     agent.signal("HUP");
     let line = agent.line(&[r#""level":"ERROR""#, "gate.unmached"]);
-    assert!(line.contains("line 4, column 1"), "{line}");
+    assert!(line.contains("line 2, column 1"), "{line}");
     assert_eq!(
         reload_failures(&agent),
         "speculaire_config_reload_failures_total 1"
@@ -917,6 +918,55 @@ fn sighup_reads_the_registry_config_again_whatever_the_modification_times_say() 
 }
 
 #[test]
+fn a_reflector_opens_once_its_identity_is_loaded_and_readyz_waits_for_it() {
+    let files = tempfile::tempdir().unwrap();
+    let cluster = Cluster::new("kubernetes");
+    let certificate = files.path().join("kubelet-client-current.pem");
+    let ca = files.path().join("ca.crt");
+    put(&ca, cluster.ca());
+    let port = free_port();
+    // Port 0: the log line names the port the reflector got, and no other test can take it in between.
+    let mut agent = Agent::spawn(
+        port,
+        scratch_file(),
+        &format!(
+            "role = \"reflector\"\n[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[config]\npoll_interval = \"1s\"\n[reflector]\nlisten = \"127.0.0.1:0\"\n[log]\nfilter = \"debug\"\n",
+            certificate.display(),
+            ca.display()
+        ),
+        &[],
+    );
+    agent.line(&["mirror open"]);
+    assert_eq!(agent.get("/readyz", "").status, 503);
+    assert_eq!(
+        metric(&agent, "speculaire_reflector_agents").unwrap(),
+        "speculaire_reflector_agents 0"
+    );
+
+    put(&certificate, &cluster.kubelet("cp-1"));
+    let open = agent.line(&["reflector open"]);
+    let address = open.split_once("127.0.0.1:").unwrap().1;
+    let listen: u16 = address
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait_until(|| agent.get("/readyz", "").status == 200);
+    assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, listen)).is_ok());
+    // A reload finds it open and leaves it be.
+    agent.signal("HUP");
+    agent.line(&[RELOADED]);
+    let (status, lines) = agent.stop();
+    assert!(status.success(), "{status}: {lines:#?}");
+    let opened = lines
+        .iter()
+        .filter(|l| l.contains("reflector open"))
+        .count();
+    assert_eq!(opened, 1, "{lines:#?}");
+}
+
+#[test]
 fn p2p_waits_for_the_kubelet_certificate_and_a_bad_one_is_one_error_naming_it() {
     let files = tempfile::tempdir().unwrap();
     let cluster = Cluster::new("kubernetes");
@@ -977,6 +1027,7 @@ fn p2p_waits_for_the_kubelet_certificate_and_a_bad_one_is_one_error_naming_it() 
     assert!(status.success(), "{status}");
     let count = |needle: &str| lines.iter().filter(|l| l.contains(needle)).count();
     assert_eq!(count(r#""level":"ERROR""#), 1, "{lines:#?}");
+    assert_eq!(count("reflector open"), 0, "not a reflector: {lines:#?}");
     assert_eq!(
         count("the kubelet certificate does not exist"),
         1,

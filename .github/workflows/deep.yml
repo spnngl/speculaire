@@ -2,7 +2,8 @@
 name: deep
 
 # The slow checks of each pull request, informational and outside `required` as `mutants.yml` is (D48): `careful` runs
-# the tests on a checked standard library under AddressSanitizer (`just careful address`, D76).
+# the tests on a checked standard library under AddressSanitizer (`just careful address`, D76); `shuttle` runs the
+# reflector's index under Shuttle's random schedules (`just shuttle`, D97).
 on:
   pull_request:
     # Only what can change what the tests do.
@@ -54,3 +55,30 @@ jobs:
         with:
           tool: cargo-careful@${{ env.CARGO_CAREFUL_VERSION }},protoc@3.${{ env.PROTOC_VERSION }}
       - run: just careful address
+
+  shuttle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # protoc: the reflector's .proto and the protobuf exposition of `/metrics` compile at build time (D34, D97).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      # The stable of rust-toolchain.toml.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: . -> target/shuttle
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
+      - run: just shuttle

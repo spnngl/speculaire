@@ -85,6 +85,19 @@ Shown in `kubectl describe pod` under `CreateContainerError`.
 | `unverifiable: <detail>` | Artifacts or the trust root could not be obtained (D17, D20) | Check upstream reachability and credentials; it is retried automatically |
 | `unverifiable: upstream rate limited: <host>` | The registry answered `429`, or `503` with `Retry-After`; discovery to that host pauses until its `Retry-After`, at most 1 h (D38) | Add registry credentials, or wait |
 
+## Reflector refusals
+
+A reflector ends an agent's `Announce` stream and counts the reason in `speculaire_reflector_announce_rejected_total{reason}`; its `warn` log names the node and the cause (D97). The agent reconnects (D33), and is refused again until the cause is fixed.
+
+| Reason | Meaning | Action |
+|---|---|---|
+| `identity` | The `Hello` names another node than the TLS certificate's (D16) | Find the node: a bug, or a node forging announcements |
+| `version` | The agent speaks a protocol version the reflector does not accept: not its own nor the previous one (D2) | Finish the rolling upgrade, reflectors first |
+| `address` | The peer address is not an IP literal with a port | Report a bug |
+| `size` | A message is over 4 MiB | Report a bug |
+| `digests` | The node announces more than 100k digests | Prune the node's images, or report it if it holds that many legitimately |
+| `malformed` | A message is not one the protocol allows there, such as a second `Hello` or a string that is not a digest | Report a bug |
+
 ## Logs and audit
 
 - `journalctl -u speculaire` shows the agent's logs, at `warn` and above by default. Change `log.filter` (`EnvFilter` syntax) and reload to see more (D37).
@@ -110,6 +123,7 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | `speculaire_p2p_enabled` | 0 for more than 10 min: the node has no usable kubelet certificate or cluster CA, or its certificate expired, and pulls only from upstream; the info log names an absent file, the error log a bad one (D16, D95) |
 | `speculaire_identity_expiry_timestamp_seconds` | Less than a tenth of the certificate's lifetime away: kubelet renews it once 70 to 90% of its lifetime has passed, so it stopped renewing; once it passes, P2P stops on the node (D95) |
 | `speculaire_reflector_connected` | 0 for any `member` for more than 5 min |
+| `speculaire_reflector_announce_rejected_total` | It increases: a reflector refuses an agent's stream, whose announcements are then missing from lookups (§ Reflector refusals) |
 | `speculaire_nri_connected` | 0 for more than 1 min: with `required_plugins`, container creation is rejected (D41) |
 | `speculaire_gate_seconds` | p99 above half of `plugin_request_timeout`: a timeout lets a container start ungated (D41) |
 

@@ -19,6 +19,7 @@ speculaire-mirror = { path = "crates/mirror" }
 speculaire-oci = { path = "crates/oci" }
 speculaire-oracle-harness = { path = "crates/oracle-harness" }
 speculaire-pki = { path = "crates/pki" }
+speculaire-reflect = { path = "crates/reflect" }
 speculaire-registry = { path = "crates/registry" }
 speculaire-registry-config = { path = "crates/registry-config" }
 speculaire-runtime = { path = "crates/runtime" }
@@ -32,6 +33,8 @@ axum = { version = "0.8.9", default-features = false, features = [
   "tokio",
 ] }
 bytes = "1.12.1"
+# D97: which agents a lookup returns, from a digest's holders; no cryptographic need.
+fastrand = "2.5.0"
 clap = { version = "4.6.7", features = ["derive"] }
 # D5: the content service of containerd, the fallback of the content directory.
 containerd-client = "0.9.0"
@@ -117,6 +120,18 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
   "registry",
   "std",
 ] }
+# D2: the reflector's index, a bitmap of node IDs per digest and of digest IDs per node.
+roaring = "0.12.0"
+# D97: randomised schedules of the reflector's streams, under `--cfg shuttle` (`just shuttle`).
+shuttle = "0.9.10"
+# D2: the reflector API: server, and the channel of its client.
+tonic = { version = "0.14.9", default-features = false, features = [
+  "channel",
+  "codegen",
+  "router",
+  "server",
+] }
+tonic-prost-build = { version = "0.14.9", default-features = false }
 # D46: the global allocator of the musl binaries, `MI_SECURE=4` (guard pages, randomised and encoded free lists).
 mimalloc = { version = "0.1.52", features = ["secure"] }
 
@@ -127,6 +142,8 @@ missing_docs = "warn"
 unreachable_pub = "warn"
 unnameable_types = "warn"
 unsafe_code = "deny"
+# `just shuttle` builds with `--cfg shuttle` (D97).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(shuttle)'] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

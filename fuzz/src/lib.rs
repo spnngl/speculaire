@@ -43,6 +43,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("reference", reference),
     ("platform", platform),
     ("node_subject", node_subject),
+    ("reflect", reflect),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -409,4 +410,30 @@ pub fn node_subject(data: &[u8]) {
             .collect();
         assert_eq!(names, [Ok(format!("{COMMON_NAME_PREFIX}{node}").as_str())]);
     }
+}
+
+/// Every message the reflector reads from an agent: `Announce`'s, `Lookup`'s and `Members`' (D2, D97).
+///
+/// Decoding and parsing never panic. An announcement that parses encodes back to protobuf that parses to it again,
+/// and a digest a lookup names prints as the text it parsed from.
+///
+/// # Panics
+///
+/// When decoding or parsing panics, or what parses does not survive the round trip.
+pub fn reflect(data: &[u8]) {
+    use prost::Message as _;
+    use speculaire_reflect::message::{Announcement, digest};
+    use speculaire_reflect::proto::{AgentMessage, LookupRequest, MembersRequest};
+    if let Ok(message) = AgentMessage::decode(data)
+        && let Ok(announcement) = Announcement::try_from(message)
+    {
+        let again = Announcement::try_from(AgentMessage::from(announcement.clone()));
+        assert_eq!(again, Ok(announcement));
+    }
+    if let Ok(request) = LookupRequest::decode(data)
+        && let Ok(parsed) = digest(request.digest.clone())
+    {
+        assert_eq!(parsed.to_string(), request.digest);
+    }
+    drop(MembersRequest::decode(data));
 }

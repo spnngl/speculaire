@@ -9,7 +9,7 @@ Each decision has three parts: the choice (**Decision**), its reasons (**Because
 Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 
 - D1 [reflector](reflector.md): reflectors replace the DHT; no libp2p
-- D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51)
+- D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51, D97)
 - D3 [distribution](distribution.md): every agent announces its own peer address and port (amended by D36)
 - D4 [build](build.md): no io_uring in v1, and the unit denies its syscalls
 - D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85)
@@ -34,7 +34,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
-- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77)
+- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97)
 - D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93)
@@ -83,7 +83,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D73 [distribution](distribution.md): a peer fetch silent for `peer.stall_timeout` moves to the next peer or falls through, without denying the peer (amends D7)
 - D74 [build](build.md): cargo-mutants tests the diff of each pull request in up to 4 shards, outside `required`; every package's tests run for each mutant, a hang killed by nextest counts as caught, one change is excluded (amends D27)
 - D75 [build](build.md): a second fuzz target, `config_values`, writes config files from the keys with literals each parser accepts or refuses, so the round trip reaches the values raw bytes seldom spell (amends D27)
-- D76 [build](build.md): cargo-careful runs the workspace's tests under AddressSanitizer on each pull request, in one job on glibc Linux, outside `required` (amends D27)
+- D76 [build](build.md): cargo-careful runs the workspace's tests under AddressSanitizer on each pull request, in one job on glibc Linux, outside `required` (amends D27; amended by D97)
 - D77 [build](build.md): RAPx analyses the workspace on each pull request that changes Rust and every week, outside `required`; the dev image gains no RAPx (amends D27)
 - D78 [distribution](distribution.md): one `registry-config` crate holds both runtimes' parsers and reads what containerd reads: versions 1 to 4, any key case, credentials per host as secrets, ignored keys ignored (amends D17)
 - D79 [build](build.md): `just oracle` also runs the Rust differential tests against the binary, mutated fuzz seeds included; the oracle reaches containerd's unexported parsers by linkname (amends D29, D70)
@@ -104,5 +104,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63)
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
+- D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76)
 
-Next free number: D97.
+Next free number: D98.
