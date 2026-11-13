@@ -11,6 +11,8 @@ For admins running speculaire on a node. Every setting is listed with its defaul
 
 To move the mirror off port 7480, set `mirror.address` to another loopback `ip:port`, run `speculaire configure` again, then restart the agent (D56). `configure` rewrites its own entries to the new address wherever they are, and remakes the certificates when the IP changed.
 
+At `log.filter = "info"`, the agent logs the address each listener got as it opens, in an `address` field: `status listener open`, `mirror open` and `reflector open`. Port 0 in `metrics.address`, `mirror.address` or `reflector.listen` takes a port the kernel picks, which that line names; the tests listen this way. The runtime reaches the mirror only on the port `configure` wrote.
+
 To stop using the mirror, run `speculaire unconfigure`. It removes only what `configure` added, keeping every edit of yours, reloads CRI-O, and then deletes the certificates. It stops while the runtime's NRI config requires `speculaire`: remove it from `required_plugins` (containerd) or `nri_validator_required_plugins` (CRI-O) and restart the runtime first, or pass `--force` (D32, D84).
 
 ## The relay on CRI-O

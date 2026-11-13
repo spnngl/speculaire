@@ -84,10 +84,14 @@ async fn serve(
         speculaire_reflect::metrics::describe();
     }
     let status = Arc::new(Status::new(metrics.clone(), role == Role::Reflector));
-    let address = *config.metrics.address.get();
-    let listener = tokio::net::TcpListener::bind(address)
+    let configured = *config.metrics.address.get();
+    let listener = tokio::net::TcpListener::bind(configured)
         .await
-        .with_context(|| format!("listening on metrics.address {address}"))?;
+        .with_context(|| format!("listening on metrics.address {configured}"))?;
+    // The bound address: port 0 in the config is the one the kernel picked.
+    let address = listener
+        .local_addr()
+        .context("reading the status listener's address")?;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(
         axum::serve(listener, status::router(Arc::clone(&status)))
@@ -275,10 +279,13 @@ async fn start_mirror(
             directory.display()
         )
     })?;
-    let address = config.mirror.address.get().get();
-    let listener = tokio::net::TcpListener::bind(address)
+    let configured = config.mirror.address.get().get();
+    let listener = tokio::net::TcpListener::bind(configured)
         .await
-        .with_context(|| format!("listening on mirror.address {address}"))?;
+        .with_context(|| format!("listening on mirror.address {configured}"))?;
+    let address = listener
+        .local_addr()
+        .context("reading the mirror's address")?;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let stopped = async {
         // An error means the sender is gone, which also means stop.
