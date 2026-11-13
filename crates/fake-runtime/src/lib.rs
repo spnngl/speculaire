@@ -4,6 +4,8 @@
 
 use std::convert::Infallible;
 use std::io;
+use std::net::Shutdown;
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -16,7 +18,12 @@ use containerd_client::tonic::{Request, Response, Status};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
+use socket2::SockRef;
 use tonic_prost::ProstCodec;
+
+// Linux only: macOS spawns in the kernel, and refuses to shut a listener down.
+#[cfg(all(test, target_os = "linux"))]
+mod tests;
 
 /// `VersionRequest` of the CRI.
 #[derive(Clone, PartialEq, prost::Message)]
@@ -123,7 +130,11 @@ impl Fake {
     ///
     /// When the socket cannot be bound.
     pub fn start(socket: &Path, answers: Answers) -> io::Result<Self> {
-        let listener = std::os::unix::net::UnixListener::bind(socket)?;
+        Self::serve(UnixListener::bind(socket)?, answers)
+    }
+
+    /// Answers on `listener` until dropped.
+    fn serve(listener: UnixListener, answers: Answers) -> io::Result<Self> {
         listener.set_nonblocking(true)?;
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let answers = Arc::new(Mutex::new(answers));
@@ -140,9 +151,13 @@ impl Fake {
                     return;
                 };
                 tokio::select! {
-                    () = accept(listener, shared) => {}
+                    () = accept(&listener, shared) => {}
                     _ = stopped => {}
                 }
+                // A process another test spawns holds a copy of the socket until it execs, and the socket listens
+                // until its last copy closes. Shut down, it refuses at once on Linux (v6.12 net/unix/af_unix.c:1606).
+                // macOS refuses to shut a listener down (ENOTCONN), but it spawns in the kernel: no child holds it.
+                let _ = SockRef::from(&listener).shutdown(Shutdown::Both);
             });
         });
         Ok(Self {
@@ -186,7 +201,7 @@ fn config(answers: &Answers) -> http::Response<containerd_client::tonic::body::B
     response
 }
 
-async fn accept(listener: tokio::net::UnixListener, answers: Arc<Mutex<Answers>>) {
+async fn accept(listener: &tokio::net::UnixListener, answers: Arc<Mutex<Answers>>) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             return;

@@ -2053,6 +2053,8 @@ dependencies = [
  "hyper",
  "hyper-util",
  "prost",
+ "socket2",
+ "tempfile",
  "tokio",
  "tonic-prost",
  "tower",
