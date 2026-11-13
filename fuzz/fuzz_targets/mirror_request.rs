@@ -1,4 +1,4 @@
-//! A request path and a Range header, as a client sends them, must never panic, and a range must lie in the body.
+//! A request path and a Range header, from a runtime or a peer, must never panic, and a range must lie in the body.
 
 #![no_main]
 

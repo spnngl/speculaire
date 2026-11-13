@@ -98,10 +98,15 @@ async fn stream(
     let Some(identity) = shared.credentials.identity() else {
         return Ended::NoIdentity;
     };
-    let peer = *shared.peer.get_or_init(|| {
-        let peer = SocketAddr::new(link.local.ip(), PEER_PORT);
+    let mut peer = SocketAddr::new(link.local.ip(), PEER_PORT);
+    shared.peer.send_if_modified(|fixed| {
+        if let Some(fixed) = fixed {
+            peer = *fixed;
+            return false;
+        }
         info!(address = %peer, "peer address fixed from the first reflector stream");
-        peer
+        *fixed = Some(peer);
+        true
     });
     let (sender, mut outbound) = mpsc::channel(16);
     let outbound = stream::poll_fn(move |cx| outbound.poll_recv(cx));

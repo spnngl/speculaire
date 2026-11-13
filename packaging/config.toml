@@ -68,7 +68,7 @@
 [peer]
 # "auto" is the local IP of the reflector connection on port 7481; or an ip:port (D36, D56). Restart.
 #address = "auto"
-# Blob bodies the peer API serves at once: "auto" is 4 per CPU (D24).
+# Blob bodies the peer API sends at once; a HEAD or a manifest does not count. "auto" is 4 per CPU (D24, D100).
 #max_uploads = "auto"
 # How long a fetch from another peer may receive nothing before it moves to the next peer (D73).
 #stall_timeout = "5s"

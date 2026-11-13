@@ -277,7 +277,8 @@ pub fn hosts_edit(data: &[u8]) {
     }
 }
 
-/// A request of the runtime to the mirror: its path, then a line with its `Range` header (D85).
+/// A request of the runtime to the mirror, or of another agent to the peer API, which shares its parser: its path,
+/// then a line with its `Range` header (D85, D100).
 ///
 /// Routing never panics. A range lies inside a body of any size: it starts at or before its end, and its end is the
 /// body's last byte at most; the whole of an empty body has no range.

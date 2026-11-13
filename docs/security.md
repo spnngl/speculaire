@@ -24,6 +24,7 @@ Trust boundaries and accepted risks. Each item names the decision that enforces 
 - **The audit log names pods and images.** It is off by default and goes to the root-readable journal (D37).
 - **A bad config never loosens the gate.** Unknown keys stop startup, and an invalid reload keeps the previous config (D30).
 - **Private layers are shared, as in Spegel (accepted).** Any node of the cluster can fetch any cached layer without pull secrets. mTLS keeps non-nodes out, but any node can read another node's private layers.
+- **The peer API serves any node any blob or manifest it can name (accepted).** It listens on the peer address, to any client with a kubelet certificate of the cluster CA (D16), and answers `GET` and `HEAD` by digest from what the node announces: containerd's `k8s.io` content or the blob cache (D99). A digest is the only key, so a node that learns one, from a reflector's `Lookup` or a manifest, reads that content without the image's pull secret. It serves no tags, no listing and no referrers, and `peer.max_uploads` bounds what one node can make it send at once (D24, D100).
 - **A joining node has no P2P.** Until its kubelet certificate exists, it pulls from upstream; the gate still enforces (D16).
 - **The pause image is not gated.** NRI's `PodSandbox` carries no image.
 - **On containerd 2.3, the identity check has a known gap (accepted).** A retag to an image with identical layers but a different config passes. The agent warns at startup; containerd 2.4 closes the gap (D15).

@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -290,6 +290,20 @@ pub enum MaxUploads {
     Auto,
     /// This many.
     Fixed(NonZeroU32),
+}
+
+impl MaxUploads {
+    /// The cap: four per CPU the agent may run on, or the number set.
+    #[must_use]
+    pub fn get(self) -> NonZeroUsize {
+        match self {
+            // A count that cannot be read is one CPU.
+            Self::Auto => std::thread::available_parallelism()
+                .unwrap_or(NonZeroUsize::MIN)
+                .saturating_mul(NonZeroUsize::MIN.saturating_add(3)),
+            Self::Fixed(n) => NonZeroUsize::try_from(n).unwrap_or(NonZeroUsize::MAX),
+        }
+    }
 }
 
 /// What TOML holds for [`MaxUploads`]: the string `"auto"` or an integer.
@@ -629,6 +643,16 @@ mod tests {
         );
         assert!(MaxUploads::try_from(Raw::Number(0)).is_err());
         assert!(MaxUploads::try_from(Raw::Number(-1)).is_err());
+    }
+
+    #[test]
+    fn max_uploads_is_four_per_cpu_unless_set() {
+        let cpus = std::thread::available_parallelism().unwrap().get();
+        assert_eq!(MaxUploads::Auto.get().get(), 4 * cpus);
+        assert_eq!(
+            MaxUploads::Fixed(NonZeroU32::new(3).unwrap()).get().get(),
+            3
+        );
     }
 
     #[test]

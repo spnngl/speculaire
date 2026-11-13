@@ -102,13 +102,13 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M2 step 01, arm64, Docker):** the differential tests send the oracle's `registries`, `certs` and `auth` subcommands 3796, 17 and 834 cases (the test data of go.podman.io/image v5.40.0, 100 mutations of each, layouts of the search directories, the e2e CRI-O node's files with and without an admin drop-in), and every case with a stable answer agrees: 3796 of 3796, 17 of 17, 791 of 834 (the rest has two entries for one registry, which the library picks from by map order). The 3796 `registries` cases include the e2e node's drop-in and the five registries of Done when (docker.io, registry.k8s.io, quay.io, ghcr.io, a private test registry). The first full run found one divergence, now fixed: a prefix `*foo.com` is a plain prefix, only `*.` makes a wildcard. `just fuzz registries_conf 60` ran 513294 execs and `just fuzz auth_json 60` 695838, with no finding. A planted fault, drop-ins read in reverse file-name order (throwaway PR 39, closed), turned the `oracle` and `check` jobs red in run 43132697521.
 - **Revisit when:** the agent follows a CRI-O that sets `registries_conf` or the environment variables, or short names matter (step 02's reference parser then lets aliases be checked).
 
-## D24: Peers apply backpressure
+## D24: Peers apply backpressure (amended by D100)
 
 - **Decision:** the peer API serves at most `peer.max_uploads` concurrent blob bodies (default: 4 × CPUs). Beyond that it answers `503` at once, and the fetcher treats `503` as a fast failure and moves to the next peer.
 - **Because:** in a flash crowd every node finds the same first seed; Spegel has no limit, so one node's uplink becomes the cluster bottleneck.
 - **Revisit when:** a flash-crowd benchmark shows one seed peer saturating. Then add multi-peer `Range` swarming.
 
-## D36: The peer address is the local side of the reflector connection (amends D3; amended by D56)
+## D36: The peer address is the local side of the reflector connection (amends D3; amended by D56, D100)
 
 - **Decision:**
   - By default, an agent announces as its peer address the local IP of its `Announce` stream to a member, as returned by `getsockname`, and listens on that IP, port 7481. The address is fixed at startup from the first such stream; the peer API starts listening only then. The load-balancer connection is never used: on a control-plane node that holds the load balancer's virtual IP, its local IP would be that VIP, which moves.
@@ -280,3 +280,21 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - containerd has no credential helpers and keeps its logins in `registry.configs` per endpoint host, so a mirror's login must not be sent to the registry.
 - **Measured (M2 step 06):** with `global_auth_file` unset the default search applies; the Bearer registry (`registry:2.8.3` behind `docker_auth` 1.14.0, a CA known only to the node's registry config) pulled through the relay with the credentials of `/run/containers/0/auth.json`, and the journal at `log.filter = "trace"` held neither the password, the Basic string nor a token (`eyJ`).
 - **Revisit when:** a CRI-O whose `crio.sock` does not serve `GET /config`, or M5 needs the trait to give a registry's whole host list rather than the sources of one image.
+
+
+## D100: The peer API shares the mirror's parser, caps blob bodies, and opens on the address the first stream fixes (amends D24, D36)
+
+- **Decision:**
+  - **Routes:** `speculaire_mirror::peer` answers `GET` and `HEAD` of `/v2/<name>/manifests/<digest>` and `/v2/<name>/blobs/<digest>`, with one `Range` at most, through the mirror's own request parser and responses (D85). The name is not read: content is keyed by digest. Everything else is a 404: `/v2/`, tags, referrers, other methods, and a digest the node no longer holds, as when containerd's garbage collector deleted it without an event (D99).
+  - **Source:** what the node announces (D99): the runtime's `Content` (containerd: `k8s.io`) or, where the node relays, the blob cache.
+  - **TLS:** the node identity's server config (`Credentials::server`, D95), TLS 1.3, ALPN `http/1.1`; a client without a kubelet certificate of the cluster CA is refused in the handshake.
+  - **Cap (D24):** only a blob's `GET` counts against `peer.max_uploads`, from its headers until hyper drops its body; a `HEAD` and a manifest (4 MiB at most) do not. `auto` is 4 × the CPUs the agent may run on. The key is live: a reload moves the cap for the next body.
+  - **Opening (D36):** the agent opens the peer API on exactly the peer address its client fixes, `peer.address` or the local IP of the first stream with port 7481 (`Client::fixed_peer_address`). An address it cannot listen on, such as a `peer.address` the node does not own, is logged; the agent runs on without a peer API, and fetchers fall through to other peers.
+  - **Shutdown (D39):** step 2 answers every new peer request `503`, `HEAD` included; step 4 waits for the bodies in flight up to `shutdown.drain_timeout`, then closes the listener and cuts what is left.
+  - **Metrics:** `speculaire_peer_uploads_total{result}` counts `served` for a request that found its content, `busy` for every `503`; `speculaire_peer_upload_bytes_total` counts blob bytes, as `speculaire_mirror_bytes_total` does.
+- **Because:**
+  - One parser for the runtime's requests and the peers' keeps one fuzz target (`mirror_request`) and one set of `Range` rules; a peer never needs a tag, since the reflector maps digests only (D6).
+  - A manifest or a `HEAD` costs no uplink to speak of; capping them would turn a flash crowd's small requests into `503`s while the bodies they wait for go out.
+  - The address must match what the reflectors announce, or peers dial a port nobody listens on; binding it rather than every interface keeps the API off the interfaces the admin did not choose.
+- **Measured (M3 step 04):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass `e2e/tests/peer.rs` in 1.1 s and 0.8 s: the second worker's peer API serves a pulled 1 MiB layer whole (SHA-256 checked) and its first 100 bytes as a `206` to the first worker's kubelet certificate, and refuses no certificate and kube-apiserver's `apiserver-kubelet-client` one, of the cluster CA but not a node's. In `crates/mirror/src/peer/tests.rs`, with `peer.max_uploads = 1`, a second `GET` of a body while a 64 MiB one is in flight answers `503` at once, and once stopping a new request answers `503` while the 64 MiB body in flight completes. No agent test serves a blob yet (docs/TODECIDE.md).
+- **Revisit when:** peers need a request the mirror's parser does not route, or a node must serve on several addresses.

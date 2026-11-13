@@ -1,5 +1,7 @@
 //! The agent process: loads the config, then serves until SIGTERM, reloading on SIGHUP and on file changes (D30).
 
+use std::future::Future;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -7,10 +9,13 @@ use std::time::SystemTime;
 use anyhow::Context as _;
 use speculaire_mirror::Local;
 use speculaire_mirror::cache::Cache;
+use speculaire_mirror::peer::Uploads;
 use speculaire_mirror::relay::{CriImages, Relay};
 use speculaire_mirror::tls::Tls;
+use speculaire_pki::node::Credentials;
 use speculaire_reflect::client::{self, Client, Holdings};
 use speculaire_reflect::{Member, Reflector, Settings};
+use speculaire_runtime::content::Content;
 use speculaire_runtime::inventory::{Change, Inventory, Update};
 use speculaire_runtime::registries::Registries;
 use speculaire_runtime::watch::Watch;
@@ -118,9 +123,8 @@ async fn serve(
     status.mirror_listening();
     let mut reflector = None;
     open_reflector(&config, &identity, &mut reflector, &status).await;
-    let inventory = mirror.inventory(&node);
-    let mut announcer = None;
-    open_client(&config, &identity, &inventory, &mut announcer);
+    let mut sharing = None;
+    open_sharing(&config, &identity, &mirror, &node, &mut sharing);
     systemd::watchdog();
     systemd::ready();
 
@@ -138,7 +142,7 @@ async fn serve(
                 reload_registries(&*registries);
                 identity.reload();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
-                open_client(&config, &identity, &inventory, &mut announcer);
+                open_sharing(&config, &identity, &mirror, &node, &mut sharing);
             }
             _ = poll.tick() => {
                 if watch.changed() {
@@ -151,7 +155,7 @@ async fn serve(
                 }
                 identity.poll();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
-                open_client(&config, &identity, &inventory, &mut announcer);
+                open_sharing(&config, &identity, &mirror, &node, &mut sharing);
             }
         }
         if config.config.poll_interval.get() != period {
@@ -160,24 +164,51 @@ async fn serve(
         }
     }
 
-    // D39, steps 1 and 3, and a stopping reflector closes the streams of its agents. Steps 2 and 4 to 6 arrive with
-    // peers, cache and gate.
+    // D39, step 1.
     systemd::stopping();
     status.stop();
     info!("stopping");
-    if let Some(announcer) = announcer {
-        announcer.stop().await;
-    }
-    if let Some(reflector) = reflector {
-        reflector.stop().await;
-    }
-    mirror.stop().await;
+    shut_down(&config, mirror, sharing, reflector).await;
     // An error means the server already ended; its result says why.
     let _ = stop.send(());
     server
         .await
         .context("the status listener panicked")?
         .context("serving the status listener")
+}
+
+/// D39, steps 2 to 4 for peers, and a stopping reflector closes the streams of its agents. The mirror's part of steps 2
+/// and 4, and steps 5 and 6, arrive with the cache and the gate.
+async fn shut_down(
+    config: &Config,
+    mirror: Mirror,
+    sharing: Option<Sharing>,
+    reflector: Option<Reflector>,
+) {
+    mirror.uploads.stop();
+    let (client, peers) = sharing
+        .map(|sharing| (sharing.client, sharing.peers))
+        .unzip();
+    if let Some(client) = client {
+        client.stop().await;
+    }
+    if let Some(reflector) = reflector {
+        reflector.stop().await;
+    }
+    let drain = config.shutdown.drain_timeout.get();
+    if tokio::time::timeout(drain, mirror.uploads.drained())
+        .await
+        .is_err()
+    {
+        warn!(
+            ?drain,
+            "uploads to peers still in flight at shutdown.drain_timeout are cut"
+        );
+    }
+    if let Some(peers) = peers {
+        peers.stop().await;
+    }
+    mirror.stop().await;
 }
 
 /// Swaps in the config at `path`, or keeps `running` and counts the failure (D30).
@@ -238,13 +269,31 @@ struct Mirror {
     task: tokio::task::JoinHandle<()>,
     /// The relay, where the node has one.
     relay: Option<Arc<Relay<CriImages>>>,
+    /// The cap on the peer API's bodies, which it holds from startup so that a reload reaches it before it opens.
+    uploads: Arc<Uploads>,
 }
 
 impl Mirror {
-    /// Gives the mirror the live keys of `config`: a lowered `blob_cache.max_size` evicts at the next blob kept (D91).
+    /// Gives the mirror the live keys of `config`: a lowered `blob_cache.max_size` evicts at the next blob kept (D91),
+    /// and `peer.max_uploads` caps the next upload (D24).
     fn apply(&self, config: &Config) {
         if let Some(relay) = &self.relay {
             relay.cache().set_max_size(config.blob_cache.max_size.get());
+        }
+        self.uploads.set_limit(config.peer.max_uploads.get());
+    }
+
+    /// Opens the peer API on the address `fixed` gives, serving what [`Self::inventory`] announces.
+    fn open_peers(
+        &self,
+        node: &RuntimeNode,
+        fixed: impl Future<Output = Option<SocketAddr>> + Send + 'static,
+        credentials: Arc<Credentials>,
+    ) -> Peers {
+        let uploads = Arc::clone(&self.uploads);
+        match &self.relay {
+            Some(relay) => Peers::open(Arc::clone(relay.cache()), fixed, credentials, uploads),
+            None => Peers::open(Arc::new(node.content()), fixed, credentials, uploads),
         }
     }
 
@@ -292,6 +341,7 @@ async fn start_mirror(
         let _ = stopped.await;
     };
     let tls = Arc::new(tls);
+    let uploads = Arc::new(Uploads::new(config.peer.max_uploads.get()));
     let (task, relay) = match node.fallback() {
         Fallback::PerBlob => (
             tokio::spawn(speculaire_mirror::serve(
@@ -326,7 +376,72 @@ async fn start_mirror(
         }
     };
     info!(%address, "mirror open");
-    Ok(Mirror { stop, task, relay })
+    Ok(Mirror {
+        stop,
+        task,
+        relay,
+        uploads,
+    })
+}
+
+/// The peer API, and what stops it.
+struct Peers {
+    stop: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Peers {
+    /// Serves `content` to other nodes on the peer address once `fixed` gives it, with the node identity of
+    /// `credentials` (D14, D16, D36); `fixed` gives `None` when the client stops first. An address that cannot be
+    /// listened on is logged: peers fall through to other nodes.
+    fn open<C: Content>(
+        content: Arc<C>,
+        fixed: impl Future<Output = Option<SocketAddr>> + Send + 'static,
+        credentials: Arc<Credentials>,
+        uploads: Arc<Uploads>,
+    ) -> Self {
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let mut stopped = std::pin::pin!(async {
+                // An error means the sender is gone, which also means stop.
+                let _ = stopped.await;
+            });
+            let address = tokio::select! {
+                address = fixed => address,
+                () = &mut stopped => None,
+            };
+            let Some(address) = address else {
+                return;
+            };
+            let listener = match tokio::net::TcpListener::bind(address).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    error!(%address, error = %err, "cannot listen on the peer address; this node serves no peers");
+                    return;
+                }
+            };
+            // The bound address: port 0 takes a port the kernel picks, as the tests do.
+            let address = listener.local_addr().unwrap_or(address);
+            info!(%address, "peer API open");
+            speculaire_mirror::peer::serve(
+                listener,
+                credentials.server(),
+                content,
+                uploads,
+                stopped,
+            )
+            .await;
+        });
+        Self { stop, task }
+    }
+
+    async fn stop(self) {
+        // An error means the peer API already ended.
+        let _ = self.stop.send(());
+        if let Err(err) = self.task.await {
+            error!(error = %err, "the peer API panicked");
+        }
+    }
 }
 
 /// Opens the reflector on `reflector.listen`, on a node whose role is reflector, once its identity allows peer links
@@ -391,23 +506,33 @@ fn follow(inventory: Arc<dyn Inventory>) -> Arc<Holdings> {
     holdings
 }
 
+/// The agent's part in P2P: announcing what the node holds, and serving it.
+struct Sharing {
+    client: Client,
+    peers: Peers,
+}
+
 /// Starts following `inventory` and announcing it to the reflectors of `reflector.url`, when one is set, once the
-/// identity allows peer links (D2, D16, D99).
-fn open_client(
+/// identity allows peer links, then serves it on the peer address the client fixes (D2, D16, D36, D99).
+fn open_sharing(
     config: &Config,
     identity: &Identity,
-    inventory: &Arc<dyn Inventory>,
-    announcer: &mut Option<Client>,
+    mirror: &Mirror,
+    node: &RuntimeNode,
+    sharing: &mut Option<Sharing>,
 ) {
-    if announcer.is_some() || !identity.enabled(SystemTime::now()) {
+    if sharing.is_some() || !identity.enabled(SystemTime::now()) {
         return;
     }
     if let Some(settings) = client_config(config) {
-        *announcer = Some(Client::spawn(
+        let credentials = Arc::clone(identity.credentials());
+        let client = Client::spawn(
             settings,
-            Arc::clone(identity.credentials()),
-            follow(Arc::clone(inventory)),
-        ));
+            Arc::clone(&credentials),
+            follow(mirror.inventory(node)),
+        );
+        let peers = mirror.open_peers(node, client.fixed_peer_address(), credentials);
+        *sharing = Some(Sharing { client, peers });
     }
 }
 
@@ -437,6 +562,8 @@ fn polls(period: Duration) -> Interval {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use speculaire_runtime::registries::ContainerdRegistries;
 
     use super::*;
@@ -483,11 +610,13 @@ mod tests {
                 stop,
                 task: tokio::spawn(async {}),
                 relay: Some(Arc::clone(&relay)),
+                uploads: Arc::new(Uploads::new(NonZeroUsize::MIN)),
             };
             let config = Config::default();
             assert_ne!(config.blob_cache.max_size.get(), 1 << 30);
             mirror.apply(&config);
             assert_eq!(relay.cache().max_size(), config.blob_cache.max_size.get());
+            assert_eq!(mirror.uploads.limit(), config.peer.max_uploads.get().get());
         });
     }
 }
