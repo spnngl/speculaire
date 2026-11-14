@@ -601,6 +601,25 @@ ca = "/etc/path/default"
             "[host.\"\"]\ncapabilities=[\"pull\"]\n[host.\"https://a.io\"]\n",
         )],
     );
+    // `configure` refuses to put the mirror before such a table (hosts_edit fuzz crash): containerd would then read it.
+    add(
+        "order: empty name first is never checked",
+        "docker.io",
+        "",
+        &[(
+            "docker.io/hosts.toml",
+            "server = \"httpclie.io\"\n[host.\"\"]\ncapabilities=[\"pull\", \"resoYve\"]\n",
+        )],
+    );
+    add(
+        "order: empty name after a host is checked",
+        "docker.io",
+        "",
+        &[(
+            "docker.io/hosts.toml",
+            "[host.\"https://a.io\"]\n[host.\"\"]\ncapabilities=[\"pull\", \"resoYve\"]\n",
+        )],
+    );
     add(
         "order: sub-table of host table",
         "docker.io",

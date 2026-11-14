@@ -89,7 +89,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D79 [build](build.md): `just oracle` also runs the Rust differential tests against the binary, mutated fuzz seeds included; the oracle reaches containerd's unexported parsers by linkname (amends D29, D70)
 - D80 [distribution](distribution.md): the CRI-O module reads what go.podman.io/image reads, from the files its `configfile` searches; credential helpers are not run, aliases are not parsed (amends D66, D70; amended by D89)
 - D81 [gate](gate.md): references and platforms are parsed as containerd's CRI plugin parses them (`ParseDockerRef`, `platforms.Only`), by a port that only its parser can build (amends D11, D15, D70)
-- D82 [agent](agent.md): `configure` makes one set of four certificate files, edits every `hosts.toml` under `config_path` with the mirror first, and `unconfigure` removes only what it added (amends D14, D32, D55, D56; amended by D85)
+- D82 [agent](agent.md): `configure` makes one set of four certificate files, edits every `hosts.toml` under `config_path` with the mirror first, and `unconfigure` removes only what it added (amends D14, D32, D55, D56; amended by D85, D101)
 - D83 [distribution](distribution.md): the CRI-O drop-in copies the admin's entry of every mirrored registry (`mirror.registries` and the admin's prefixes), with the mirror's location the entry's own (amends D66; amended by D88)
 - D84 [agent](agent.md): `configure`, `unconfigure` and `check-config` find the runtime by its socket, `--runtime` names it, and `unconfigure` stops while the runtime's NRI config requires `speculaire` (amends D32, D64; amended by D90)
 - D85 [distribution](distribution.md): the mirror is hyper over TLS 1.3 with a required client certificate, finds a held blob by its digest in the content directory, answers every miss with a 404, and is checked by the distribution-spec conformance suite (amends D5, D14, D55, D82)
@@ -108,5 +108,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33)
 - D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90)
 - D100 [distribution](distribution.md): the peer API routes `GET` and `HEAD` by digest through the mirror's parser, caps only blob bodies, answers `503` while the agent stops, and opens on the peer address the client fixes (amends D24, D36)
+- D101 [agent](agent.md): `configure` keeps the mirror's table only where containerd reads it first, and refuses a `hosts.toml` whose first host table is `[host.""]`, which containerd skips there and would read after the mirror's (amends D82)
 
-Next free number: D101.
+Next free number: D102.

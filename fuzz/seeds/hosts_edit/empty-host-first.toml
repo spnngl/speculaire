@@ -1,0 +1,4 @@
+server = "httpclie.io"
+
+[host.""]
+  capabilities = ["pull", "resoYve"]
