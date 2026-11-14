@@ -133,10 +133,7 @@ echo; echo "Members: $(tr -c '[:print:]' ' ' <"$body")""#
 /// The holders of a `LookupResponse` in a gRPC frame, from its hex: `repeated Peer peers = 1`, each `Peer` of
 /// `string node = 1` and `string address = 2` (`crates/reflect/proto`).
 fn holders(hex: &str) -> Option<Vec<Holder>> {
-    let bytes: Vec<u8> = (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
-        .collect::<Option<_>>()?;
+    let bytes = unhex(hex)?;
     fields(bytes.get(5..)?)?
         .into_iter()
         .filter(|(number, _)| *number == 1)
@@ -155,6 +152,14 @@ fn holders(hex: &str) -> Option<Vec<Holder>> {
             }
             Some(holder)
         })
+        .collect()
+}
+
+/// The bytes of `hex`, two digits a byte, as `od -An -v -tx1 | tr -d ' \n'` writes them.
+pub(crate) fn unhex(hex: &str) -> Option<Vec<u8>> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
         .collect()
 }
 

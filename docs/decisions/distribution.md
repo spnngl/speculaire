@@ -283,7 +283,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Revisit when:** a CRI-O whose `crio.sock` does not serve `GET /config`, or M5 needs the trait to give a registry's whole host list rather than the sources of one image.
 
 
-## D100: The peer API shares the mirror's parser, caps blob bodies, and opens on the address the first stream fixes (amends D24, D36)
+## D100: The peer API shares the mirror's parser, caps blob bodies, and opens on the address the first stream fixes (amends D24, D36; amended by D103)
 
 - **Decision:**
   - **Routes:** `speculaire_mirror::peer` answers `GET` and `HEAD` of `/v2/<name>/manifests/<digest>` and `/v2/<name>/blobs/<digest>`, with one `Range` at most, through the mirror's own request parser and responses (D85). The name is not read: content is keyed by digest. Everything else is a 404: `/v2/`, tags, referrers, other methods, and a digest the node no longer holds, as when containerd's garbage collector deleted it without an event (D99).
@@ -291,7 +291,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - **TLS:** the node identity's server config (`Credentials::server`, D95), TLS 1.3, ALPN `http/1.1`; a client without a kubelet certificate of the cluster CA is refused in the handshake.
   - **Cap (D24):** only a blob's `GET` counts against `peer.max_uploads`, from its headers until hyper drops its body; a `HEAD` and a manifest (4 MiB at most) do not. `auto` is 4 × the CPUs the agent may run on. The key is live: a reload moves the cap for the next body.
   - **Opening (D36):** the agent opens the peer API on exactly the peer address its client fixes, `peer.address` or the local IP of the first stream with port 7481 (`Client::fixed_peer_address`). An address it cannot listen on, such as a `peer.address` the node does not own, is logged; the agent runs on without a peer API, and fetchers fall through to other peers.
-  - **Shutdown (D39):** step 2 answers every new peer request `503`, `HEAD` included; step 4 waits for the bodies in flight up to `shutdown.drain_timeout`, then closes the listener and cuts what is left.
+  - **Shutdown (D39):** step 2 answers every new peer request `503`, `HEAD` included; step 4 closes the listener and waits, up to `shutdown.drain_timeout`, for every connection to send its response and close (D103), then cuts what is left.
   - **Metrics:** `speculaire_peer_uploads_total{result}` counts `served` for a request that found its content, `busy` for every `503`; `speculaire_peer_upload_bytes_total` counts blob bytes, as `speculaire_mirror_bytes_total` does.
 - **Because:**
   - One parser for the runtime's requests and the peers' keeps one fuzz target (`mirror_request`) and one set of `Range` rules; a peer never needs a tag, since the reflector maps digests only (D6).
@@ -300,7 +300,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M3 step 04):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass `e2e/tests/peer.rs` in 1.1 s and 0.8 s: the second worker's peer API serves a pulled 1 MiB layer whole (SHA-256 checked) and its first 100 bytes as a `206` to the first worker's kubelet certificate, and refuses no certificate and kube-apiserver's `apiserver-kubelet-client` one, of the cluster CA but not a node's. In `crates/mirror/src/peer/tests.rs`, with `peer.max_uploads = 1`, a second `GET` of a body while a 64 MiB one is in flight answers `503` at once, and once stopping a new request answers `503` while the 64 MiB body in flight completes. No agent test serves a blob yet (docs/TODECIDE.md).
 - **Revisit when:** peers need a request the mirror's parser does not route, or a node must serve on several addresses.
 
-## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98)
+## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103)
 
 - **Decision:**
   - **Where:** `speculaire_mirror::fetch::Fetcher`, linked once P2P starts to a `Lookup` (the agent's adapter over the reflector client) and the node identity. Before that, or when the lookup fails, names no holder or only denied ones, the pull falls through (D66).
