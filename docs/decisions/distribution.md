@@ -19,7 +19,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** with `resolve`, a peer could answer a tag with any digest it serves. Without it, tags resolve upstream (a small request) and blobs, the bulk of the bytes, still go P2P. Measured on containerd 2.3.7 and 2.4.2: the mirror sees no tag request, only manifests and blobs by digest (D22).
 - **Revisit when:** users need tag pulls to survive an upstream outage. Then expose `resolve_tags = true`, documented as "trust all nodes".
 
-## D7: Verify blob digests in flight (amended by D52, D67, D73)
+## D7: Verify blob digests in flight (amended by D52, D67, D73, D102)
 
 - **Decision:** hash every full-blob response while streaming it; on mismatch, abort and deny the peer (D52).
 - **Because:** it catches a bad peer early, so it can be reported. Otherwise the error only surfaces at containerd's commit.
@@ -102,7 +102,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M2 step 01, arm64, Docker):** the differential tests send the oracle's `registries`, `certs` and `auth` subcommands 3796, 17 and 834 cases (the test data of go.podman.io/image v5.40.0, 100 mutations of each, layouts of the search directories, the e2e CRI-O node's files with and without an admin drop-in), and every case with a stable answer agrees: 3796 of 3796, 17 of 17, 791 of 834 (the rest has two entries for one registry, which the library picks from by map order). The 3796 `registries` cases include the e2e node's drop-in and the five registries of Done when (docker.io, registry.k8s.io, quay.io, ghcr.io, a private test registry). The first full run found one divergence, now fixed: a prefix `*foo.com` is a plain prefix, only `*.` makes a wildcard. `just fuzz registries_conf 60` ran 513294 execs and `just fuzz auth_json 60` 695838, with no finding. A planted fault, drop-ins read in reverse file-name order (throwaway PR 39, closed), turned the `oracle` and `check` jobs red in run 43132697521.
 - **Revisit when:** the agent follows a CRI-O that sets `registries_conf` or the environment variables, or short names matter (step 02's reference parser then lets aliases be checked).
 
-## D24: Peers apply backpressure (amended by D100)
+## D24: Peers apply backpressure (amended by D100, D102)
 
 - **Decision:** the peer API serves at most `peer.max_uploads` concurrent blob bodies (default: 4 × CPUs). Beyond that it answers `503` at once, and the fetcher treats `503` as a fast failure and moves to the next peer.
 - **Because:** in a flash crowd every node finds the same first seed; Spegel has no limit, so one node's uplink becomes the cluster bottleneck.
@@ -119,7 +119,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Peers check each other by the node name in the certificate (D16), never by IP, so a wrong guess fails as an unreachable peer, which falls through, never as a trust problem.
 - **Revisit when:** users report an interface the guess gets wrong on a common platform; then add that platform's rule.
 
-## D52: A peer that sends a wrong digest is denied locally (amends D7, D37)
+## D52: A peer that sends a wrong digest is denied locally (amends D7, D37; amended by D102)
 
 - **Decision:** on a digest mismatch (D7), the agent:
   1. aborts the fetch, counts `speculaire_peer_fetches_total{result="digest_mismatch"}`, and resumes from the next peer;
@@ -146,7 +146,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - It has the same form as `metrics.address` and `reflector.listen`.
 - **Revisit when:** —
 
-## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80, D83)
+## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80, D83, D102)
 
 - **Decision:**
   - `speculaire configure` writes `/etc/containers/registries.conf.d/99-speculaire.conf`. For each registry it mirrors, the file holds one `[[registry]]` that copies the admin's effective entry for that prefix (`location`, `insecure`, `blocked`, its mirrors) and puts first `[[registry.mirror]] location = "<mirror.address>/<registry host>"` with `pull-from-mirror = "all"`.
@@ -177,7 +177,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Cost:** on CRI-O the agent sits in the path of every pull from a mirrored registry, and relays what it fetches from upstream. When it is down, CRI-O pulls from upstream.
 - **Revisit when:** CRI-O gains a per-blob fallback across sources.
 
-## D67: On CRI-O, the agent serves from its own blob cache, which the mirror fills (amends D5, D7; amended by D88)
+## D67: On CRI-O, the agent serves from its own blob cache, which the mirror fills (amends D5, D7; amended by D88, D102)
 
 - **Decision:**
   - On CRI-O, the *blob cache* `/var/lib/speculaire/blobs/` replaces D5's content directory. It holds, by digest, every manifest and blob the mirror served to CRI-O. The peer API and the mirror read from it.
@@ -199,7 +199,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Cost:** up to `blob_cache.max_size` of disk on each CRI-O node, on top of CRI-O's own storage, and 10 to 18 ms of agent CPU per MB proxied.
 - **Revisit when:** CRI-O or go.podman.io/storage keeps compressed blobs.
 
-## D73: A stalled peer fetch moves to the next peer (amends D7)
+## D73: A stalled peer fetch moves to the next peer (amends D7; amended by D102)
 
 - **Decision:**
   - A peer fetch that receives no bytes for `peer.stall_timeout` (default `"5s"`, live) is aborted and counts `speculaire_peer_fetches_total{result="timeout"}`. The timer restarts with every chunk received, and covers the wait for the response's headers.
@@ -208,7 +208,8 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:**
   - A peer that keeps its connection open and sends nothing would otherwise hold the runtime's pull until its own timeout, which neither containerd nor CRI-O sets per blob.
   - A timer on silence, not on the whole transfer, does not penalise a large layer coming at a steady rate.
-- **Revisit when:** M3's suite, which stalls a serving node with `tc qdisc … netem`, shows 5 s too short for a loaded node or too long for a pull.
+- **Measured (M3 step 05):** with the serving node stalled by `netem loss 100%` mid-blob, a 16 MiB pull completed from the next peer 5.3 to 5.8 s after it started, on containerd 2.4 and CRI-O 1.37 (D102).
+- **Revisit when:** a loaded node stalls for more than 5 s while still sending, or pulls report the 5 s wait as too long.
 
 ## D83: The CRI-O drop-in copies the admin's entry of every mirrored registry, and the mirror's location is the entry's (amends D66; amended by D88)
 
@@ -227,7 +228,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M2 step 03, arm64, Docker):** on CRI-O 1.37.2 `speculaire configure` wrote the drop-in and the three certificate files, the journal logged `Applied new registry configuration`, and `crictl pull docker.io/library/busybox:1.36.1` sent `GET /v2/` to a TLS server on `127.0.0.1:7480` with the client certificate; with that server killed the pull went on to Docker Hub and succeeded. `unconfigure` kept an admin's `50-admin.conf` with an edit made after `configure`, and a pull after it succeeded; the same on the three CRI-O legs of each architecture in CI run 43182634661.
 - **Revisit when:** CRI-O gains a per-blob fallback across sources (D66), or a node's CRI-O sets `registries_conf` (D80).
 
-## D85: The mirror is hyper over TLS 1.3, finds a held blob by its digest in the content directory, and is checked by the distribution-spec suite (amends D5, D14, D55, D82)
+## D85: The mirror is hyper over TLS 1.3, finds a held blob by its digest in the content directory, and is checked by the distribution-spec suite (amends D5, D14, D55, D82; amended by D102)
 
 - **Decision:**
   - **Stack:** crate `speculaire-mirror`. `hyper` 1 (HTTP/1 only) serves each connection that `tokio-rustls` accepts, with rustls on aws-lc-rs and no `tls12` feature, so TLS 1.3 is the only version the binary has. `WebPkiClientVerifier` requires a client certificate that the local CA signed (D14). A client has 10 s for the handshake and for its request headers. The router is a `match` on the path, not axum's: a name has any number of segments, which axum's routes cannot match before `/blobs/<digest>`.
@@ -298,3 +299,31 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - The address must match what the reflectors announce, or peers dial a port nobody listens on; binding it rather than every interface keeps the API off the interfaces the admin did not choose.
 - **Measured (M3 step 04):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass `e2e/tests/peer.rs` in 1.1 s and 0.8 s: the second worker's peer API serves a pulled 1 MiB layer whole (SHA-256 checked) and its first 100 bytes as a `206` to the first worker's kubelet certificate, and refuses no certificate and kube-apiserver's `apiserver-kubelet-client` one, of the cluster CA but not a node's. In `crates/mirror/src/peer/tests.rs`, with `peer.max_uploads = 1`, a second `GET` of a body while a 64 MiB one is in flight answers `503` at once, and once stopping a new request answers `503` while the 64 MiB body in flight completes. No agent test serves a blob yet (docs/TODECIDE.md).
 - **Revisit when:** peers need a request the mirror's parser does not route, or a node must serve on several addresses.
+
+## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98)
+
+- **Decision:**
+  - **Where:** `speculaire_mirror::fetch::Fetcher`, linked once P2P starts to a `Lookup` (the agent's adapter over the reflector client) and the node identity. Before that, or when the lookup fails, names no holder or only denied ones, the pull falls through (D66).
+  - **Race:** the first holder is asked at once, one more at each hedge delay, up to 4 at once. A holder that fails, answers `503` (D24) or `404` (a blob it no longer holds, D100) gives its turn to the next at once. The first good head wins; the others are dropped and stay candidates for a resume. Hedge delays are the 80th, 85th and 90th percentiles of the last 256 times peers took to give a good head, 50 ms at least, after Spegel v0.8.0 (`pkg/registry/registry.go:132`).
+  - **Identity:** each connection requires the certificate of the node the lookup named (`Credentials::client`, D16, D95).
+  - **Resume (D73):** each head, and each frame of a body, waits `peer.stall_timeout` at most. A body that breaks off or stalls resumes from the next holder with `Range: bytes=<offset>-`, whose `206` must give the same size. A stalled peer is not denied.
+  - **containerd:** a `GET` without `Range` of a digest the node lacks is fetched whole and checked before the first byte goes out, in an unnamed file under `<blob_cache.directory>/staging`; the mirror then serves a manifest only up to its 4 MiB (D85). A mismatch denies every peer that sent part of it and starts over without them, 3 times at most; then the pull falls through. A `HEAD` or a `Range` of a digest the node lacks falls through, as before.
+  - **CRI-O (D67):** the relay asks peers before upstream for a blob's `GET` without `Range`, streams it as it streams upstream's (hashed, kept in the blob cache, last chunk held back) and on a mismatch fails the pull, which kubelet retries without the denied peers. Manifests and ranges still come from upstream.
+  - **Denial (D52):** in memory, by node name, for `peer.deny_ttl`; each denial logs a warning and, with the audit on, a `peer` event (D37).
+  - **Sockets:** every connection the agent opens or accepts, mirror, peer API and reflector, sets `TCP_NODELAY`.
+  - **Metrics:** `speculaire_peer_fetches_total{result}` counts each failed request and each whole body (`ok` or `digest_mismatch`); hedge losers are not counted. `speculaire_peer_hedges_total` counts hedged requests, `speculaire_mirror_bytes_total{source="peer"}` the bytes sent on, and `speculaire_lookup_seconds{result="hit|miss|error"}` the agent's lookups (`NoMember`, before any reflector answers, is not timed).
+- **Because:**
+  - containerd keys an ingest by a stable ref and resumes it on its next attempt (`core/content/helpers.go:192-245`, `plugins/content/local/store.go:501-528` at v2.4.2), so a wrong byte it receives poisons every retry until the ingest expires. Checking before sending is the only way a wrong peer costs time, never a pull.
+  - CRI-O reads a blob once and copies nothing back; holding the last chunk keeps a wrong blob from committing, and the denial sends kubelet's retry elsewhere.
+  - Spegel's hedge waits for the slow tail rather than a fixed delay, so one slow peer does not slow every pull while a healthy cluster sends few duplicate requests.
+  - A miss on containerd now waits for a lookup, a small gRPC message: with Nagle's algorithm it waited for the reflector's delayed ACK, and a fall-through took 32 ms at the median.
+- **Limit:**
+  - On containerd the response's headers wait for the whole blob; containerd gives up on headers after 30 s (`core/remotes/docker/registry.go:254-268`) and pulls it from upstream instead.
+  - The staging file is not counted against `blob_cache.max_size`.
+- **Measured (M3 step 05, arm64, Docker):**
+  - `e2e/tests/fetch.rs` passes on containerd 2.4 (IPv4) in 62 s and on CRI-O 1.37 (dual-stack, fetches over IPv6) in 58 s: an image pulled on A comes to B with no blob `GET` at upstream; a peer whose certificate names another node than the lookup is refused and the pull falls through; a corrupted blob on A is denied with the warning and the audit `peer` event, containerd's pull succeeding from another peer and CRI-O's first pull failing (`Digest did not match`) and kubelet's retry succeeding.
+  - A 16 MiB blob that A sends at 16 Mbit/s, C after a 1 s delay: with A's agent killed after 1 MiB, B's pull completed in 1.54 to 1.90 s on containerd and 1.56 s on CRI-O; with A stalled by `netem loss 100%`, in 5.33 to 5.78 s and 5.37 s, `peer.stall_timeout` at its 5 s default (D73). Once the qdisc was removed A served the next fetch.
+  - In `crates/mirror/src/fetch/tests.rs`, with `peer.max_uploads = 1`, a holder answering `503` handed the fetch to the next with no hedge; a TCP relay that cuts or stalls a body checks the resume.
+  - 1000 misses on one connection to a worker's mirror (`e2e/tests/mirror.rs`): before `TCP_NODELAY`, p50 32 ms and p99 140 ms on containerd; after it, p50 0.27 ms and p99 0.47 ms, with p99 up to 17 ms in some runs on Docker Desktop. The test's bound is now 25 ms, D98's 20 ms lookup p99 plus D85's 5 ms; CRI-O, which asks no peer for a miss, measured p99 1.1 ms.
+  - `just fuzz peer_response 60`: 172,583 runs, no crash.
+- **Revisit when:** a blob that takes peers more than 30 s to send is common on containerd; then serve it as it comes and let a mismatch fail one pull, as on CRI-O.

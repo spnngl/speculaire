@@ -195,10 +195,16 @@ async fn an_agent_announces_to_every_member_and_keeps_both_maps_the_same() {
     assert_eq!(found.len(), 1);
     assert_eq!((found[0].node.as_str(), found[0].address), ("node-a", peer));
     assert_eq!(a.lookup(&digest(2)).await.unwrap(), []);
-    assert!(
-        test.metric("speculaire_lookup_seconds_count")
-            .is_some_and(|count| count != "0")
-    );
+    for result in ["hit", "miss"] {
+        assert_eq!(
+            test.metric(&format!(
+                "speculaire_lookup_seconds_count{{result=\"{result}\"}}"
+            ))
+            .as_deref(),
+            Some("1"),
+            "{result}"
+        );
+    }
     // Stopping the client withdraws the node from both.
     a.stop().await;
     test.wait(&digest(2), &[]).await;

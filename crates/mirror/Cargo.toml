@@ -14,7 +14,8 @@ bytes.workspace = true
 futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
-hyper.workspace = true
+humantime.workspace = true
+hyper = { workspace = true, features = ["client"] }
 hyper-util.workspace = true
 metrics.workspace = true
 rustls.workspace = true
@@ -25,6 +26,7 @@ speculaire-oci.workspace = true
 speculaire-pki.workspace = true
 speculaire-registry.workspace = true
 speculaire-runtime.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-rustls.workspace = true
@@ -34,8 +36,8 @@ tracing.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }
 hyper = { workspace = true, features = ["client", "http2"] }
 secrecy.workspace = true
-tempfile.workspace = true
 metrics-exporter-prometheus.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -150,6 +150,22 @@ pub struct Netem<'a> {
     node: String,
 }
 
+impl Netem<'_> {
+    /// Replaces the qdisc's `args`, such as a rate with `loss 100%`, in one step.
+    ///
+    /// # Errors
+    ///
+    /// When `tc` fails.
+    pub fn change(&self, args: &str) -> Result<(), Failure> {
+        self.cluster
+            .sh(
+                &self.node,
+                &format!("tc qdisc replace dev eth0 root netem {args}"),
+            )
+            .map(drop)
+    }
+}
+
 impl Drop for Netem<'_> {
     fn drop(&mut self) {
         let _ = self.cluster.sh(&self.node, "tc qdisc del dev eth0 root");

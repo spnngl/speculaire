@@ -73,7 +73,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 - **Revisit when:** D33's load test misses a target, or a node legitimately holds more than 100k digests.
 
 
-## D98: The agent's reflector client (amends D2, D33)
+## D98: The agent's reflector client (amends D2, D33; amended by D102)
 
 - **Decision:**
   - **Members:** the agent dials `reflector.url` itself, accepting any node of the cluster (`Credentials::client_any`), and reads the node of the certificate that answered. A `Members` answer whose node is not in its own list is ignored, like a failed call: the agent keeps the last list and retries with D33's backoff. The channel is never dialled again behind the agent's back, so every answer comes from the checked connection.

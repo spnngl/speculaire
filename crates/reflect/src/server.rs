@@ -217,6 +217,8 @@ async fn accept(
 }
 
 async fn handshake(acceptor: &TlsAcceptor, tcp: TcpStream) -> io::Result<Link> {
+    // A lookup's answer is small: Nagle's algorithm would hold it for the client's delayed ACK.
+    tcp.set_nodelay(true)?;
     let tls = acceptor.accept(tcp).await?;
     // The verifier checked the certificate's subject: reading it again only gets the name.
     let node = tls

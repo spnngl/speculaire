@@ -40,6 +40,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("token_answer", token_answer),
     ("manifest", manifest),
     ("mirror_request", mirror_request),
+    ("peer_response", peer_response),
     ("reference", reference),
     ("platform", platform),
     ("node_subject", node_subject),
@@ -305,6 +306,60 @@ pub fn mirror_request(data: &[u8]) {
         }
     }
     assert_eq!(Span::whole(0), None);
+}
+
+/// The head of a peer's answer to a fetch, as the fetcher reads it: a line with the status and the offset asked from,
+/// then a header per line (D102).
+///
+/// Reading never panics. A size it gives lies past the offset, is the offset plus the `Content-Length`, and comes from a
+/// `200` only for a fetch from the start; a `503` is busy.
+///
+/// # Panics
+///
+/// When reading panics, or a size breaks one of those.
+pub fn peer_response(data: &[u8]) {
+    use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+    use speculaire_mirror::fetch::read_head;
+    use speculaire_mirror::metrics::Fetched;
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let mut lines = text.lines();
+    let mut first = lines.next().unwrap_or_default().split(' ');
+    let Some(status) = first
+        .next()
+        .and_then(|code| StatusCode::from_bytes(code.as_bytes()).ok())
+    else {
+        return;
+    };
+    let offset = first.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':')
+            && let Ok(name) = HeaderName::from_bytes(name.as_bytes())
+            && let Ok(value) = HeaderValue::from_str(value.trim())
+        {
+            headers.append(name, value);
+        }
+    }
+    match read_head(status, &headers, offset) {
+        Ok(size) => {
+            let length: Option<u64> = headers
+                .get("content-length")
+                .and_then(|value| value.to_str().ok()?.parse().ok());
+            let length =
+                length.unwrap_or_else(|| panic!("a size with no Content-Length: {text:?}"));
+            assert_eq!(offset.checked_add(length), Some(size), "{text:?}");
+            assert!(status != StatusCode::OK || offset == 0, "{text:?}");
+        }
+        Err(failed) => {
+            assert_eq!(
+                failed == Fetched::Busy,
+                status == StatusCode::SERVICE_UNAVAILABLE,
+                "{text:?}"
+            );
+        }
+    }
 }
 
 /// The version a runtime reports about itself over the CRI (D86).

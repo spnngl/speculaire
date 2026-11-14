@@ -70,7 +70,7 @@
 #address = "auto"
 # Blob bodies the peer API sends at once; a HEAD or a manifest does not count. "auto" is 4 per CPU (D24, D100).
 #max_uploads = "auto"
-# How long a fetch from another peer may receive nothing before it moves to the next peer (D73).
+# How long a fetch from another peer may receive nothing, head or body, before it moves to the next peer (D73, D102).
 #stall_timeout = "5s"
 # How long a peer that sent a wrong digest is skipped (D52).
 #deny_ttl = "10m"
@@ -78,7 +78,8 @@
 [blob_cache]
 # On CRI-O, the size above which the least recently served blobs are evicted (D67).
 #max_size = "20GiB"
-# Where the blob cache keeps the blobs and the manifests the mirror served (D67, D88). Restart.
+# Where the blob cache keeps the blobs and the manifests the mirror served (D67, D88); on containerd, its staging/
+# holds what comes from peers until its digest is checked (D102). Restart.
 #directory = "/var/lib/speculaire/blobs"
 
 [metrics]

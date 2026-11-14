@@ -4,6 +4,7 @@ Trust boundaries and accepted risks. Each item names the decision that enforces 
 
 - **Peers are untrusted for integrity** (*withhold, never forge*):
   - blobs are checked against their digest, and a peer that sends a wrong one is skipped locally for a while; no node can evict another cluster-wide (D7, D52);
+  - on the fetch path a peer can only withhold: on containerd the agent sends the runtime nothing of a peer's blob or manifest until the whole has matched its digest; on CRI-O it holds back the last chunk, so a wrong blob fails that pull, which kubelet retries without the peers that sent it. A peer that is slow, busy, stalled or gone costs time: the fetcher hedges, moves on, resumes with `Range` from the next, and falls through to upstream when none is left. The fetcher dials only the node a lookup named and requires that node's certificate (D16, D52, D67, D73, D102);
   - artifacts are checked against their digest and signature (D8);
   - TUF metadata authenticates itself, so it can travel P2P (D26).
 - **Peers are authenticated for identity.** Only holders of a kubelet client certificate from the cluster CA can talk to the peer API or a reflector, and a node can only announce content for itself (D16).

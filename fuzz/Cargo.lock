@@ -1677,6 +1677,7 @@ dependencies = [
  "serde_path_to_error",
  "speculaire-configure",
  "speculaire-mirror",
+ "speculaire-oci",
  "speculaire-pki",
  "speculaire-reflect",
  "speculaire-runtime",
@@ -1700,6 +1701,7 @@ name = "speculaire-fuzz"
 version = "0.0.0"
 dependencies = [
  "containerd-client",
+ "http",
  "libfuzzer-sys",
  "prost",
  "secrecy",
@@ -1725,6 +1727,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body-util",
+ "humantime",
  "hyper",
  "hyper-util",
  "metrics",
@@ -1736,6 +1739,7 @@ dependencies = [
  "speculaire-pki",
  "speculaire-registry",
  "speculaire-runtime",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-rustls",

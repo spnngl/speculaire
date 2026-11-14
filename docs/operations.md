@@ -117,7 +117,8 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | Metric | Alert when |
 |---|---|
 | `speculaire_gate_total{mode="enforce",result=~"rejected\|unverifiable\|pending\|unmatched"}` | The rate rises above its usual level |
-| `speculaire_peer_fetches_total{result="digest_mismatch"}` | It increases: a peer sent bytes that do not match their digest; the warning log, and the `peer` audit event if on, name its node (D52) |
+| `speculaire_peer_fetches_total{result="digest_mismatch"}` | It increases: a peer sent bytes that do not match their digest, and is skipped until `peer.deny_ttl` passes; the warning log `a peer sent content that is not its digest`, and the `peer` audit event if on, name its node. On containerd the pull went on from another peer; on CRI-O it failed once and kubelet retried (D52, D102) |
+| `speculaire_lookup_seconds_count{result="error"}` | It rises: lookups fail at every reflector asked, and pulls fall through to upstream (D102) |
 | `speculaire_mirror_requests_total{result="error"}` | It increases: the mirror could not read content it may hold, and answered 404; the warning log names the error (D85) |
 | `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, or on its previous registry config, or a registry config read left a credential, certificate or key file out, or the kubelet certificate or the cluster CA cannot be loaded and the previous one stays; the error log names the file and the line (D30, D91, D92, D95) |
 | `speculaire_identity_path{path="annotation"}` | It is 1: the node runs containerd 2.3, with its known identity gap (D15) |

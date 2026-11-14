@@ -11,6 +11,7 @@ use speculaire_runtime::registries::{Credentials, Endpoint, Error as ConfigError
 use tokio::net::TcpListener;
 
 use super::*;
+use crate::fetch::tests::{Nodes, SETTINGS, pattern};
 
 /// What the fake registry answers for a path.
 #[derive(Clone)]
@@ -281,9 +282,19 @@ impl Node {
     }
 
     fn relay_with<I: Images>(&self, max_size: u64, images: I) -> Relay<I> {
+        // Unlinked, the fetcher asks no peer.
+        let fetcher = Fetcher::new(
+            self.dir.path().join("staging"),
+            crate::fetch::tests::SETTINGS,
+        );
+        self.relay_from(max_size, images, fetcher)
+    }
+
+    fn relay_from<I: Images>(&self, max_size: u64, images: I, fetcher: Fetcher) -> Relay<I> {
         let cache = Cache::open(self.dir.path().join("blobs"), max_size).unwrap();
         Relay::new(
             cache,
+            fetcher,
             Arc::clone(&self.config) as Arc<dyn Registries>,
             images,
         )
@@ -292,7 +303,7 @@ impl Node {
 
 /// The digest of `bytes`.
 fn sha(bytes: &[u8]) -> Digest {
-    hash_of("sha256", bytes).unwrap()
+    hash::of("sha256", bytes).unwrap()
 }
 
 /// An image of two layers on the fake registry under `reg.test/app/web`: the config, the layers, the manifest.
@@ -676,6 +687,66 @@ async fn a_blob_cut_short_by_upstream_is_not_kept() {
 }
 
 #[tokio::test]
+async fn a_blob_a_peer_holds_is_relayed_from_it_before_upstream_and_kept() {
+    let node = Node::new().await;
+    let image = Image::new(&node.registry, &[300_000]);
+    let layer = sha(&image.layers[0]);
+    let mut nodes = Nodes::new();
+    let (a, _) = nodes.peer("node-a", &[(&layer, &image.layers[0])], 4).await;
+    let relay = node.relay_from(1 << 30, NoImages, nodes.fetcher(vec![a], SETTINGS));
+    read(
+        relay
+            .pull(pull(Kind::Manifest, &tag("1.0"), false, None))
+            .await,
+    )
+    .await
+    .unwrap();
+    let got = read(relay.pull(pull(Kind::Blob, &by(&layer), false, None)).await)
+        .await
+        .unwrap();
+    assert_eq!(got.status, StatusCode::OK);
+    assert!(got.error.is_none(), "{:?}", got.error);
+    assert!(got.body == image.layers[0].as_ref(), "the bytes differ");
+    assert_eq!(
+        got.headers["content-length"],
+        image.layers[0].len().to_string()
+    );
+    assert!(relay.cache().contains(&layer));
+    assert_eq!(node.registry.requests(), ["GET /v2/app/web/manifests/1.0"]);
+}
+
+#[tokio::test]
+async fn a_wrong_blob_from_a_peer_fails_the_pull_and_the_retry_goes_upstream() {
+    let node = Node::new().await;
+    let image = Image::new(&node.registry, &[300_000]);
+    let layer = sha(&image.layers[0]);
+    let mut nodes = Nodes::new();
+    let wrong = pattern(image.layers[0].len(), 1);
+    let (a, _) = nodes.peer("node-a", &[(&layer, &wrong)], 4).await;
+    let relay = node.relay_from(1 << 30, NoImages, nodes.fetcher(vec![a], SETTINGS));
+    read(
+        relay
+            .pull(pull(Kind::Manifest, &tag("1.0"), false, None))
+            .await,
+    )
+    .await
+    .unwrap();
+    let got = read(relay.pull(pull(Kind::Blob, &by(&layer), false, None)).await)
+        .await
+        .unwrap();
+    assert!(got.error.is_some(), "the body ended as if it were whole");
+    assert!(got.body.len() < image.layers[0].len());
+    assert!(!relay.cache().contains(&layer));
+    // The kubelet's retry: node-a is denied, so upstream sends it.
+    let got = read(relay.pull(pull(Kind::Blob, &by(&layer), false, None)).await)
+        .await
+        .unwrap();
+    assert!(got.error.is_none() && got.body == image.layers[0].as_ref());
+    assert!(relay.cache().contains(&layer));
+    assert_eq!(node.registry.requests().len(), 2);
+}
+
+#[tokio::test]
 async fn a_range_of_a_blob_the_cache_lacks_is_relayed_as_upstream_answers_and_not_kept() {
     let node = Node::new().await;
     let image = Image::new(&node.registry, &[5000]);
@@ -1023,26 +1094,4 @@ async fn a_cache_over_its_bound_is_evicted_by_the_task_that_waits_for_it() {
     }
     assert!(relay.cache().size() <= 4000);
     task.abort();
-}
-
-#[test]
-fn every_algorithm_a_digest_may_name_hashes_to_its_known_value() {
-    for (name, hex) in [
-        (
-            "sha256",
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-        ),
-        (
-            "sha384",
-            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
-        ),
-        (
-            "sha512",
-            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
-        ),
-    ] {
-        let digest = hash_of(name, b"abc").expect("a known algorithm");
-        assert_eq!(digest.to_string(), format!("{name}:{hex}"));
-    }
-    assert!(hash_of("md5", b"abc").is_none());
 }
