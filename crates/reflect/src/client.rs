@@ -234,9 +234,24 @@ pub fn members(response: proto::MembersResponse) -> Vec<Member> {
         .collect()
 }
 
-/// Whether failures since `since` have lasted long enough to log at `warn` (D98).
-fn failing_long(since: Instant) -> bool {
-    since.elapsed() >= PATIENCE
+/// Since when the load balancer, or a member, has failed without a success in between (D98).
+#[derive(Debug, Default)]
+struct Outage(Option<tokio::time::Instant>);
+
+impl Outage {
+    /// Records a failure, which starts the outage unless one runs; whether the outage has lasted long enough to log
+    /// at `warn`.
+    fn failed(&mut self) -> bool {
+        self.0
+            .get_or_insert_with(tokio::time::Instant::now)
+            .elapsed()
+            >= PATIENCE
+    }
+
+    /// Ends the outage: the next failure starts another.
+    const fn ended(&mut self) {
+        self.0 = None;
+    }
 }
 
 /// One stream per member, as the load balancer lists them every [`REFRESH`] and after a stream drops; the last list
@@ -244,12 +259,12 @@ fn failing_long(since: Instant) -> bool {
 async fn supervise(shared: Arc<Shared>, stop: CancellationToken) {
     let mut streams: HashMap<Member, (CancellationToken, JoinHandle<()>)> = HashMap::new();
     let mut backoff = backoff::Backoff::new(fastrand::u64(..));
-    let mut answered = Instant::now();
+    let mut outage = Outage::default();
     loop {
         let wait = match ask_members(&shared).await {
             Ok(members) => {
                 backoff.succeeded();
-                answered = Instant::now();
+                outage.ended();
                 for (member, (token, task)) in
                     streams.extract_if(|member, _| !members.contains(member))
                 {
@@ -272,7 +287,7 @@ async fn supervise(shared: Arc<Shared>, stop: CancellationToken) {
             }
             Err(err) => {
                 let wait = backoff.failed();
-                if failing_long(answered) {
+                if outage.failed() {
                     warn!(error = %err, retry = ?wait, "the reflectors' load balancer fails; the last list of members stays");
                 } else {
                     info!(error = %err, retry = ?wait, "cannot ask the reflectors' load balancer for the members");
@@ -438,6 +453,22 @@ mod tests {
         });
         let nodes: Vec<&str> = kept.iter().map(|member| member.node.as_str()).collect();
         assert_eq!(nodes, ["a", "e"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_outage_is_long_after_sixty_seconds_of_failures_not_sixty_seconds_after_a_success() {
+        let mut outage = Outage::default();
+        // A success, then the next call a refresh later fails: the outage starts with that failure.
+        outage.ended();
+        tokio::time::advance(REFRESH + Duration::from_secs(1)).await;
+        assert!(!outage.failed());
+        tokio::time::advance(PATIENCE.saturating_sub(Duration::from_millis(1))).await;
+        assert!(!outage.failed());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(outage.failed());
+        // A success ends it.
+        outage.ended();
+        assert!(!outage.failed());
     }
 
     #[tokio::test(start_paused = true)]
