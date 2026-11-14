@@ -56,6 +56,7 @@ pub async fn connect(
             let connector = connector.clone();
             async move {
                 let tcp = TcpStream::connect(address).await?;
+                tcp.set_nodelay(true)?;
                 let tls = connector
                     .connect(ServerName::IpAddress(address.ip().into()), tcp)
                     .await?;

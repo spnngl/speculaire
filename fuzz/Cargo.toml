@@ -17,6 +17,8 @@ cargo-fuzz = true
 [dependencies]
 # `containerd_event` decodes containerd's envelopes; the same version as the workspace's.
 containerd-client = "0.9.0"
+# `peer_response` builds the head it reads; the same version as the workspace's.
+http = "1.5.0"
 libfuzzer-sys = "0.4.13"
 speculaire-agent = { path = "../crates/agent" }
 speculaire-mirror = { path = "../crates/mirror" }
@@ -175,6 +177,13 @@ bench = false
 [[bin]]
 name = "reflect"
 path = "fuzz_targets/reflect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peer_response"
+path = "fuzz_targets/peer_response.rs"
 test = false
 doc = false
 bench = false

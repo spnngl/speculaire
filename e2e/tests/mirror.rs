@@ -95,9 +95,11 @@ fn the_mirror_serves_a_client_with_the_local_certificate_and_refuses_one_without
     }
 }
 
+/// On containerd a miss first looks the digest up (D102): 25 ms is the 20 ms lookup p99 past which D98 is revisited, plus
+/// the 5 ms the mirror took alone (M2).
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
-fn a_digest_the_node_does_not_hold_falls_through_in_under_5_ms_at_p99() {
+fn a_digest_the_node_does_not_hold_falls_through_in_under_25_ms_at_p99() {
     let cluster = Cluster::from_env();
     let node = workers(&cluster).remove(0);
     let before = series(
@@ -122,7 +124,7 @@ fn a_digest_the_node_does_not_hold_falls_through_in_under_5_ms_at_p99() {
         seconds[500], seconds[999]
     );
     assert!(
-        p99 < 0.005,
+        p99 < 0.025,
         "p99 of a fall through is {p99} s; median {} s, max {} s",
         seconds[500],
         seconds[999]

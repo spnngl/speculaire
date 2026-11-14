@@ -16,8 +16,8 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `speculaire_peer_fetches_total` | counter | `result` = `ok`\|`digest_mismatch`\|`busy`\|`timeout`\|`error` | Fetches from other agents; `timeout` includes a stalled one (D7, D24, D73) |
-| `speculaire_peer_hedges_total` | counter | — | Hedged extra fetches started |
+| `speculaire_peer_fetches_total` | counter | `result` = `ok`\|`digest_mismatch`\|`busy`\|`timeout`\|`error` | Requests to other agents, each counted when it ends: `ok` and `digest_mismatch` once per whole body, the others per peer that failed; `error` includes a refused certificate and a `404`, `timeout` a stall (D7, D24, D52, D73, D102) |
+| `speculaire_peer_hedges_total` | counter | — | Requests to a further peer started because the first were slow to answer (D102) |
 | `speculaire_peer_uploads_total` | counter | `result` = `served`\|`busy` | Requests to the peer API that found what they named; `busy` answered `503`, at `peer.max_uploads` or while the agent stops (D24, D39, D100) |
 | `speculaire_peer_uploads_in_flight` | gauge | — | Blob bodies now being sent, which `peer.max_uploads` caps (D24) |
 | `speculaire_peer_upload_bytes_total` | counter | — | Blob bytes sent to other agents |
@@ -30,7 +30,7 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 |---|---|---|---|
 | `speculaire_reflector_connected` | gauge | `member` | 1 while the `Announce` stream to that reflector is up |
 | `speculaire_reflector_reconnects_total` | counter | `member` | Stream reconnects (D33) |
-| `speculaire_lookup_seconds` | histogram | — | `Lookup` latency seen by the agent, hedge included |
+| `speculaire_lookup_seconds` | histogram | `result` = `hit`\|`miss`\|`error` | `Lookup` latency seen by the agent, hedge included; `miss` named no holder, `error` failed at every member asked; none while no member is known (D102) |
 
 ## Reflector server (`role = "reflector"`)
 

@@ -4,15 +4,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context as _;
+/// The target of audit events; they bypass `log.filter` and follow `audit.enabled` (D37). The crates that audit name it.
+pub use speculaire_mirror::fetch::AUDIT_TARGET;
 use tracing_subscriber::filter::{FilterExt as _, filter_fn};
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{EnvFilter, Layer as _, Registry, reload};
 
 use crate::config;
-
-/// The target of audit events; they bypass `log.filter` and follow `audit.enabled` (D37).
-pub const AUDIT_TARGET: &str = "speculaire::audit";
 
 /// The syslog identifier of audit events in journald: `journalctl -t speculaire-audit` shows them alone (D37).
 const AUDIT_IDENTIFIER: &str = "speculaire-audit";

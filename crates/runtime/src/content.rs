@@ -59,7 +59,12 @@ pub struct Blob {
 
 enum Source {
     File(PathBuf),
-    Grpc { channel: Channel, digest: String },
+    /// A file already open, such as one with no name that goes when it is closed.
+    Open(std::fs::File),
+    Grpc {
+        channel: Channel,
+        digest: String,
+    },
     Memory(Bytes),
 }
 
@@ -67,6 +72,7 @@ impl std::fmt::Debug for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::File(path) => write!(f, "File({})", path.display()),
+            Self::Open(_) => write!(f, "Open"),
             Self::Grpc { digest, .. } => write!(f, "Grpc({digest})"),
             Self::Memory(bytes) => write!(f, "Memory({} bytes)", bytes.len()),
         }
@@ -80,6 +86,15 @@ impl Blob {
         Self {
             size,
             source: Source::File(path),
+        }
+    }
+
+    /// A blob that is the first `size` bytes of an open file.
+    #[must_use]
+    pub fn from_open(file: std::fs::File, size: u64) -> Self {
+        Self {
+            size,
+            source: Source::Open(file),
         }
     }
 
@@ -123,6 +138,13 @@ impl Blob {
             }
             Source::File(path) => {
                 let mut file = tokio::fs::File::open(path).await?;
+                file.seek(io::SeekFrom::Start(first)).await?;
+                Ok(Box::pin(
+                    ReaderStream::with_capacity(file.take(length), CHUNK).map_err(Error::Io),
+                ))
+            }
+            Source::Open(file) => {
+                let mut file = tokio::fs::File::from_std(file);
                 file.seek(io::SeekFrom::Start(first)).await?;
                 Ok(Box::pin(
                     ReaderStream::with_capacity(file.take(length), CHUNK).map_err(Error::Io),

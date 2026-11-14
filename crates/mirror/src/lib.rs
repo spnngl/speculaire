@@ -7,6 +7,8 @@
 //! The peer API, [`peer`], serves the same content to the agents of other nodes.
 
 pub mod cache;
+pub mod fetch;
+mod hash;
 pub mod metrics;
 pub mod peer;
 mod pulls;

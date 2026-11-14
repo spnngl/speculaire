@@ -142,14 +142,13 @@ impl Client {
     ///
     /// When no stream is up, or every member asked fails.
     pub async fn lookup(&self, digest: &Digest) -> Result<Vec<Peer>, LookupError> {
-        let start = Instant::now();
-        let mut channels: Vec<Channel> = self.shared.links().values().cloned().collect();
-        fastrand::shuffle(&mut channels);
-        let mut channels = channels.into_iter();
-        let first = channels.next().ok_or(LookupError::NoMember)?;
-        let peers = hedged(ask(first, digest), channels.next().map(|c| ask(c, digest))).await;
-        ::metrics::histogram!(CLIENT_LOOKUP).record(start.elapsed().as_secs_f64());
-        Ok(peers?)
+        self.lookups().lookup(digest).await
+    }
+
+    /// A handle that looks digests up for as long as the client runs; after [`Client::stop`] it finds no member.
+    #[must_use]
+    pub fn lookups(&self) -> Lookups {
+        Lookups(Arc::clone(&self.shared))
     }
 
     /// Ends every stream, so that each member withdraws what the node announced (D39, step 3).
@@ -158,6 +157,35 @@ impl Client {
         if let Err(err) = self.task.await {
             warn!(error = %err, "reflector client task ended abnormally");
         }
+    }
+}
+
+/// Looks digests up through a [`Client`]'s streams.
+#[derive(Clone, Debug)]
+pub struct Lookups(Arc<Shared>);
+
+impl Lookups {
+    /// As [`Client::lookup`]. The latency goes to `speculaire_lookup_seconds` with `result` `hit`, `miss` or `error`;
+    /// a lookup with no stream up asks nobody and is not counted.
+    ///
+    /// # Errors
+    ///
+    /// When no stream is up, or every member asked fails.
+    pub async fn lookup(&self, digest: &Digest) -> Result<Vec<Peer>, LookupError> {
+        let start = Instant::now();
+        let mut channels: Vec<Channel> = self.0.links().values().cloned().collect();
+        fastrand::shuffle(&mut channels);
+        let mut channels = channels.into_iter();
+        let first = channels.next().ok_or(LookupError::NoMember)?;
+        let peers = hedged(ask(first, digest), channels.next().map(|c| ask(c, digest))).await;
+        let result = match &peers {
+            Ok(found) if found.is_empty() => "miss",
+            Ok(_) => "hit",
+            Err(_) => "error",
+        };
+        ::metrics::histogram!(CLIENT_LOOKUP, "result" => result)
+            .record(start.elapsed().as_secs_f64());
+        Ok(peers?)
     }
 }
 
@@ -382,6 +410,8 @@ async fn dial(address: SocketAddr, mut tls: ClientConfig) -> Result<(Channel, Li
     let connector = TlsConnector::from(Arc::new(tls));
     let (local, stream) = tokio::time::timeout(DIAL, async {
         let tcp = TcpStream::connect(address).await?;
+        // A lookup is small: Nagle's algorithm would hold it for the reflector's delayed ACK.
+        tcp.set_nodelay(true)?;
         let local = tcp.local_addr()?;
         let stream = connector
             .connect(ServerName::IpAddress(address.ip().into()), tcp)

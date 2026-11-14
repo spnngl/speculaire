@@ -14,7 +14,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D4 [build](build.md): no io_uring in v1, and the unit denies its syscalls
 - D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85)
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66)
-- D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73)
+- D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73, D102)
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43)
 - D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
@@ -31,7 +31,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D21 [verification](verification.md): stale verdicts keep serving during re-verification, for up to `verify.stale_max` (amended by D31, D65)
 - D22 [verification](verification.md): verification starts at the manifest fetch (amended by D65, D66)
 - D23 [gate](gate.md): `gate.unmatched` (default `deny`) decides images that no policy matches
-- D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100)
+- D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100, D102)
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
 - D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97)
@@ -59,7 +59,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D49 [verification](verification.md): a BuildKit SBOM inside a signed index is D43's one exception (amends D43)
 - D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34)
 - D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2)
-- D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37)
+- D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37; amended by D102)
 - D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69, D88)
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64, D86)
 - D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32; amended by D82, D85)
@@ -73,14 +73,14 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59; amended by D94)
 - D64 [gate](gate.md): the same NRI plugin gates CRI-O; the agent finds its runtime by probing both sockets, and reads CRI-O's NRI keys from `GET /config` on `crio.sock` (amends D9, D41, D54; amended by D84, D86, D90)
 - D65 [gate](gate.md): on CRI-O the image identity is the `ImageRef` annotation (the config digest), policies match every name of the image, and `images.json` changes trigger verification; no pinning (amends D11, D15, D20, D21, D22)
-- D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32; amended by D80, D83)
-- D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7; amended by D88)
+- D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32; amended by D80, D83, D102)
+- D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7; amended by D88, D102)
 - D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61)
 - D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53)
 - D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29; amended by D79, D80, D81)
 - D71 [build](build.md): cargo-vet holds every crate version of `Cargo.lock` to an imported audit, a trusted publisher or an exemption, in `deps (deny)` inside `required`; bumps of exempted crates are renewed by hand (amends D27)
 - D72 [build](build.md): the `coverage` job uploads line coverage for the ruleset's `code_coverage` rule and `required` needs it; cargo-nextest runs the tests of `just check` and `just cov`, killing hung tests (amends D27, D48)
-- D73 [distribution](distribution.md): a peer fetch silent for `peer.stall_timeout` moves to the next peer or falls through, without denying the peer (amends D7)
+- D73 [distribution](distribution.md): a peer fetch silent for `peer.stall_timeout` moves to the next peer or falls through, without denying the peer (amends D7; amended by D102)
 - D74 [build](build.md): cargo-mutants tests the diff of each pull request in up to 4 shards, outside `required`; every package's tests run for each mutant, a hang killed by nextest counts as caught, one change is excluded (amends D27)
 - D75 [build](build.md): a second fuzz target, `config_values`, writes config files from the keys with literals each parser accepts or refuses, so the round trip reaches the values raw bytes seldom spell (amends D27)
 - D76 [build](build.md): cargo-careful runs the workspace's tests under AddressSanitizer on each pull request, in one job on glibc Linux, outside `required` (amends D27; amended by D97)
@@ -92,7 +92,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D82 [agent](agent.md): `configure` makes one set of four certificate files, edits every `hosts.toml` under `config_path` with the mirror first, and `unconfigure` removes only what it added (amends D14, D32, D55, D56; amended by D85, D101)
 - D83 [distribution](distribution.md): the CRI-O drop-in copies the admin's entry of every mirrored registry (`mirror.registries` and the admin's prefixes), with the mirror's location the entry's own (amends D66; amended by D88)
 - D84 [agent](agent.md): `configure`, `unconfigure` and `check-config` find the runtime by its socket, `--runtime` names it, and `unconfigure` stops while the runtime's NRI config requires `speculaire` (amends D32, D64; amended by D90)
-- D85 [distribution](distribution.md): the mirror is hyper over TLS 1.3 with a required client certificate, finds a held blob by its digest in the content directory, answers every miss with a 404, and is checked by the distribution-spec conformance suite (amends D5, D14, D55, D82)
+- D85 [distribution](distribution.md): the mirror is hyper over TLS 1.3 with a required client certificate, finds a held blob by its digest in the content directory, answers every miss with a 404, and is checked by the distribution-spec conformance suite (amends D5, D14, D55, D82; amended by D102)
 - D86 [gate](gate.md): one preflight stops the agent and fails `check-config` on a node where it would mirror or gate wrongly: runtime version floors, NRI, discard_unpacked_layers and config_path, certificates; `/readyz` is 503 until the mirror listens (amends D15, D54, D64; amended by D90)
 - D87 [agent](agent.md): `runtime.containerd_socket`, `runtime.containerd_config` and `runtime.crio_socket` are restart keys that every command reads, and the agent's tests run against a fake containerd; no switch skips preflight (amends D60)
 - D88 [distribution](distribution.md): the upstream client is our own on hyper, with Bearer tokens kept per host and scope; the CRI-O relay serves what its served manifests point to and keeps it in the blob cache (amends D17, D53, D67, D83)
@@ -105,9 +105,10 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
 - D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76)
-- D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33)
+- D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33; amended by D102)
 - D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90)
 - D100 [distribution](distribution.md): the peer API routes `GET` and `HEAD` by digest through the mirror's parser, caps only blob bodies, answers `503` while the agent stops, and opens on the peer address the client fixes (amends D24, D36)
 - D101 [agent](agent.md): `configure` keeps the mirror's table only where containerd reads it first, and refuses a `hosts.toml` whose first host table is `[host.""]`, which containerd skips there and would read after the mirror's (amends D82)
+- D102 [distribution](distribution.md): the fetcher races and hedges a lookup's holders (4 at once, Spegel's 80th/85th/90th percentile delays, 50 ms floor), resumes with `Range`, checks a blob whole before serving it on containerd and streams it on CRI-O; `speculaire_lookup_seconds` gains `result`; every socket sets `TCP_NODELAY` (amends D7, D24, D52, D66, D67, D73, D85, D98)
 
-Next free number: D102.
+Next free number: D103.

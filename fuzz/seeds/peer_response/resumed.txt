@@ -1,0 +1,3 @@
+206 500
+content-length: 500
+content-range: bytes 500-999/1000

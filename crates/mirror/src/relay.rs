@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use aws_lc_rs::digest::{self, Context as Hasher};
 use bytes::Bytes;
 use futures_util::TryStreamExt as _;
 use http::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, RANGE};
@@ -25,6 +24,8 @@ use tokio::sync::Notify;
 use tracing::{debug, warn};
 
 use crate::cache::{Cache, Writer};
+use crate::fetch::{Download, Fetcher};
+use crate::hash::{self, Hash};
 use crate::metrics;
 use crate::pulls::{Answer, Body, Pull, Pulls, from_content};
 use crate::request::{Kind, Reference};
@@ -130,6 +131,7 @@ impl Known {
 /// The relay.
 pub struct Relay<I> {
     cache: Arc<Cache>,
+    fetcher: Fetcher,
     client: Client,
     registries: Arc<dyn Registries>,
     known: Known,
@@ -138,11 +140,13 @@ pub struct Relay<I> {
 }
 
 impl<I: Images> Relay<I> {
-    /// A relay that keeps what it serves in `cache`, and fetches where `registries` say.
+    /// A relay that keeps what it serves in `cache`, and fetches a blob from peers with `fetcher`, else where
+    /// `registries` say.
     #[must_use]
-    pub fn new(cache: Cache, registries: Arc<dyn Registries>, images: I) -> Self {
+    pub fn new(cache: Cache, fetcher: Fetcher, registries: Arc<dyn Registries>, images: I) -> Self {
         Self {
             cache: Arc::new(cache),
+            fetcher,
             client: Client::new(),
             registries,
             known: Known::default(),
@@ -274,9 +278,9 @@ impl<I: Images> Relay<I> {
             .to_bytes();
         // A manifest by tag is named by its sha256; one by digest has to hash to it.
         let digest = match reference {
-            Reference::Tag(_) => hash_of("sha256", &bytes)?,
+            Reference::Tag(_) => hash::of("sha256", &bytes)?,
             Reference::Digest(digest) => {
-                if hash_of(digest.algorithm(), &bytes).as_ref() != Some(digest) {
+                if hash::of(digest.algorithm(), &bytes).as_ref() != Some(digest) {
                     warn!(name = pull.name, digest = %digest, "upstream sent a manifest that is not the digest asked for");
                     return None;
                 }
@@ -338,6 +342,21 @@ impl<I: Images> Relay<I> {
             )
             .await;
         }
+        // A whole blob comes from a peer that holds it before upstream (D67); a head or a range does not.
+        if !pull.head
+            && pull.range.is_none()
+            && let Some(download) = self.fetcher.download(Kind::Blob, digest).await
+        {
+            let length = download.size();
+            return self
+                .relay_blob(
+                    Feed::Peers(Box::new(download)),
+                    Some(length.into()),
+                    digest,
+                    pull.name,
+                )
+                .await;
+        }
         let digest_text = digest.to_string();
         let sources = match self
             .registries
@@ -363,7 +382,9 @@ impl<I: Images> Relay<I> {
             let answer = match (response.status, pull.head, pull.range) {
                 (StatusCode::OK, true, _) => head_response(&response).map(Answer::Served),
                 (StatusCode::OK, false, None) => {
-                    Some(self.relay_blob(response, digest, pull.name).await)
+                    let length = response.headers.get(CONTENT_LENGTH).cloned();
+                    let feed = Feed::Upstream(response.body);
+                    Some(self.relay_blob(feed, length, digest, pull.name).await)
                 }
                 // A range, answered as upstream answers it: unhashed, not kept (D7's limit).
                 (
@@ -385,14 +406,20 @@ impl<I: Images> Relay<I> {
         Answer::Missing
     }
 
-    /// A blob whole: hashed as it streams, kept when the digest matches, and never sent to its end when it does not.
-    async fn relay_blob(&self, response: Upstreamed, digest: &Digest, name: &str) -> Answer {
-        let Some(algorithm) = algorithm(digest.algorithm()) else {
+    /// A blob whole, of `length`: hashed as it streams, kept when the digest matches, and never sent to its end when it
+    /// does not.
+    async fn relay_blob(
+        &self,
+        feed: Feed,
+        length: Option<HeaderValue>,
+        digest: &Digest,
+        name: &str,
+    ) -> Answer {
+        let Some(hash) = Hash::new(digest) else {
             return Answer::Failed(Error::Relay(format!(
                 "{digest}: the relay hashes only sha256, sha384 and sha512"
             )));
         };
-        let length = response.headers.get(CONTENT_LENGTH).cloned();
         let writer = self
             .cache
             .writer()
@@ -400,14 +427,13 @@ impl<I: Images> Relay<I> {
             .map_err(|err| warn!(error = %err, "the blob cache cannot write: this blob is relayed without being kept"))
             .ok();
         let relaying = Relaying {
-            body: response.body,
-            hasher: Hasher::new(algorithm),
+            feed: Some(feed),
+            hash,
             expected: digest.clone(),
             writer,
             cache: Arc::clone(&self.cache),
             over: Arc::clone(&self.over),
             held: None,
-            done: false,
             name: name.to_owned(),
         };
         let mut out = Response::new(
@@ -463,33 +489,6 @@ fn header_value(text: &str) -> Option<HeaderValue> {
     HeaderValue::from_str(text).ok()
 }
 
-fn algorithm(name: &str) -> Option<&'static digest::Algorithm> {
-    match name {
-        "sha256" => Some(&digest::SHA256),
-        "sha384" => Some(&digest::SHA384),
-        "sha512" => Some(&digest::SHA512),
-        _ => None,
-    }
-}
-
-/// The digest of `bytes` under `algorithm`.
-fn hash_of(algorithm_name: &str, bytes: &[u8]) -> Option<Digest> {
-    let algorithm = algorithm(algorithm_name)?;
-    let mut hasher = Hasher::new(algorithm);
-    hasher.update(bytes);
-    to_digest(algorithm_name, &hasher.finish())
-}
-
-fn to_digest(algorithm_name: &str, hashed: &digest::Digest) -> Option<Digest> {
-    use std::fmt::Write as _;
-    let hex = hashed.as_ref().iter().fold(String::new(), |mut out, byte| {
-        // Writing to a string cannot fail.
-        let _ = write!(out, "{byte:02x}");
-        out
-    });
-    Digest::parse(&format!("{algorithm_name}:{hex}")).ok()
-}
-
 /// A response with the headers of upstream's answer to a HEAD, and no body.
 fn head_response(response: &Upstreamed) -> Option<Response<Body>> {
     let mut out = Response::new(crate::serve::empty());
@@ -537,16 +536,57 @@ fn passthrough(response: Upstreamed, digest: &Digest) -> Response<Body> {
     out
 }
 
+/// Where a relayed blob comes from.
+enum Feed {
+    Upstream(Incoming),
+    Peers(Box<Download>),
+}
+
+impl Feed {
+    /// The next chunk, or `None` at the end.
+    async fn next(&mut self, name: &str) -> Result<Option<Bytes>, io::Error> {
+        match self {
+            Self::Upstream(body) => loop {
+                match body.frame().await {
+                    Some(Ok(frame)) => {
+                        if let Ok(data) = frame.into_data()
+                            && !data.is_empty()
+                        {
+                            metrics::upstream_bytes(data.len());
+                            return Ok(Some(data));
+                        }
+                    }
+                    Some(Err(err)) => {
+                        debug!(error = %err, name, "upstream broke off a blob");
+                        return Err(io::Error::other(err));
+                    }
+                    None => return Ok(None),
+                }
+            },
+            Self::Peers(download) => {
+                let chunk = download.next().await.ok_or_else(|| {
+                    debug!(name, "no peer is left to finish a blob");
+                    io::Error::other("no peer is left to finish the blob")
+                })?;
+                if let Some(data) = &chunk {
+                    metrics::peer_bytes(data.len());
+                }
+                Ok(chunk)
+            }
+        }
+    }
+}
+
 /// A blob being relayed: what has been hashed, and the last chunk, held back.
 struct Relaying {
-    body: Incoming,
-    hasher: Hasher,
+    /// Where the blob comes from, until it ends.
+    feed: Option<Feed>,
+    hash: Hash,
     expected: Digest,
     writer: Option<Writer>,
     cache: Arc<Cache>,
     over: Arc<Notify>,
     held: Option<Bytes>,
-    done: bool,
     name: String,
 }
 
@@ -559,45 +599,41 @@ impl Relaying {
     /// match it is sent and the file is kept, on a mismatch the stream fails, the connection closes without it and the
     /// file is deleted (D67).
     async fn step(mut self) -> Result<Option<(Bytes, Self)>, io::Error> {
-        if self.done {
-            return Ok(None);
-        }
         loop {
-            match self.body.frame().await {
-                Some(Ok(frame)) => {
-                    let Ok(data) = frame.into_data() else {
-                        continue;
-                    };
-                    if data.is_empty() {
-                        continue;
-                    }
-                    self.hasher.update(&data);
-                    if let Some(writer) = &mut self.writer
-                        && let Err(err) = writer.write(&data).await
-                    {
-                        warn!(error = %err, "the blob cache cannot write: this blob is relayed without being kept");
-                        self.writer = None;
-                    }
-                    metrics::upstream_bytes(data.len());
-                    if let Some(previous) = self.held.replace(data) {
-                        return Ok(Some((previous, self)));
-                    }
-                }
-                Some(Err(err)) => {
-                    debug!(error = %err, name = %self.name, "upstream broke off a blob");
-                    return Err(io::Error::other(err));
-                }
-                None => return self.finish().await,
+            let Some(feed) = &mut self.feed else {
+                return Ok(None);
+            };
+            let Some(data) = feed.next(&self.name).await? else {
+                return self.finish().await;
+            };
+            self.hash.update(&data);
+            if let Some(writer) = &mut self.writer
+                && let Err(err) = writer.write(&data).await
+            {
+                warn!(error = %err, "the blob cache cannot write: this blob is relayed without being kept");
+                self.writer = None;
+            }
+            if let Some(previous) = self.held.replace(data) {
+                return Ok(Some((previous, self)));
             }
         }
     }
 
     async fn finish(mut self) -> Result<Option<(Bytes, Self)>, io::Error> {
-        let name = self.expected.algorithm().to_owned();
-        let actual = to_digest(&name, &self.hasher.clone().finish());
-        if actual.as_ref() != Some(&self.expected) {
-            warn!(expected = %self.expected, name = %self.name, "upstream sent a blob that is not its digest: nothing is kept, and the last chunk is not sent");
+        let matched = self.hash.matches();
+        let feed = self.feed.take();
+        if !matched {
+            // A peer's part in a wrong blob denies it (D52); upstream is only warned about.
+            match feed {
+                Some(Feed::Peers(download)) => download.finish(false),
+                _ => {
+                    warn!(expected = %self.expected, name = %self.name, "upstream sent a blob that is not its digest: nothing is kept, and the last chunk is not sent");
+                }
+            }
             return Err(io::Error::other("the blob does not match its digest"));
+        }
+        if let Some(Feed::Peers(download)) = feed {
+            download.finish(true);
         }
         if let Some(writer) = self.writer.take() {
             match writer.commit(&self.cache, &self.expected).await {
@@ -611,7 +647,6 @@ impl Relaying {
                 }
             }
         }
-        self.done = true;
         Ok(self.held.take().map(|last| (last, self)))
     }
 }

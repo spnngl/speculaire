@@ -22,6 +22,10 @@ pub const UPLOADS: &str = "speculaire_peer_uploads_total";
 pub const UPLOADS_IN_FLIGHT: &str = "speculaire_peer_uploads_in_flight";
 /// `speculaire_peer_upload_bytes_total`: blob bytes the peer API sent.
 pub const UPLOAD_BYTES: &str = "speculaire_peer_upload_bytes_total";
+/// `speculaire_peer_fetches_total`: requests to other agents, by `result`.
+pub const FETCHES: &str = "speculaire_peer_fetches_total";
+/// `speculaire_peer_hedges_total`: hedged extra requests to other agents.
+pub const HEDGES: &str = "speculaire_peer_hedges_total";
 
 /// What became of a pull request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +107,74 @@ pub fn describe_peer() {
     }
     gauge!(UPLOADS_IN_FLIGHT).set(0.0);
     counter!(UPLOAD_BYTES).absolute(0);
+}
+
+/// How a request to a peer ended (D7, D24, D52, D73).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fetched {
+    /// It gave the end of a blob whose digest matched.
+    Ok,
+    /// It gave the end of a blob whose digest did not match.
+    DigestMismatch,
+    /// It answered 503.
+    Busy,
+    /// It sent nothing for `peer.stall_timeout`.
+    Timeout,
+    /// Anything else: no connection, a refused certificate, a 404, a head that is not the one asked for, a body that
+    /// broke off.
+    Error,
+}
+
+impl Fetched {
+    /// Every result, in the order of the catalog.
+    pub const ALL: [Self; 5] = [
+        Self::Ok,
+        Self::DigestMismatch,
+        Self::Busy,
+        Self::Timeout,
+        Self::Error,
+    ];
+
+    /// The `result` label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::DigestMismatch => "digest_mismatch",
+            Self::Busy => "busy",
+            Self::Timeout => "timeout",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Describes the fetcher's metrics and gives each its zero, on every agent.
+pub fn describe_fetch() {
+    describe_counter!(
+        FETCHES,
+        "Requests to other agents, by how they ended; timeout includes a stalled one"
+    );
+    describe_counter!(HEDGES, "Hedged extra requests to other agents");
+    for result in Fetched::ALL {
+        counter!(FETCHES, "result" => result.label()).absolute(0);
+    }
+    counter!(HEDGES).absolute(0);
+    counter!(BYTES, "source" => "peer").absolute(0);
+}
+
+/// Counts how a request to a peer ended.
+pub fn fetched(result: Fetched) {
+    counter!(FETCHES, "result" => result.label()).increment(1);
+}
+
+/// Counts a hedged request.
+pub fn hedged() {
+    counter!(HEDGES).increment(1);
+}
+
+/// Counts bytes served to the runtime that came from peers.
+pub fn peer_bytes(bytes: usize) {
+    counter!(BYTES, "source" => "peer").increment(bytes as u64);
 }
 
 /// Counts a peer request.

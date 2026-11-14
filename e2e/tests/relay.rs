@@ -54,7 +54,7 @@ impl Worker {
             .map(|n| n.name)
             .find(|name| name.ends_with("-worker"))
             .expect("a worker");
-        let worker = Self {
+        let mut worker = Self {
             cluster,
             name,
             undo: Vec::new(),
@@ -65,6 +65,12 @@ impl Worker {
         // blob cache (the agent counts what it holds, so it restarts).
         worker.wait_ready();
         if runtime == Runtime::Crio {
+            // These tests count what comes from upstream: with peers on, the other nodes would send the blobs of the
+            // test image (D102), which `fetch.rs` checks.
+            worker.sh(&format!(
+                "cp {CONFIG} {CONFIG}.e2e && sed -i 's|^url = .*|url = \"\"|' {CONFIG}"
+            ));
+            worker.agent_changed = true;
             worker.sh(&format!(
                 "systemctl stop speculaire && rm -rf {CACHE}/blobs {CACHE}/tmp && systemctl reset-failed speculaire; systemctl start speculaire"
             ));
@@ -852,12 +858,17 @@ fn on_containerd_the_mirror_sends_no_upstream_request() {
     worker.forget();
     std::thread::sleep(Duration::from_secs(10));
     let image = format!("{address}/app/web:1");
-    let fall_throughs =
-        |worker: &Worker| worker.manifests("fall_through") + worker.blobs("fall_through");
-    let before = fall_throughs(&worker);
+    // What other nodes hold comes from them (D102), the rest falls through: either way the mirror is asked.
+    let asked = |worker: &Worker| {
+        ["served", "fall_through"]
+            .iter()
+            .map(|result| worker.manifests(result) + worker.blobs(result))
+            .sum::<f64>()
+    };
+    let before = asked(&worker);
     assert_pulled(&worker.pull(&image, None));
     assert!(
-        fall_throughs(&worker) > before,
+        asked(&worker) > before,
         "the pull did not go through the mirror"
     );
     assert!(worker.upstream_bytes() < 1.0, "{}", worker.upstream_bytes());

@@ -131,6 +131,15 @@ async fn a_blob_over_the_limit_is_not_read_whole_and_an_empty_one_is_empty() {
     assert_eq!(collect(part).await, pattern(100).slice(10..20));
     let beyond = Blob::from_bytes(pattern(10)).stream(50, 11).await.unwrap();
     assert_eq!(collect(beyond).await, Vec::<u8>::new());
+    // An open file with no name serves its first `size` bytes, from any offset.
+    let mut file = tempfile::tempfile().unwrap();
+    std::io::Write::write_all(&mut file, &pattern(100)).unwrap();
+    let open = Blob::from_open(file, 90);
+    assert_eq!(open.size(), 90);
+    assert_eq!(
+        collect(open.stream(80, 10).await.unwrap()).await,
+        pattern(100).slice(80..90)
+    );
 }
 
 // ---- a fake of containerd's content service ----

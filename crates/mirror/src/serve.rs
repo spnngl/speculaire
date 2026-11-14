@@ -96,6 +96,11 @@ pub(crate) async fn listen<A: Api>(
 }
 
 async fn connection<A: Api>(stream: TcpStream, acceptor: TlsAcceptor, api: Arc<A>) {
+    // A response's head is small: Nagle's algorithm would hold it for the client's delayed ACK.
+    if let Err(err) = stream.set_nodelay(true) {
+        debug!(error = %err, "a client's connection is gone");
+        return;
+    }
     let Ok(accepted) = tokio::time::timeout(CLIENT_TIME, acceptor.accept(stream)).await else {
         debug!("a client did not finish the TLS handshake in time");
         return;

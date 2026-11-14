@@ -9,11 +9,13 @@ use std::time::SystemTime;
 use anyhow::Context as _;
 use speculaire_mirror::Local;
 use speculaire_mirror::cache::Cache;
+use speculaire_mirror::fetch::{self, Fetcher, Holder};
 use speculaire_mirror::peer::Uploads;
 use speculaire_mirror::relay::{CriImages, Relay};
 use speculaire_mirror::tls::Tls;
+use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
-use speculaire_reflect::client::{self, Client, Holdings};
+use speculaire_reflect::client::{self, Client, Holdings, LookupError, Lookups};
 use speculaire_reflect::{Member, Reflector, Settings};
 use speculaire_runtime::content::Content;
 use speculaire_runtime::inventory::{Change, Inventory, Update};
@@ -271,16 +273,19 @@ struct Mirror {
     relay: Option<Arc<Relay<CriImages>>>,
     /// The cap on the peer API's bodies, which it holds from startup so that a reload reaches it before it opens.
     uploads: Arc<Uploads>,
+    /// What fetches from peers, linked to the reflectors once the agent shares.
+    fetcher: Fetcher,
 }
 
 impl Mirror {
     /// Gives the mirror the live keys of `config`: a lowered `blob_cache.max_size` evicts at the next blob kept (D91),
-    /// and `peer.max_uploads` caps the next upload (D24).
+    /// `peer.max_uploads` caps the next upload (D24), and `peer.stall_timeout` and `peer.deny_ttl` reach the next fetch.
     fn apply(&self, config: &Config) {
         if let Some(relay) = &self.relay {
             relay.cache().set_max_size(config.blob_cache.max_size.get());
         }
         self.uploads.set_limit(config.peer.max_uploads.get());
+        self.fetcher.set(fetch_settings(config));
     }
 
     /// Opens the peer API on the address `fixed` gives, serving what [`Self::inventory`] announces.
@@ -342,22 +347,26 @@ async fn start_mirror(
     };
     let tls = Arc::new(tls);
     let uploads = Arc::new(Uploads::new(config.peer.max_uploads.get()));
+    let blobs = config.blob_cache.directory.get().get();
+    // On containerd, a blob from peers waits there until it is whole and checked (D102).
+    let fetcher = Fetcher::new(blobs.join("staging"), fetch_settings(config));
+    speculaire_mirror::metrics::describe_fetch();
     let (task, relay) = match node.fallback() {
         Fallback::PerBlob => (
             tokio::spawn(speculaire_mirror::serve(
                 listener,
                 tls,
-                Arc::new(Local::new(node.content())),
+                Arc::new(Local::new(node.content(), fetcher.clone())),
                 stopped,
             )),
             None,
         ),
         Fallback::Relay => {
-            let blobs = config.blob_cache.directory.get().get();
             let cache = Cache::open(blobs, config.blob_cache.max_size.get())
                 .with_context(|| format!("opening the blob cache {}", blobs.display()))?;
             let relay = Arc::new(Relay::new(
                 cache,
+                fetcher.clone(),
                 registries,
                 CriImages::new(node.socket(), node.name()),
             ));
@@ -381,7 +390,44 @@ async fn start_mirror(
         task,
         relay,
         uploads,
+        fetcher,
     })
+}
+
+/// The fetcher's live keys in `config`.
+fn fetch_settings(config: &Config) -> fetch::Settings {
+    fetch::Settings {
+        stall_timeout: config.peer.stall_timeout.get(),
+        deny_ttl: config.peer.deny_ttl.get(),
+    }
+}
+
+/// The holders of a digest, from the reflectors (D98).
+struct Holders(Lookups);
+
+impl fetch::Lookup for Holders {
+    fn holders<'a>(
+        &'a self,
+        digest: &'a Digest,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Vec<Holder>> + Send + 'a>> {
+        Box::pin(async move {
+            match self.0.lookup(digest).await {
+                Ok(peers) => peers
+                    .into_iter()
+                    .map(|peer| Holder {
+                        node: peer.node,
+                        address: peer.address,
+                    })
+                    .collect(),
+                // No reflector yet, or one that fails: the pull falls through (D66).
+                Err(LookupError::NoMember) => Vec::new(),
+                Err(LookupError::Call(status)) => {
+                    debug!(%digest, error = %status, "a lookup failed: the pull falls through");
+                    Vec::new()
+                }
+            }
+        })
+    }
 }
 
 /// The peer API, and what stops it.
@@ -531,6 +577,10 @@ fn open_sharing(
             Arc::clone(&credentials),
             follow(mirror.inventory(node)),
         );
+        mirror.fetcher.link(
+            Arc::new(Holders(client.lookups())),
+            Arc::clone(&credentials),
+        );
         let peers = mirror.open_peers(node, client.fixed_peer_address(), credentials);
         *sharing = Some(Sharing { client, peers });
     }
@@ -597,11 +647,19 @@ mod tests {
     }
 
     #[test]
-    fn the_live_keys_of_a_config_reach_the_relays_cache() {
+    fn the_live_keys_of_a_config_reach_the_relays_cache_and_the_fetcher() {
         let dir = tempfile::tempdir().unwrap();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let fetcher = Fetcher::new(
+                dir.path().join("staging"),
+                fetch::Settings {
+                    stall_timeout: Duration::from_secs(1),
+                    deny_ttl: Duration::from_secs(1),
+                },
+            );
             let relay = Arc::new(Relay::new(
                 Cache::open(dir.path(), 1 << 30).unwrap(),
+                fetcher.clone(),
                 Arc::new(ContainerdRegistries::new(dir.path().join("config.toml"))),
                 CriImages::new(dir.path().join("crio.sock"), "cri-o"),
             ));
@@ -611,12 +669,14 @@ mod tests {
                 task: tokio::spawn(async {}),
                 relay: Some(Arc::clone(&relay)),
                 uploads: Arc::new(Uploads::new(NonZeroUsize::MIN)),
+                fetcher,
             };
             let config = Config::default();
             assert_ne!(config.blob_cache.max_size.get(), 1 << 30);
             mirror.apply(&config);
             assert_eq!(relay.cache().max_size(), config.blob_cache.max_size.get());
             assert_eq!(mirror.uploads.limit(), config.peer.max_uploads.get().get());
+            assert_eq!(mirror.fetcher.settings(), fetch_settings(&config));
         });
     }
 }

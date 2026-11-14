@@ -73,7 +73,15 @@ fn write_files(dir: &Path, mirror: &Mirror) {
 }
 
 async fn start<C: Content>(content: C) -> Server {
-    start_pulls(Local::new(content)).await
+    // Unlinked, the fetcher fetches nothing: these tests are of what the node holds.
+    let fetcher = crate::fetch::Fetcher::new(
+        std::env::temp_dir(),
+        crate::fetch::Settings {
+            stall_timeout: std::time::Duration::from_secs(5),
+            deny_ttl: std::time::Duration::from_secs(600),
+        },
+    );
+    start_pulls(Local::new(content, fetcher)).await
 }
 
 async fn start_pulls<P: Pulls>(pulls: P) -> Server {
