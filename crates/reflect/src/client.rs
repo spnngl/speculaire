@@ -165,27 +165,32 @@ impl Client {
 pub struct Lookups(Arc<Shared>);
 
 impl Lookups {
-    /// As [`Client::lookup`]. The latency goes to `speculaire_lookup_seconds` with `result` `hit`, `miss` or `error`;
-    /// a lookup with no stream up asks nobody and is not counted.
+    /// As [`Client::lookup`]. The latency goes to `speculaire_lookup_seconds` with `result` `hit`, `miss`, `error`, or
+    /// `no_reflector` when no stream is up and nobody was asked (D103).
     ///
     /// # Errors
     ///
     /// When no stream is up, or every member asked fails.
     pub async fn lookup(&self, digest: &Digest) -> Result<Vec<Peer>, LookupError> {
         let start = Instant::now();
+        let peers = self.ask(digest).await;
+        let result = match &peers {
+            Ok(found) if found.is_empty() => "miss",
+            Ok(_) => "hit",
+            Err(LookupError::Call(_)) => "error",
+            Err(LookupError::NoMember) => "no_reflector",
+        };
+        ::metrics::histogram!(CLIENT_LOOKUP, "result" => result)
+            .record(start.elapsed().as_secs_f64());
+        peers
+    }
+
+    async fn ask(&self, digest: &Digest) -> Result<Vec<Peer>, LookupError> {
         let mut channels: Vec<Channel> = self.0.links().values().cloned().collect();
         fastrand::shuffle(&mut channels);
         let mut channels = channels.into_iter();
         let first = channels.next().ok_or(LookupError::NoMember)?;
-        let peers = hedged(ask(first, digest), channels.next().map(|c| ask(c, digest))).await;
-        let result = match &peers {
-            Ok(found) if found.is_empty() => "miss",
-            Ok(_) => "hit",
-            Err(_) => "error",
-        };
-        ::metrics::histogram!(CLIENT_LOOKUP, "result" => result)
-            .record(start.elapsed().as_secs_f64());
-        Ok(peers?)
+        Ok(hedged(ask(first, digest), channels.next().map(|c| ask(c, digest))).await?)
     }
 }
 
@@ -289,7 +294,12 @@ async fn supervise(shared: Arc<Shared>, stop: CancellationToken) {
     let mut backoff = backoff::Backoff::new(fastrand::u64(..));
     let mut outage = Outage::default();
     loop {
-        let wait = match ask_members(&shared).await {
+        // A load balancer that hangs holds the call for up to `DIAL` and `CALL`: stopping does not wait for it.
+        let asked = tokio::select! {
+            () = stop.cancelled() => break,
+            asked = ask_members(&shared) => asked,
+        };
+        let wait = match asked {
             Ok(members) => {
                 backoff.succeeded();
                 outage.ended();

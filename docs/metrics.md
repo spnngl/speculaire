@@ -30,7 +30,7 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 |---|---|---|---|
 | `speculaire_reflector_connected` | gauge | `member` | 1 while the `Announce` stream to that reflector is up |
 | `speculaire_reflector_reconnects_total` | counter | `member` | Stream reconnects (D33) |
-| `speculaire_lookup_seconds` | histogram | `result` = `hit`\|`miss`\|`error` | `Lookup` latency seen by the agent, hedge included; `miss` named no holder, `error` failed at every member asked; none while no member is known (D102) |
+| `speculaire_lookup_seconds` | histogram | `result` = `hit`\|`miss`\|`error`\|`no_reflector` | `Lookup` latency seen by the agent, hedge included; `miss` named no holder, `error` failed at every member asked, `no_reflector` asked nobody as no stream was up (D102, D103) |
 
 ## Reflector server (`role = "reflector"`)
 
