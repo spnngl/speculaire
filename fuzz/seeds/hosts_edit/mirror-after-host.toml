@@ -1,0 +1,6 @@
+[host."https://registry-1.docker.io"]
+  capabilities = ["pull", "resolve"]
+
+[host."https://127.0.0.1:7481"]
+  capabilities = ["pull"]
+  ca = "/var/lib/speculaire/mirror/ca.crt"

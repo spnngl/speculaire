@@ -45,12 +45,18 @@ pub enum EditError {
     /// A table is named like the mirror's address, and its `ca` is not in the mirror's directory.
     #[error("`host.\"{0}\"` is not the mirror's: its `ca` is not in the mirror directory")]
     Taken(String),
+    /// The first `[host.*]` table is named `""`: containerd skips it there, and would read it after the mirror's.
+    #[error(
+        "the first host table is `host.\"\"`, which containerd skips; after the mirror's it would read it: remove it"
+    )]
+    EmptyFirst,
 }
 
-/// `text` with the mirror's table first: added when there is none, or made equal to `entry` when there is one.
+/// `text` with the mirror's table where containerd reads it first: kept and made equal to `entry` when it is there,
+/// otherwise added first in the file.
 ///
-/// Another table of the file is never touched, and neither is its position, comments or spacing. Of several tables
-/// with a `ca` in the mirror's directory, the first stays and the others go.
+/// Another table of the file is never touched, and neither is its position, comments or spacing. Every other table
+/// with a `ca` in the mirror's directory goes.
 ///
 /// # Errors
 ///
@@ -59,19 +65,26 @@ pub fn add(text: &str, entry: &Entry, mirror_dir: &Path) -> Result<String, EditE
     let mut doc: DocumentMut = text.parse()?;
     let own = own_urls(&doc, mirror_dir)?;
     let host = host_table(&mut doc)?;
-    if let Some((first, extra)) = own.split_first() {
-        for url in extra {
-            host.remove(url);
-        }
-        if *first != entry.url {
-            rename(host, first, &entry.url);
+    let kept = order(host)
+        .into_iter()
+        .find(|name| !name.is_empty())
+        .filter(|name| own.contains(name));
+    for url in own.iter().filter(|url| kept.as_ref() != Some(*url)) {
+        host.remove(url);
+    }
+    if kept.as_ref() != Some(&entry.url) && host.contains_key(&entry.url) {
+        return Err(EditError::Taken(entry.url.clone()));
+    }
+    if let Some(kept) = kept {
+        if kept != entry.url {
+            rename(host, &kept, &entry.url);
         }
         if let Some(table) = host.get_mut(&entry.url).and_then(Item::as_table_like_mut) {
             set_fields(table, entry);
         }
     } else {
-        if host.contains_key(&entry.url) {
-            return Err(EditError::Taken(entry.url.clone()));
+        if order(host).first().is_some_and(String::is_empty) {
+            return Err(EditError::EmptyFirst);
         }
         let mut table = Table::new();
         table.decor_mut().set_prefix(format!("\n{MARKER}\n"));
@@ -81,6 +94,29 @@ pub fn add(text: &str, entry: &Entry, mirror_dir: &Path) -> Result<String, EditE
         host.insert(&entry.url, Item::Table(table));
     }
     Ok(tidy(doc.to_string()))
+}
+
+/// The hosts of `[host."<name>"…]` headers, in the order of the first header of each.
+///
+/// containerd lists a host when its header names another than the last one listed, which starts as `""`
+/// (`getSortedHosts`, `hosts.go:576`, v2.4.2): it reads first the first host not named `""`, and a table put before
+/// all others changes only what the first header is compared with, from `""` to the mirror's name.
+fn order(host: &Table) -> Vec<String> {
+    // The position of the first header in a table and the tables under it; toml_edit gives none to a table that
+    // dotted keys or a deeper header open.
+    fn first(table: &Table) -> Option<isize> {
+        table
+            .iter()
+            .filter_map(|(_, item)| item.as_table().and_then(first))
+            .chain(table.position())
+            .min()
+    }
+    let mut hosts: Vec<_> = host
+        .iter()
+        .filter_map(|(name, item)| Some((item.as_table().and_then(first)?, name.to_owned())))
+        .collect();
+    hosts.sort_unstable();
+    hosts.into_iter().map(|(_, name)| name).collect()
 }
 
 /// Renames the table `old` of `host` to `new`, in the same place and with the comments it had.
@@ -191,9 +227,12 @@ fn set_fields(table: &mut dyn TableLike, entry: &Entry) {
     }
 }
 
-/// A file that starts with a blank line loses it: the mirror's table, first in an otherwise empty document, has one.
+/// The text without the blank line the mirror's table brings when it opens the file.
 fn tidy(text: String) -> String {
-    text.strip_prefix('\n').map(str::to_owned).unwrap_or(text)
+    match text.strip_prefix('\n') {
+        Some(rest) if rest.starts_with(MARKER) => rest.to_owned(),
+        _ => text,
+    }
 }
 
 /// A `hosts.toml` of the directories of `config_path`.
@@ -286,7 +325,7 @@ mod tests {
     const DIR: &str = "/var/lib/speculaire/mirror";
 
     /// The examples of containerd's `docs/hosts.md` (v2.4.2), and files in the styles admins write.
-    const FILES: [(&str, &str); 7] = [
+    const FILES: [(&str, &str); 8] = [
         ("empty", ""),
         (
             "docker-io",
@@ -312,6 +351,8 @@ mod tests {
             "dotted-keys",
             "[host.\"https://mirror.example\"]\ncapabilities = [\"pull\"]\nheader.x-token = \"abc\"\n",
         ),
+        // A fuzz crash: each add took a blank line off.
+        ("blank-lines-first", "\n\nserver = \"https://docker.io\"\n"),
     ];
 
     fn entry(address: &str) -> Entry {
@@ -331,6 +372,8 @@ mod tests {
         for (name, text) in FILES {
             let out = added(text);
             insta::assert_snapshot!(name, out);
+            // insta ignores the blank lines that open a snapshot.
+            assert_eq!(out.starts_with('\n'), text.starts_with('\n'), "{name}");
             // containerd reads the mirror first, and the admin's hosts after it, in their order.
             let hosts = parse_hosts_file(Path::new("/dir"), &out).unwrap();
             let before = parse_hosts_file(Path::new("/dir"), text).unwrap();
@@ -403,6 +446,63 @@ mod tests {
             "{taken}"
         );
         assert_eq!(remove(admin, Path::new(DIR)).unwrap(), admin);
+    }
+
+    #[test]
+    fn a_file_whose_host_tables_open_with_an_empty_name_is_refused() {
+        // containerd skips these tables (`getSortedHosts`); with the mirror before them it would read them. The first
+        // file is a fuzz crash: containerd accepts it as it is and refuses it with the mirror's table added.
+        for text in [
+            "server = \"httpclie.io\"\n\n[host.\"\"]\n  capabilities = [\"pull\", \"resoYve\"]\n",
+            "[host.\"\".header]\n  x = \"y\"\n[host.\"https://mirror.example\"]\n",
+        ] {
+            assert!(parse_hosts_file(Path::new("/dir"), text).is_ok(), "{text}");
+            let refused = add(text, &entry("127.0.0.1:7480"), Path::new(DIR));
+            assert!(matches!(refused, Err(EditError::EmptyFirst)), "{refused:?}");
+        }
+        // After another host, containerd reads it already: the mirror's table changes nothing.
+        let read = "[host.\"https://mirror.example\"]\n[host.\"\"]\n  capabilities = [\"pull\"]\n";
+        let hosts = parse_hosts_file(Path::new("/dir"), &added(read)).unwrap();
+        assert_eq!(hosts.len(), 4);
+        // Dotted keys open no table, so containerd never reads it.
+        let dotted = added("host.\"\".capabilities = [\"x\"]\n");
+        assert!(parse_hosts_file(Path::new("/dir"), &dotted).is_ok());
+    }
+
+    #[test]
+    fn a_mirror_table_that_containerd_does_not_read_first_is_replaced_by_one_that_it_does() {
+        // The second is a fuzz crash: the mirror's table was renamed where it stood, after another host.
+        let after = format!(
+            "{}\n[host.\"https://x.io\"]\n  ca = \"{DIR}/old.crt\"\n",
+            FILES[1].1
+        );
+        assert_eq!(added(&after), added(FILES[1].1));
+        for text in [
+            format!(
+                "host.\"https://x.io\".ca = \"{DIR}/ca.crt\"\n{}",
+                FILES[1].1
+            ),
+            format!("[host]\n\"https://x.io\" = {{ ca = \"{DIR}/ca.crt\" }}\n"),
+        ] {
+            let hosts = parse_hosts_file(Path::new("/dir"), &added(&text)).unwrap();
+            assert_eq!(hosts[0].host, "127.0.0.1:7480", "{text}");
+        }
+        // containerd skips `[host.""]` there, and reads the mirror first already.
+        let behind = format!("[host.\"\"]\n  capabilities = [\"x\"]\n\n{}", added(""));
+        assert_eq!(added(&behind), behind);
+    }
+
+    #[test]
+    fn a_new_address_held_by_a_table_of_the_admin_is_refused() {
+        let text = format!(
+            "{}\n[host.\"https://127.0.0.1:7481\"]\n  ca = \"/etc/other/ca.crt\"\n",
+            added("")
+        );
+        let taken = add(&text, &entry("127.0.0.1:7481"), Path::new(DIR));
+        assert!(
+            matches!(&taken, Err(EditError::Taken(url)) if url == "https://127.0.0.1:7481"),
+            "{taken:?}"
+        );
     }
 
     #[test]

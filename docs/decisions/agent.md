@@ -174,7 +174,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Measured (M1 step 06, `just e2e containerd 2.4 1.37` and `just e2e crio 1.37`, arm64):** the unit is active on every node with `Type=notify` and `WatchdogUSec=30s`; `systemd-analyze security` reports D53's settings set, except `SystemCallFilter=~@resources`, `RestrictAddressFamilies=~AF_UNIX` and `RestrictAddressFamilies=~AF_(INET|INET6)`, which D53 leaves open; removing `ProtectClock=` and `WatchdogSec=` from one node failed the suite; `systemctl stop` exits 0 in under a second; `/run/speculaire` survives a restart; the journal holds the agent's fields with tracing-journald's `F_` prefix, such as `F_ADDRESS=[::]:7482`.
 - **Revisit when:** a component holds a thread for longer than the watchdog allows by design.
 
-## D82: `configure` makes one set of certificates and edits every `hosts.toml` under `config_path` (amends D14, D32, D55, D56; amended by D85)
+## D82: `configure` makes one set of certificates and edits every `hosts.toml` under `config_path` (amends D14, D32, D55, D56; amended by D85, D101)
 
 - **Decision:**
   - **Certificates:** four files in `/var/lib/speculaire/mirror/`: `ca.crt` and `server.crt` (0644), `server.key` and `client.pem` (0600). `client.pem` is the client certificate and its key, in that order, as containerd's `client` reads them (D14). The keys are ECDSA P-256 (`rcgen` on aws-lc-rs, D13), the certificates valid from an hour before they are made for ten years, and the CA's own key is dropped after it signs the two others. Crates `speculaire-pki` (`mirror`) and `speculaire-configure`.
@@ -316,3 +316,16 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - kubelet pulls into `k8s.io`; content of other namespaces is not what pods use, and serving it would leak it to every node.
   - Content events are per blob, so no image walk is needed, unlike Spegel's (`docs/research/spegel.md`).
 - **Revisit when:** containerd publishes deletions by its garbage collector, or the 60 s listing costs containerd measurably on a node with many blobs.
+
+## D101: `configure` keeps the mirror's table where containerd reads it first, or refuses the file (amends D82)
+
+- **Decision:**
+  - The mirror's table that `configure` keeps is the one containerd reads first: the first `[host."<name>"…]` header not named `""`. It is renamed in place to the current address and its keys are set, as before. Every other table whose `ca` lies in the mirror directory is removed, and when none is read first a new one goes first in the file.
+  - A rename onto a table of the admin's with the new name is refused, as adding is.
+  - Adding refuses, naming the file, a `hosts.toml` whose first host header names `""`; `check-config` reports it. A `[host.""]` after another host is edited as before.
+- **Because:**
+  - containerd lists a host when its header names another than the last one listed, which starts as `""` (`getSortedHosts`, `core/remotes/docker/config/hosts.go:576`, v2.3.7 and v2.4.2): a `[host.""]` before every other host table is never listed, so neither checked (`parseHostConfig`, `hosts.go:453-466`) nor tried. With the mirror's table first, containerd lists it, and fails every pull of the registry on a bad key in it, or tries an endpoint with no host.
+  - D82 renamed the first table with a `ca` in the mirror directory wherever it stood: after another host it stayed second, and a rename onto the admin's table of that name replaced it.
+  - The `hosts_edit` fuzz target found both: scheduled run 43582227237, then a local run.
+  - Putting the mirror after a leading `[host.""]` keeps the file's meaning but breaks "first in the file", and a table that containerd ignores is the admin's mistake to remove.
+- **Revisit when:** containerd lists a `[host.""]` that opens the file, or refuses it.
