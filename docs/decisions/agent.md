@@ -59,7 +59,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A separate filter keeps a `log.filter` change from silently dropping the audit trail.
 - **Revisit when:** someone needs OpenTelemetry traces or log export; add `tracing-opentelemetry` as a layer behind a cargo feature.
 
-## D39: Shutdown withdraws first, drains, saves, and leaves NRI last (amended by D69)
+## D39: Shutdown withdraws first, drains, saves, and leaves NRI last (amended by D69, D103)
 
 - **Decision:** on SIGTERM, the agent:
   1. sends `STOPPING=1` to systemd, and `/readyz` returns 503;

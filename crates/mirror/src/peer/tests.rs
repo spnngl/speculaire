@@ -66,13 +66,14 @@ fn credentials(cluster: &Cluster, dir: &TempDir, node: &str) -> Arc<Credentials>
     credentials
 }
 
-/// A peer API of [`SERVER`], serving until the test ends.
+/// A peer API of [`SERVER`], serving until the test ends or calls [`Test::stop`].
 struct Test {
     cluster: Cluster,
     dir: TempDir,
     address: SocketAddr,
     uploads: Arc<Uploads>,
-    _stop: oneshot::Sender<()>,
+    stop: oneshot::Sender<()>,
+    served: tokio::task::JoinHandle<()>,
 }
 
 impl Test {
@@ -84,7 +85,7 @@ impl Test {
         let address = listener.local_addr().unwrap();
         let uploads = Arc::new(Uploads::new(NonZeroUsize::new(max_uploads).unwrap()));
         let (stop, stopped) = oneshot::channel::<()>();
-        tokio::spawn(serve(listener, tls, content, Arc::clone(&uploads), async {
+        let served = tokio::spawn(serve(listener, tls, content, Arc::clone(&uploads), async {
             // An error means the sender went with the test: stop too.
             let _ = stopped.await;
         }));
@@ -93,8 +94,15 @@ impl Test {
             dir,
             address,
             uploads,
-            _stop: stop,
+            stop,
+            served,
         }
+    }
+
+    /// Stops the peer API; the handle completes when `serve` returns.
+    fn stop(self) -> tokio::task::JoinHandle<()> {
+        let _ = self.stop.send(());
+        self.served
     }
 
     /// A connection from `node`'s agent, which checks that [`SERVER`] answers.
@@ -378,21 +386,23 @@ async fn at_max_uploads_a_further_body_answers_503_at_once() {
     test.uploads.set_limit(NonZeroUsize::new(2).unwrap());
     let raised = in_flight(&test, &held).await;
     drop((first, raised));
-    tokio::time::timeout(Duration::from_secs(5), test.uploads.drained())
-        .await
-        .expect("a dropped body ends its upload");
-    assert!(
-        handle
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !handle
             .render()
             .lines()
             .any(|l| l == "speculaire_peer_uploads_in_flight 0")
-    );
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a dropped body ends its upload");
     test.uploads.set_limit(NonZeroUsize::new(1).unwrap());
     assert_eq!(in_flight(&test, &held).await.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn once_stopped_new_requests_answer_503_and_a_body_in_flight_completes() {
+async fn once_stopped_new_requests_answer_503_and_the_api_ends_after_the_body_in_flight() {
     let held = digest_of(1);
     let test = Test::start(
         Arc::new(Held(HashMap::from([(held.clone(), pattern(LARGE))]))),
@@ -406,17 +416,19 @@ async fn once_stopped_new_requests_answer_503_and_a_body_in_flight_completes() {
         let answer = ask(&mut sender, method.clone(), &blob_path(&held), None).await;
         assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE, "{method}");
     }
-    let drained = test.uploads.drained();
-    tokio::pin!(drained);
+    let mut served = test.stop();
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut drained)
+        tokio::time::timeout(Duration::from_millis(100), &mut served)
             .await
             .is_err(),
         "a body is in flight"
     );
+    // The idle connection closed at once; the busy one sends its whole body.
+    assert!(sender.ready().await.is_err(), "an idle connection stays");
     let body = first.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body, pattern(LARGE));
-    tokio::time::timeout(Duration::from_secs(5), drained)
+    tokio::time::timeout(Duration::from_secs(5), served)
         .await
-        .expect("the body that completed ended its upload");
+        .expect("the API ends once its body is sent")
+        .unwrap();
 }

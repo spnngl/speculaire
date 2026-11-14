@@ -30,8 +30,9 @@ use crate::serve::{Api, listen, status};
 
 /// Serves the peer API on `listener`, from `content`, under `uploads`, until `stop` completes.
 ///
-/// `tls` is the node identity's server side (`speculaire_pki::node::Credentials::server`). A connection open when `stop`
-/// completes is left to finish: [`Uploads::drained`] waits for its body.
+/// `tls` is the node identity's server side (`speculaire_pki::node::Credentials::server`). Once `stop` completes, it
+/// returns when every connection has closed: an idle one at once, one with a body in flight once it has sent the body
+/// (D39, D103).
 pub async fn serve<C: Content>(
     listener: TcpListener,
     mut tls: ServerConfig,
@@ -80,13 +81,6 @@ impl Uploads {
     /// Answers every new request with 503 from now on, while the bodies in flight go on (D39, step 2).
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::Relaxed);
-    }
-
-    /// Completes when no body is in flight (D39, step 4).
-    pub async fn drained(&self) {
-        let mut active = self.active.subscribe();
-        // An error means the sender is gone, which `self` holds: it cannot be.
-        let _ = active.wait_for(|active| *active == 0).await;
     }
 
     /// One more body, unless the cap is reached.

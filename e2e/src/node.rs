@@ -3,6 +3,9 @@
 
 use std::time::{Duration, Instant};
 
+use prost::Message as _;
+
+use crate::reflector::unhex;
 use crate::registry::fail;
 use crate::upstream::Digest;
 use crate::{Cluster, Failure, Runtime};
@@ -142,6 +145,82 @@ impl Cluster {
         self.exec(node, &["curl", "-sf", "http://127.0.0.1:7482/metrics"])
             .map(Metrics)
     }
+
+    /// The samples of the histogram `name` whose labels include `label`, as the node's agent serves them now in the
+    /// protobuf exposition, the only one with native histograms (D34); 0 when it has none.
+    ///
+    /// # Errors
+    ///
+    /// When the agent does not answer, or its answer does not parse.
+    pub fn histogram_count(
+        &self,
+        node: &str,
+        name: &str,
+        label: (&str, &str),
+    ) -> Result<u64, Failure> {
+        let hex = self.sh(
+            node,
+            "curl -sf -H 'Accept: application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited' http://127.0.0.1:7482/metrics | od -An -v -tx1 | tr -d ' \\n'",
+        )?;
+        let unparsable = |detail: &str| fail(&format!("the metrics of {node}"), &detail);
+        let bytes = unhex(hex.trim()).ok_or_else(|| unparsable("not hex"))?;
+        let mut rest = bytes.as_slice();
+        let mut count = 0;
+        while !rest.is_empty() {
+            let family = Family::decode_length_delimited(&mut rest)
+                .map_err(|err| unparsable(&err.to_string()))?;
+            if family.name != name {
+                continue;
+            }
+            count += family
+                .metric
+                .iter()
+                .filter(|metric| {
+                    metric
+                        .label
+                        .iter()
+                        .any(|pair| (pair.name.as_str(), pair.value.as_str()) == label)
+                })
+                .filter_map(|metric| metric.histogram.as_ref())
+                .map(|histogram| histogram.sample_count)
+                .sum::<u64>();
+        }
+        Ok(count)
+    }
+}
+
+/// What [`Cluster::histogram_count`] reads of a `MetricFamily` of Prometheus' `metrics.proto`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct Family {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(message, repeated, tag = "4")]
+    metric: Vec<Series>,
+}
+
+/// A `Metric`: its labels and its histogram.
+#[derive(Clone, PartialEq, prost::Message)]
+struct Series {
+    #[prost(message, repeated, tag = "1")]
+    label: Vec<LabelPair>,
+    #[prost(message, optional, tag = "7")]
+    histogram: Option<Histogram>,
+}
+
+/// A `LabelPair`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct LabelPair {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(string, tag = "2")]
+    value: String,
+}
+
+/// A `Histogram`: its count of samples.
+#[derive(Clone, PartialEq, prost::Message)]
+struct Histogram {
+    #[prost(uint64, tag = "1")]
+    sample_count: u64,
 }
 
 /// A `tc netem` qdisc on a node, removed when this drops.

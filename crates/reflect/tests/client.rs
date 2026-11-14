@@ -256,7 +256,39 @@ async fn a_load_balancer_answered_by_a_reflector_outside_the_members_is_not_trus
         a.lookup(&digest(1)).await,
         Err(LookupError::NoMember)
     ));
+    // A lookup that asks nobody is counted apart from the others (D103).
+    assert_eq!(
+        test.metric("speculaire_lookup_seconds_count{result=\"no_reflector\"}")
+            .as_deref(),
+        Some("1")
+    );
     a.stop().await;
+}
+
+#[tokio::test]
+async fn a_client_stops_at_once_while_the_load_balancer_hangs() {
+    let test = Test::start(&[]).await;
+    // A listener that never accepts: the connection opens, and the TLS handshake waits for the dial timeout.
+    let hanging = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = hanging.local_addr().unwrap();
+    let config = Config {
+        host: address.ip().to_string(),
+        port: address.port(),
+        peer: None,
+    };
+    let a = Client::spawn(
+        config,
+        credentials(&test.cluster, &test.dir, "node-a"),
+        Arc::new(Holdings::default()),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let start = Instant::now();
+    a.stop().await;
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 #[tokio::test]

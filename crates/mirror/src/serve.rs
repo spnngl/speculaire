@@ -23,6 +23,7 @@ use serde::de::IgnoredAny;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::content::{Blob, Error};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, warn};
 
@@ -37,9 +38,8 @@ const MAX_MANIFEST: u64 = 4 * 1024 * 1024;
 /// How long a client may take to finish the TLS handshake, and to send a request's headers.
 const CLIENT_TIME: Duration = Duration::from_secs(10);
 
-/// Serves the pull API on `listener` until `stop` completes.
-///
-/// A connection that is open when `stop` completes is left to finish: the agent's own shutdown ends it (D39).
+/// Serves the pull API on `listener` until `stop` completes, then until every connection has closed: an idle one at
+/// once, a busy one once it has sent its response (D39, D103).
 pub async fn serve<P: Pulls>(
     listener: TcpListener,
     tls: Arc<Tls>,
@@ -62,13 +62,18 @@ impl<P: Pulls> Api for P {
 }
 
 /// Serves `api` over HTTP/1.1 on `listener`, each connection with the TLS config `tls` gives then, until `stop`
-/// completes.
+/// completes; then closes `listener`, and returns once every connection has closed.
+///
+/// Waiting for the connections, not only for their bodies, is what lets a body's last bytes leave: hyper drops a body
+/// once it has buffered its end, and the process may exit before hyper sends it.
 pub(crate) async fn listen<A: Api>(
     listener: TcpListener,
     tls: impl Fn() -> Arc<ServerConfig>,
     api: Arc<A>,
     stop: impl Future<Output = ()>,
 ) {
+    // Each connection holds a receiver: a send tells them all to close, and `closed` waits until they have.
+    let (closing, _) = watch::channel(());
     tokio::pin!(stop);
     loop {
         tokio::select! {
@@ -77,9 +82,8 @@ pub(crate) async fn listen<A: Api>(
                 Ok((stream, _)) => {
                     let acceptor = TlsAcceptor::from(tls());
                     let api = Arc::clone(&api);
-                    tokio::spawn(async move {
-                        connection(stream, acceptor, api).await;
-                    });
+                    let closing = closing.subscribe();
+                    tokio::spawn(connection(stream, acceptor, api, closing));
                 }
                 // A connection that was reset before it was accepted, or no file descriptor left: log and go on.
                 Err(err) => {
@@ -93,15 +97,31 @@ pub(crate) async fn listen<A: Api>(
             },
         }
     }
+    drop(listener);
+    closing.send_replace(());
+    closing.closed().await;
 }
 
-async fn connection<A: Api>(stream: TcpStream, acceptor: TlsAcceptor, api: Arc<A>) {
+/// Serves one connection until it ends, or until `closing` changes or goes: then a request in flight is answered,
+/// and the connection closes.
+async fn connection<A: Api>(
+    stream: TcpStream,
+    acceptor: TlsAcceptor,
+    api: Arc<A>,
+    mut closing: watch::Receiver<()>,
+) {
     // A response's head is small: Nagle's algorithm would hold it for the client's delayed ACK.
     if let Err(err) = stream.set_nodelay(true) {
         debug!(error = %err, "a client's connection is gone");
         return;
     }
-    let Ok(accepted) = tokio::time::timeout(CLIENT_TIME, acceptor.accept(stream)).await else {
+    let handshake = tokio::time::timeout(CLIENT_TIME, acceptor.accept(stream));
+    let accepted = tokio::select! {
+        accepted = handshake => accepted,
+        // A client that has sent no request yet loses nothing.
+        _ = closing.changed() => return,
+    };
+    let Ok(accepted) = accepted else {
         debug!("a client did not finish the TLS handshake in time");
         return;
     };
@@ -117,11 +137,19 @@ async fn connection<A: Api>(stream: TcpStream, acceptor: TlsAcceptor, api: Arc<A
         let api = Arc::clone(&api);
         async move { Ok::<_, Infallible>(api.answer(&request).await) }
     });
-    let served = http1::Builder::new()
+    let connection = http1::Builder::new()
         .timer(TokioTimer::new())
         .header_read_timeout(CLIENT_TIME)
-        .serve_connection(TokioIo::new(tls), service)
-        .await;
+        .serve_connection(TokioIo::new(tls), service);
+    tokio::pin!(connection);
+    let served = tokio::select! {
+        served = connection.as_mut() => served,
+        _ = closing.changed() => {
+            // hyper ends the response in flight, flushes it, and closes TLS and the socket's sending side.
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+    };
     if let Err(err) = served {
         debug!(error = %err, "a connection ended with an error");
     }

@@ -17,8 +17,8 @@ pub const REJECTED: &str = "speculaire_reflector_announce_rejected_total";
 pub const CONNECTED: &str = "speculaire_reflector_connected";
 /// `speculaire_reflector_reconnects_total`: streams opened again to the `member` (D33).
 pub const RECONNECTS: &str = "speculaire_reflector_reconnects_total";
-/// `speculaire_lookup_seconds`: the time a `Lookup` takes for the agent, hedge included, by `result`: `hit`, `miss`
-/// or `error`.
+/// `speculaire_lookup_seconds`: the time a `Lookup` takes for the agent, hedge included, by `result`: `hit`, `miss`,
+/// `error` or `no_reflector`.
 pub const CLIENT_LOOKUP: &str = "speculaire_lookup_seconds";
 
 /// Why the reflector ended an `Announce` stream; `docs/operations.md` explains each.
@@ -89,7 +89,7 @@ pub fn describe_client() {
         CLIENT_LOOKUP,
         "Time a Lookup takes for the agent, hedge included"
     );
-    for result in ["hit", "miss", "error"] {
+    for result in ["hit", "miss", "error", "no_reflector"] {
         drop(metrics::histogram!(CLIENT_LOOKUP, "result" => result));
     }
 }

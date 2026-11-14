@@ -197,20 +197,20 @@ async fn shut_down(
     if let Some(reflector) = reflector {
         reflector.stop().await;
     }
+    // Both listeners close, and their connections send what is in flight before they close (D39 step 4, D103).
+    let peers = async {
+        if let Some(peers) = peers {
+            peers.stop().await;
+        }
+    };
     let drain = config.shutdown.drain_timeout.get();
-    if tokio::time::timeout(drain, mirror.uploads.drained())
-        .await
-        .is_err()
-    {
+    let transfers = async { tokio::join!(peers, mirror.stop()) };
+    if tokio::time::timeout(drain, transfers).await.is_err() {
         warn!(
             ?drain,
-            "uploads to peers still in flight at shutdown.drain_timeout are cut"
+            "transfers still in flight at shutdown.drain_timeout are cut"
         );
     }
-    if let Some(peers) = peers {
-        peers.stop().await;
-    }
-    mirror.stop().await;
 }
 
 /// Swaps in the config at `path`, or keeps `running` and counts the failure (D30).

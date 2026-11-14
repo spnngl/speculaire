@@ -73,7 +73,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 - **Revisit when:** D33's load test misses a target, or a node legitimately holds more than 100k digests.
 
 
-## D98: The agent's reflector client (amends D2, D33; amended by D102)
+## D98: The agent's reflector client (amends D2, D33; amended by D102, D103)
 
 - **Decision:**
   - **Members:** the agent dials `reflector.url` itself, accepting any node of the cluster (`Credentials::client_any`), and reads the node of the certificate that answered. A `Members` answer whose node is not in its own list is ignored, like a failed call: the agent keeps the last list and retries with D33's backoff. The channel is never dialled again behind the agent's back, so every answer comes from the checked connection.
@@ -89,3 +89,18 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - A rollout restarts every reflector, and an agent starts before its own: failures shorter than that are expected, and D37's default `warn` level is for what needs the operator.
   - D33's target puts the server's lookup p99 at 500 µs; with a LAN round trip, 20 ms is far past the normal answer, so the hedge fires only for a slow or gone member.
 - **Revisit when:** D33's load test shows snapshots at reconnect dominate, or the agents' `speculaire_lookup_seconds` p99 exceeds 20 ms without a member down.
+
+## D103: Outages fall through, counted, and a stopping agent sends what it started (amends D39, D98, D100, D102)
+
+- **Decision:**
+  - **Counted:** a lookup made while no stream is up asks nobody and counts in `speculaire_lookup_seconds` with `result="no_reflector"`; D102 counted none.
+  - **Restart:** a restarted reflector sends no `Resync`: its index starts empty, and each agent's next stream opens with a whole snapshot (D98).
+  - **Stop:** the client stops while it waits on the load balancer, instead of after the call's timeouts.
+  - **Drain (D39 step 4):** the mirror's and the peer API's listeners close, and each connection is shut down gracefully: an idle one closes at once, a busy one once hyper has flushed its response and closed TLS. The drain waits for the connections, up to `shutdown.drain_timeout`, where it waited for the peer bodies.
+  - **Alerts:** `docs/operations.md` § Metrics to alert on adds `no_reflector` lookups, and a share of `miss` that rises while every stream is up.
+- **Because:**
+  - In an outage every pull falls through. Without the count, the agent's metrics show only the fall-throughs, not their cause; counting it as `error` would mix a reflector that failed with none to ask.
+  - A load balancer that hangs held the stop for 5 s to dial and 5 s to call, the half of `TimeoutStopSec` that D39 leaves after the drain.
+  - hyper drops a body once it has buffered its end, before it has written it: a drain that waited for bodies let the agent exit with the end of a blob unsent, and the peer's pull went upstream.
+- **Measured (M3 step 06):** `e2e/tests/outage.rs` passes on containerd 2.4 and CRI-O 1.37 in 33 s. After a reflector restarts, its lookups find every holder 0.6 to 5.3 s after it is ready: the agents' 0 to 5 s wait after a drop (D33). An agent started with both reflectors down opens its peer API 0.6 to 3.9 s after one is ready, and 9.4 to 9.5 s after its certificate appears (`config.poll_interval`, 10 s). Stopping an agent that serves a 16 MiB layer at 32 Mbit/s takes it out of lookups in 160 to 350 ms, and the unit stops in 3.1 to 3.8 s while the peer's pull completes from it. Before the drain change, that pull went upstream.
+- **Revisit when:** a reflector keeps its index across restarts.
