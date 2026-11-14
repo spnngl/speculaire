@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use super::backoff::Backoff;
 use super::holdings::Batch;
-use super::{DialError, PEER_PORT, Shared, dial, failing_long};
+use super::{DialError, Outage, PEER_PORT, Shared, dial};
 use crate::message::{Announcement, Delta, Hello, Snapshot};
 use crate::metrics::{CONNECTED, RECONNECTS};
 use crate::proto::reflector_client::ReflectorClient;
@@ -44,7 +44,7 @@ pub(super) async fn run(member: Member, shared: Arc<Shared>, stop: CancellationT
     connected.set(0.0);
     reconnects.absolute(0);
     let mut up = None;
-    let mut down = Instant::now();
+    let mut outage = Outage::default();
     loop {
         let ended = tokio::select! {
             () = stop.cancelled() => break,
@@ -54,7 +54,7 @@ pub(super) async fn run(member: Member, shared: Arc<Shared>, stop: CancellationT
         connected.set(0.0);
         let up_for = up.take().map(|since| since.elapsed());
         if up_for.is_some() {
-            down = Instant::now();
+            outage.ended();
         }
         let wait = if dropped(up_for) {
             shared.dropped.notify_one();
@@ -62,7 +62,7 @@ pub(super) async fn run(member: Member, shared: Arc<Shared>, stop: CancellationT
         } else {
             backoff.failed()
         };
-        if failing_long(down) {
+        if outage.failed() {
             warn!(node = %member.node, address = %member.address, error = %ended, retry = ?wait, "no stream to the reflector");
         } else {
             info!(node = %member.node, address = %member.address, error = %ended, retry = ?wait, "reflector stream ended");

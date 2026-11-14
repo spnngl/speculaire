@@ -25,8 +25,6 @@ exclude_re = [
   # tokio-rustls writes its records to the socket within `poll_write`, and a TCP flush does nothing; a link not shut
   # down is closed when dropped, so its client sees the end all the same.
   'server\.rs:\d+:\d+: replace <impl AsyncWrite for Link>::poll_(flush|shutdown) -> Poll<io::Result<\(\)>> with Poll::from\(Ok\(\(\)\)\)$',
-  # It picks the level of a log line, which no test reads (D98).
-  'client\.rs:\d+:\d+: replace (failing_long -> bool with (true|false)|>= with < in failing_long)$',
 ]
 # `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/` and
 # `crates/pki/src/testing.rs` are test support (D87, D95). `fuzz/` is a workspace of its own, which cargo-mutants
