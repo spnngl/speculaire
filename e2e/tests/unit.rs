@@ -166,8 +166,18 @@ fn the_journal_holds_structured_entries_and_nothing_at_warning() {
             command.extend_from_slice(args);
             cluster.exec(&node, &command).unwrap()
         };
-        let warnings = journal(&["-p", "warning", "-o", "cat"]);
-        assert!(warnings.trim().is_empty(), "{node}: {warnings}");
+        // Each entry's time, then its message, target and the agent's fields, such as `F_ERROR`.
+        let verbose = journal(&["-p", "warning", "-o", "verbose"]);
+        let warnings: Vec<&str> = verbose
+            .lines()
+            .filter(|l| match l.strip_prefix("    ") {
+                Some(field) => ["MESSAGE=", "TARGET=", "F_"]
+                    .iter()
+                    .any(|p| field.starts_with(p)),
+                None => !l.trim().is_empty(),
+            })
+            .collect();
+        assert!(warnings.is_empty(), "{node}:\n{}", warnings.join("\n"));
         // The agent's own entries, from tracing-journald: its fields carry the `F_` prefix.
         let opened = journal(&["-o", "json"])
             .lines()

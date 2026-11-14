@@ -11,7 +11,8 @@ RUN apk add --no-cache curl
 WORKDIR /download
 RUN f="containerd-${RELEASE}-linux-${TARGETARCH}.tar.gz" \
     && u="https://github.com/containerd/containerd/releases/download/v${RELEASE}" \
-    && curl -fsSLO "$u/$f" && curl -fsSLO "$u/$f.sha256sum" \
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
+        --remote-name-all "$u/$f" "$u/$f.sha256sum" \
     && sha256sum -c "$f.sha256sum" && mkdir out && tar -xzf "$f" -C out
 
 FROM ${NODE}
