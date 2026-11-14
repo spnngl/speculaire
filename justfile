@@ -338,7 +338,9 @@ musl target:
 e2e runtime version kubernetes="": e2e-tools
     #!/usr/bin/env bash
     set -euo pipefail
-    trap '{{ just_executable() }} e2e-down {{ runtime }} {{ version }} {{ quote(kubernetes) }}' EXIT
+    # A failed run saves the journals first, for CI to keep.
+    trap 'status=$?; (( status == 0 )) || {{ just_executable() }} e2e-journals {{ runtime }} {{ version }} {{ quote(kubernetes) }} || true
+        {{ just_executable() }} e2e-down {{ runtime }} {{ version }} {{ quote(kubernetes) }}' EXIT
     {{ just_executable() }} e2e-up {{ runtime }} {{ version }} {{ quote(kubernetes) }}
     {{ just_executable() }} e2e-test {{ runtime }} {{ version }} {{ quote(kubernetes) }}
 
@@ -465,6 +467,22 @@ e2e-test runtime version kubernetes="" *args:
         SPECULAIRE_E2E_RELEASE="$release" SPECULAIRE_E2E_KUBERNETES="$kubernetes" SPECULAIRE_E2E_IP_FAMILY="$family" \
         cargo test -p e2e --locked -- --ignored {{ args }}
 
+# Save each node's journal, the agent's with every field, and the load balancer's log into target/e2e/journals/<cluster>:
+# just e2e-journals crio 1.37
+e2e-journals runtime version kubernetes="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{ e2e_path }}:$PATH"
+    eval "$({{ just_executable() }} e2e-cluster {{ runtime }} {{ version }} {{ quote(kubernetes) }})"
+    dir="{{ e2e_dir }}/journals/$cluster"
+    mkdir -p "$dir"
+    for node in $(kind get nodes --name "$cluster"); do
+        docker exec "$node" journalctl --no-pager -o short-iso-precise >"$dir/$node.log"
+        docker exec "$node" journalctl --no-pager -u speculaire -o json >"$dir/$node.speculaire.json"
+    done
+    docker logs "$cluster-lb" >"$dir/$cluster-lb.log" 2>&1
+    echo "e2e: journals in $dir" >&2
+
 # The cluster's upstream and load balancer go too; without arguments, so do the containers a killed suite left.
 # Delete the e2e cluster `just e2e-up` made with the same arguments and SPECULAIRE_E2E_IP_FAMILY, or every e2e
 # cluster: just e2e-down
@@ -536,11 +554,13 @@ e2e-tools:
         aarch64 | arm64) arch=arm64 ;;
         *) echo "e2e-tools: no kind for $(uname -m)" >&2; exit 1 ;;
     esac
+    # A runner's network fails now and then: each download retries for about half a minute.
+    get() { curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 "$@"; }
     fetch() { # <dir> <name> <url> <sha256 url>
         [[ -x "$1/$2" ]] && return
         mkdir -p "$1"
-        curl -fsSLo "$1/$2.part" "$3"
-        want="$(curl -fsSL "$4" | cut -d' ' -f1)"
+        get -o "$1/$2.part" "$3"
+        want="$(get "$4" | cut -d' ' -f1)"
         got="$(shasum -a 256 "$1/$2.part" | cut -d' ' -f1)"
         [[ "$want" == "$got" ]] || { echo "e2e-tools: $3: sha256 $got, want $want" >&2; exit 1; }
         chmod +x "$1/$2.part"

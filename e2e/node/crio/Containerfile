@@ -10,7 +10,8 @@ RUN apk add --no-cache curl
 WORKDIR /download
 RUN f="cri-o.${TARGETARCH}.v${RELEASE}.tar.gz" \
     && u="https://storage.googleapis.com/cri-o/artifacts" \
-    && curl -fsSLO "$u/$f" && curl -fsSLO "$u/$f.sha256sum" \
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
+        --remote-name-all "$u/$f" "$u/$f.sha256sum" \
     && sha256sum -c "$f.sha256sum" && tar -xzf "$f"
 
 FROM ${NODE}

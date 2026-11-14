@@ -234,6 +234,14 @@ jobs:
           KUBERNETES: ${{ matrix.leg.kubernetes }}
           SPECULAIRE_E2E_IP_FAMILY: dual
         run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
+      # The journals `just e2e` saved before deleting a cluster whose suites failed.
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-journals-${{ matrix.leg.runtime }}-${{ matrix.leg.version }}-k${{ matrix.leg.kubernetes }}-${{ matrix.platform.os }}
+          path: target/e2e/journals
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The Go test oracle (D29): built, vetted and tested in the pinned Go image, then the Rust differential tests that ask
   # it (D70) on the runner.
