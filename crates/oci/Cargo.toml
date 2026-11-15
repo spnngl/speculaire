@@ -15,7 +15,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+divan.workspace = true
 speculaire-oracle-harness.workspace = true
+
+[[bench]]
+name = "micro"
+harness = false
 
 [lints]
 workspace = true
