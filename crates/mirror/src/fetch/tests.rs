@@ -265,9 +265,10 @@ async fn on_containerd_a_whole_get_of_a_digest_the_node_lacks_is_served_from_a_p
         range,
         accept: None,
     };
-    let Answer::Served(response) = local.pull(pull(false, None)).await else {
+    let Answer::Served(source, response) = local.pull(pull(false, None)).await else {
         panic!("a blob a peer holds is served");
     };
+    assert_eq!(source, metrics::Source::Peer);
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.into_body().collect().await.unwrap().to_bytes(),
@@ -275,7 +276,7 @@ async fn on_containerd_a_whole_get_of_a_digest_the_node_lacks_is_served_from_a_p
     );
     assert_counted(
         &handle,
-        &[r#"speculaire_mirror_bytes_total{source="peer"} 1000"#],
+        &[r#"speculaire_peer_fetches_total{result="ok"} 1"#],
     );
     // Neither waits for a whole blob: both fall through.
     assert!(matches!(

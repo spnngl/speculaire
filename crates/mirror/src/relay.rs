@@ -224,15 +224,7 @@ impl<I: Images> Relay<I> {
             && self.known.has(digest, pull.name)
             && self.cache.contains(digest)
         {
-            return from_content(
-                &*self.cache,
-                Kind::Manifest,
-                digest,
-                pull.head,
-                None,
-                metrics::local_bytes,
-            )
-            .await;
+            return from_content(&*self.cache, Kind::Manifest, digest, pull.head, None).await;
         }
         for source in &sources {
             if let Some(answer) = self.relay_manifest(source, pull, reference, &text).await {
@@ -265,7 +257,10 @@ impl<I: Images> Relay<I> {
             return None;
         }
         if head {
-            return Some(Answer::Served(head_response(&response)?));
+            return Some(Answer::Served(
+                metrics::Source::Upstream,
+                head_response(&response)?,
+            ));
         }
         let content_type = response
             .headers
@@ -305,9 +300,10 @@ impl<I: Images> Relay<I> {
                 warn!(error = %err, digest = %digest, "the blob cache could not keep a manifest");
             }
         }
-        Some(Answer::Served(manifest_response(
-            &bytes, &digest, media_type, false,
-        )))
+        Some(Answer::Served(
+            metrics::Source::Upstream,
+            manifest_response(&bytes, &digest, media_type, false),
+        ))
     }
 
     /// Remembers that `digest` and what is below it may be served for `name`.
@@ -333,15 +329,7 @@ impl<I: Images> Relay<I> {
             return Answer::Missing;
         }
         if self.cache.contains(digest) {
-            return from_content(
-                &*self.cache,
-                Kind::Blob,
-                digest,
-                pull.head,
-                pull.range,
-                metrics::local_bytes,
-            )
-            .await;
+            return from_content(&*self.cache, Kind::Blob, digest, pull.head, pull.range).await;
         }
         // A whole blob comes from a peer that holds it before upstream (D67); a head or a range does not.
         if !pull.head
@@ -381,7 +369,8 @@ impl<I: Images> Relay<I> {
                 continue;
             };
             let answer = match (response.status, pull.head, pull.range) {
-                (StatusCode::OK, true, _) => head_response(&response).map(Answer::Served),
+                (StatusCode::OK, true, _) => head_response(&response)
+                    .map(|head| Answer::Served(metrics::Source::Upstream, head)),
                 (StatusCode::OK, false, None) => {
                     let length = response.headers.get(CONTENT_LENGTH).cloned();
                     let feed = Feed::Upstream(response.body);
@@ -394,7 +383,10 @@ impl<I: Images> Relay<I> {
                     | StatusCode::RANGE_NOT_SATISFIABLE,
                     false,
                     Some(_),
-                ) => Some(Answer::Served(passthrough(response, digest))),
+                ) => Some(Answer::Served(
+                    metrics::Source::Upstream,
+                    passthrough(response, digest),
+                )),
                 (status, ..) => {
                     debug!(%status, name = pull.name, "upstream has no such blob for the relay");
                     None
@@ -427,6 +419,10 @@ impl<I: Images> Relay<I> {
             .await
             .map_err(|err| warn!(error = %err, "the blob cache cannot write: this blob is relayed without being kept"))
             .ok();
+        let source = match feed {
+            Feed::Upstream(_) => metrics::Source::Upstream,
+            Feed::Peers(_) => metrics::Source::Peer,
+        };
         let relaying = Relaying {
             feed: Some(feed),
             hash,
@@ -450,7 +446,7 @@ impl<I: Images> Relay<I> {
         if let Some(length) = length {
             headers.insert(CONTENT_LENGTH, length);
         }
-        Answer::Served(out)
+        Answer::Served(source, out)
     }
 
     /// Sends to the first candidate of `source` that answers.
@@ -509,18 +505,7 @@ fn head_response(response: &Upstreamed) -> Option<Response<Body>> {
 
 /// A range answer as upstream gave it: status, `Content-Range`, `Content-Length`, and the body unhashed.
 fn passthrough(response: Upstreamed, digest: &Digest) -> Response<Body> {
-    let mut out = Response::new(
-        response
-            .body
-            .map_frame(|frame| {
-                if let Some(data) = frame.data_ref() {
-                    metrics::upstream_bytes(data.len());
-                }
-                frame
-            })
-            .map_err(io::Error::other)
-            .boxed_unsync(),
-    );
+    let mut out = Response::new(response.body.map_err(io::Error::other).boxed_unsync());
     *out.status_mut() = response.status;
     let headers = out.headers_mut();
     for name in [CONTENT_LENGTH, HeaderName::from_static("content-range")] {
@@ -553,7 +538,6 @@ impl Feed {
                         if let Ok(data) = frame.into_data()
                             && !data.is_empty()
                         {
-                            metrics::upstream_bytes(data.len());
                             return Ok(Some(data));
                         }
                     }
@@ -564,16 +548,10 @@ impl Feed {
                     None => return Ok(None),
                 }
             },
-            Self::Peers(download) => {
-                let chunk = download.next().await.ok_or_else(|| {
-                    debug!(name, "no peer is left to finish a blob");
-                    io::Error::other("no peer is left to finish the blob")
-                })?;
-                if let Some(data) = &chunk {
-                    metrics::peer_bytes(data.len());
-                }
-                Ok(chunk)
-            }
+            Self::Peers(download) => download.next().await.ok_or_else(|| {
+                debug!(name, "no peer is left to finish a blob");
+                io::Error::other("no peer is left to finish the blob")
+            }),
         }
     }
 }

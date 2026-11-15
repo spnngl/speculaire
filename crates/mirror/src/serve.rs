@@ -28,7 +28,7 @@ use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, warn};
 
-use crate::metrics::{self, Outcome};
+use crate::metrics::{Outcome, PullSeries};
 use crate::pulls::{Answer, Body, Pull, Pulls};
 use crate::request::{Ranged, Route, Span, range, route};
 use crate::tls::Tls;
@@ -47,7 +47,11 @@ pub async fn serve<P: Pulls>(
     pulls: Arc<P>,
     stop: impl Future<Output = ()>,
 ) {
-    listen(listener, move || tls.config(), pulls, stop).await;
+    let mirror = Arc::new(Mirror {
+        pulls,
+        series: PullSeries::new(),
+    });
+    listen(listener, move || tls.config(), mirror, stop).await;
 }
 
 /// What answers the requests of a listener: the pull API, or the peer API.
@@ -56,9 +60,15 @@ pub(crate) trait Api: Send + Sync + 'static {
     fn answer(&self, request: &Request<Incoming>) -> impl Future<Output = Response<Body>> + Send;
 }
 
-impl<P: Pulls> Api for P {
+/// The pull API: what `pulls` answers, measured into `series`.
+struct Mirror<P> {
+    pulls: Arc<P>,
+    series: PullSeries,
+}
+
+impl<P: Pulls> Api for Mirror<P> {
     fn answer(&self, request: &Request<Incoming>) -> impl Future<Output = Response<Body>> + Send {
-        handle(self, request)
+        handle(&*self.pulls, &self.series, request)
     }
 }
 
@@ -164,7 +174,11 @@ pub(crate) enum Miss {
     Failed(Error),
 }
 
-async fn handle<P: Pulls>(pulls: &P, request: &Request<Incoming>) -> Response<Body> {
+async fn handle<P: Pulls>(
+    pulls: &P,
+    series: &PullSeries,
+    request: &Request<Incoming>,
+) -> Response<Body> {
     let started = Instant::now();
     let Some(route) = route(request.method(), request.uri().path()) else {
         return status(StatusCode::NOT_FOUND);
@@ -196,15 +210,17 @@ async fn handle<P: Pulls>(pulls: &P, request: &Request<Incoming>) -> Response<Bo
         })
         .await;
     let (response, outcome) = match answered {
-        Answer::Served(response) => (response, Outcome::Served),
+        Answer::Served(source, response) => (
+            series.measure(kind, source, started, response),
+            Outcome::Served(source),
+        ),
         Answer::Missing => (status(StatusCode::NOT_FOUND), Outcome::FallThrough),
         Answer::Failed(err) => {
             warn!(error = %err, kind = kind.label(), "the mirror could not read content it may hold");
             (status(StatusCode::NOT_FOUND), Outcome::Error)
         }
     };
-    metrics::request(kind, outcome);
-    metrics::first_byte(kind, started.elapsed().as_secs_f64());
+    series.answered(kind, outcome, started);
     response
 }
 
@@ -255,13 +271,12 @@ pub(crate) fn manifest_response(
     response
 }
 
-/// The response that serves `blob`, or the span of it `range_header` asks for; `sent` counts the body's bytes.
+/// The response that serves `blob`, or the span of it `range_header` asks for.
 pub(crate) async fn blob_response(
     blob: Blob,
     digest: &Digest,
     head: bool,
     range_header: Option<&str>,
-    sent: fn(usize),
 ) -> Result<Response<Body>, Miss> {
     let size = blob.size();
     let ranged = if head {
@@ -307,10 +322,7 @@ pub(crate) async fn blob_response(
             .stream(span.first, span.bytes())
             .await
             .map_err(Miss::Failed)?;
-        let frames = chunks
-            .inspect_ok(move |chunk| sent(chunk.len()))
-            .map_ok(Frame::data)
-            .map_err(io::Error::other);
+        let frames = chunks.map_ok(Frame::data).map_err(io::Error::other);
         *response.body_mut() = StreamBody::new(frames).boxed_unsync();
     }
     Ok(response)

@@ -18,7 +18,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
 
-use crate::metrics;
+use crate::metrics::CacheSeries;
 
 struct Entry {
     size: u64,
@@ -48,6 +48,7 @@ pub struct Cache {
     parts: AtomicU64,
     /// Each blob kept and each blob gone, sent while the state is locked, so in the order the state changed.
     changes: broadcast::Sender<Change>,
+    series: CacheSeries,
 }
 
 /// Changes a follower of the cache may lag behind before it lists the cache again.
@@ -116,6 +117,7 @@ impl Cache {
             state: Mutex::new(state),
             parts: AtomicU64::new(0),
             changes: broadcast::channel(BACKLOG).0,
+            series: CacheSeries::new(),
         };
         cache.report();
         Ok(cache)
@@ -135,7 +137,7 @@ impl Cache {
     }
 
     fn report(&self) {
-        metrics::cache_bytes(self.state().total);
+        self.series.size(self.state().total);
     }
 
     /// Bytes kept.
@@ -233,7 +235,7 @@ impl Cache {
             let mut state = self.state();
             if let Some(entry) = state.entries.remove(&digest) {
                 state.total -= entry.size;
-                metrics::cache_eviction();
+                self.series.evicted();
                 // Nobody following is no error.
                 let _ = self.changes.send(Change::Removed(digest.clone()));
                 evicted.push(digest);

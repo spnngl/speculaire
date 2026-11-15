@@ -187,7 +187,7 @@ async fn another_node_reads_a_blob_whole_and_in_part_and_a_manifest_by_digest() 
     let handle = recorder.handle();
     // This test thread only: the other tests of the process count into the global recorder, if there is one.
     let _local = ::metrics::set_default_local_recorder(&recorder);
-    metrics::describe_peer();
+    crate::metrics::describe_peer();
     let (blob, manifest) = (digest_of(1), digest_of(2));
     let index = Bytes::from_static(br#"{"schemaVersion":2,"manifests":[]}"#);
     let test = Test::start(
@@ -237,6 +237,8 @@ async fn another_node_reads_a_blob_whole_and_in_part_and_a_manifest_by_digest() 
         r#"speculaire_peer_uploads_total{result="served"} 4"#,
         r#"speculaire_peer_uploads_total{result="busy"} 0"#,
         "speculaire_peer_upload_bytes_total 1010",
+        // The whole blob and its part; neither the head nor the manifest.
+        "speculaire_peer_upload_seconds_count 2",
         "speculaire_peer_uploads_in_flight 0",
     ] {
         assert!(

@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
@@ -23,7 +24,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::warn;
 
-use crate::metrics::{self, Uploaded};
+use crate::metrics::{Metered, PeerSeries, Uploaded};
 use crate::pulls::{Answer, Body, from_content};
 use crate::request::{Kind, Reference, Route, route};
 use crate::serve::{Api, listen, status};
@@ -54,6 +55,7 @@ pub struct Uploads {
     /// The bodies in flight.
     active: watch::Sender<usize>,
     stopping: AtomicBool,
+    series: PeerSeries,
 }
 
 impl Uploads {
@@ -64,6 +66,7 @@ impl Uploads {
             limit: AtomicUsize::new(limit.get()),
             active: watch::Sender::new(0),
             stopping: AtomicBool::new(false),
+            series: PeerSeries::new(),
         }
     }
 
@@ -91,7 +94,7 @@ impl Uploads {
                 return false;
             }
             *active += 1;
-            metrics::uploads_in_flight(*active);
+            self.series.in_flight(*active);
             true
         });
         started.then(|| Upload(Arc::clone(self)))
@@ -105,14 +108,14 @@ impl Drop for Upload {
     fn drop(&mut self) {
         self.0.active.send_modify(|active| {
             *active -= 1;
-            metrics::uploads_in_flight(*active);
+            self.0.series.in_flight(*active);
         });
     }
 }
 
 /// A body that holds its upload until hyper drops it: at its end, or when the connection goes.
 struct Uploading {
-    body: Body,
+    body: Metered<Body>,
     _upload: Upload,
 }
 
@@ -136,8 +139,9 @@ struct Peer<C> {
 
 impl<C: Content> Api for Peer<C> {
     async fn answer(&self, request: &Request<Incoming>) -> Response<Body> {
+        let started = Instant::now();
         if self.uploads.stopping.load(Ordering::Relaxed) {
-            return busy();
+            return self.busy();
         }
         let Some(Route::Pull {
             kind: kind @ (Kind::Manifest | Kind::Blob),
@@ -152,7 +156,7 @@ impl<C: Content> Api for Peer<C> {
         let upload = match (kind, head) {
             (Kind::Blob, false) => match self.uploads.start() {
                 Some(upload) => Some(upload),
-                None => return busy(),
+                None => return self.busy(),
             },
             _ => None,
         };
@@ -160,20 +164,13 @@ impl<C: Content> Api for Peer<C> {
             .headers()
             .get(RANGE)
             .and_then(|value| value.to_str().ok());
-        let answered = from_content(
-            &*self.content,
-            kind,
-            &digest,
-            head,
-            range,
-            metrics::upload_bytes,
-        )
-        .await;
+        let answered = from_content(&*self.content, kind, &digest, head, range).await;
+        let series = &self.uploads.series;
         match answered {
-            Answer::Served(response) => {
-                metrics::upload(Uploaded::Served);
+            Answer::Served(_, response) => {
+                series.upload(Uploaded::Served);
                 match upload {
-                    Some(upload) => response.map(|body| {
+                    Some(upload) => series.measure(started, response, |body| {
                         Uploading {
                             body,
                             _upload: upload,
@@ -193,9 +190,11 @@ impl<C: Content> Api for Peer<C> {
     }
 }
 
-fn busy() -> Response<Body> {
-    metrics::upload(Uploaded::Busy);
-    status(StatusCode::SERVICE_UNAVAILABLE)
+impl<C> Peer<C> {
+    fn busy(&self) -> Response<Body> {
+        self.uploads.series.upload(Uploaded::Busy);
+        status(StatusCode::SERVICE_UNAVAILABLE)
+    }
 }
 
 #[cfg(test)]

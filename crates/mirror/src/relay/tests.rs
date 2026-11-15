@@ -11,7 +11,7 @@ use speculaire_runtime::registries::{Credentials, Endpoint, Error as ConfigError
 use tokio::net::TcpListener;
 
 use super::*;
-use crate::fetch::tests::{Nodes, SETTINGS, assert_counted, pattern, recorder};
+use crate::fetch::tests::{Nodes, SETTINGS, pattern};
 
 /// What the fake registry answers for a path.
 #[derive(Clone)]
@@ -393,8 +393,10 @@ fn by(digest: &Digest) -> Reference<'static> {
     Reference::Digest(digest.clone())
 }
 
-/// What a client of the mirror got: the status, the headers, and the body as far as it came, with the error that cut it.
+/// What a client of the mirror got: where it came from, the status, the headers, and the body as far as it came, with
+/// the error that cut it.
 struct Got {
+    source: metrics::Source,
     status: StatusCode,
     headers: http::HeaderMap,
     body: Vec<u8>,
@@ -402,11 +404,12 @@ struct Got {
 }
 
 async fn read(answer: Answer) -> Option<Got> {
-    let Answer::Served(response) = answer else {
+    let Answer::Served(source, response) = answer else {
         return None;
     };
     let (parts, mut body) = response.into_parts();
     let mut got = Got {
+        source,
         status: parts.status,
         headers: parts.headers,
         body: Vec::new(),
@@ -536,7 +539,6 @@ async fn the_head_of_a_tag_is_asked_as_a_head_and_keeps_nothing() {
 
 #[tokio::test]
 async fn a_blob_is_served_only_below_a_manifest_the_relay_served_and_is_fetched_once() {
-    let (handle, _guard) = recorder();
     let node = Node::new().await;
     let image = Image::new(&node.registry, &[300_000, 2000]);
     let relay = node.relay(1 << 30);
@@ -575,6 +577,7 @@ async fn a_blob_is_served_only_below_a_manifest_the_relay_served_and_is_fetched_
         let got = read(relay.pull(pull(Kind::Blob, &by(&blob), false, None)).await)
             .await
             .unwrap();
+        assert_eq!(got.source, metrics::Source::Upstream);
         assert_eq!(got.status, StatusCode::OK);
         assert!(got.error.is_none(), "{:?}", got.error);
         assert_eq!(got.body.len(), bytes.len());
@@ -589,6 +592,7 @@ async fn a_blob_is_served_only_below_a_manifest_the_relay_served_and_is_fetched_
     let again = read(relay.pull(pull(Kind::Blob, &by(&layer), false, None)).await)
         .await
         .unwrap();
+    assert_eq!(again.source, metrics::Source::Local);
     assert_eq!(again.body, image.layers[0].as_ref());
     let part = read(
         relay
@@ -597,19 +601,10 @@ async fn a_blob_is_served_only_below_a_manifest_the_relay_served_and_is_fetched_
     )
     .await
     .unwrap();
+    assert_eq!(part.source, metrics::Source::Local);
     assert_eq!(part.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(part.body, image.layers[0].slice(100..200));
     assert_eq!(node.registry.requests().len(), before);
-    // Blob bytes alone are counted, as on containerd and the peer API (D100): the manifest is not.
-    let blobs = image.config.len() + image.layers.iter().map(Bytes::len).sum::<usize>();
-    let local = image.layers[0].len() + 100;
-    assert_counted(
-        &handle,
-        &[
-            &format!(r#"speculaire_mirror_bytes_total{{source="upstream"}} {blobs}"#),
-            &format!(r#"speculaire_mirror_bytes_total{{source="local"}} {local}"#),
-        ],
-    );
     assert_eq!(
         std::fs::read_dir(node.dir.path().join("blobs/tmp"))
             .unwrap()
