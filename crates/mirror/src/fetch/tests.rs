@@ -192,7 +192,7 @@ pub(crate) fn recorder() -> (PrometheusHandle, ::metrics::LocalRecorderGuard<'st
     let recorder = Box::leak(Box::new(PrometheusBuilder::new().build_recorder()));
     let handle = recorder.handle();
     let guard = ::metrics::set_default_local_recorder(recorder);
-    metrics::describe_fetch();
+    crate::metrics::describe_fetch();
     (handle, guard)
 }
 
@@ -242,6 +242,10 @@ async fn a_blob_and_a_manifest_come_whole_from_a_peer_that_holds_them() {
             r#"speculaire_peer_fetches_total{result="ok"} 2"#,
             r#"speculaire_peer_fetches_total{result="error"} 1"#,
             "speculaire_peer_hedges_total 0",
+            // One time per request counted.
+            r#"speculaire_peer_fetch_seconds_count{result="ok"} 2"#,
+            r#"speculaire_peer_fetch_seconds_count{result="error"} 1"#,
+            r#"speculaire_peer_fetch_seconds_count{result="timeout"} 0"#,
         ],
     );
 }
@@ -268,7 +272,7 @@ async fn on_containerd_a_whole_get_of_a_digest_the_node_lacks_is_served_from_a_p
     let Answer::Served(source, response) = local.pull(pull(false, None)).await else {
         panic!("a blob a peer holds is served");
     };
-    assert_eq!(source, metrics::Source::Peer);
+    assert_eq!(source, crate::metrics::Source::Peer);
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.into_body().collect().await.unwrap().to_bytes(),
@@ -296,6 +300,52 @@ async fn nothing_is_fetched_before_the_fetcher_is_linked_or_from_no_holder() {
     assert!(unlinked.whole(Kind::Blob, &sha(b"x")).await.is_none());
     let alone = nodes.fetcher(Vec::new(), SETTINGS);
     assert!(alone.download(Kind::Blob, &sha(b"x")).await.is_none());
+}
+
+/// What a test's subscriber writes.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        lock(&self.0).extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn each_request_to_a_peer_is_a_span_naming_its_address_rank_and_result() {
+    let capture = Capture::default();
+    let sink = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+    let mut nodes = Nodes::new();
+    let blob = pattern(1000, 0);
+    let digest = sha(&blob);
+    let (a, _) = nodes.peer("node-a", &[(&digest, &blob)], 4).await;
+    let (b, _) = nodes.peer("node-b", &[(&digest, &blob)], 4).await;
+    let impostor = Holder {
+        node: "node-x".to_owned(),
+        address: a.address,
+    };
+    let fetcher = nodes.fetcher(vec![impostor, b.clone()], SETTINGS);
+    assert!(fetcher.whole(Kind::Blob, &digest).await.is_some());
+    let printed = String::from_utf8(lock(&capture.0).clone()).unwrap();
+    for span in [
+        format!(r#"peer fetch{{peer={} rank=0 result="error"}}"#, a.address),
+        format!(r#"peer fetch{{peer={} rank=1 result="ok"}}"#, b.address),
+    ] {
+        assert!(printed.contains(&span), "no `{span}` in\n{printed}");
+    }
 }
 
 #[tokio::test]
@@ -348,7 +398,10 @@ async fn a_busy_peer_gives_its_turn_to_the_next_at_once() {
     let held = busy.download(Kind::Blob, &digest).await.unwrap();
     let fetcher = nodes.fetcher(vec![a, b], SETTINGS);
     let download = fetcher.download(Kind::Blob, &digest).await.unwrap();
-    assert_eq!(download.current.as_ref().unwrap().holder.node, "node-b");
+    assert_eq!(
+        download.current.as_ref().unwrap().attempt.holder().node,
+        "node-b"
+    );
     // A manifest takes no upload (D100): it is asked for as one.
     let got = busy.whole(Kind::Manifest, &manifest_digest).await.unwrap();
     assert_eq!(read(got).await, manifest);
@@ -461,7 +514,10 @@ async fn a_peer_slow_to_answer_is_hedged_and_the_first_good_answer_wins() {
     let late = behind(&a, Fault::Late(Duration::from_secs(2))).await;
     let fetcher = nodes.fetcher(vec![late, b], SETTINGS);
     let download = fetcher.download(Kind::Blob, &digest).await.unwrap();
-    assert_eq!(download.current.as_ref().unwrap().holder.node, "node-b");
+    assert_eq!(
+        download.current.as_ref().unwrap().attempt.holder().node,
+        "node-b"
+    );
     // The loser waits to resume the body, should the winner fail.
     assert_eq!(download.waiting.len(), 1);
     assert_counted(&handle, &["speculaire_peer_hedges_total 1"]);

@@ -33,10 +33,10 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpStream;
 use tokio::time::{Instant, timeout};
 use tokio_rustls::TlsConnector;
-use tracing::{debug, info, warn};
+use tracing::{Instrument as _, Span, debug, debug_span, field, info, warn};
 
 use crate::hash::Hash;
-use crate::metrics::{self, Fetched};
+use crate::metrics::{FetchSeries, Fetched};
 use crate::request::Kind;
 
 /// The target of audit events, which the agent's logs send to the audit log alone (D37).
@@ -94,6 +94,7 @@ struct Shared {
     denied: Mutex<HashMap<String, Instant>>,
     /// The last answer times.
     times: Mutex<VecDeque<Duration>>,
+    series: FetchSeries,
 }
 
 struct Link {
@@ -111,6 +112,7 @@ impl Fetcher {
             link: OnceLock::new(),
             denied: Mutex::default(),
             times: Mutex::default(),
+            series: FetchSeries::new(),
         }))
     }
 
@@ -155,18 +157,20 @@ impl Fetcher {
     /// with [`Download::finish`].
     pub async fn download(&self, kind: Kind, digest: &Digest) -> Option<Download> {
         let link = self.0.link.get()?;
-        let mut waiting: VecDeque<Holder> = link
+        let mut waiting: VecDeque<Ranked> = link
             .lookup
             .holders(digest)
             .await
             .into_iter()
-            .filter(|holder| self.0.allowed(&holder.node))
+            .enumerate()
+            .filter(|(_, holder)| self.0.allowed(&holder.node))
+            .map(|(rank, holder)| Ranked { rank, holder })
             .collect();
         if waiting.is_empty() {
             return None;
         }
         let credentials = Arc::clone(&link.credentials);
-        let (holder, body, size) =
+        let (attempt, body, size) =
             race(&self.0, &credentials, &mut waiting, kind, digest, 0, None).await?;
         Some(Download {
             shared: Arc::clone(&self.0),
@@ -175,7 +179,7 @@ impl Fetcher {
             digest: digest.clone(),
             waiting,
             current: Some(Current {
-                holder,
+                attempt,
                 body,
                 contributed: false,
             }),
@@ -269,7 +273,7 @@ pub struct Download {
     kind: Kind,
     digest: Digest,
     /// Holders not asked yet.
-    waiting: VecDeque<Holder>,
+    waiting: VecDeque<Ranked>,
     /// The peer the body is coming from, until it fails.
     current: Option<Current>,
     size: u64,
@@ -279,9 +283,45 @@ pub struct Download {
 }
 
 struct Current {
-    holder: Holder,
+    attempt: Attempt,
     body: Incoming,
     contributed: bool,
+}
+
+/// A holder, and its place in the lookup's answer.
+#[derive(Clone)]
+struct Ranked {
+    rank: usize,
+    holder: Holder,
+}
+
+/// A request to one holder, from its start to its end: each counts once in `speculaire_peer_fetches_total` and
+/// `speculaire_peer_fetch_seconds`, unless another holder's answer won the race first.
+struct Attempt {
+    ranked: Ranked,
+    started: Instant,
+    /// Covers the request and the reads of its body.
+    span: Span,
+}
+
+impl Attempt {
+    fn start(ranked: Ranked) -> Self {
+        let span = debug_span!("peer fetch", peer = %ranked.holder.address, rank = ranked.rank, result = field::Empty);
+        Self {
+            ranked,
+            started: Instant::now(),
+            span,
+        }
+    }
+
+    const fn holder(&self) -> &Holder {
+        &self.ranked.holder
+    }
+
+    fn end(self, series: &FetchSeries, result: Fetched) {
+        self.span.record("result", result.label());
+        series.fetched(result, self.started.elapsed());
+    }
 }
 
 impl Download {
@@ -303,7 +343,7 @@ impl Download {
                 return Some(None);
             }
             let Some(current) = &mut self.current else {
-                let (holder, body, _) = race(
+                let (attempt, body, _) = race(
                     &self.shared,
                     &self.credentials,
                     &mut self.waiting,
@@ -314,13 +354,16 @@ impl Download {
                 )
                 .await?;
                 self.current = Some(Current {
-                    holder,
+                    attempt,
                     body,
                     contributed: false,
                 });
                 continue;
             };
-            let failed = match timeout(self.shared.stall(), current.body.frame()).await {
+            let frame = timeout(self.shared.stall(), current.body.frame())
+                .instrument(current.attempt.span.clone())
+                .await;
+            let failed = match frame {
                 Err(_) => Fetched::Timeout,
                 Ok(Some(Ok(frame))) => {
                     let Ok(data) = frame.into_data() else {
@@ -337,7 +380,7 @@ impl Download {
                     {
                         if !current.contributed {
                             current.contributed = true;
-                            self.contributors.push(current.holder.clone());
+                            self.contributors.push(current.attempt.holder().clone());
                         }
                         self.received += length;
                         return Some(Some(data));
@@ -347,57 +390,63 @@ impl Download {
                 }
                 Ok(Some(Err(_)) | None) => Fetched::Error,
             };
-            debug!(node = %current.holder.node, received = self.received, result = failed.label(), "a peer's body failed: resuming from the next");
-            metrics::fetched(failed);
-            self.current = None;
+            debug!(node = %current.attempt.holder().node, received = self.received, result = failed.label(), "a peer's body failed: resuming from the next");
+            if let Some(current) = self.current.take() {
+                current.attempt.end(&self.shared.series, failed);
+            }
         }
     }
 
     /// Ends the download once its whole body was hashed: a body that `matched` its digest counts `ok`; one that did not
     /// counts `digest_mismatch` and denies every peer that sent part of it (D52).
     pub fn finish(self, matched: bool) {
-        if matched {
-            metrics::fetched(Fetched::Ok);
+        let result = if matched {
+            Fetched::Ok
         } else {
-            metrics::fetched(Fetched::DigestMismatch);
             self.shared.deny(&self.contributors, &self.digest);
+            Fetched::DigestMismatch
+        };
+        // The whole body came: the peer that sent its end is still the current one.
+        if let Some(current) = self.current {
+            current.attempt.end(&self.shared.series, result);
         }
     }
 }
 
-/// A request in flight: the holder asked, and its answer.
-type Asking = Pin<Box<dyn Future<Output = (Holder, Result<(Incoming, u64), Fetched>)> + Send>>;
+/// A request in flight, and its answer.
+type Asking = Pin<Box<dyn Future<Output = (Attempt, Result<(Incoming, u64), Fetched>)> + Send>>;
 
 /// The first good head of `digest` from `offset` among `waiting`, hedged; `size`, when known, is what it must say.
 /// Holders that failed leave `waiting`; those still asked when another won go back to its end.
 async fn race(
     shared: &Shared,
     credentials: &Arc<Credentials>,
-    waiting: &mut VecDeque<Holder>,
+    waiting: &mut VecDeque<Ranked>,
     kind: Kind,
     digest: &Digest,
     offset: u64,
     size: Option<u64>,
-) -> Option<(Holder, Incoming, u64)> {
+) -> Option<(Attempt, Incoming, u64)> {
     let stall = shared.stall();
     let start = Instant::now();
     let mut hedges = shared.hedge_delays().into_iter().map(|delay| start + delay);
     let mut next_hedge = hedges.next();
     let mut asking = FuturesUnordered::<Asking>::new();
-    let mut asked: Vec<Holder> = Vec::new();
-    let mut ask_next = |asking: &mut FuturesUnordered<Asking>, asked: &mut Vec<Holder>| {
-        let Some(holder) = waiting.pop_front() else {
+    let mut asked: Vec<Ranked> = Vec::new();
+    let mut ask_next = |asking: &mut FuturesUnordered<Asking>, asked: &mut Vec<Ranked>| {
+        let Some(ranked) = waiting.pop_front() else {
             return false;
         };
-        asked.push(holder.clone());
-        let config = credentials.client(&holder.node);
+        asked.push(ranked.clone());
+        let config = credentials.client(&ranked.holder.node);
         let path = path(kind, digest);
+        let attempt = Attempt::start(ranked);
         asking.push(Box::pin(async move {
-            let answer = match timeout(stall, ask(&holder, config, &path, offset)).await {
-                Ok(answer) => answer,
-                Err(_) => Err(Fetched::Timeout),
-            };
-            (holder, answer)
+            let answer = timeout(stall, ask(attempt.holder(), config, &path, offset))
+                .instrument(attempt.span.clone())
+                .await
+                .unwrap_or(Err(Fetched::Timeout));
+            (attempt, answer)
         }));
         true
     };
@@ -406,22 +455,22 @@ async fn race(
         // Holders that fail are replaced one for one, so the start and the hedges keep at most `WIDTH` asked.
         tokio::select! {
             answered = asking.next() => {
-                let Some((holder, answer)) = answered else {
+                let Some((attempt, answer)) = answered else {
                     break None;
                 };
-                asked.retain(|other| *other != holder);
+                asked.retain(|other| other.rank != attempt.ranked.rank);
                 match answer {
                     Ok((body, said)) if size.is_none_or(|size| size == said) => {
                         shared.answered(start.elapsed());
-                        break Some((holder, body, said));
+                        break Some((attempt, body, said));
                     }
                     Ok(_) => {
-                        debug!(node = %holder.node, "a peer gave another size than the first");
-                        metrics::fetched(Fetched::Error);
+                        debug!(node = %attempt.holder().node, "a peer gave another size than the first");
+                        attempt.end(&shared.series, Fetched::Error);
                     }
                     Err(failed) => {
-                        debug!(node = %holder.node, result = failed.label(), "a peer did not give the content");
-                        metrics::fetched(failed);
+                        debug!(node = %attempt.holder().node, result = failed.label(), "a peer did not give the content");
+                        attempt.end(&shared.series, failed);
                     }
                 }
                 if !ask_next(&mut asking, &mut asked) && asking.is_empty() {
@@ -431,7 +480,7 @@ async fn race(
             () = sleep_until(next_hedge) => {
                 next_hedge = hedges.next();
                 if ask_next(&mut asking, &mut asked) {
-                    metrics::hedged();
+                    shared.series.hedged();
                 }
             }
         }
