@@ -141,7 +141,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Rejected:** pure Rust without an oracle. Drift from containerd would stay silent until a user hit it.
 - **Revisit when:** an upstream Rust NRI crate ships its own runtime harness (D9). Then drop `nri-runtime`. Keep the other subcommands while we maintain the ports.
 
-## D35: Benchmarks against Spegel, with the tool Spegel publishes with (amended by D106)
+## D35: Benchmarks against Spegel, with the tool Spegel publishes with (amended by D106, D114)
 
 - **Decision:**
   - **Tool:** `spegel-org/benchmark` at a pinned release, tracked by Renovate, run with its `suite` command. It deploys DaemonSets of the static `ghcr.io/spegel-org/benchmark` images (v1 and v2 of 10 MB, 100 MB and 1 GB, each in 1 and 4 layers), reads each pod's pull duration from its events, then rolls v1 to v2, 20% of pods at a time. Like the oracle (D29), it is test tooling and never shipped.
@@ -469,7 +469,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a leg passes 20 minutes (then the dual-stack pass and the slowest peer suites move to a nightly workflow), or kind's balancer image changes.
 
 
-## D106: The bench's kind tier runs speculaire without gate or policy, with the e2e cluster's reflectors (amends D35)
+## D106: The bench's kind tier runs speculaire without gate or policy, with the e2e cluster's reflectors (amends D35; amended by D114)
 
 - **Decision:**
   - **Image sets:** `just bench <kubeconfig> [<set>...]` runs the tool's `measure` once per set, each set being `<size>-<layers>`, 10 MB and 100 MB in 1 and 4 layers by default. `suite` always adds the 1 GB sets.
@@ -560,3 +560,14 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - A job's `if` cannot read matrix values, and a skipped step still starts its job on a runner.
 - **Cost:** a regression on an older runtime or Kubernetes minor shows on `main` after the merge. Whoever merges watches `main`'s run and fixes forward.
 - **Revisit when:** runners keep up with 14 legs per pull request, or `main` breaks on a `main-only` leg twice in a milestone.
+
+## D114: The bench's peak memory is the cgroup's `anon`, page cache shown apart (amends D35, D106)
+
+- **Decision:**
+  - **Sampled:** during each set, `bench/node/usage.sh` reads `anon` and `file` from the agent's cgroup `memory.stat` every second, on every node. `memory.peak` is no longer read.
+  - **Reported:** per set and node, the peak of each in `results.json` (`memory.anon`, `memory.file`); the table shows, per agent, the highest peak of each over the sets, on the node with the most.
+  - **Release bar:** D35's peak memory is the peak of `anon`. `file` carries no bar.
+- **Because:** `memory.peak` counts the page cache charged to the cgroup with the process's own memory, and the kernel reclaims page cache under pressure, `anon` only by swapping. In D106's first run speculaire peaked at 215 to 233 MiB against Spegel's 31 to 33, and nothing told the two apart.
+- **Measured:** the first run (amd64, arm64) gave speculaire an `anon` peak of 115.5 and 121.5 MiB against Spegel's 21.3 and 23.3, and a `file` peak of 25.6 and 0.8 MiB. Page cache explains little of D106's 215 to 233 MiB: kernel memory, such as socket buffers, or peaks shorter than a second hold the rest.
+- **Cost:** a one-second sample misses a peak shorter than a second, and a sampler per node runs through each set.
+- **Revisit when:** the agent pins page cache the kernel cannot reclaim, such as by locking or mapping blobs.

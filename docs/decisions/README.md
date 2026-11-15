@@ -42,7 +42,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104)
 - D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109)
-- D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower (amended by D106)
+- D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower (amended by D106, D114)
 - D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56, D100)
 - D37 [agent](agent.md): logs through `tracing` to journald or JSON, default `warn`; an audit log of gate decisions and verdict changes, off by default; secrets never logged (amends D30; amended by D52)
 - D38 [verification](verification.md): upstream `429` pauses discovery to that host until `Retry-After`; fallback and `.sig` tags are probed with `HEAD` (amends D20; amended by D43)
@@ -113,7 +113,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D103 [reflector](reflector.md): a lookup with no stream up counts as `no_reflector`, a restarted reflector refills from the agents' opening snapshots, the client stops without waiting on the load balancer, and the drain waits for each connection to close, not only for its body (amends D39, D98, D100, D102)
 - D104 [reflector](reflector.md): `speculaire-loadgen` runs D33's scenario from the library `crates/load` against a reflector process, measuring `/proc` and `/metrics`, in `load.yml` nightly and on dispatch with `args`; `Snapshot` chunks of 25 digests, unbatched messages, 8 KiB stream windows, snapshots staged as bitmaps and inline index keys bound the reflector's cost per agent; a stopping reflector empties its index at once; divan micro-benchmarks outside CI; `deep` runs the reflector under Valgrind (amends D27, D33, D97; amended by D105)
 - D105 [reflector](reflector.md): agents and reflectors speak 4-byte length-prefixed protobuf over TLS with ALPN `speculaire-reflect/1`, not gRPC: numbered lookups answered in order between announcements, `Ping` every 30 s and a close after 40 s of silence, `Refused` with a reason, frame lengths checked against 4 MiB before allocating (amends D2, D13, D97, D98, D104)
-- D106 [build](build.md): the bench's kind tier `measure`s the 10 MB and 100 MB sets on the e2e cluster nightly on both architectures, speculaire with its default settings, reflectors on the control-plane nodes and no gate or policy until M5 and M6 (amends D35)
+- D106 [build](build.md): the bench's kind tier `measure`s the 10 MB and 100 MB sets on the e2e cluster nightly on both architectures, speculaire with its default settings, reflectors on the control-plane nodes and no gate or policy until M5 and M6 (amends D35; amended by D114)
 - D107 [build](build.md): hot paths borrow their input, reuse buffers, keep fixed sizes on the stack and read fixed binary layouts through `zerocopy`; a change made for speed or memory names its measure (amends D13)
 - D108 [distribution](distribution.md): the mirror reloads its certificates when a D93 stamp of their files changes, at most once a second (amends D85, D93)
 - D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34)
@@ -121,4 +121,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D111 [distribution](distribution.md): every request of the upstream client carries `User-Agent: speculaire/<version>` (amends D88)
 - D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94)
 - D113 [build](build.md): pull requests run 4 e2e legs, the newest containerd and CRI-O on both architectures; `main` runs all 14 (amends D63, D94)
-Next free number: D114.
+- D114 [build](build.md): the bench samples the agent's cgroup `anon` and `file` every second; peak memory, and so the release bar, is the peak of `anon` (amends D35, D106)
+Next free number: D115.

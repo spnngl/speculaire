@@ -21,9 +21,12 @@ die() {
     log "$*"
     exit 1
 }
+pod() { # <node>: its node pod
+    awk -v node="$1" '$1 == node { print $2 }' "$out/pods.tsv"
+}
 on() { # <node> <command>...: runs the command in the node's host namespaces, with this script's stdin
     local pod
-    pod="$(awk -v node="$1" '$1 == node { print $2 }' "$out/pods.tsv")"
+    pod="$(pod "$1")"
     shift
     k -n "$ns" exec -i "$pod" -- nsenter -t 1 -a -- "$@"
 }
@@ -91,10 +94,32 @@ install_speculaire() { # the reflectors first, on the control-plane nodes, then 
     done
 }
 
-usage() { # <run>: "<node> <usec> <bytes>" of the run's agent on each node that runs it
+usage() { # <run>: "<node> <usec>" of the run's agent on each node that runs it
     [[ "$1" == baseline ]] && return
     for node in "${nodes[@]}"; do
-        on "$node" bash -s -- "$1" <bench/node/usage.sh | sed "s/^/$node /"
+        on "$node" bash -s -- "$1" cpu <bench/node/usage.sh | sed "s/^/$node /"
+    done
+}
+
+sample() { # <run> <dir>: samples the memory of the run's agent on each node into <dir>/memory-<node>, until `peaks`
+    sampling=()
+    [[ "$1" == baseline ]] && return
+    for node in "${nodes[@]}"; do
+        # kubectl itself, not a function's subshell, so that killing it closes the sampler's output.
+        kubectl --kubeconfig "$kubeconfig" -n "$ns" exec -i "$(pod "$node")" -- nsenter -t 1 -a -- \
+            bash -s -- "$1" memory <bench/node/usage.sh >"$2/memory-$node" &
+        sampling+=("$!")
+    done
+}
+
+peaks() { # <dir>: stops the samplers, then prints "<node> <anon> <file>", the peaks of each node's samples
+    local file
+    ((${#sampling[@]} == 0)) || kill "${sampling[@]}" 2>/dev/null || true
+    wait "${sampling[@]}" 2>/dev/null || true
+    for file in "$1"/memory-*; do
+        [[ -s "$file" ]] || continue
+        awk -v node="${file##*/memory-}" '$1 > anon { anon = $1 } $2 > file { file = $2 }
+            END { print node, anon + 0, file + 0 }' "$file"
     done
 }
 
@@ -105,19 +130,24 @@ measure() { # <run>: each set, into $out/<run>/<set>.json
         mkdir -p "$dir"
         log "$run: $set"
         usage "$run" >"$dir/usage-before"
+        sample "$run" "$dir"
         benchmark measure --kubeconfig "$kubeconfig" --output-dir "$dir" \
             --images "ghcr.io/spegel-org/benchmark:v1-$set" "ghcr.io/spegel-org/benchmark:v2-$set" >"$dir/measure.log" 2>&1 ||
             die "$run: $set: benchmark measure failed: $dir/measure.log"
         usage "$run" >"$dir/usage-after"
-        # Nearest-rank percentiles of the pull durations, in seconds, and the agent's CPU seconds on each node.
+        peaks "$dir" >"$dir/memory"
+        # Nearest-rank percentiles of the pull durations, in seconds, and the agent's CPU seconds and peak anon and file
+        # bytes on each node.
         jq -n --slurpfile bench <(cat "$dir"/benchmark-*.json) --rawfile before "$dir/usage-before" \
-            --rawfile after "$dir/usage-after" '
+            --rawfile after "$dir/usage-after" --rawfile memory "$dir/memory" '
             def stats: map(.duration / 1e9) | sort
                 | { p50: .[(length * 0.5 | ceil) - 1], p95: .[(length * 0.95 | ceil) - 1], max: .[-1] };
-            def usec: split("\n") | map(select(. != "") | split(" ") | { (.[0]): (.[1] | tonumber) }) | add // {};
-            ($before | usec) as $start
+            def column($n): split("\n") | map(select(. != "") | split(" ") | { (.[0]): (.[$n] | tonumber) })
+                | add // {};
+            ($before | column(1)) as $start
             | { create: ($bench[0].create.samples | stats), update: ($bench[0].update.samples | stats),
-                cpu_seconds: ($after | usec | with_entries(.value = (.value - $start[.key]) / 1e6)) }' >"$dir.json"
+                cpu_seconds: ($after | column(1) | with_entries(.value = (.value - $start[.key]) / 1e6)),
+                memory: { anon: ($memory | column(1)), file: ($memory | column(2)) } }' >"$dir.json"
     done
 }
 
@@ -142,7 +172,7 @@ sed "s|@image@|$BENCH_NODE|" bench/node.yaml | k apply -f - >/dev/null
 k -n "$ns" rollout status daemonset/node --timeout=180s >/dev/null
 k -n "$ns" get pods -l app=speculaire-bench-node \
     -o jsonpath='{range .items[*]}{.spec.nodeName}{"\t"}{.metadata.name}{"\n"}{end}' >"$out/pods.tsv"
-trap 'reset || true; k delete namespace "$ns" --ignore-not-found --wait >/dev/null || true' EXIT
+trap 'kill $(jobs -p) 2>/dev/null || true; reset || true; k delete namespace "$ns" --ignore-not-found --wait >/dev/null || true' EXIT
 
 for run in "${runs[@]}"; do
     log "$run: reset"
@@ -152,14 +182,10 @@ for run in "${runs[@]}"; do
         speculaire) install_speculaire ;;
     esac
     measure "$run"
-    usage "$run" >"$out/$run/usage-end"
 done
 
-# results.json: per run, each set's pull seconds and agent CPU seconds per node, and the agent's peak memory per node.
+# results.json: per run, each set's pull seconds, and the agent's CPU seconds and peak memory per node.
 for run in "${runs[@]}"; do
-    jq -n --arg run "$run" --rawfile end "$out/$run/usage-end" '
-        { ($run): { memory_peak_bytes: ($end | split("\n") | map(select(. != "") | split(" ")
-            | { (.[0]): (.[2] | tonumber) }) | add // {}), sets: {} } }'
     for set in "${sets[@]}"; do
         jq --arg run "$run" --arg set "$set" '{ ($run): { sets: { ($set): . } } }' "$out/$run/$set.json"
     done
@@ -185,10 +211,12 @@ jq -r --argjson sets "$(printf '%s\n' "${sets[@]}" | jq -R . | jq -s .)" '
         | "| \($set) | \($phase) | \([$r.runs.baseline, $r.runs.spegel, $r.runs.speculaire]
             | map(.sets[$set][$phase] | pulls) | join(" | ")) |"),
       "",
-      "Agent CPU seconds per set and peak memory in MiB, on the node with the most:",
+      "Agent CPU seconds per set, and peak memory in MiB over the sets, on the node with the most: anon is the agent itself,",
+      "file the page cache charged to it. The release bar compares anon (D114).",
       "",
-      "| Agent | \($sets | join(" | ")) | Peak MiB |",
-      "|---|\($sets | map("---") | join("|"))|---|",
+      "| Agent | \($sets | join(" | ")) | Peak anon MiB | Peak file MiB |",
+      "|---|\($sets | map("---") | join("|"))|---|---|",
       (("spegel", "speculaire") as $run | $r.runs[$run]
-        | "| \($run) | \([$sets[] as $set | .sets[$set].cpu_seconds | most] | join(" | ")) | \(.memory_peak_bytes
-            | map_values(. / 1048576) | most) |")' "$out/results.json"
+        | "| \($run) | \([$sets[] as $set | .sets[$set].cpu_seconds | most] | join(" | "))"
+          + " | \([.sets[].memory.anon[] / 1048576] | most) | \([.sets[].memory.file[] / 1048576] | most) |")' \
+    "$out/results.json"
