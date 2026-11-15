@@ -98,12 +98,8 @@ impl Auth {
             return Ok(None);
         }
         let decoded = crate::crio::auth::base64_decode(auth).ok_or(InvalidAuth)?;
-        let decoded = String::from_utf8_lossy(&decoded);
-        let (username, password) = decoded.split_once(':').ok_or(InvalidAuth)?;
-        Ok(Some(Login::Password {
-            username: username.to_owned(),
-            password: SecretString::from(password.trim_matches('\0').to_owned()),
-        }))
+        let (username, password) = crate::crio::auth::split_login(&decoded).ok_or(InvalidAuth)?;
+        Ok(Some(Login::Password { username, password }))
     }
 }
 
