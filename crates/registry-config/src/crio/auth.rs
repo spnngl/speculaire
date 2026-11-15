@@ -458,11 +458,6 @@ fn decode(path: &AuthPath, key: &str, entry: &Entry) -> Result<Lookup, Error> {
     }))
 }
 
-/// `findCredentialsInFile`.
-fn find_in_file(key: &str, registry: &str, path: &AuthPath) -> Result<Lookup, Error> {
-    find_in_parsed(key, registry, path, &read_auth_file(path)?)
-}
-
 /// `findCredentialsInFile` on a file already read.
 fn find_in_parsed(
     key: &str,
@@ -506,19 +501,6 @@ fn read_auth_file(path: &AuthPath) -> Result<AuthFile, Error> {
     })
 }
 
-/// `GetCredentials`: the login for `key`, a registry, a namespace or a repository (`docker.io`,
-/// `quay.io/org`, `localhost:5000/app`), from the first helper of `helpers` that has one. The helper
-/// [`AUTHENTICATION_FILE_HELPER`] searches [`auth_file_paths`].
-///
-/// # Errors
-///
-/// When the key is invalid, or every helper fails and none finds a login.
-pub fn credentials(ctx: &Context, helpers: &[String], key: &str) -> Result<Lookup, Error> {
-    lookup(helpers, key, |key, registry| {
-        search_files(ctx, key, registry)
-    })
-}
-
 /// The credential files of a [`Context`], parsed once, so that a reader can hold the logins of a moment (D91). A file
 /// that is not valid is kept as one that fails the lookups that reach it (D92).
 #[derive(Debug, Default)]
@@ -528,8 +510,8 @@ impl Files {
     /// Reads [`auth_file_paths`]; a file that does not exist is an empty one.
     ///
     /// A file that cannot be read or is not valid does not fail the whole: its [`Error`] is returned beside the files,
-    /// with those of the entries whose `auth` is not base64. A lookup that reaches such a file or entry fails as
-    /// [`credentials`] does, and one that is answered before it is not affected.
+    /// with those of the entries whose `auth` is not base64. A lookup that reaches such a file or entry fails, as
+    /// `GetCredentials` does, and one that is answered before it is not affected.
     #[must_use]
     pub fn load(ctx: &Context) -> (Self, Vec<Error>) {
         let mut problems = Vec::new();
@@ -549,64 +531,50 @@ impl Files {
         (Self(files), problems)
     }
 
-    /// [`credentials`] over the parsed files.
+    /// `GetCredentials`: the login for `key`, a registry, a namespace or a repository (`docker.io`, `quay.io/org`,
+    /// `localhost:5000/app`), from the first helper of `helpers` that has one. The helper
+    /// [`AUTHENTICATION_FILE_HELPER`] searches the files in the order of [`auth_file_paths`].
     ///
     /// # Errors
     ///
-    /// As [`credentials`].
+    /// When the key is invalid, or every helper fails and none finds a login.
     pub fn credentials(&self, helpers: &[String], key: &str) -> Result<Lookup, Error> {
-        lookup(helpers, key, |key, registry| {
-            for (path, file) in &self.0 {
-                let Some(file) = file else {
-                    return Err(Error::Unusable {
-                        path: path.path.clone(),
-                    });
-                };
-                match find_in_parsed(key, registry, path, file)? {
-                    Lookup::Found(auth) if auth.is_empty() => {}
-                    Lookup::NotFound => {}
-                    found => return Ok(found),
-                }
+        validate_key(key)?;
+        let registry = key.split('/').next().unwrap_or(key);
+        let mut errors = Vec::new();
+        for helper in helpers {
+            if helper != AUTHENTICATION_FILE_HELPER {
+                return Ok(Lookup::Helper(helper.clone()));
             }
+            match self.search(key, registry) {
+                Ok(Lookup::NotFound) => {}
+                Ok(found) => return Ok(found),
+                Err(e) => errors.push(e),
+            }
+        }
+        if errors.is_empty() {
             Ok(Lookup::NotFound)
-        })
+        } else {
+            Err(Error::Helpers(errors))
+        }
     }
-}
 
-fn lookup(
-    helpers: &[String],
-    key: &str,
-    mut search_files: impl FnMut(&str, &str) -> Result<Lookup, Error>,
-) -> Result<Lookup, Error> {
-    validate_key(key)?;
-    let registry = key.split('/').next().unwrap_or(key);
-    let mut errors = Vec::new();
-    for helper in helpers {
-        if helper != AUTHENTICATION_FILE_HELPER {
-            return Ok(Lookup::Helper(helper.clone()));
+    /// The helper [`AUTHENTICATION_FILE_HELPER`]: the first file with a login for `key`.
+    fn search(&self, key: &str, registry: &str) -> Result<Lookup, Error> {
+        for (path, file) in &self.0 {
+            let Some(file) = file else {
+                return Err(Error::Unusable {
+                    path: path.path.clone(),
+                });
+            };
+            match find_in_parsed(key, registry, path, file)? {
+                Lookup::Found(auth) if auth.is_empty() => {}
+                Lookup::NotFound => {}
+                found => return Ok(found),
+            }
         }
-        match search_files(key, registry) {
-            Ok(Lookup::NotFound) => {}
-            Ok(found) => return Ok(found),
-            Err(e) => errors.push(e),
-        }
-    }
-    if errors.is_empty() {
         Ok(Lookup::NotFound)
-    } else {
-        Err(Error::Helpers(errors))
     }
-}
-
-fn search_files(ctx: &Context, key: &str, registry: &str) -> Result<Lookup, Error> {
-    for path in auth_file_paths(ctx) {
-        match find_in_file(key, registry, &path)? {
-            Lookup::Found(auth) if auth.is_empty() => {}
-            Lookup::NotFound => {}
-            found => return Ok(found),
-        }
-    }
-    Ok(Lookup::NotFound)
 }
 
 #[cfg(test)]
@@ -629,6 +597,11 @@ mod tests {
 
     fn files() -> Vec<String> {
         vec![AUTHENTICATION_FILE_HELPER.to_owned()]
+    }
+
+    /// A lookup in the files as they are now.
+    fn credentials(ctx: &Context, helpers: &[String], key: &str) -> Result<Lookup, Error> {
+        Files::load(ctx).0.credentials(helpers, key)
     }
 
     fn found(lookup: Result<Lookup, Error>) -> Option<(String, String, String)> {
@@ -723,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn parsed_files_answer_as_the_files_do_and_hold_what_they_read() {
+    fn parsed_files_hold_what_they_read() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let ctx = context(dir.path());
         write(
@@ -738,15 +711,6 @@ mod tests {
         );
         let (parsed, problems) = Files::load(&ctx);
         assert!(problems.is_empty(), "{problems:?}");
-        for key in ["a.io", "b.io", "c.io", "h.io", "none.io", "b.io/ns/repo"] {
-            let from_files = credentials(&ctx, &files(), key).expect("a lookup");
-            let from_parsed = parsed.credentials(&files(), key).expect("a lookup");
-            assert_eq!(
-                format!("{from_files:?}"),
-                format!("{from_parsed:?}"),
-                "{key}"
-            );
-        }
         // An empty login in a file does not hide the one in the next.
         assert!(matches!(
             parsed.credentials(&files(), "c.io").expect("a lookup"),
