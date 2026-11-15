@@ -1,0 +1,33 @@
+# The node-access pod of D35: bench/bench.sh runs each node command in the host's namespaces through the pod on that
+# node. bench.sh replaces @image@ with the justfile's `bench_node`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: speculaire-bench
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node
+  namespace: speculaire-bench
+spec:
+  selector:
+    matchLabels:
+      app: speculaire-bench-node
+  template:
+    metadata:
+      labels:
+        app: speculaire-bench-node
+    spec:
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: node
+          image: "@image@"
+          command: [sleep, infinity]
+          securityContext:
+            privileged: true

@@ -52,6 +52,18 @@ go_tags := "containers_image_openpgp,exclude_graphdriver_btrfs,exclude_graphdriv
 e2e_dir := justfile_directory() / "target/e2e"
 e2e_path := (e2e_dir / "kind-" + kind_version) + ":" + (e2e_dir / "kubectl-" + kubectl_version)
 
+# The bench (D35, D106): the measuring tool, the mirror compared, the tool installing it, and the node-access pod.
+# renovate: datasource=github-releases depName=spegel-org/benchmark
+benchmark_version := "0.0.7"
+# renovate: datasource=github-releases depName=spegel-org/spegel
+spegel_version := "0.8.1"
+# renovate: datasource=github-releases depName=helm/helm
+helm_version := "4.3.2"
+# renovate: datasource=docker depName=docker.io/library/debian
+bench_node := "trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2"
+bench_dir := justfile_directory() / "target/bench-tools"
+bench_path := (bench_dir / "benchmark-" + benchmark_version) + ":" + (bench_dir / "helm-" + helm_version)
+
 # List recipes.
 default:
     @just --list
@@ -624,6 +636,47 @@ e2e-tools:
     kubectl="https://dl.k8s.io/release/v{{ kubectl_version }}/bin/$os/$arch/kubectl"
     fetch '{{ e2e_dir }}/kubectl-{{ kubectl_version }}' kubectl "$kubectl" "$kubectl.sha256"
 
+# Needs a cluster-admin kubeconfig. The samples and results.json go to target/bench/<UTC time>, the tables to stdout.
+# Each node runs the binary of `just musl` for its architecture. The bench images are amd64 only: arm64 nodes run them
+# through binfmt_misc.
+# Bench speculaire against no mirror and Spegel (D35, D106): just bench ~/.kube/config 10MB-1
+bench kubeconfig *sets="10MB-1 10MB-4 100MB-1 100MB-4": e2e-tools bench-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{ e2e_path }}:{{ bench_path }}:$PATH"
+    BENCH_NODE='docker.io/library/debian:{{ bench_node }}' SPEGEL_VERSION='{{ spegel_version }}' \
+        bench/bench.sh {{ quote(kubeconfig) }} "target/bench/$(date -u +%Y%m%dT%H%M%SZ)" {{ sets }}
+
+# Download the pinned benchmark and helm into target/bench-tools, checking their published SHA-256.
+[private]
+bench-tools:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    case "$(uname -m)" in
+        x86_64 | amd64) arch=amd64 ;;
+        aarch64 | arm64) arch=arm64 ;;
+        *) echo "bench-tools: no benchmark for $(uname -m)" >&2; exit 1 ;;
+    esac
+    get() { curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 "$@"; }
+    fetch() { # <dir> <name> <tarball url> <checksums url> <path in the tarball>
+        [[ -x "$1/$2" ]] && return
+        mkdir -p "$1"
+        get -o "$1/$2.tar.gz" "$3"
+        want="$(get "$4" | awk -v file="${3##*/}" '$2 == file { print $1 }')"
+        got="$(shasum -a 256 "$1/$2.tar.gz" | cut -d' ' -f1)"
+        [[ -n "$want" && "$want" == "$got" ]] || { echo "bench-tools: $3: sha256 $got, want $want" >&2; exit 1; }
+        tar -xzOf "$1/$2.tar.gz" "$5" >"$1/$2.part"
+        rm "$1/$2.tar.gz"
+        chmod +x "$1/$2.part"
+        mv "$1/$2.part" "$1/$2"
+    }
+    benchmark='https://github.com/spegel-org/benchmark/releases/download/v{{ benchmark_version }}'
+    fetch '{{ bench_dir }}/benchmark-{{ benchmark_version }}' benchmark \
+        "$benchmark/benchmark_{{ benchmark_version }}_${os}_$arch.tar.gz" \
+        "$benchmark/benchmark_{{ benchmark_version }}_checksums.txt" benchmark
+    helm="https://get.helm.sh/helm-v{{ helm_version }}-$os-$arch.tar.gz"
+    fetch '{{ bench_dir }}/helm-{{ helm_version }}' helm "$helm" "$helm.sha256sum" "$os-$arch/helm"
 
 # Derived from packaging/config.toml: the file with its keys uncommented, in fuzz/target/seeds/config, and a token
 # dictionary of its tables, keys and quoted strings, so that libFuzzer can write `mode = "enforce"`.
