@@ -389,17 +389,17 @@ fn normalize_auth_file_key(key: &str, legacy: bool) -> &str {
 }
 
 /// `authKeyLookupOrder`: the key, then each namespace above it, down to the registry; a legacy file only the registry.
-fn key_lookup_order<'a>(key: &'a str, registry: &'a str, legacy: bool) -> Vec<&'a str> {
-    if legacy {
-        return vec![registry];
-    }
-    let mut keys = vec![key];
-    let mut key = key;
-    while let Some(slash) = key.rfind('/') {
-        key = &key[..slash];
-        keys.push(key);
-    }
-    keys
+fn key_lookup_order<'a>(
+    key: &'a str,
+    registry: &'a str,
+    legacy: bool,
+) -> impl Iterator<Item = &'a str> {
+    let first = if legacy { registry } else { key };
+    std::iter::successors(Some(first), move |key| {
+        key.rfind('/')
+            .filter(|_| !legacy)
+            .map(|slash| &key[..slash])
+    })
 }
 
 /// Go's `base64.StdEncoding.DecodeString`: padded, and blind to line breaks.
@@ -666,12 +666,13 @@ mod tests {
 
     #[test]
     fn lookups_try_the_key_then_each_namespace_above() {
+        let order = |key, legacy| key_lookup_order(key, "q.io", legacy).collect::<Vec<_>>();
         assert_eq!(
-            key_lookup_order("q.io/a/b/c", "q.io", false),
+            order("q.io/a/b/c", false),
             ["q.io/a/b/c", "q.io/a/b", "q.io/a", "q.io"]
         );
-        assert_eq!(key_lookup_order("q.io", "q.io", false), ["q.io"]);
-        assert_eq!(key_lookup_order("q.io/a/b", "q.io", true), ["q.io"]);
+        assert_eq!(order("q.io", false), ["q.io"]);
+        assert_eq!(order("q.io/a/b", true), ["q.io"]);
     }
 
     #[test]
