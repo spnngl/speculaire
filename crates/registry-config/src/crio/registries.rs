@@ -458,14 +458,14 @@ impl Config {
     }
 
     /// `FindRegistry`: the registry with the longest prefix of `name`, a repository name such as
-    /// `docker.io/library/busybox`.
+    /// `docker.io/library/busybox`. An empty prefix, which `prefix = "/"` leaves, matches nothing.
     #[must_use]
     pub fn find_registry(&self, name: &str) -> Option<&Registry> {
         self.registries
             .iter()
-            .filter(|registry| ref_matching_prefix(name, &registry.prefix).is_some())
             .fold(None, |best: Option<&Registry>, registry| {
-                if best.is_none_or(|best| registry.prefix.len() > best.prefix.len()) {
+                let longer = registry.prefix.len() > best.map_or(0, |best| best.prefix.len());
+                if longer && ref_matching_prefix(name, &registry.prefix).is_some() {
                     Some(registry)
                 } else {
                     best
@@ -737,6 +737,15 @@ mod tests {
             .expect("sources");
         assert_eq!(sources[0].reference, "sub.example.org/x:1");
         assert!(wildcard.pull_sources("other.com/x:1").is_err());
+    }
+
+    #[test]
+    fn an_empty_prefix_matches_nothing() {
+        // `findRegistryWithParsedConfig` wants a prefix longer than none.
+        let config = config("[[registry]]\nprefix = \"/\"\nlocation = \"a\"\n");
+        assert_eq!(config.registries[0].prefix, "");
+        assert!(config.find_registry("/x").is_none());
+        assert!(config.find_registry("").is_none());
     }
 
     #[test]
