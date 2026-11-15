@@ -10,7 +10,7 @@ use speculaire_oci::reference::Digest;
 use speculaire_runtime::content::{Blob, Content, Error};
 
 use crate::fetch::Fetcher;
-use crate::metrics;
+use crate::metrics::Source;
 use crate::request::{Kind, Reference};
 
 /// The body of an answer.
@@ -35,8 +35,8 @@ pub struct Pull<'a> {
 
 /// What became of a pull.
 pub enum Answer {
-    /// The response to send.
-    Served(Response<Body>),
+    /// The response to send, and where its bytes come from.
+    Served(Source, Response<Body>),
     /// This node does not have it and will not fetch it: the runtime goes on (a 404).
     Missing,
     /// Looking or fetching failed: a 404 too, and the error is logged and counted.
@@ -69,60 +69,49 @@ impl<C: Content> Pulls for Local<C> {
         else {
             return Answer::Missing;
         };
-        let answer = from_content(
-            &self.content,
-            pull.kind,
-            digest,
-            pull.head,
-            pull.range,
-            metrics::local_bytes,
-        )
-        .await;
+        let answer = from_content(&self.content, pull.kind, digest, pull.head, pull.range).await;
         // A peer's content is served once it is whole and checked, which a head or a range would not wait for: those
         // fall through (D102).
         if !matches!(answer, Answer::Missing) || pull.head || pull.range.is_some() {
             return answer;
         }
         match self.fetcher.whole(pull.kind, digest).await {
-            Some(blob) => {
-                from_blob(blob, pull.kind, digest, false, None, metrics::peer_bytes).await
-            }
+            Some(blob) => from_blob(blob, Source::Peer, pull.kind, digest, false, None).await,
             None => Answer::Missing,
         }
     }
 }
 
-/// The answer of a pull of `digest` from `content`; `sent` counts the bytes of a blob's body as they go.
+/// The answer of a pull of `digest` from `content`, this node's own.
 pub(crate) async fn from_content<C: Content>(
     content: &C,
     kind: Kind,
     digest: &Digest,
     head: bool,
     range: Option<&str>,
-    sent: fn(usize),
 ) -> Answer {
     match content.open(digest).await {
-        Ok(Some(blob)) => from_blob(blob, kind, digest, head, range, sent).await,
+        Ok(Some(blob)) => from_blob(blob, Source::Local, kind, digest, head, range).await,
         Ok(None) => Answer::Missing,
         Err(err) => Answer::Failed(err),
     }
 }
 
-/// The answer of a pull of `digest`, whose content is `blob`.
+/// The answer of a pull of `digest`, whose content is `blob`, from `source`.
 async fn from_blob(
     blob: Blob,
+    source: Source,
     kind: Kind,
     digest: &Digest,
     head: bool,
     range: Option<&str>,
-    sent: fn(usize),
 ) -> Answer {
     let served = match kind {
         Kind::Manifest => crate::serve::manifest(blob, digest, head).await,
-        _ => crate::serve::blob_response(blob, digest, head, range, sent).await,
+        _ => crate::serve::blob_response(blob, digest, head, range).await,
     };
     match served {
-        Ok(response) => Answer::Served(response),
+        Ok(response) => Answer::Served(source, response),
         Err(crate::serve::Miss::NotHeld) => Answer::Missing,
         Err(crate::serve::Miss::Failed(err)) => Answer::Failed(err),
     }

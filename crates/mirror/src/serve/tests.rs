@@ -525,13 +525,13 @@ async fn replaced_certificates_serve_the_next_connection() {
 }
 
 #[tokio::test]
-async fn the_metrics_count_requests_bytes_and_first_byte_times() {
+async fn the_metrics_count_requests_bytes_and_times() {
     use metrics_exporter_prometheus::PrometheusBuilder;
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     // This test thread only: the other tests of the process count into the global recorder, if there is one.
     let _local = ::metrics::set_default_local_recorder(&recorder);
-    metrics::describe();
+    crate::metrics::describe();
     let held = digest_of(1);
     let server = start(Fake(HashMap::from([(held.clone(), pattern(1000))]))).await;
     let mut sender = client(&server).await;
@@ -548,15 +548,14 @@ async fn the_metrics_count_requests_bytes_and_first_byte_times() {
         StatusCode::NOT_FOUND
     );
     let text = handle.render();
-    // Every request that found its content, or not, has a first byte.
-    for kind in ["blob", "manifest"] {
-        let count = format!(r#"speculaire_mirror_first_byte_seconds_count{{kind="{kind}"}} "#);
-        assert!(
-            text.lines().any(|l| l.starts_with(&count)),
-            "no `{count}` in\n{text}"
-        );
-    }
     for line in [
+        // Every request that found its content, or not, has a first byte; a 404 is a fall through.
+        r#"speculaire_mirror_first_byte_seconds_count{kind="blob",source="local"} 1"#,
+        r#"speculaire_mirror_first_byte_seconds_count{kind="blob",source="fall_through"} 1"#,
+        r#"speculaire_mirror_first_byte_seconds_count{kind="manifest",source="fall_through"} 1"#,
+        // A body sent to its end has a last byte.
+        r#"speculaire_mirror_body_seconds_count{kind="blob",source="local"} 1"#,
+        r#"speculaire_mirror_body_seconds_count{kind="blob",source="peer"} 0"#,
         r#"speculaire_mirror_requests_total{kind="blob",result="served"} 1"#,
         r#"speculaire_mirror_requests_total{kind="blob",result="fall_through"} 1"#,
         r#"speculaire_mirror_requests_total{kind="manifest",result="fall_through"} 1"#,
@@ -588,7 +587,7 @@ impl Pulls for Recording {
                     .boxed_unsync(),
             );
             *response.status_mut() = StatusCode::OK;
-            Answer_::Served(response)
+            Answer_::Served(crate::metrics::Source::Local, response)
         } else {
             Answer_::Missing
         })

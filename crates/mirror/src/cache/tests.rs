@@ -103,6 +103,7 @@ async fn opening_again_deletes_leftovers_and_counts_what_was_kept() {
 
 #[tokio::test]
 async fn above_the_bound_the_least_recently_served_blob_goes_first() {
+    let (handle, _guard) = crate::fetch::tests::recorder();
     let dir = tempfile::tempdir().unwrap();
     let cache = Cache::open(dir.path(), 25).unwrap();
     for n in 1..=3 {
@@ -120,6 +121,13 @@ async fn above_the_bound_the_least_recently_served_blob_goes_first() {
     assert!(!cache.over());
     // Within the bound, nothing goes.
     assert_eq!(cache.evict(&HashSet::new()).len(), 0);
+    crate::fetch::tests::assert_counted(
+        &handle,
+        &[
+            "speculaire_blob_cache_bytes 20",
+            "speculaire_blob_cache_evictions_total 1",
+        ],
+    );
 }
 
 #[tokio::test]

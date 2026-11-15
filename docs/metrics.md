@@ -7,10 +7,11 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `speculaire_mirror_requests_total` | counter | `kind` = `manifest`\|`blob`\|`referrers`; `result` = `served`\|`fall_through`\|`error` | Requests from the runtime to the local mirror |
-| `speculaire_mirror_bytes_total` | counter | `source` = `local`\|`peer`\|`upstream` | Blob bytes served to the runtime (D100); `upstream` only on CRI-O (D66) |
+| `speculaire_mirror_bytes_total` | counter | `source` = `local`\|`peer`\|`upstream` | Blob bytes served to the runtime (D100); `upstream` stays 0 on containerd (D66) |
 | `speculaire_blob_cache_bytes` | gauge | — | Size of the *blob cache*, on CRI-O (D67) |
 | `speculaire_blob_cache_evictions_total` | counter | — | Blobs evicted from the *blob cache* above `blob_cache.max_size` (D67) |
-| `speculaire_mirror_first_byte_seconds` | histogram | `kind` | Time from request to first byte, or to the 404 of a *fall through* |
+| `speculaire_mirror_first_byte_seconds` | histogram | `kind`; `source` = `local`\|`peer`\|`upstream`\|`fall_through` | Time from request to the response head: of an answer, by where its bytes come from, or of a 404 (`fall_through`, errors included). On containerd, `peer` waits for the whole blob (D102) |
+| `speculaire_mirror_body_seconds` | histogram | `kind`; `source` = `local`\|`peer`\|`upstream` | Time from request to the last byte of a body sent whole; a body cut off is not recorded |
 
 ## Peers
 
@@ -21,6 +22,7 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 | `speculaire_peer_uploads_total` | counter | `result` = `served`\|`busy` | Requests to the peer API that found what they named; `busy` answered `503`, at `peer.max_uploads` or while the agent stops (D24, D39, D100) |
 | `speculaire_peer_uploads_in_flight` | gauge | — | Blob bodies now being sent, which `peer.max_uploads` caps (D24) |
 | `speculaire_peer_upload_bytes_total` | counter | — | Blob bytes sent to other agents |
+| `speculaire_peer_upload_seconds` | histogram | — | Time from a peer's request to the last byte of a blob body sent whole, ranges included |
 | `speculaire_p2p_enabled` | gauge | — | 1 while the kubelet certificate and the cluster CA are loaded and the certificate has not expired, 0 otherwise (D16, D95) |
 | `speculaire_identity_expiry_timestamp_seconds` | gauge | — | When the kubelet certificate in use expires, as a Unix time; absent until one is loaded (D95) |
 
