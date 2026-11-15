@@ -161,6 +161,12 @@ impl Cache {
         self.size() > self.max_size()
     }
 
+    /// The blob with `digest`, read without counting as served: the order of eviction stays as it was.
+    pub(crate) fn peek(&self, digest: &Digest) -> Option<Blob> {
+        let size = self.state().entries.get(digest)?.size;
+        Some(Blob::from_file(self.path(digest), size))
+    }
+
     /// Whether the cache holds `digest`.
     #[must_use]
     pub fn contains(&self, digest: &Digest) -> bool {
