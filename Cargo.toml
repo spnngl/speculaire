@@ -128,6 +128,8 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 ] }
 # D2: the reflector's index, a bitmap of node IDs per digest and of digest IDs per node.
 roaring = "0.12.0"
+# D2: the index's digest numbers, found by the key each digest's entry holds, so that the key is held once.
+hashbrown = { version = "0.17.1", default-features = false }
 # D97: randomised schedules of the reflector's streams, under `--cfg shuttle` (`just shuttle`).
 shuttle = "0.9.10"
 # D46: the global allocator of the musl binaries, `MI_SECURE=4` (guard pages, randomised and encoded free lists).
