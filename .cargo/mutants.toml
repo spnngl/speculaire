@@ -28,11 +28,11 @@ exclude_re = [
   # alone.
   'agents\.rs:\d+:\d+: replace (/ with [*%]|\* with \+) in pace$',
   # The settling log every 5 s.
-  'reflector\.rs:\d+:\d+: replace >= with < in Reflector::settled$',
+  'node\.rs:\d+:\d+: replace >= with < in Agent::settled$',
   # A reflector settled at once, or dropped instead of stopped, which `kill_on_drop` kills: the small run goes on and
   # meets its loose targets. The settling logs and the exit status of D33's run tell them apart.
-  'reflector\.rs:\d+:\d+: replace Reflector::settled -> anyhow::Result<Option<Duration>> with Ok\(Some\(Default::default\(\)\)\)$',
-  'reflector\.rs:\d+:\d+: replace Reflector::stop -> anyhow::Result<\(\)> with Ok\(\(\)\)$',
+  'node\.rs:\d+:\d+: replace Agent::settled -> anyhow::Result<Option<Duration>> with Ok\(Some\(Default::default\(\)\)\)$',
+  'node\.rs:\d+:\d+: replace Agent::stop -> anyhow::Result<\(\)> with Ok\(\(\)\)$',
 ]
 # `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/`,
 # `crates/pki/src/testing.rs` and `crates/reflect/src/bench.rs` are test and benchmark support (D87, D95, D104).

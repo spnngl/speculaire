@@ -1,5 +1,5 @@
-//! The reflector under load: `speculaire agent` with `role = "reflector"` on a fake containerd, in a process of its
-//! own, so that its RSS is its own (D33).
+//! A node of the runs: `speculaire agent` on a fake containerd, in a process of its own, so that its RSS and its
+//! profile are its own (D33, D116). The reflector under load is one with `role = "reflector"`.
 
 use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -12,6 +12,7 @@ use secrecy::ExposeSecret as _;
 use speculaire_fake_runtime::{Answers, Fake};
 use speculaire_pki::mirror::{Mirror, Part};
 use speculaire_pki::testing::Cluster;
+use speculaire_runtime::containerd::CONTENT_PLUGIN;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
@@ -20,8 +21,12 @@ use crate::exposition::{self, Buckets, PROTOBUF};
 
 /// The reflector's node, which its certificate names and its one member is.
 pub(crate) const NODE: &str = "load-reflector";
+/// The containerd version the nodes' fakes answer.
+const CONTAINERD: &str = "v2.4.2";
+/// The variable that names a node's process for a wrapper, such as `just profile`'s, which names its output after it.
+const NODE_VARIABLE: &str = "SPECULAIRE_LOAD_NODE";
 
-/// How long the reflector may take to answer `/readyz` 200, under Valgrind too.
+/// How long an agent may take to answer `/readyz` 200, under Valgrind too.
 const READY: Duration = Duration::from_mins(2);
 /// How long it may take to exit after SIGTERM: its drain, and Valgrind's leak check.
 const EXIT: Duration = Duration::from_mins(2);
@@ -30,21 +35,71 @@ const POLL: Duration = Duration::from_millis(250);
 /// How often a wait for the gauges logs them.
 const PROGRESS: Duration = Duration::from_secs(5);
 
-/// The reflector's files: its config, certificates and fake containerd, removed on drop.
+/// A node's files: its config, certificates and fake containerd, removed on drop.
 pub(crate) struct Node {
     dir: tempfile::TempDir,
     _containerd: Fake,
+    name: &'static str,
     /// Where the reflector listens for agents.
     pub(crate) listen: SocketAddr,
+    /// Where the node's mirror listens.
+    pub(crate) mirror: SocketAddr,
     metrics: SocketAddr,
 }
 
 impl Node {
     /// Writes the files of a reflector whose certificate `cluster` issues, on ports free now.
     pub(crate) fn new(cluster: &Cluster) -> anyhow::Result<Self> {
+        let listen = free_port()?;
+        Self::write(
+            cluster,
+            NODE,
+            Answers::containerd(CONTAINERD),
+            listen,
+            "role = \"reflector\"\n",
+            &format!(
+                "[reflector]\nlisten = \"{listen}\"\nmembers = [{{ node = \"{NODE}\", address = \"{listen}\" }}]\n"
+            ),
+        )
+    }
+
+    /// Writes the files of the agent `name`, whose certificate `cluster` issues, which announces the `content` its fake
+    /// containerd lists to the reflector of `reflector`, and serves peers on a port free now.
+    pub(crate) fn agent(
+        cluster: &Cluster,
+        name: &'static str,
+        content: Vec<String>,
+        reflector: &Self,
+    ) -> anyhow::Result<Self> {
+        let peer = free_port()?;
+        let mut containerd = Answers::containerd(CONTAINERD);
+        containerd.content = content;
+        Self::write(
+            cluster,
+            name,
+            containerd,
+            reflector.listen,
+            "",
+            &format!(
+                "[peer]\naddress = \"{peer}\"\n[reflector]\nurl = \"https://{}\"\n",
+                reflector.listen
+            ),
+        )
+    }
+
+    /// Writes the files of the node `name`, whose fake containerd gives `containerd`: its config is `top`, the tables
+    /// every node has, and `tables`.
+    fn write(
+        cluster: &Cluster,
+        name: &'static str,
+        containerd: Answers,
+        listen: SocketAddr,
+        top: &str,
+        tables: &str,
+    ) -> anyhow::Result<Self> {
         let dir = tempfile::tempdir()?;
         let path = dir.path();
-        let containerd = Fake::start(&path.join("containerd.sock"), Answers::containerd("v2.4.2"))?;
+        let containerd = Fake::start(&path.join("containerd.sock"), containerd)?;
         let mirror = Mirror::generate(Ipv4Addr::LOCALHOST.into(), SystemTime::now())?;
         std::fs::create_dir(path.join("mirror"))?;
         for part in Part::ALL {
@@ -54,26 +109,32 @@ impl Node {
             )?;
         }
         std::fs::write(path.join("ca.crt"), cluster.ca())?;
-        std::fs::write(path.join("reflector.pem"), cluster.kubelet(NODE))?;
-        let (listen, metrics) = (free_port()?, free_port()?);
+        std::fs::write(path.join("node.pem"), cluster.kubelet(name))?;
+        let (mirror, metrics) = (free_port()?, free_port()?);
         let d = path.display();
+        std::fs::write(
+            path.join("containerd.toml"),
+            format!("version = 3\nroot = \"{d}/root\"\n"),
+        )?;
         std::fs::write(
             path.join("config.toml"),
             format!(
-                "role = \"reflector\"\n\
-                 [identity]\ncertificate = \"{d}/reflector.pem\"\nca = \"{d}/ca.crt\"\n\
-                 [runtime]\ncontainerd_socket = \"{d}/containerd.sock\"\ncontainerd_config = \"{d}/config.toml\"\n\
+                "{top}\
+                 [identity]\ncertificate = \"{d}/node.pem\"\nca = \"{d}/ca.crt\"\n\
+                 [runtime]\ncontainerd_socket = \"{d}/containerd.sock\"\ncontainerd_config = \"{d}/containerd.toml\"\n\
                  crio_socket = \"{d}/crio.sock\"\n\
-                 [mirror]\naddress = \"127.0.0.1:0\"\ndirectory = \"{d}/mirror\"\n\
+                 [mirror]\naddress = \"{mirror}\"\ndirectory = \"{d}/mirror\"\n\
                  [blob_cache]\ndirectory = \"{d}/blobs\"\n\
                  [metrics]\naddress = \"{metrics}\"\n\
-                 [reflector]\nlisten = \"{listen}\"\nmembers = [{{ node = \"{NODE}\", address = \"{listen}\" }}]\n"
+                 {tables}"
             ),
         )?;
         Ok(Self {
             dir,
             _containerd: containerd,
+            name,
             listen,
+            mirror,
             metrics,
         })
     }
@@ -87,24 +148,30 @@ impl Node {
     pub(crate) fn path(&self) -> &Path {
         self.dir.path()
     }
+
+    /// The content directory below the `root` of the node's containerd config, where its agent reads blobs (D110).
+    pub(crate) fn content(&self) -> PathBuf {
+        self.path().join("root").join(CONTENT_PLUGIN)
+    }
 }
 
-/// A port nobody listens on now; the reflector binds it a moment later, and again after its restart.
+/// A port nobody listens on now; an agent binds it a moment later, and again after its restart.
 fn free_port() -> std::io::Result<SocketAddr> {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()
 }
 
-/// A running reflector, killed on drop.
-pub(crate) struct Reflector {
+/// A running agent, killed on drop.
+pub(crate) struct Agent {
     child: Child,
     pid: u32,
     metrics: SocketAddr,
 }
 
-impl Reflector {
-    /// Starts `command` followed by `agent --config` and `node`'s config, and returns once `/readyz` answers 200.
+impl Agent {
+    /// Starts `command` followed by `agent --config` and `node`'s config, with the node's name in [`NODE_VARIABLE`],
+    /// and returns once `/readyz` answers 200.
     pub(crate) async fn start(command: &[OsString], node: &Node) -> anyhow::Result<Self> {
-        let (program, args) = command.split_first().context("no reflector command")?;
+        let (program, args) = command.split_first().context("no agent command")?;
         let mut child = Command::new(program)
             .args(args)
             .args([
@@ -113,23 +180,27 @@ impl Reflector {
                 node.path().join("config.toml").as_os_str(),
             ])
             .env_remove("JOURNAL_STREAM")
+            .env(NODE_VARIABLE, node.name)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("cannot start {}", program.display()))?;
-        let pid = child.id().context("the reflector exited at once")?;
+        let name = node.name;
+        let pid = child
+            .id()
+            .with_context(|| format!("{name} exited at once"))?;
         let deadline = Instant::now() + READY;
         loop {
             if let Some(status) = child.try_wait()? {
-                bail!("the reflector exited before it was ready: {status}");
+                bail!("{name} exited before it was ready: {status}");
             }
             if let Ok((200, _)) = get(node.metrics, "/readyz", "").await {
                 break;
             }
             ensure!(
                 Instant::now() < deadline,
-                "the reflector was not ready within {READY:?}"
+                "{name} was not ready within {READY:?}"
             );
             tokio::time::sleep(POLL).await;
         }
@@ -198,7 +269,7 @@ impl Reflector {
             .with_context(|| format!("no {field} in the reflector's /proc status"))
     }
 
-    /// Sends SIGTERM and waits for the reflector to exit with success.
+    /// Sends SIGTERM and waits for the agent to exit with success.
     pub(crate) async fn stop(mut self) -> anyhow::Result<()> {
         let kill = Command::new("kill")
             .args(["-TERM", &self.pid.to_string()])
@@ -207,8 +278,8 @@ impl Reflector {
         ensure!(kill.success(), "kill -TERM {}: {kill}", self.pid);
         let status = tokio::time::timeout(EXIT, self.child.wait())
             .await
-            .context("the reflector did not exit after SIGTERM")??;
-        ensure!(status.success(), "the reflector exited with {status}");
+            .context("the agent did not exit after SIGTERM")??;
+        ensure!(status.success(), "the agent exited with {status}");
         Ok(())
     }
 }

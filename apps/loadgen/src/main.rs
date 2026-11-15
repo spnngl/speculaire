@@ -1,4 +1,5 @@
-//! `speculaire-loadgen`: D33's load scenario against one reflector, through `speculaire-load` (D62, D104).
+//! `speculaire-loadgen`: D33's load scenario against one reflector, and D116's pulls from a peer, through
+//! `speculaire-load` (D62, D104).
 
 // D46: on musl, mimalloc in its secure mode replaces musl's allocator.
 #[cfg(target_env = "musl")]
@@ -9,14 +10,43 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::Parser;
-use speculaire_load::{Scenario, Settings, Targets};
+use clap::{Args, Parser, Subcommand};
+use speculaire_load::{Pulls, Scenario, Settings, Targets};
 
 /// Run D33's load against one reflector, print the report as Markdown, and exit 1 when a target is missed. Every
 /// option defaults to D33's value; Linux only.
 #[derive(Parser)]
-#[command(version)]
+#[command(
+    version,
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
+)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    load: Load,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Pull a random blob from a peer through a second agent's mirror, again and again, and print the times to the
+    /// first and the last byte as Markdown: the run `just profile peer` profiles (D116). Linux only.
+    Peer {
+        /// The blob's size, in MiB.
+        #[arg(long, default_value_t = 64)]
+        size_mib: usize,
+        /// How many times it is pulled.
+        #[arg(long, default_value_t = 20)]
+        pulls: usize,
+        /// Each agent's command, `agent --config <file>` appended: the `speculaire` binary, or a wrapper and it.
+        #[arg(last = true, required = true)]
+        agent: Vec<OsString>,
+    },
+}
+
+#[derive(Args)]
+struct Load {
     /// Simulated agents.
     #[arg(long)]
     agents: Option<usize>,
@@ -71,6 +101,21 @@ async fn main() -> anyhow::Result<ExitCode> {
         )
         .init();
     let cli = Cli::parse();
+    if let Some(Command::Peer {
+        size_mib,
+        pulls,
+        agent,
+    }) = cli.command
+    {
+        let pulls = Pulls {
+            size: size_mib << 20,
+            count: pulls,
+            agent,
+        };
+        print!("{}", speculaire_load::pull(&pulls).await?.markdown());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let cli = cli.load;
     let (d33, targets) = (Scenario::D33, Targets::D33);
     let settings = Settings {
         scenario: Scenario {

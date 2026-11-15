@@ -2108,15 +2108,19 @@ name = "speculaire-load"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
  "fastrand",
  "prost",
+ "rustls",
  "secrecy",
  "speculaire-fake-runtime",
  "speculaire-oci",
  "speculaire-pki",
  "speculaire-reflect",
+ "speculaire-runtime",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 
