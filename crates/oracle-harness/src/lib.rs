@@ -7,15 +7,20 @@
 //! [`Oracle::from_env`] returns `None`, and the test skips, as it does in `just check`; with the variable and no
 //! binary, it is an error, so a test cannot pass by skipping in the `oracle` job.
 
-use std::io::Write as _;
+use std::io::{Read, Write as _};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// The environment variable that holds the path of the oracle binary.
 pub const ENV: &str = "SPECULAIRE_ORACLE";
+
+/// How long one [`Oracle::ask`] may run: a hung oracle fails its test, before the job's timeout hides which. The
+/// slowest ask, CRI-O's 829 credential cases, takes about a minute.
+const TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Why the oracle gave no answer.
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +37,14 @@ pub enum Error {
         /// Why.
         #[source]
         source: std::io::Error,
+    },
+    /// The binary did not exit in time, and was killed.
+    #[error("{} did not answer within {after:?}", path.display())]
+    Timeout {
+        /// The binary.
+        path: PathBuf,
+        /// How long it had.
+        after: Duration,
     },
     /// The binary exited with a failure.
     #[error("{} exited with {status}: {stderr}", path.display())]
@@ -73,6 +86,7 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct Oracle {
     path: PathBuf,
+    timeout: Duration,
 }
 
 impl Oracle {
@@ -88,14 +102,17 @@ impl Oracle {
         if !path.is_file() {
             return Err(Error::Missing(path));
         }
-        Ok(Some(Self { path }))
+        Ok(Some(Self {
+            path,
+            timeout: TIMEOUT,
+        }))
     }
 
     /// Runs `subcommand` on `cases`, and returns one answer per case, in order.
     ///
     /// # Errors
     ///
-    /// When the binary cannot run or fails, or answers a case with something other than an `A`.
+    /// When the binary cannot run, fails or outlasts its timeout, or answers a case with something other than an `A`.
     pub fn ask<C: Serialize, A: DeserializeOwned>(
         &self,
         subcommand: &str,
@@ -120,29 +137,42 @@ impl Oracle {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(run)?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| run(std::io::Error::other("the child has no stdin")))?;
-        // The answers fill the pipe while the cases are still written: write from another thread.
-        let output = std::thread::scope(|scope| {
+        let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+        let (Some(mut stdin), Some(stdout), Some(stderr)) = pipes else {
+            return Err(run(std::io::Error::other("the child lacks a pipe")));
+        };
+        // The answers fill the pipe while the cases are still written: each pipe has its own thread, and this one
+        // watches the clock. A killed child closes its pipes, which ends the threads.
+        let (status, written, stdout, stderr) = std::thread::scope(|scope| {
             let writer = scope.spawn(move || stdin.write_all(&input));
-            let output = child.wait_with_output();
-            (output, writer.join())
+            let stdout = scope.spawn(|| read_all(stdout));
+            let stderr = scope.spawn(|| read_all(stderr));
+            let status = wait(&mut child, self.timeout);
+            let joined = |handle: std::thread::ScopedJoinHandle<'_, std::io::Result<Vec<u8>>>| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err(std::io::Error::other("a reader panicked")))
+            };
+            (status, writer.join(), joined(stdout), joined(stderr))
         });
-        let (output, written) = output;
-        let output = output.map_err(run)?;
-        if !output.status.success() {
+        let Some(status) = status.map_err(run)? else {
+            return Err(Error::Timeout {
+                path: self.path.clone(),
+                after: self.timeout,
+            });
+        };
+        if !status.success() {
             return Err(Error::Exit {
                 path: self.path.clone(),
-                status: output.status,
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                status,
+                stderr: String::from_utf8_lossy(&stderr.map_err(run)?).into_owned(),
             });
         }
         if let Ok(Err(source)) = written {
             return Err(run(source));
         }
-        let text = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.map_err(run)?;
+        let text = String::from_utf8_lossy(&stdout);
         let lines: Vec<&str> = text.lines().collect();
         if lines.len() != cases.len() {
             return Err(Error::Count {
@@ -155,6 +185,27 @@ impl Oracle {
             .enumerate()
             .map(|(index, line)| answer(index, line))
             .collect()
+    }
+}
+
+fn read_all(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes).map(|_| bytes)
+}
+
+/// The child's exit status, or `None` once it has run for `limit` and been killed.
+fn wait(child: &mut Child, limit: Duration) -> std::io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -178,12 +229,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_variable_names_the_oracle_with_the_default_timeout() {
+        // Only the `oracle` and `mutants` jobs set the variable (D79).
+        let oracle = Oracle::from_env().expect("the variable names a file, or is unset");
+        let expected = std::env::var_os(ENV).map(|path| (PathBuf::from(path), TIMEOUT));
+        assert_eq!(oracle.map(|o| (o.path, o.timeout)), expected);
+    }
+
+    #[test]
     fn a_missing_binary_is_an_error() {
         let oracle = Oracle {
             path: PathBuf::from("/nonexistent/speculaire-oracle"),
+            timeout: TIMEOUT,
         };
         let err = oracle.ask::<u8, u8>("version", &[1]).unwrap_err();
         assert!(matches!(err, Error::Run { .. }), "{err}");
+    }
+
+    #[test]
+    fn an_oracle_that_hangs_is_killed_at_its_timeout() {
+        // `sleep 600` stands for an oracle that never answers.
+        let oracle = Oracle {
+            path: PathBuf::from("sleep"),
+            timeout: Duration::from_millis(100),
+        };
+        let started = Instant::now();
+        let err = oracle.ask::<u8, u8>("600", &[1]).unwrap_err();
+        assert!(matches!(err, Error::Timeout { .. }), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_failing_oracle_is_an_error_with_its_stderr() {
+        let oracle = Oracle {
+            path: PathBuf::from("sh"),
+            timeout: TIMEOUT,
+        };
+        let err = oracle.ask::<u8, u8>("-c", &[1]).unwrap_err();
+        assert!(
+            matches!(&err, Error::Exit { stderr, .. } if !stderr.is_empty()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn each_case_gets_the_answer_on_its_line() {
+        // `cat -` answers each case with itself.
+        let oracle = Oracle {
+            path: PathBuf::from("cat"),
+            timeout: TIMEOUT,
+        };
+        assert_eq!(oracle.ask::<u8, u8>("-", &[1, 2]).unwrap(), vec![1, 2]);
     }
 
     #[test]
