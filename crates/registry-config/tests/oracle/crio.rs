@@ -801,10 +801,11 @@ fn our_auth(case: &AuthCase) -> Value {
             );
         }
     };
+    let (files, _) = auth::Files::load(&ctx);
     Value::Array(
         case.keys
             .iter()
-            .map(|key| match auth::credentials(&ctx, &helpers, key) {
+            .map(|key| match files.credentials(&helpers, key) {
                 Ok(Lookup::Found(found)) => json!({
                     "key": key,
                     "login": {
