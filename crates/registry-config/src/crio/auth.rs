@@ -13,6 +13,7 @@ use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 
+use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
@@ -402,12 +403,11 @@ fn key_lookup_order<'a>(key: &'a str, registry: &'a str, legacy: bool) -> Vec<&'
     keys
 }
 
-/// Go's `base64.StdEncoding.DecodeString`: padded, and blind to line breaks.
-pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
-    let data: Vec<u8> = text
-        .bytes()
-        .filter(|b| *b != b'\r' && *b != b'\n')
-        .collect();
+/// Go's `base64.StdEncoding.DecodeString`: padded, and blind to line breaks. What it decodes may be a password, so
+/// every copy is wiped when dropped.
+pub(crate) fn base64_decode(text: &str) -> Option<Zeroizing<Vec<u8>>> {
+    let mut data = Zeroizing::new(Vec::with_capacity(text.len()));
+    data.extend(text.bytes().filter(|b| *b != b'\r' && *b != b'\n'));
     if !data.len().is_multiple_of(4) {
         return None;
     }
@@ -419,7 +419,8 @@ pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
         b'/' => Some(63),
         _ => None,
     };
-    let mut out = Vec::with_capacity(data.len() / 4 * 3);
+    // Sized for every byte, so that it never moves and leaves a copy.
+    let mut out = Zeroizing::new(Vec::with_capacity(data.len() / 4 * 3));
     let quads = data.len() / 4;
     #[expect(
         clippy::chunks_exact_to_as_chunks,
@@ -447,15 +448,33 @@ fn decode(path: &AuthPath, key: &str, entry: &Entry) -> Result<Lookup, Error> {
         path: path.path.clone(),
         key: key.to_owned(),
     })?;
-    let decoded = String::from_utf8_lossy(&decoded);
-    let Some((user, password)) = decoded.split_once(':') else {
+    let Some((username, password)) = split_login(&decoded) else {
         return Ok(Lookup::NotFound);
     };
     Ok(Lookup::Found(Auth {
-        username: user.to_owned(),
-        password: password.trim_matches('\0').to_owned().into(),
+        username,
+        password,
         identity_token: entry.identity_token.clone(),
     }))
+}
+
+/// A decoded `auth`, `user:password`, cut at its first `:`, the password without NUL bytes at either end, as in Go;
+/// none without a `:`.
+pub(crate) fn split_login(decoded: &[u8]) -> Option<(String, SecretString)> {
+    let colon = decoded.iter().position(|b| *b == b':')?;
+    let mut password = &decoded[colon + 1..];
+    while let [0, rest @ ..] = password {
+        password = rest;
+    }
+    while let [rest @ .., 0] = password {
+        password = rest;
+    }
+    // A password that is not UTF-8 is replaced in a new string, which moves into the secret.
+    let password = SecretString::from(String::from_utf8_lossy(password).into_owned());
+    Some((
+        String::from_utf8_lossy(&decoded[..colon]).into_owned(),
+        password,
+    ))
 }
 
 /// `findCredentialsInFile` on a file already read.
@@ -616,7 +635,26 @@ mod tests {
     }
 
     #[test]
+    fn a_login_is_cut_at_its_first_colon_and_its_password_loses_nul_at_either_end() {
+        let login = |decoded: &[u8]| {
+            split_login(decoded)
+                .map(|(username, password)| (username, password.expose_secret().to_owned()))
+        };
+        assert_eq!(
+            login(b"u:\0p:\0w\0\0"),
+            Some(("u".to_owned(), "p:\0w".to_owned()))
+        );
+        assert_eq!(
+            login(b"\xff:\xff"),
+            Some(("\u{fffd}".to_owned(), "\u{fffd}".to_owned()))
+        );
+        assert_eq!(login(b":"), Some((String::new(), String::new())));
+        assert_eq!(login(b"user"), None);
+    }
+
+    #[test]
     fn base64_is_padded_and_blind_to_line_breaks() {
+        let base64_decode = |text| base64_decode(text).map(|decoded| decoded.to_vec());
         assert_eq!(base64_decode("dXNlcjpwYXNz"), Some(b"user:pass".to_vec()));
         assert_eq!(base64_decode("dXNlcjpwdw=="), Some(b"user:pw".to_vec()));
         assert_eq!(base64_decode("dXNlcjpwYQ=="), Some(b"user:pa".to_vec()));
