@@ -572,6 +572,28 @@ fn the_agent_tells_systemd_when_it_is_ready_and_when_it_stops() {
 }
 
 #[test]
+fn a_watchdog_timeout_of_zero_or_infinity_is_no_watchdog() {
+    for usec in ["0", "18446744073709551615"] {
+        let notifications = Notifications::bind();
+        let agent = Agent::start_with_env(
+            "",
+            &[
+                ("NOTIFY_SOCKET", notifications.path()),
+                ("WATCHDOG_USEC", usec),
+            ],
+        );
+        assert_eq!(notifications.next(), "READY=1\n", "{usec}");
+        let (status, lines) = agent.stop();
+        assert!(status.success(), "{usec}: {status}");
+        assert_eq!(notifications.next(), "STOPPING=1\n", "{usec}");
+        assert!(
+            !lines.iter().any(|line| line.contains("panicked")),
+            "{usec}: {lines:#?}"
+        );
+    }
+}
+
+#[test]
 fn the_watchdog_is_pinged_every_half_of_its_timeout() {
     let notifications = Notifications::bind();
     let _agent = Agent::start_with_env(
