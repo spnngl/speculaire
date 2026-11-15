@@ -295,8 +295,8 @@ pub(crate) fn clean_path(path: &str) -> String {
 /// The longest duration Go's `time.ParseDuration` sums before it overflows: 2^63 ns.
 const LIMIT: u64 = 1 << 63;
 
-/// Go's `time.ParseDuration`, refusing what a [`Duration`] cannot hold: a negative duration.
-pub(crate) fn parse_duration(input: &str) -> Result<Duration, Refused> {
+/// Go's `time.ParseDuration`; `None` for a negative duration, which a [`Duration`] cannot hold.
+pub(crate) fn parse_duration(input: &str) -> Result<Option<Duration>, Refused> {
     let invalid = || refuse(format!("time: invalid duration {input:?}"));
     let mut s = input;
     let mut negative = false;
@@ -305,7 +305,7 @@ pub(crate) fn parse_duration(input: &str) -> Result<Duration, Refused> {
         s = rest;
     }
     if s == "0" {
-        return Ok(Duration::ZERO);
+        return Ok(Some(Duration::ZERO));
     }
     if s.is_empty() {
         return Err(invalid());
@@ -378,15 +378,15 @@ pub(crate) fn parse_duration(input: &str) -> Result<Duration, Refused> {
         }
     }
     if total == 0 {
-        return Ok(Duration::ZERO);
+        return Ok(Some(Duration::ZERO));
     }
     if negative {
-        return Err(refuse(format!("negative duration {input:?}")));
+        return Ok(None);
     }
     if total > i64::MAX.unsigned_abs() {
         return Err(invalid());
     }
-    Ok(Duration::from_nanos(total))
+    Ok(Some(Duration::from_nanos(total)))
 }
 
 /// Go's `leadingInt`: the digits at the start, and the rest; `None` on overflow.
@@ -789,10 +789,32 @@ mod tests {
             // A fraction longer than 63 bits drops its last digits.
             ("0.12345678901234567890123456789s", 0.123_456_789),
         ] {
-            let parsed = parse_duration(text).expect("a duration").as_secs_f64();
+            let parsed = parse_duration(text)
+                .expect("a duration")
+                .expect("not negative")
+                .as_secs_f64();
             assert!((parsed - seconds).abs() < 1e-9, "{text}: {parsed}");
         }
-        for bad in ["", "1", "-1s", "1x", "s", "99999999999999999999s"] {
+        // Go's limit is one nanosecond further below zero than above it.
+        for negative in ["-1s", "-9223372036854775808ns"] {
+            assert_eq!(
+                parse_duration(negative).expect("a duration"),
+                None,
+                "{negative}"
+            );
+        }
+        assert_eq!(
+            parse_duration("-0s").expect("a duration"),
+            Some(Duration::ZERO)
+        );
+        for bad in [
+            "",
+            "1",
+            "1x",
+            "s",
+            "99999999999999999999s",
+            "9223372036854775808ns",
+        ] {
             assert!(parse_duration(bad).is_err(), "{bad:?} is accepted");
         }
     }

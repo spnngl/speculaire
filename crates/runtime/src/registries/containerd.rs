@@ -3,7 +3,8 @@
 //!
 //! The endpoints of a registry are those of its host directory, the registry itself last (`ConfigureHosts`); the
 //! credentials of an endpoint are the `configs.<host>.auth` of `config.toml`, by the endpoint's host (containerd
-//! v2.4.2 `internal/cri/server/images/image_pull.go:108`). The deprecated `mirrors` table is not followed.
+//! v2.4.2 `internal/cri/server/images/image_pull.go:108`). An endpoint whose `dial_timeout` is negative is left out, as
+//! containerd's dial to it fails at once (D115). The deprecated `mirrors` table is not followed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,9 @@ use std::path::{Path, PathBuf};
 use secrecy::SecretString;
 use speculaire_registry_config::Headers;
 use speculaire_registry_config::containerd::config::{self, Auth, Hosts, Login, Registry};
-use speculaire_registry_config::containerd::hosts::{Capabilities, RegistryHost, Tree};
+use speculaire_registry_config::containerd::hosts::{
+    Capabilities, DialTimeout, RegistryHost, Tree,
+};
 
 use super::live::Live;
 use super::{
@@ -165,7 +168,10 @@ impl Registries for ContainerdRegistries {
         Ok(tree
             .resolve(host, None)
             .into_iter()
-            .filter(|endpoint| endpoint.capabilities.contains(wanted))
+            .filter(|endpoint| {
+                endpoint.capabilities.contains(wanted)
+                    && endpoint.dial_timeout != Some(DialTimeout::Expired)
+            })
             .map(|endpoint| source(&snapshot, host, repository, &endpoint))
             .collect())
     }

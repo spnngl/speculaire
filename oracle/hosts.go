@@ -139,7 +139,8 @@ func parsed(hosts []hostConfig, err error) *Outcome[Parsed] {
 			p.Client = [][2]string{}
 		}
 		if h.dialTimeout != nil {
-			ns := h.dialTimeout.Nanoseconds()
+			// Every negative timeout fails a dial at once, so the port keeps only the sign (D115).
+			ns := max(h.dialTimeout.Nanoseconds(), -1)
 			p.DialTimeout = &ns
 		}
 		out.Ok = append(out.Ok, p)

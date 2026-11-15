@@ -64,7 +64,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Pull secrets travel with each CRI request (`image_pull.go:105-114`) and never reach a file the agent could read.
 - **Revisit when:** users need pull-secret-only images verified. Then add kubelet credential-provider support.
 
-## D78: One `registry-config` crate holds both runtimes' parsers, and reads what containerd reads (amends D17)
+## D78: One `registry-config` crate holds both runtimes' parsers, and reads what containerd reads (amends D17; amended by D115)
 
 - **Decision:**
   - The *registry config* parsers are one crate, `crates/registry-config` (`speculaire-registry-config`), a module per runtime: `containerd::config` for `config.toml`, `containerd::hosts` for `hosts.toml` and the host directories, and `crio` for CRI-O's files (D80).
@@ -354,3 +354,12 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - **Measured (M4 step 00):** the e2e upstreams log `speculaire/0.1.0` for the CRI-O relay's requests; `crates/registry/tests/client.rs` checks the header on each request of a Bearer pull redirected to another host.
 - **Cost:** a registry learns the agent's version; the runtime already tells it its own.
 - **Revisit when:** an operator needs to hide the version, or a registry treats the header specially.
+
+## D115: A negative `dial_timeout` is a host containerd cannot dial (amends D78)
+
+- **Decision:** `parse_hosts_file` accepts a negative `dial_timeout`, as Go's `time.ParseDuration` does (containerd v2.4.2 `core/remotes/docker/config/hosts.go:539-545`), and reads it as `DialTimeout::Expired`. The containerd `Registries` leaves such a host out of a registry's sources.
+- **Because:**
+  - Go's dialer sets a deadline in the past for a negative timeout (`net/dial.go:255` at go1.27.4), so every dial to that host fails at once and containerd tries the next host (`core/remotes/docker/resolver.go:343`). Leaving the host out does the same without the failed dial.
+  - Refusing the value refused the whole file, so the agent kept the previous registry config (D91) while containerd pulled through the next host.
+- **Limit:** a timeout of zero or more is parsed and not applied: the upstream client opens every connection within its own 15 s (`crates/registry/src/connect.rs`).
+- **Revisit when:** Go reads a negative `net.Dialer.Timeout` otherwise.

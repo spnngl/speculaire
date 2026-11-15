@@ -149,6 +149,27 @@ fn a_host_that_cannot_do_what_is_asked_is_skipped() {
 }
 
 #[test]
+fn a_host_with_a_negative_dial_timeout_is_skipped_as_containerd_cannot_dial_it() {
+    let node = Node::new("");
+    node.hosts(
+        "docker.io",
+        "[host.\"https://never.corp\"]\ndial_timeout = \"-1s\"\n\
+         [host.\"https://now.corp\"]\ndial_timeout = \"0s\"\n",
+    );
+    let sources = node
+        .registries()
+        .sources("docker.io/library/busybox", tag("1"))
+        .unwrap();
+    assert_eq!(
+        endpoints(&sources),
+        [
+            vec![("now.corp".to_owned(), true)],
+            vec![("registry-1.docker.io".to_owned(), true)],
+        ]
+    );
+}
+
+#[test]
 fn an_http_host_with_tls_settings_is_tried_on_https_then_on_http() {
     let node = Node::new("");
     let ca = node.dir.path().join("certs.d/reg.test:5000/ca.crt");
