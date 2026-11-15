@@ -486,6 +486,25 @@ fn platforms_agree_with_containerd() {
             candidates,
         },
     ));
+    // Go lowers each character alone: `İ` is `i` and `Σ` is `σ`, at the end of a word too.
+    for (os, arch) in [
+        ("L\u{130}NUX", "AMD64"),
+        ("linux", "\u{130}386"),
+        ("LINUX\u{3a3}", "ARM64"),
+    ] {
+        cases.push((
+            format!("lower {os}/{arch}"),
+            PlatformCase {
+                host: false,
+                specifier: None,
+                platform: Some(Plat::new(os, arch, "")),
+                candidates: vec![
+                    Plat::new("linux", "amd64", ""),
+                    Plat::new("linux", "386", ""),
+                ],
+            },
+        ));
+    }
     let asked: Vec<&PlatformCase> = cases.iter().map(|(_, case)| case).collect();
     let theirs: Vec<Value> = oracle.ask("platform", &asked).expect("the oracle answers");
     let labelled: Vec<(String, Value, Value)> = cases
