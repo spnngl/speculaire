@@ -174,7 +174,7 @@ impl Reflector {
 struct Api {
     index: Arc<Index>,
     settings: Arc<Settings>,
-    /// What `Members` answers, encoded once.
+    /// What `Members` answers, built once from the settings.
     members: proto::MembersResponse,
     stop: CancellationToken,
     #[expect(
