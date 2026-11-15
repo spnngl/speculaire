@@ -10,6 +10,7 @@ Before any task, read the decisions' index, `docs/decisions/README.md`, then the
 
 - Use the words in ARCHITECTURE.md § Vocabulary with exactly that meaning, in code, docs, metric names and commits.
 - Write Rust per the `rs-coding` skill. Write agent-facing documents per the `writing-for-agents` skill: small, concise, one source of truth. Each `AGENTS.md` has a `CLAUDE.md` symlink beside it.
+- On a hot path, borrow, reuse buffers and keep fixed sizes on the stack (D107).
 - Cite upstream behaviour as file:line in a clone at a named version (REFERENCES.md).
 - Every parser of outside data gets a fuzz target. Outside data includes runtime config (containerd's, CRI-O's and `registries.conf`), NRI frames, registry responses, Sigstore bundles and peer protobuf.
 - A change that moves a trust boundary updates `docs/security.md` in the same change.

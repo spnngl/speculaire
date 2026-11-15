@@ -17,7 +17,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Details: `~/src/github.com/spnngl/agent-skills/skills/kernel/io-uring/`.
 - **Revisit when:** a benchmark shows the agent CPU-bound at serving, at more than 1 core per 10 Gb/s. Then prototype a plaintext-peer `sendfile` path first. Try io_uring only after that, behind a cargo feature with owned buffers, and after reading the io-uring skill.
 
-## D13: Stack and binaries (amended by D34, D46, D57, D105)
+## D13: Stack and binaries (amended by D34, D46, D57, D105, D107)
 
 - **Decision:**
   - **Stack:** Rust edition 2024, tokio (multi-thread), axum/hyper, tonic/prost, `containerd-client` 0.9, `oci-spec`, rustls with the `aws-lc-rs` provider (+ `rcgen` for D14's local certificates), `sd-notify`, `toml`.
@@ -498,3 +498,17 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
     An update rolls one worker at a time, so its p50 is the second worker's pull from the first: speculaire's takes up to 0.8 s more than Spegel's. Per set, speculaire used 0.03 to 0.30 CPU seconds against Spegel's 0.08 to 0.20, and peaked at 233 MiB on amd64 and 215 on arm64 against 31 and 33. On Docker Desktop arm64, `just bench` writes the same tables in 9 minutes.
 - **Cost:** 25 runner-minutes a night, and the kind tier's numbers carry no release bar.
 - **Revisit when:** the gate and the policy exist (then D35's third run applies in full), or a run passes 45 minutes.
+
+
+## D107: Hot paths borrow, reuse and keep fixed sizes on the stack; each change shows its saving (amends D13)
+
+- **Decision:** code on a per-request, per-blob, per-frame or per-agent path follows these rules, in this order:
+  - **Borrow:** parse into types that borrow the input (`&str`, `&[u8]`) and convert to owned data once, where it must outlive the input. Share a buffer that outlives one owner as `bytes::Bytes`, sliced, never copied.
+  - **Reuse:** a loop that fills a buffer allocates it once and `clear()`s it each turn. A reader keeps one read buffer for its connection.
+  - **Stack:** a value of fixed size lives on the stack: a digest is `[u8; 32]`, a frame header is an array. A small collection with a known bound uses an array or `arrayvec`; `smallvec` only where a measure shows most values fit inline.
+  - **Fixed layouts:** a binary header of fixed layout (the D105 frame length, NRI's ttrpc header) is read and written through `zerocopy` types (`FromBytes`, `IntoBytes`, `big_endian::U32`), not by hand-shifted bytes. `unsafe_code` stays `deny`: `zerocopy`'s derives are the only way to such layouts.
+  - Cold paths (startup, config reload, errors) stay plain: owned `String`s and `Vec`s where they read better.
+- **Because:** the reflector's memory was its connections' buffers (D104, D105: 49 KB per connection under gRPC, 9 KB with our framing), and pulls through speculaire trail Spegel's by up to 0.8 s (D106). Allocations and copies on hot paths cost both, and the allocator's secure mode (D46) makes each allocation dearer.
+- **Proof:** a change made for speed or memory names its measure in the commit body: `just bench-micro`, a DHAT profile from `just valgrind`, `just load`, or `just bench`. A change that only removes an allocation or a copy, keeping the code as clear, needs no measure.
+- **Cost:** lifetimes in parsed types, and `zerocopy` (a Google crate with no runtime dependencies) to vet (D71).
+- **Revisit when:** a lifetime spreads through more than one crate's public API, which then takes owned or `Bytes` data instead.
