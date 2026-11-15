@@ -110,7 +110,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | Path | Role |
 |---|---|
 | `apps/speculaire` | The binary: `version`, `check-config`, `configure`, `unconfigure` and `agent` today; `verify` (planned) (D62) |
-| `apps/loadgen` | `speculaire-loadgen`, test only and never packaged: D33's load against one reflector, `just load` (D104) |
+| `apps/loadgen` | `speculaire-loadgen`, test only and never packaged: D33's load against one reflector, `just load` (D104), and a pull from a peer, `just profile peer` (D116) |
 | `crates/agent` | The agent: config (D60), the node its config names (D87), preflight at startup (D86), the mirror that `Node::fallback` calls for (D90), logs (D37), metrics (D34) and status listener (D42, D45) |
 | `crates/registry-config` | The *registry config* parsers, a module per runtime: containerd's `config.toml` and `hosts.toml` (D17, D78); CRI-O's `registries.conf`, `certs.d` and credential files (D66, D80) |
 | `crates/oracle-harness` | Test helper: runs `speculaire-oracle` and reads its answers; the differential tests of the parsers use it (D70, D79) |

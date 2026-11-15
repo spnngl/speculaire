@@ -239,16 +239,25 @@ bench-micro *args:
     cargo bench --locked -p speculaire-reflect -p speculaire-mirror -p speculaire-runtime -p speculaire-oci --bench micro \
         --features speculaire-reflect/bench,speculaire-mirror/bench -- {{ args }}
 
+# `just profile` and `just valgrind` run in the glibc profile image (D116), privileged for perf, on the release
+# build with symbols, in a volume of their own.
+in_profile := container + ' run --rm -i --privileged -v "$(pwd):/src" -v speculaire-registry:/usr/local/cargo/registry -v speculaire-profile-' + arch() + ':/target -e CARGO_TARGET_DIR=/target -e CARGO_PROFILE_RELEASE_DEBUG=line-tables-only -e CARGO_PROFILE_RELEASE_STRIP=none -e RUST_LOG --ulimit nofile=1048576:1048576 --sysctl "net.ipv4.ip_local_port_range=1024 65535" localhost/speculaire-profile'
+
+[private]
+profile-image:
+    {{ container }} build --quiet --target profile -t localhost/speculaire-profile -f build/Containerfile build >/dev/null
+
 # The reflector under a short load (D104), twice: Valgrind's memcheck, failing on a definite leak or a memory error, then
-# DHAT, whose profiles go to target/valgrind/dhat. The glibc build, with symbols: Valgrind does not follow the static
-# musl binary's allocator (D46). On Linux with Valgrind installed; own target dir; outside `just check`.
-valgrind:
+# DHAT; then DHAT on the agents of a short peer pull (D116). The profiles go to target/valgrind/dhat, named after the
+# run, the node and the pid. Needs Docker; outside `just check`.
+valgrind: profile-image
     #!/usr/bin/env bash
     set -euo pipefail
-    export CARGO_TARGET_DIR=target/valgrind CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_STRIP=none
+    mkdir -p target/valgrind
+    {{ in_profile }} bash -euo pipefail -s <<'EOF'
     cargo build --release --locked -p speculaire -p speculaire-loadgen
-    bin=target/valgrind/release
-    mkdir -p target/valgrind/dhat
+    bin=/target/release dhat=/src/target/valgrind/dhat
+    rm -rf "$dhat" && mkdir -p "$dhat"
     # Small enough for Valgrind's pace; the measures mean nothing under it, so no target fails the run.
     load=("$bin/speculaire-loadgen" --agents 100 --blobs 500 --pool 10000 --lookups 100 --deltas 50 --join 10s
         --warmup 5s --steady 20s --measure-only --)
@@ -256,7 +265,44 @@ valgrind:
     # that the optimiser reads early, and leaks are what this run is for.
     "${load[@]}" valgrind --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite \
         --undef-value-errors=no --error-exitcode=1 "$bin/speculaire"
-    "${load[@]}" valgrind --tool=dhat --dhat-out-file=target/valgrind/dhat/dhat.%p.json "$bin/speculaire"
+    "${load[@]}" valgrind --tool=dhat --dhat-out-file="$dhat/load.%q{SPECULAIRE_LOAD_NODE}.%p.json" "$bin/speculaire"
+    "$bin/speculaire-loadgen" peer --size-mib 16 --pulls 5 -- \
+        valgrind --tool=dhat --dhat-out-file="$dhat/peer.%q{SPECULAIRE_LOAD_NODE}.%p.json" "$bin/speculaire"
+    # The container runs as root: the profiles go to the checkout's owner.
+    chown -R "$(stat -c %u:%g /src)" "$dhat"
+    EOF
+
+# A CPU flamegraph of each agent of a run (D116): `load`, the reflector under D33's load for 30 s, or `peer`, a 64 MiB
+# blob pulled 30 times from a peer through a second agent's mirror. perf samples each process by its frame pointers;
+# target/profile/<target>/ gets the run's report, and per process a folded stack file and an SVG, named after its node
+# and pid. Needs Docker; outside `just check`.
+# Profile the peer pull: just profile peer
+profile target: profile-image
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case '{{ target }}' in
+        load) run=(--steady 30s --measure-only --) ;;
+        peer) run=(peer --size-mib 64 --pulls 30 --) ;;
+        *) echo "profile: no target '{{ target }}': load or peer" >&2; exit 1 ;;
+    esac
+    mkdir -p target/profile
+    {{ in_profile }} bash -euo pipefail -s '{{ target }}' "${run[@]}" <<'EOF'
+    cargo build --release --locked -p speculaire -p speculaire-loadgen
+    bin=/target/release out="/src/target/profile/$1"
+    shift
+    rm -rf "$out" && mkdir -p "$out"
+    # perf follows the agent's pid through `exec`, so SIGTERM reaches the agent itself, which then exits with success as
+    # the run requires, and perf ends with it.
+    "$bin/speculaire-loadgen" "$@" sh -c 'perf record --quiet -F 999 --call-graph fp \
+        -o "$0/$SPECULAIRE_LOAD_NODE.$$.data" -p $$ 2>/dev/null & exec "$@"' "$out" "$bin/speculaire" | tee "$out/report.md"
+    while grep -qx perf /proc/[0-9]*/comm 2>/dev/null; do sleep 0.2; done
+    for data in "$out"/*.data; do
+        name="${data%.data}"
+        perf script -i "$data" --no-inline 2>/dev/null | rustfilt | inferno-collapse-perf >"$name.folded"
+        inferno-flamegraph --title "${name##*/}" <"$name.folded" >"$name.svg"
+    done
+    chown -R "$(stat -c %u:%g /src)" "$out"
+    EOF
 
 # Ported from dedens `justfile` at v0.1.0-131-gfd00747 (D16 there; D77 here).
 # Install RAPx at `rapx_rev` and what it builds on: the nightly's rustc-dev, rust-src and llvm-tools, and Z3 (on macOS

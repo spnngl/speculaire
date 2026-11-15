@@ -1,8 +1,9 @@
 # The build image (D57): every recipe on macOS through `just dev`, and the static musl binaries through `just musl`
 # (D13), natively on the architecture of the machine running it.
 #
-#   build  the toolchain, lld and cargo-auditable: just musl
-#   dev    plus just and the tools of `just check` and the dependency checks: just dev <recipe>
+#   build    the toolchain, lld and cargo-auditable: just musl
+#   dev      plus just and the tools of `just check` and the dependency checks: just dev <recipe>
+#   profile  glibc, perf, Valgrind and inferno: just profile <target>, just valgrind (D116)
 
 # The tag is rust-toolchain.toml's channel; Renovate keeps the digest.
 FROM docker.io/library/rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build
@@ -58,3 +59,26 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         cargo-shear@"$CARGO_SHEAR_VERSION" cargo-hack@"$CARGO_HACK_VERSION" cargo-deny@"$CARGO_DENY_VERSION" \
         cargo-vet@"$CARGO_VET_VERSION" cargo-nextest@"$CARGO_NEXTEST_VERSION" \
         cargo-llvm-cov@"$CARGO_LLVM_COV_VERSION"
+
+
+# perf and Valgrind follow glibc's allocator and the frame pointers of a glibc build, where Valgrind does not follow the
+# static musl binary's (D46). The tag is rust-toolchain.toml's channel; Renovate keeps the digest.
+FROM docker.io/library/rust:1.99.1-slim-trixie@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS profile
+
+# linux-perf: the sampler of `just profile`; procps: `kill`, with which the load stops agents; protobuf-compiler and
+# libprotobuf-dev: protoc and its well-known types (D34). `unshare` and `mount`, for the peer pull's holder, are in the
+# base image.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libprotobuf-dev linux-perf procps protobuf-compiler valgrind \
+    && rm -rf /var/lib/apt/lists/*
+# rust-toolchain.toml's components, which rustup would otherwise fetch at the first build.
+RUN rustup component add clippy llvm-tools rustfmt
+
+# inferno draws the flamegraphs; rustfilt demangles Rust's v0 symbols, which this perf prints mangled.
+# renovate: datasource=crate depName=inferno
+ARG INFERNO_VERSION=0.12.8
+# renovate: datasource=crate depName=rustfilt
+ARG RUSTFILT_VERSION=0.2.2
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install --locked inferno@"$INFERNO_VERSION" rustfilt@"$RUSTFILT_VERSION"
+WORKDIR /src

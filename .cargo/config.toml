@@ -4,6 +4,11 @@
 # as it does `rustflags`. x86_64-unknown-linux-gnu has no entry: rustc links with its own lld there by default (1.90),
 # as long as no `linker` is set for it. The macOS targets have none either.
 
+# Frame pointers in every Linux build, the release binaries too, so that perf and eBPF profilers walk their stacks
+# (D116). Cargo joins these flags to those of the target's own entry below.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "force-frame-pointers=yes"]
+
 # rustc's default there is GNU ld through `cc`.
 [target.aarch64-unknown-linux-gnu]
 linker = ".cargo/lld-cc"

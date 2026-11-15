@@ -17,7 +17,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Details: `~/src/github.com/spnngl/agent-skills/skills/kernel/io-uring/`.
 - **Revisit when:** a benchmark shows the agent CPU-bound at serving, at more than 1 core per 10 Gb/s. Then prototype a plaintext-peer `sendfile` path first. Try io_uring only after that, behind a cargo feature with owned buffers, and after reading the io-uring skill.
 
-## D13: Stack and binaries (amended by D34, D46, D57, D105, D107)
+## D13: Stack and binaries (amended by D34, D46, D57, D105, D107, D116)
 
 - **Decision:**
   - **Stack:** Rust edition 2024, tokio (multi-thread), axum/hyper, tonic/prost, `containerd-client` 0.9, `oci-spec`, rustls with the `aws-lc-rs` provider (+ `rcgen` for D14's local certificates), `sd-notify`, `toml`.
@@ -34,7 +34,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Native Alpine builds avoid cross-toolchain drift for C dependencies (rs-coding `musl.md`). dedens rejected QEMU, cross and zigbuild for the same reason (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50, D61, D109)
+## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50, D61, D109, D116)
 
 - **Decision:**
   - **Catalog:** `docs/metrics.md` lists every metric with its type, labels and meaning. A test renders `/metrics` after the e2e suite and fails if a metric is missing from the catalog, or listed there but never emitted.
@@ -204,7 +204,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:** pod authors choose registry hosts, so "a host from the registry config" was not bounded: a pod naming a new host would add series on every node. The `hosts.toml` tree is written by the admin.
 - **Revisit when:** admins need per-host numbers for hosts without a `hosts.toml` directory; the audit log (D37) already names them.
 
-## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58, D62)
+## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58, D62, D116)
 
 - **Decision:**
   - `rust-toolchain.toml` pins stable `1.99.1` with clippy and rustfmt; the justfile pins one nightly, for rustfmt (`rustfmt.toml` uses unstable options) and `-Z` flags. `rust-version` is `1.95`, which `just msrv` checks.
@@ -311,6 +311,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Renovate cannot read containerd's requirement; Go's version selection can, and the test turns any drift red.
 - **Measured (M1 step 07, arm64):** `just oracle` prints `{"containerd":"v2.4.2","nri":"v0.12.3"}`; with `go get github.com/containerd/nri@v0.12.5`, `go test` fails with `github.com/containerd/containerd/v2@v2.4.2 requires NRI "v0.12.3", go.mod selects "v0.12.5"`.
 - **Revisit when:** containerd 2.5 is supported (D40): the oracle moves to the newest minor by hand.
+
 ## D79: `just oracle` runs the Rust differential tests, and the oracle reaches containerd's unexported code (amends D29, D70)
 
 - **Decision:**
@@ -571,3 +572,32 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Measured:** the first run (amd64, arm64) gave speculaire an `anon` peak of 115.5 and 121.5 MiB against Spegel's 21.3 and 23.3, and a `file` peak of 25.6 and 0.8 MiB. Page cache explains little of D106's 215 to 233 MiB: kernel memory, such as socket buffers, or peaks shorter than a second hold the rest.
 - **Cost:** a one-second sample misses a peak shorter than a second, and a sampler per node runs through each set.
 - **Revisit when:** the agent pins page cache the kernel cannot reclaim, such as by locking or mapping blobs.
+
+## D116: Metrics and spans say where a pull spends its time; profiles run in a glibc image on frame pointers (amends D13, D34, D37, D57, D104)
+
+- **Decision:**
+  - **Metrics** (catalog in `docs/metrics.md`, D34):
+    - `speculaire_mirror_first_byte_seconds` gets a `source` label: `local`, `peer` or `upstream` for where the bytes came from, `fall_through` for the `404`.
+    - `speculaire_mirror_body_seconds{kind,source}`: from a body's first byte to its last.
+    - `speculaire_peer_fetch_seconds{result}`: one observation per attempt at one holder, with the results of `speculaire_peer_fetches_total`.
+    - `speculaire_peer_upload_seconds`: one observation per blob body sent to a peer, from its request to its last byte.
+    - `speculaire_reflector_resync_seconds`: per connection to a reflector, from its opening to the end of the agent's opening `Snapshot`: what a restarted reflector waits for each agent (D103, D104).
+    - `speculaire_runtime_alive_tasks` and `speculaire_runtime_global_queue_depth`: gauges read from tokio's stable `RuntimeMetrics` at each scrape. They come from inside the process, where node-exporter cannot see; memory, CPU and file descriptors stay with node-exporter (D34).
+    - Each handle is registered once, at start or at the first use of its label values, and kept: a hot path never looks a metric up by name (D107).
+  - **Spans**, at `DEBUG` under `log.filter` (D37): one per mirror request (`kind`, `digest`, `source`, `result`), one per peer fetch attempt (the peer's address, the holder's rank), one per reflector connection (the node identity). A span records no header, token or credential.
+  - **Span timings:** the setting `timings` of `[log]`, default `false`, reloaded live, logs each span's busy and idle time when it closes (`FmtSpan::CLOSE`). The JSON sink logs them itself. `tracing-journald` has no span events, so under journald a fmt layer logs these closes alone on stderr, which systemd also sends to the journal.
+  - **Profile image:** `build/Containerfile`'s `profile` stage, from the digest-pinned `rust:<channel>-slim-trixie` (glibc), holds perf, Valgrind, inferno and rustfilt. `just profile` and `just valgrind` build the release binaries with line tables in it and run them in a privileged container.
+  - **`just profile <target>`:** perf samples each agent of the run at 999 Hz through its frame pointers, attached by pid so that the agent itself gets the run's `SIGTERM`. Each agent gets a folded stack file and an SVG flamegraph in `target/profile/<target>/`, next to the run's report. Targets: `load`, D33's load for 30 s; `peer`, 30 pulls of a 64 MiB blob.
+  - **Peer pull:** `speculaire-loadgen peer` (`crates/load`) starts a reflector, a holder and a puller as `speculaire agent`s on fake containerds. Each node's containerd config puts `root` in its temporary directory, where the holder's blob is (D110); a test pulls twice. The puller's fake answers `Content/Info` with `NotFound`, so its mirror fetches from the holder. A client with the mirror's client certificate pulls the blob without `Range`, as containerd does, and the report gives the time to the first and the last byte.
+  - **`just valgrind`** runs in the profile image as well, and adds DHAT on the agents of a peer pull (5 pulls of 16 MiB). The `deep` job runs it on the runner's Docker.
+  - **Frame pointers:** every Linux build, release and musl binaries included, has `-C force-frame-pointers=yes` (`.cargo/config.toml`), so that perf and eBPF profilers walk a node's stacks without DWARF.
+- **Because:**
+  - Pulls through speculaire trail Spegel's by up to 0.8 s (D106), and the metrics could not say where: one first-byte histogram, without the source, the body or the peers' side.
+  - A label per digest or peer would break D34's bound; a debug span carries them for one node, for the time of a diagnosis.
+  - Tokio's queue and task counts exist only inside the process.
+  - perf ships in Debian, attaches to a running pid, runs in Docker Desktop's VM, and its folded stacks need no browser; samply's profiles need the Firefox Profiler. Valgrind needs glibc's allocator (D46), and one image gives the laptop and the `deep` job the same Valgrind and protoc.
+  - A frame-pointer walk costs perf no DWARF unwinding and works on the shipped binaries.
+  - **Measured** (Docker Desktop, arm64, 10 CPUs, loopback): the peer pull's p50 to first byte / last byte is 3.2 / 4.1 ms for 1 MiB, 17.4 / 27.7 ms for 10 MiB and 100.8 / 188.1 ms for 64 MiB. The first byte waits for the whole blob to be fetched, hashed and staged (D102): about 1.5 ms per MiB, more than half of the pull. Under perf, a 64 MiB pull costs the puller 182 ms of CPU and the holder 64 ms. In the puller: SHA-256 18%, on the task that reads from the peer; TLS decryption 9% and encryption 9%; socket reads 8% and writes 6%; the blocking pool's writes to the staging file 12% and reads back from it 8%; `memcpy` 8%. In the holder: TLS encryption 25%, file reads 22%, socket writes 16%. On loopback the blob path costs milliseconds per 10 MB, so most of D106's gap at 10 MB, 0.17 to 0.24 s, lies outside it; the metrics above, on kind, are to find where.
+  - **Measured**, frame pointers, on the same host shared with other builds, without then with the flag, alternated: the arm64 musl binary grows 0.8% (10.57 to 10.66 MB). `just bench-micro`, 4 rounds each: the index lookup's median 1.7 to 4.2 µs without and 1.3 to 2.8 µs with, SHA-256 of 16 MiB at best 5.14 ms both. `just load --agents 2000 --measure-only`, 2 rounds each: peak RSS 181 and 181 MiB without, 182 and 185 MiB with; resync 16.8 and 9.0 s without, 12.0 and 10.8 s with; lookup p99 345 µs and 2.8 ms without, 205 µs and 2.8 ms with (the second round of each ran beside other builds). No difference stands out of the noise.
+- **Cost:** profiles need a privileged container. The `deep` job's Valgrind build starts cold each run. Frame pointers cost one register and a push per call, below what the measures above can show; a release still checks its pulls against Spegel with `just bench` (D35).
+- **Revisit when:** a diagnosis needs off-CPU time (perf's `--off-cpu`, or eBPF); or frame pointers cost more than 2% in `just load` or `just bench`.
