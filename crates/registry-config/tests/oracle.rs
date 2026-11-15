@@ -772,6 +772,11 @@ ca = "/etc/path/default"
         ("dial_timeout", "\"9223372037s\""),
         ("dial_timeout", "\"2562047h47m16.854775807s\""),
         ("dial_timeout", "\"2562047h47m16.854775808s\""),
+        (
+            "dial_timeout",
+            "\"9223372036854775808ns9223372036854775808ns\"",
+        ),
+        ("dial_timeout", "\"9223372036854775808ns1ns\""),
         ("dial_timeout", "\"0.000000001s\""),
         ("dial_timeout", "\"1.0000000009s\""),
         ("dial_timeout", "3"),
