@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use ::aws_lc_rs::digest;
 use hyper::Uri;
 use hyper_util::client::legacy::connect::{Connected, Connection};
 use hyper_util::rt::TokioIo;
@@ -25,12 +26,15 @@ use tokio_rustls::client::TlsStream;
 /// How long a connection may take to open, TLS included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Bytes that differ when two `Tls` would build different configs: the key of a client per trust.
-pub(crate) fn fingerprint(tls: &Tls) -> Vec<u8> {
-    let mut out = vec![u8::from(tls.skip_verify)];
+/// The key of a client per trust: a SHA-256 that differs when two `Tls` would build different configs.
+///
+/// A digest rather than the bytes themselves: the client key is not copied into the key kept for the process's life.
+pub(crate) fn fingerprint(tls: &Tls) -> [u8; 32] {
+    let mut context = digest::Context::new(&digest::SHA256);
+    context.update(&[u8::from(tls.skip_verify)]);
     let mut part = |bytes: &[u8]| {
-        out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-        out.extend_from_slice(bytes);
+        context.update(&(bytes.len() as u64).to_le_bytes());
+        context.update(bytes);
     };
     for root in &tls.roots {
         part(root);
@@ -40,7 +44,11 @@ pub(crate) fn fingerprint(tls: &Tls) -> Vec<u8> {
         part(&client.certificate);
         part(client.key.expose_secret().as_bytes());
     }
-    out
+    context
+        .finish()
+        .as_ref()
+        .try_into()
+        .expect("a SHA-256 is 32 bytes")
 }
 
 /// The rustls config of a trust. TLS 1.2 is allowed here, unlike on the mirror: registries that runtimes reach may

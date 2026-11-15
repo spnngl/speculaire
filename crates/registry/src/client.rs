@@ -96,7 +96,7 @@ pub enum Error {
 /// The client: connections kept by trust, and the tokens in use.
 #[derive(Default)]
 pub struct Client {
-    clients: Mutex<HashMap<Vec<u8>, HyperClient>>,
+    clients: Mutex<HashMap<[u8; 32], HyperClient>>,
     tokens: Tokens,
 }
 

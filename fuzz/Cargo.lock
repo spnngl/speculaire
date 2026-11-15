@@ -1794,6 +1794,7 @@ dependencies = [
 name = "speculaire-registry"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "http",
  "http-body-util",
