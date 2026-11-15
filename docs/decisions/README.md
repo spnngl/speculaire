@@ -41,7 +41,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104)
-- D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61)
+- D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109)
 - D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower (amended by D106)
 - D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56, D100)
 - D37 [agent](agent.md): logs through `tracing` to journald or JSON, default `warn`; an audit log of gate decisions and verdict changes, off by default; secrets never logged (amends D30; amended by D52)
@@ -116,4 +116,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D106 [build](build.md): the bench's kind tier `measure`s the 10 MB and 100 MB sets on the e2e cluster nightly on both architectures, speculaire with its default settings, reflectors on the control-plane nodes and no gate or policy until M5 and M6 (amends D35)
 - D107 [build](build.md): hot paths borrow their input, reuse buffers, keep fixed sizes on the stack and read fixed binary layouts through `zerocopy`; a change made for speed or memory names its measure (amends D13)
 - D108 [distribution](distribution.md): the mirror reloads its certificates when a D93 stamp of their files changes, at most once a second (amends D85, D93)
-Next free number: D109.
+- D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34)
+Next free number: D110.

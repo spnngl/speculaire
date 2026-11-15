@@ -34,7 +34,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Native Alpine builds avoid cross-toolchain drift for C dependencies (rs-coding `musl.md`). dedens rejected QEMU, cross and zigbuild for the same reason (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50, D61)
+## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50, D61, D109)
 
 - **Decision:**
   - **Catalog:** `docs/metrics.md` lists every metric with its type, labels and meaning. A test renders `/metrics` after the e2e suite and fails if a metric is missing from the catalog, or listed there but never emitted.
@@ -512,3 +512,15 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Proof:** a change made for speed or memory names its measure in the commit body: `just bench-micro`, a DHAT profile from `just valgrind`, `just load`, or `just bench`. A change that only removes an allocation or a copy, keeping the code as clear, needs no measure.
 - **Cost:** lifetimes in parsed types, and `zerocopy` (a Google crate with no runtime dependencies) to vet (D71).
 - **Revisit when:** a lifetime spreads through more than one crate's public API, which then takes owned or `Bytes` data instead.
+
+## D109: Catalog rows of metrics not built yet name their milestone (amends D34)
+
+- **Decision:**
+  - A row of `docs/metrics.md` whose metric no code emits yet gets a `Planned` cell naming the milestone that builds it (`M4`, …). The change that builds the metric removes the cell.
+  - `crates/agent/src/telemetry.rs` has a unit test that runs every `describe` function of the agent, the mirror and the reflector under a recording `metrics::Recorder`, and fails unless the names described are the rows without a `Planned` cell.
+  - The tests of `/metrics` (`apps/speculaire/tests/agent.rs`, `e2e/tests/unit.rs`) keep failing on a metric missing from the catalog.
+- **Because:**
+  - D34's test of a listed metric never emitted cannot pass while the catalog holds 11 metrics of M4 to M6, and the catalog is where their labels are agreed before the code.
+  - One agent's `/metrics` never holds every metric: the reflector's only on its role, the relay's only on CRI-O, a labelled counter only once counted, and histograms only in protobuf. Every metric is described once in code, so the described names are the complete list, in a test of milliseconds with no runtime.
+- **Cost:** a metric described but never set passes. A metric set but not described is caught by the tests of `/metrics` only when they emit it.
+- **Revisit when:** a metric is set without its `describe`, or the catalog is generated from the code.
