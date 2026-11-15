@@ -443,7 +443,13 @@ impl FromStr for ReflectorUrl {
         };
         let uri: http::Uri = s.parse().map_err(|_| invalid())?;
         let bare = uri.path_and_query().is_none_or(|p| p.as_str() == "/");
-        if uri.scheme() == Some(&http::uri::Scheme::HTTPS) && uri.host().is_some() && bare {
+        // `Uri` takes `user:password@` into the authority, which `Display` and `Debug` would print (D37).
+        let credentials = uri.authority().is_some_and(|a| a.as_str().contains('@'));
+        if uri.scheme() == Some(&http::uri::Scheme::HTTPS)
+            && uri.host().is_some()
+            && bare
+            && !credentials
+        {
             Ok(Self(Some(uri)))
         } else {
             Err(invalid())
@@ -680,6 +686,7 @@ mod tests {
             "http://reflector:7483",
             "https://reflector:7483/v1",
             "reflector:7483",
+            "https://alice@reflector:7483",
         ] {
             assert!(s.parse::<ReflectorUrl>().is_err(), "{s}");
         }
