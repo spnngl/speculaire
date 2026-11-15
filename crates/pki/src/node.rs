@@ -24,6 +24,7 @@ use rustls::{
 };
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer as _;
+use x509_parser::x509::AttributeTypeAndValue;
 
 /// The subject organization of every node certificate.
 pub const ORGANIZATION: &str = "system:nodes";
@@ -130,7 +131,7 @@ pub enum Error {
 ///
 /// When `der` is not a certificate, or its subject is not a node's.
 pub fn node_subject(der: &[u8]) -> Result<String, Refusal> {
-    node_of(&certificate(der)?)
+    node_of(&certificate(der)?).map(str::to_owned)
 }
 
 fn certificate(der: &[u8]) -> Result<X509Certificate<'_>, Refusal> {
@@ -139,26 +140,36 @@ fn certificate(der: &[u8]) -> Result<X509Certificate<'_>, Refusal> {
         .map_err(|err| Refusal::Encoding(err.to_string()))
 }
 
-fn node_of(cert: &X509Certificate<'_>) -> Result<String, Refusal> {
-    // An attribute that is not a string still counts, so that it cannot hide among the strings.
-    let text = |value: &x509_parser::x509::AttributeTypeAndValue<'_>| {
-        value
-            .as_str()
-            .map_or_else(|_| "<not a string>".to_owned(), str::to_owned)
-    };
-    let subject = cert.subject();
-    let organizations: Vec<String> = subject.iter_organization().map(text).collect();
-    if organizations != [ORGANIZATION] {
-        return Err(Refusal::Organization(organizations));
+// Borrows from the certificate: each handshake checks a subject, and only a refusal allocates.
+fn node_of<'a>(cert: &X509Certificate<'a>) -> Result<&'a str, Refusal> {
+    // `subject()` would tie the strings to `cert`; the field ties them to the DER.
+    let subject = &cert.tbs_certificate.subject;
+    let mut organizations = subject
+        .iter_organization()
+        .map(AttributeTypeAndValue::as_str);
+    if !matches!(
+        (organizations.next(), organizations.next()),
+        (Some(Ok(ORGANIZATION)), None)
+    ) {
+        return Err(Refusal::Organization(texts(subject.iter_organization())));
     }
-    let names: Vec<String> = subject.iter_common_name().map(text).collect();
-    if let [name] = names.as_slice()
+    let mut names = subject
+        .iter_common_name()
+        .map(AttributeTypeAndValue::as_str);
+    if let (Some(Ok(name)), None) = (names.next(), names.next())
         && let Some(node) = name.strip_prefix(COMMON_NAME_PREFIX)
         && !node.is_empty()
     {
-        return Ok(node.to_owned());
+        return Ok(node);
     }
-    Err(Refusal::CommonName(names))
+    Err(Refusal::CommonName(texts(subject.iter_common_name())))
+}
+
+/// Every value, for a refusal; one that is not a string still shows, so that it cannot hide among the strings.
+fn texts<'a>(values: impl Iterator<Item = &'a AttributeTypeAndValue<'a>>) -> Vec<String> {
+    values
+        .map(|value| value.as_str().unwrap_or("<not a string>").to_owned())
+        .collect()
 }
 
 /// A node certificate with its key, as this node presents it.
@@ -177,7 +188,7 @@ impl Identity {
             .map_err(Problem::Pem)?;
         let leaf = chain.first().ok_or(Problem::NoCertificate)?;
         let cert = certificate(leaf)?;
-        let node = node_of(&cert)?;
+        let node = node_of(&cert)?.to_owned();
         let expiry = SystemTime::from(cert.validity().not_after.to_datetime());
         let key = PrivateKeyDer::from_pem_slice(pem).map_err(Problem::Key)?;
         let key = CertifiedKey::from_der(chain, key, provider).map_err(|err| match err {
@@ -405,11 +416,12 @@ impl Verifier {
         authority
             .chain
             .verify_client_cert(end_entity, intermediates, now)?;
-        let presented = node_subject(end_entity)?;
+        let cert = certificate(end_entity)?;
+        let presented = node_of(&cert)?;
         match &self.expected {
-            Some(expected) if *expected != presented => Err(Refusal::OtherNode {
+            Some(expected) if expected != presented => Err(Refusal::OtherNode {
                 expected: expected.clone(),
-                presented,
+                presented: presented.to_owned(),
             }
             .into()),
             _ => Ok(()),
@@ -500,7 +512,7 @@ impl ClientCertVerifier for Verifier {
 mod tests {
     use std::fs;
 
-    use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose};
+    use rcgen::{CertificateParams, DnType, DnValue, ExtendedKeyUsagePurpose};
     use time::OffsetDateTime;
 
     use super::*;
@@ -719,6 +731,14 @@ mod tests {
                 .distinguished_name
                 .push(DnType::OrganizationName, "system:masters")),
             Err(Refusal::Organization(vec!["system:masters".to_owned()]))
+        );
+        // A BMPString is not one of the strings read: it shows as such.
+        assert_eq!(
+            subject(|params| params.distinguished_name.push(
+                DnType::OrganizationName,
+                DnValue::BmpString("system:nodes".try_into().unwrap())
+            )),
+            Err(Refusal::Organization(vec!["<not a string>".to_owned()]))
         );
         assert!(matches!(
             node_subject(b"not a certificate"),
