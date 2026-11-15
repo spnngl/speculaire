@@ -1064,6 +1064,40 @@ async fn above_the_bound_the_blobs_of_unlisted_images_go_before_those_of_listed_
 }
 
 #[tokio::test]
+async fn the_blobs_of_listed_images_go_least_recently_served_first() {
+    let node = Node::new().await;
+    let image = Image::new(&node.registry, &[3000, 3000]);
+    let relay = node.relay_with(1 << 30, Listed(vec![image.manifest_digest.clone()]));
+    read(
+        relay
+            .pull(pull(
+                Kind::Manifest,
+                &by(&image.manifest_digest),
+                false,
+                None,
+            ))
+            .await,
+    )
+    .await
+    .unwrap();
+    // Served in the order of the manifest, the last layer last.
+    for blob in std::iter::once(&image.config).chain(&image.layers) {
+        read(
+            relay
+                .pull(pull(Kind::Blob, &by(&sha(blob)), false, None))
+                .await,
+        )
+        .await
+        .unwrap();
+    }
+    // One byte short of the two layers: the manifest, the config and the layer served first go.
+    relay.cache().set_max_size(5999);
+    relay.evict().await;
+    assert!(!relay.cache().contains(&sha(&image.layers[0])));
+    assert!(relay.cache().contains(&sha(&image.layers[1])));
+}
+
+#[tokio::test]
 async fn a_cache_over_its_bound_is_evicted_by_the_task_that_waits_for_it() {
     let node = Node::new().await;
     let image = Image::new(&node.registry, &[3000, 3000]);

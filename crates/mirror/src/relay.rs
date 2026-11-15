@@ -19,7 +19,7 @@ use hyper::body::{Frame, Incoming};
 use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::reference::Digest;
 use speculaire_registry::{Client, Request, Response as Upstreamed};
-use speculaire_runtime::content::{Content as _, Error};
+use speculaire_runtime::content::Error;
 use speculaire_runtime::registries::{self, Registries, Source};
 use tokio::sync::Notify;
 use tracing::{debug, warn};
@@ -191,7 +191,8 @@ impl<I: Images> Relay<I> {
             if !protected.insert(digest.clone()) {
                 continue;
             }
-            let Ok(Some(blob)) = self.cache.open(&digest).await else {
+            // Looking is no serving: the blobs it protects keep their place in the eviction order (D67).
+            let Some(blob) = self.cache.peek(&digest) else {
                 continue;
             };
             // A blob that is no manifest, or too large to be one, has nothing below it.
