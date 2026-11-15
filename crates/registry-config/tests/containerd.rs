@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use secrecy::ExposeSecret;
 use speculaire_registry_config::containerd::config::{self, Hosts, LoadError, RegistryError};
-use speculaire_registry_config::containerd::hosts::{self, Capabilities};
+use speculaire_registry_config::containerd::hosts::{self, Capabilities, DialTimeout};
 
 const NODE_CONFIGS: [&str; 3] = [
     include_str!("data/containerd/node-k1.35.toml"),
@@ -264,6 +264,7 @@ ca = "root.pem"
     x-many = ["2", "3"]
 
 [host."http://mirror-b.example"]
+  dial_timeout = "-1s"
 "#;
 
 #[test]
@@ -283,7 +284,12 @@ fn hosts_toml_lists_the_hosts_in_order_then_the_server() {
     assert_eq!(a.path, "/v2/path");
     assert_eq!(a.capabilities, Capabilities::PULL);
     assert_eq!(a.skip_verify, Some(true));
-    assert_eq!(a.dial_timeout, Some(Duration::from_secs(90)));
+    assert_eq!(
+        a.dial_timeout,
+        Some(DialTimeout::Within(Duration::from_secs(90)))
+    );
+    assert_eq!(hosts[1].dial_timeout, Some(DialTimeout::Expired));
+    assert_eq!(hosts[2].dial_timeout, None);
     assert_eq!(
         a.ca(),
         [

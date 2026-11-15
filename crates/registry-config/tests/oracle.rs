@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use speculaire_oracle_harness::Oracle;
 use speculaire_registry_config::Headers;
 use speculaire_registry_config::containerd::config::{self, Auth, RawRegistry};
-use speculaire_registry_config::containerd::hosts::{self, HostConfig, RegistryHost};
+use speculaire_registry_config::containerd::hosts::{self, DialTimeout, HostConfig, RegistryHost};
 
 /// A self-signed certificate and its key: files that Go's TLS code loads.
 const CA: &str = include_str!("data/test-ca.pem");
@@ -153,7 +153,11 @@ fn parsed<E>(result: Result<Vec<HostConfig>, E>) -> Value {
                             c.key.as_ref().map_or_else(String::new, |k| k.to_string_lossy().into_owned()),
                         ])).collect::<Vec<_>>(),
                         "skip_verify": h.skip_verify,
-                        "dial_timeout_ns": h.dial_timeout.map(|d| d.as_nanos()),
+                        // The oracle writes any negative timeout as -1: every one fails a dial at once.
+                        "dial_timeout_ns": h.dial_timeout.map(|d| match d {
+                            DialTimeout::Within(d) => json!(d.as_nanos()),
+                            DialTimeout::Expired => json!(-1),
+                        }),
                         "header": headers(&h.header),
                     })
                 })
@@ -782,6 +786,10 @@ ca = "/etc/path/default"
         ("dial_timeout", "3"),
         ("dial_timeout", "\"1m1\""),
         ("dial_timeout", "\"..s\""),
+        ("dial_timeout", "\"-1s\""),
+        ("dial_timeout", "\"-0s\""),
+        ("dial_timeout", "\"-2562047h47m16.854775808s\""),
+        ("dial_timeout", "\"-2562047h47m16.854775809s\""),
         ("header", "{ a = \"b\" }"),
         ("header", "{ a = [\"b\", \"c\"] }"),
         ("header", "{ a = 1 }"),

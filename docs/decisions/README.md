@@ -85,7 +85,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D75 [build](build.md): a second fuzz target, `config_values`, writes config files from the keys with literals each parser accepts or refuses, so the round trip reaches the values raw bytes seldom spell (amends D27)
 - D76 [build](build.md): cargo-careful runs the workspace's tests under AddressSanitizer on each pull request, in one job on glibc Linux, outside `required` (amends D27; amended by D97)
 - D77 [build](build.md): RAPx analyses the workspace on each pull request that changes Rust and every week, outside `required`; the dev image gains no RAPx (amends D27)
-- D78 [distribution](distribution.md): one `registry-config` crate holds both runtimes' parsers and reads what containerd reads: versions 1 to 4, any key case, credentials per host as secrets, ignored keys ignored (amends D17)
+- D78 [distribution](distribution.md): one `registry-config` crate holds both runtimes' parsers and reads what containerd reads: versions 1 to 4, any key case, credentials per host as secrets, ignored keys ignored (amends D17; amended by D115)
 - D79 [build](build.md): `just oracle` also runs the Rust differential tests against the binary, mutated fuzz seeds included; the oracle reaches containerd's unexported parsers by linkname (amends D29, D70)
 - D80 [distribution](distribution.md): the CRI-O module reads what go.podman.io/image reads, from the files its `configfile` searches; credential helpers are not run, aliases are not parsed (amends D66, D70; amended by D89)
 - D81 [gate](gate.md): references and platforms are parsed as containerd's CRI plugin parses them (`ParseDockerRef`, `platforms.Only`), by a port that only its parser can build (amends D11, D15, D70)
@@ -122,4 +122,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94)
 - D113 [build](build.md): pull requests run 4 e2e legs, the newest containerd and CRI-O on both architectures; `main` runs all 14 (amends D63, D94)
 - D114 [build](build.md): the bench samples the agent's cgroup `anon` and `file` every second; peak memory, and so the release bar, is the peak of `anon` (amends D35, D106)
-Next free number: D115.
+- D115 [distribution](distribution.md): a negative `dial_timeout` in a `hosts.toml` is parsed, and the host is left out of the registry's sources, as containerd cannot dial it (amends D78)
+Next free number: D116.

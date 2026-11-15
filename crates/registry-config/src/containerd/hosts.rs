@@ -93,6 +93,16 @@ pub struct ClientPair {
     pub key: Option<PathBuf>,
 }
 
+/// `dial_timeout`: how long containerd's dialer waits for a connection to a host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialTimeout {
+    /// At most this long; zero sets no limit, as in Go's `net.Dialer`.
+    Within(Duration),
+    /// A negative duration: Go's dialer fails at once (`net/dial.go:255` at go1.27.4), and containerd tries the next
+    /// host (`core/remotes/docker/resolver.go:343`; D115).
+    Expired,
+}
+
 /// One endpoint of a registry as `hosts.toml` configures it, before the defaults of [`resolve`].
 #[derive(Clone, Debug, Default)]
 pub struct HostConfig {
@@ -109,7 +119,7 @@ pub struct HostConfig {
     /// `skip_verify`; `None` when the file does not say.
     pub skip_verify: Option<bool>,
     /// `dial_timeout`.
-    pub dial_timeout: Option<Duration>,
+    pub dial_timeout: Option<DialTimeout>,
     /// Headers added to every request to the host.
     pub header: Headers,
 }
@@ -414,10 +424,9 @@ fn host_config(
             .collect();
     }
     if !entry.dial_timeout.is_empty() {
-        host.dial_timeout = Some(
-            parse_duration(&entry.dial_timeout)
-                .map_err(|e| ParseError::new(at("dial_timeout"), e.to_string()))?,
-        );
+        let timeout = parse_duration(&entry.dial_timeout)
+            .map_err(|e| ParseError::new(at("dial_timeout"), e.to_string()))?;
+        host.dial_timeout = Some(timeout.map_or(DialTimeout::Expired, DialTimeout::Within));
     }
     Ok(host)
 }
@@ -582,7 +591,7 @@ pub struct RegistryHost {
     /// The TLS settings the file names, or the defaults of a local registry.
     pub tls: Tls,
     /// How long to wait for a connection.
-    pub dial_timeout: Option<Duration>,
+    pub dial_timeout: Option<DialTimeout>,
     /// Whether a TLS failure retries on plain HTTP (`NewHTTPFallback`): an `http` host with TLS settings.
     pub http_fallback: bool,
 }
