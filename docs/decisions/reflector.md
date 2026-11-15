@@ -105,7 +105,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 - **Measured (M3 step 06):** `e2e/tests/outage.rs` passes on containerd 2.4 and CRI-O 1.37 in 33 s. After a reflector restarts, its lookups find every holder 0.6 to 5.3 s after it is ready: the agents' 0 to 5 s wait after a drop (D33). An agent started with both reflectors down opens its peer API 0.6 to 3.9 s after one is ready, and 9.4 to 9.5 s after its certificate appears (`config.poll_interval`, 10 s). Stopping an agent that serves a 16 MiB layer at 32 Mbit/s takes it out of lookups in 160 to 350 ms, and the unit stops in 3.1 to 3.8 s while the peer's pull completes from it. Before the drain change, that pull went upstream.
 - **Revisit when:** a reflector keeps its index across restarts.
 
-## D104: The load scenario is a library under `speculaire-loadgen`, and the reflector bounds what each agent costs it (amends D27, D33, D97; amended by D105)
+## D104: The load scenario is a library under `speculaire-loadgen`, and the reflector bounds what each agent costs it (amends D27, D33, D97; amended by D105, D116)
 
 - **Decision:**
   - **Place:** `apps/loadgen`, the package `speculaire-loadgen`, parses arguments and prints the report (D62). The library `crates/load`, `speculaire-load`, holds the scenario. It makes a test CA with `speculaire-pki`'s `testing` feature, starts the reflector as a child `speculaire agent` with `role = "reflector"` on a fake containerd, and runs one `crates/reflect` client per simulated agent, each with its own node certificate.

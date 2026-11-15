@@ -40,7 +40,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Restoring backups would undo admin edits made after `configure`.
 - **Revisit when:** —
 
-## D37: Logs through `tracing`, with an opt-in audit log (amends D30; amended by D52)
+## D37: Logs through `tracing`, with an opt-in audit log (amends D30; amended by D52, D116)
 
 - **Decision:**
   - **Sinks:** `tracing-subscriber` with `tracing-journald` when `JOURNAL_STREAM` is set, and JSON on stderr otherwise.
