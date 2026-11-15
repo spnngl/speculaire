@@ -1,18 +1,19 @@
 //! The mirror's TLS: its server certificate, and the clients it accepts (D14).
 //!
 //! Only TLS 1.3 (named in the server config: the upstream client enables `tls12`, D88), and only a client with a certificate that the local CA
-//! signed. The files are read again when one of them changes, so `configure` can replace them under a running agent
-//! (D14, Measured: the next pull used the regenerated certificates).
+//! signed. The files are read again when one of their D93 stamps changes, so `configure` can replace them under a
+//! running agent (D14, Measured: the next pull used the regenerated certificates; D108).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use speculaire_pki::mirror::Part;
+use speculaire_runtime::watch::Watch;
 use tracing::{error, info};
 
 /// How often the files are looked at: at most once in this time, when a connection comes.
@@ -42,12 +43,10 @@ pub enum Error {
     Config(#[from] rustls::Error),
 }
 
-/// What a load read, to tell whether the files changed.
-type Stamp = Vec<Option<SystemTime>>;
-
 struct Loaded {
     config: Arc<ServerConfig>,
-    stamp: Stamp,
+    /// The files' stamps, taken before they were read.
+    watch: Watch,
 }
 
 /// The TLS configuration of the mirror, reloaded when its files change.
@@ -66,7 +65,10 @@ impl Tls {
     pub fn load(directory: &Path) -> Result<Self, Error> {
         Ok(Self {
             directory: directory.to_owned(),
-            loaded: RwLock::new(Arc::new(read(directory)?)),
+            loaded: RwLock::new(Arc::new(read(
+                directory,
+                Watch::new(files(directory).into()),
+            )?)),
             checked: Mutex::new(Instant::now()),
         })
     }
@@ -96,12 +98,12 @@ impl Tls {
     }
 
     fn reload(&self) {
-        let current = stamp(&self.directory);
         let held = Arc::clone(&self.loaded.read().unwrap_or_else(PoisonError::into_inner));
-        if held.stamp == current {
+        let watch = held.watch.again();
+        if watch == held.watch {
             return;
         }
-        match read(&self.directory) {
+        match read(&self.directory, watch) {
             Ok(loaded) => {
                 *self.loaded.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(loaded);
                 info!(directory = %self.directory.display(), "the mirror's certificates were reloaded");
@@ -119,16 +121,9 @@ fn files(directory: &Path) -> [PathBuf; 3] {
         .map(|part| directory.join(part.file_name()))
 }
 
-fn stamp(directory: &Path) -> Stamp {
-    files(directory)
-        .iter()
-        .map(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
-        .collect()
-}
-
-fn read(directory: &Path) -> Result<Loaded, Error> {
-    // The stamp first: a file replaced while it is read is read again at the next look.
-    let stamp = stamp(directory);
+/// Reads the files of `directory`, stamped in `watch` before the read: a file replaced during it differs at the next
+/// look.
+fn read(directory: &Path, watch: Watch) -> Result<Loaded, Error> {
     let [ca, certificate, key] = files(directory);
     let bytes = |path: &Path| {
         std::fs::read(path).map_err(|source| Error::Read {
@@ -173,13 +168,14 @@ fn read(directory: &Path) -> Result<Loaded, Error> {
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Loaded {
         config: Arc::new(config),
-        stamp,
+        watch,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::SystemTime;
 
     use secrecy::ExposeSecret as _;
     use speculaire_pki::mirror::Mirror;
@@ -265,5 +261,36 @@ mod tests {
         );
         *tls.checked.lock().unwrap() = Instant::now().checked_sub(RECHECK).unwrap();
         assert!(!Arc::ptr_eq(&second, &tls.config()));
+    }
+
+    #[test]
+    fn files_replaced_with_their_modification_times_kept_are_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            &Mirror::generate(IP, SystemTime::now()).unwrap(),
+        );
+        let tls = Tls::load(dir.path()).unwrap();
+        let first = tls.config();
+        let times =
+            files(dir.path()).map(|path| std::fs::metadata(path).unwrap().modified().unwrap());
+        // As `cp -p` replaces them, or a write within one tick of the kernel's coarse clock dates them.
+        write(
+            dir.path(),
+            &Mirror::generate(IP, SystemTime::now()).unwrap(),
+        );
+        for (path, time) in files(dir.path()).iter().zip(times) {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        }
+        *tls.checked.lock().unwrap() = Instant::now().checked_sub(RECHECK).unwrap();
+        assert!(
+            !Arc::ptr_eq(&first, &tls.config()),
+            "the new files were loaded"
+        );
     }
 }
