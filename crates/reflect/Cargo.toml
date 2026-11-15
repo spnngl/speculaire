@@ -15,6 +15,7 @@ bench = []
 [dependencies]
 fastrand.workspace = true
 futures-util.workspace = true
+hashbrown.workspace = true
 metrics.workspace = true
 prost.workspace = true
 roaring.workspace = true

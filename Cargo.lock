@@ -2203,6 +2203,7 @@ dependencies = [
  "divan",
  "fastrand",
  "futures-util",
+ "hashbrown 0.17.1",
  "metrics",
  "metrics-exporter-prometheus",
  "prost",

@@ -5,9 +5,11 @@
 //! not yet ended is a bitmap of digest numbers too (D104).
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher as _, RandomState};
 use std::net::SocketAddr;
 use std::sync::{Arc, PoisonError};
 
+use hashbrown::HashTable;
 use roaring::RoaringBitmap;
 
 use crate::key::Key;
@@ -50,7 +52,9 @@ struct Inner {
     /// By node number; `None` is free for the next node.
     agents: Vec<Option<Agent>>,
     free_agents: Vec<u32>,
-    digests: HashMap<Key, u32>,
+    /// The digest numbers, found by the key of their `holders` entry: the key is held once.
+    digests: HashTable<u32>,
+    hasher: RandomState,
     /// By digest number; `None` is free for the next digest.
     holders: Vec<Option<Holders>>,
     free_holders: Vec<u32>,
@@ -161,24 +165,19 @@ impl Index {
         let slot = inner.owned(stream)?;
         let mut next = inner.agent(slot).digests.clone();
         for key in removed {
-            if let Some(&number) = inner.digests.get(key) {
+            if let Some(number) = inner.find(key) {
                 next.remove(number);
             }
         }
         let fresh: HashSet<&Key> = added
             .iter()
-            .filter(|key| {
-                inner
-                    .digests
-                    .get(*key)
-                    .is_none_or(|&number| !next.contains(number))
-            })
+            .filter(|key| inner.find(key).is_none_or(|number| !next.contains(number)))
             .collect();
         if usize::try_from(next.len()).map_or(true, |held| held + fresh.len() > limit) {
             return Err(Refused::Limit);
         }
         for key in removed {
-            if let Some(&number) = inner.digests.get(key) {
+            if let Some(number) = inner.find(key) {
                 inner.release(slot, number);
             }
         }
@@ -221,9 +220,8 @@ impl Index {
     pub(crate) fn lookup(&self, digest: &Key, asking: &str, limit: usize) -> Vec<Holder> {
         let inner = self.lock();
         let Some(holders) = inner
-            .digests
-            .get(digest)
-            .and_then(|&number| inner.holders[at(number)].as_ref())
+            .find(digest)
+            .and_then(|number| inner.holders[at(number)].as_ref())
             // A digest only staged has none.
             .filter(|holders| !holders.nodes.is_empty())
         else {
@@ -286,7 +284,7 @@ impl Inner {
     /// The number of the digest `key`, numbering it if new: a new digest has no holders until the caller adds or stages
     /// one.
     fn number(&mut self, key: Key) -> u32 {
-        if let Some(&number) = self.digests.get(&key) {
+        if let Some(number) = self.find(&key) {
             return number;
         }
         let holders = Holders {
@@ -295,8 +293,25 @@ impl Inner {
             staging: 0,
         };
         let number = allocate(&mut self.holders, &mut self.free_holders, holders);
-        self.digests.insert(key, number);
+        let Self {
+            digests,
+            holders,
+            hasher,
+            ..
+        } = self;
+        digests.insert_unique(hasher.hash_one(key), number, |&n| {
+            hasher.hash_one(key_of(holders, n))
+        });
         number
+    }
+
+    /// The number of the digest `key`, if a node holds or stages it.
+    fn find(&self, key: &Key) -> Option<u32> {
+        self.digests
+            .find(self.hasher.hash_one(key), |&n| {
+                key_of(&self.holders, n) == key
+            })
+            .copied()
     }
 
     /// Removes digest `number` from what `slot` holds.
@@ -320,7 +335,10 @@ impl Inner {
             && holders.staging == 0
             && let Some(holders) = self.holders[at(number)].take()
         {
-            self.digests.remove(&holders.key);
+            let hash = self.hasher.hash_one(holders.key);
+            if let Ok(entry) = self.digests.find_entry(hash, |&n| n == number) {
+                entry.remove();
+            }
             self.free_holders.push(number);
         }
     }
@@ -350,6 +368,14 @@ impl Inner {
     fn publish(&self) {
         crate::metrics::index(self.nodes.len(), self.digests.len(), self.pairs);
     }
+}
+
+/// The key of digest `number`, which the table of digest numbers holds.
+fn key_of(holders: &[Option<Holders>], number: u32) -> &Key {
+    &holders[at(number)]
+        .as_ref()
+        .expect("a digest number of the table has holders")
+        .key
 }
 
 fn at(number: u32) -> usize {
@@ -392,7 +418,7 @@ impl Index {
             for number in &agent.digests {
                 let holders = inner.holders[at(number)].as_ref().expect("holders");
                 assert!(holders.nodes.contains(slot));
-                assert_eq!(inner.digests.get(&holders.key), Some(&number));
+                assert_eq!(inner.find(&holders.key), Some(number));
                 digests.insert(holders.key.to_string());
                 pairs += 1;
             }
