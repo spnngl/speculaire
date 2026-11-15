@@ -29,10 +29,11 @@ impl Logs {
     ///
     /// When the subscriber is gone: [`install`] made it the global default, which lives as long as the process.
     pub fn apply(&self, log: &config::Log, audit: &config::Audit) {
+        // The reload asks every callsite again, and a filter's answer sticks: the flag it reads must be new by then.
+        self.audit.store(audit.enabled, Ordering::Relaxed);
         self.filter
             .reload(log.filter.env_filter())
             .expect("the global subscriber outlives the agent");
-        self.audit.store(audit.enabled, Ordering::Relaxed);
     }
 }
 
@@ -91,10 +92,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use tracing::info;
+    use tracing_subscriber::filter::{FilterExt as _, filter_fn};
     use tracing_subscriber::layer::SubscriberExt as _;
-    use tracing_subscriber::{Layer as _, Registry, fmt};
+    use tracing_subscriber::{Layer as _, Registry, fmt, reload};
 
-    use super::{AUDIT_TARGET, audit_filter};
+    use super::{AUDIT_TARGET, Logs, audit_filter};
+    use crate::config;
 
     /// A writer that keeps what the subscriber writes.
     struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -132,5 +135,40 @@ mod tests {
         assert!(written.contains("audit while on"), "{written}");
         assert!(!written.contains("audit while off"), "{written}");
         assert!(!written.contains("diagnostic"), "{written}");
+    }
+
+    #[test]
+    fn audit_turned_on_by_a_reload_reaches_a_callsite_seen_while_off() {
+        let (filter, handle) = reload::Layer::new(config::Log::default().filter.env_filter());
+        let logs = Logs {
+            filter: handle,
+            audit: Arc::new(AtomicBool::new(false)),
+        };
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writer = {
+            let written = Arc::clone(&written);
+            move || Sink(Arc::clone(&written))
+        };
+        // As `install` layers them: both filters refuse an audit event while audit is off.
+        let subscriber = Registry::default()
+            .with(
+                fmt::layer()
+                    .with_writer(writer.clone())
+                    .with_filter(filter.and(filter_fn(|meta| meta.target() != AUDIT_TARGET))),
+            )
+            .with(
+                fmt::layer()
+                    .with_writer(writer)
+                    .with_filter(audit_filter(Arc::clone(&logs.audit))),
+            );
+        tracing::subscriber::with_default(subscriber, || {
+            for enabled in [false, true] {
+                logs.apply(&config::Log::default(), &config::Audit { enabled });
+                info!(target: AUDIT_TARGET, enabled, "one callsite");
+            }
+        });
+        let written = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        assert!(written.contains("enabled=true"), "{written}");
+        assert!(!written.contains("enabled=false"), "{written}");
     }
 }
