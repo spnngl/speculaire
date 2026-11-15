@@ -304,7 +304,6 @@ impl<I: Images> Relay<I> {
                 warn!(error = %err, digest = %digest, "the blob cache could not keep a manifest");
             }
         }
-        metrics::upstream_bytes(bytes.len());
         Some(Answer::Served(manifest_response(
             &bytes, &digest, media_type, false,
         )))

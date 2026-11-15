@@ -11,7 +11,7 @@ use speculaire_runtime::registries::{Credentials, Endpoint, Error as ConfigError
 use tokio::net::TcpListener;
 
 use super::*;
-use crate::fetch::tests::{Nodes, SETTINGS, pattern};
+use crate::fetch::tests::{Nodes, SETTINGS, assert_counted, pattern, recorder};
 
 /// What the fake registry answers for a path.
 #[derive(Clone)]
@@ -536,6 +536,7 @@ async fn the_head_of_a_tag_is_asked_as_a_head_and_keeps_nothing() {
 
 #[tokio::test]
 async fn a_blob_is_served_only_below_a_manifest_the_relay_served_and_is_fetched_once() {
+    let (handle, _guard) = recorder();
     let node = Node::new().await;
     let image = Image::new(&node.registry, &[300_000, 2000]);
     let relay = node.relay(1 << 30);
@@ -599,6 +600,16 @@ async fn a_blob_is_served_only_below_a_manifest_the_relay_served_and_is_fetched_
     assert_eq!(part.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(part.body, image.layers[0].slice(100..200));
     assert_eq!(node.registry.requests().len(), before);
+    // Blob bytes alone are counted, as on containerd and the peer API (D100): the manifest is not.
+    let blobs = image.config.len() + image.layers.iter().map(Bytes::len).sum::<usize>();
+    let local = image.layers[0].len() + 100;
+    assert_counted(
+        &handle,
+        &[
+            &format!(r#"speculaire_mirror_bytes_total{{source="upstream"}} {blobs}"#),
+            &format!(r#"speculaire_mirror_bytes_total{{source="local"}} {local}"#),
+        ],
+    );
     assert_eq!(
         std::fs::read_dir(node.dir.path().join("blobs/tmp"))
             .unwrap()
