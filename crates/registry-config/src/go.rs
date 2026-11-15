@@ -370,7 +370,9 @@ pub(crate) fn parse_duration(input: &str) -> Result<Duration, Refused> {
                 return Err(invalid());
             }
         }
-        total += whole;
+        // Go adds into a uint64 that wraps: 2^63 twice sums to zero, which Go then accepts
+        // (go1.27.4 `src/time/format.go:1719`).
+        total = total.wrapping_add(whole);
         if total > LIMIT {
             return Err(invalid());
         }
@@ -768,6 +770,7 @@ mod tests {
             ("300ms", 0.3),
             ("0", 0.0),
             ("+2s", 2.0),
+            ("9223372036854775808ns9223372036854775808ns", 0.0),
             // A fraction longer than 63 bits drops its last digits.
             ("0.12345678901234567890123456789s", 0.123_456_789),
         ] {
