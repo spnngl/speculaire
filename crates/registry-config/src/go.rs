@@ -641,6 +641,10 @@ fn has_meta(path: &str) -> bool {
 }
 
 /// Go's `filepath.Glob`: the paths that match, sorted per directory; I/O errors hide a directory.
+///
+/// Go recurses once per directory level that has metacharacters, and refuses a pattern that reaches 10 000 levels
+/// (`globWithLimit`, CVE-2022-30632). This walks the levels in a loop instead, since the recursion overflows a 2 MiB
+/// thread stack near 3 000 levels, and refuses the same patterns.
 pub(crate) fn glob(pattern: &str) -> Result<Vec<PathBuf>, BadPattern> {
     matches(pattern, "")?;
     if !has_meta(pattern) {
@@ -650,21 +654,32 @@ pub(crate) fn glob(pattern: &str) -> Result<Vec<PathBuf>, BadPattern> {
             Vec::new()
         });
     }
-    let (dir, file) = pattern.split_at(pattern.rfind('/').map_or(0, |i| i + 1));
-    let dir = match dir {
-        "" => ".",
-        "/" => "/",
-        other => &other[..other.len() - 1],
+    // The last element of each level, from the pattern's own up.
+    let mut files = Vec::new();
+    let mut pattern = pattern;
+    let mut found = loop {
+        let (dir, file) = pattern.split_at(pattern.rfind('/').map_or(0, |i| i + 1));
+        let dir = match dir {
+            "" => ".",
+            "/" => "/",
+            other => &other[..other.len() - 1],
+        };
+        if !has_meta(dir) {
+            break glob_in(Path::new(dir), file)?;
+        }
+        if dir == pattern || files.len() + 1 == 10_000 {
+            return Err(BadPattern);
+        }
+        matches(dir, "")?;
+        files.push(file);
+        pattern = dir;
     };
-    if !has_meta(dir) {
-        return glob_in(Path::new(dir), file);
-    }
-    if dir == pattern {
-        return Err(BadPattern);
-    }
-    let mut found = Vec::new();
-    for parent in glob(dir)? {
-        found.extend(glob_in(&parent, file)?);
+    while let Some(file) = files.pop() {
+        let mut next = Vec::new();
+        for parent in found {
+            next.extend(glob_in(&parent, file)?);
+        }
+        found = next;
     }
     Ok(found)
 }
@@ -842,5 +857,13 @@ mod tests {
         let none = glob(&format!("{}/none/*.toml", dir.path().display())).expect("a glob");
         assert_eq!(none.len(), 0);
         assert!(glob("[").is_err());
+    }
+
+    #[test]
+    fn a_glob_of_ten_thousand_levels_with_metacharacters_is_refused() {
+        // Below the last level, each pattern reads the root alone.
+        assert!(glob(&format!("/speculaire-none-*{}", "/*".repeat(10_000))).is_err());
+        let deepest = format!("/speculaire-none-*{}", "/*".repeat(9_999));
+        assert_eq!(glob(&deepest).expect("a glob").len(), 0);
     }
 }
