@@ -1,6 +1,8 @@
 //! What the agent tells systemd (D39): readiness, stopping, and the watchdog. Outside systemd, where
 //! `NOTIFY_SOCKET` is unset, each call does nothing.
 
+use std::time::Duration;
+
 use sd_notify::NotifyState;
 use tracing::warn;
 
@@ -15,9 +17,12 @@ pub(crate) fn stopping() {
 }
 
 /// Pings the watchdog every half of `WATCHDOG_USEC`, from a task of the runtime: a stalled runtime misses the pings
-/// and systemd kills it. Does nothing when the unit sets no `WatchdogSec`.
+/// and systemd kills it. Does nothing when the unit sets no `WatchdogSec`, or sets it to 0 or infinity
+/// (`u64::MAX`), as `sd_watchdog_enabled` does: systemd v259.10, `src/libsystemd/sd-daemon/sd-daemon.c:841`.
 pub(crate) fn watchdog() {
-    let Some(timeout) = sd_notify::watchdog_enabled() else {
+    let infinity = Duration::from_micros(u64::MAX);
+    let Some(timeout) = sd_notify::watchdog_enabled().filter(|t| !t.is_zero() && *t != infinity)
+    else {
         return;
     };
     tokio::spawn(async move {
