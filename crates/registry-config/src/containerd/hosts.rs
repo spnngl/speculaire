@@ -8,6 +8,7 @@
 //! `client`, `skip_verify`, `header`, `override_path` and `dial_timeout`. [`parse_hosts_file`] turns the text into
 //! [`HostConfig`]s in containerd's order; [`resolve`] adds what a registry host defaults to.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -531,20 +532,19 @@ fn load_cert_files(dir: &Path) -> Result<Vec<HostConfig>, HostsError> {
 fn host_paths(root: &Path, host: &str) -> Vec<PathBuf> {
     let root = root.to_string_lossy();
     host_dir_names(host)
-        .iter()
-        .map(|name| join_clean(&root, name).into())
+        .map(|name| join_clean(&root, &name).into())
         .collect()
 }
 
 /// The names of the directories of `host` in a root, in the order they are looked for.
-fn host_dir_names(host: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    if let Some(i) = host.rfind(':').filter(|i| *i > 0) {
-        names.push(format!("{}_{}_", &host[..i], &host[i + 1..]));
-    }
-    names.push(host.to_owned());
-    names.push("_default".to_owned());
-    names
+fn host_dir_names(host: &str) -> impl Iterator<Item = Cow<'_, str>> {
+    let ported = host
+        .rfind(':')
+        .filter(|i| *i > 0)
+        .map(|i| Cow::Owned(format!("{}_{}_", &host[..i], &host[i + 1..])));
+    ported
+        .into_iter()
+        .chain([Cow::Borrowed(host), Cow::Borrowed("_default")])
 }
 
 /// The directory of `host` in the first of `roots` that has one (`HostDirFromRoot`, `hostDirFromRoots`): `root/host`
@@ -702,11 +702,10 @@ impl Tree {
     /// [`resolve`] over the tree: the endpoints of `host`, with no disk to read.
     #[must_use]
     pub fn resolve(&self, host: &str, default_scheme: Option<&str>) -> Vec<RegistryHost> {
-        let names = host_dir_names(host);
         let found = self
             .dirs
             .iter()
-            .find_map(|dirs| names.iter().find_map(|name| dirs.get(name)));
+            .find_map(|dirs| host_dir_names(host).find_map(|name| dirs.get(name.as_ref())));
         finish(found.cloned(), host, default_scheme)
     }
 }
