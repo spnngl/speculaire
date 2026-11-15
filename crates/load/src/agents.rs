@@ -31,7 +31,7 @@ struct Agent {
     credentials: Arc<Credentials>,
     holdings: Arc<Holdings>,
     /// What `holdings` holds, as indices into the pool, for the deltas to swap.
-    held: Mutex<Vec<u32>>,
+    held: Mutex<Vec<usize>>,
 }
 
 impl Fleet {
@@ -44,8 +44,8 @@ impl Fleet {
         dir: &Path,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
-            scenario.blobs <= scenario.pool && u32::try_from(scenario.pool).is_ok(),
-            "each agent's {} blobs must come from a pool of at least as many digests, under 2^32",
+            scenario.blobs <= scenario.pool,
+            "each agent's {} blobs must come from a pool of at least as many digests",
             scenario.blobs
         );
         let mut rng = fastrand::Rng::with_seed(scenario.seed);
@@ -64,10 +64,10 @@ impl Fleet {
             credentials.load_authority(ca)?;
             let mut held = HashSet::with_capacity(scenario.blobs);
             while held.len() < scenario.blobs {
-                held.insert(rng.u32(..pool_len(&pool)));
+                held.insert(rng.usize(..pool.len()));
             }
             let holdings = Arc::new(Holdings::default());
-            holdings.replace(held.iter().map(|&i| pool[i as usize].clone()).collect());
+            holdings.replace(held.iter().map(|&i| &pool[i]));
             agents.push(Agent {
                 credentials,
                 holdings,
@@ -100,10 +100,6 @@ impl Fleet {
 /// The node name of the agent at `index`.
 fn name(index: usize) -> String {
     format!("load-agent-{index:05}")
-}
-
-fn pool_len(pool: &[Digest]) -> u32 {
-    u32::try_from(pool.len()).unwrap_or(u32::MAX)
 }
 
 /// The fleet with its clients running.
@@ -161,14 +157,14 @@ impl Connected {
                 return;
             };
             let Some(new) = (0..64)
-                .map(|_| rng.u32(..pool_len(&fleet.pool)))
+                .map(|_| rng.usize(..fleet.pool.len()))
                 .find(|i| !held.contains(i))
             else {
                 return;
             };
             let old = std::mem::replace(&mut held[slot], new);
-            agent.holdings.remove(&fleet.pool[old as usize]);
-            agent.holdings.add(fleet.pool[new as usize].clone());
+            agent.holdings.remove(&fleet.pool[old]);
+            agent.holdings.add(&fleet.pool[new]);
             counts.deltas.fetch_add(2, Ordering::Relaxed);
         }))
     }
