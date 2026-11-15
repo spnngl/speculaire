@@ -26,7 +26,7 @@ use crate::frame::{self, FrameError, Reader};
 use crate::message::Request;
 use crate::metrics::CLIENT_LOOKUP;
 use crate::proto::{self, reflector_message};
-use crate::{Member, connect};
+use crate::{Key, Member, connect};
 
 mod announce;
 mod backoff;
@@ -223,7 +223,8 @@ impl Lookups {
         fastrand::shuffle(&mut queues);
         let mut queues = queues.into_iter();
         let first = queues.next().ok_or(LookupError::NoMember)?;
-        Ok(hedged(ask(first, digest), queues.next().map(|q| ask(q, digest))).await?)
+        let key = Key::from(digest);
+        Ok(hedged(ask(first, key), queues.next().map(|q| ask(q, key))).await?)
     }
 }
 
@@ -236,7 +237,7 @@ impl Shared {
 /// A lookup waiting for a connection's writer, which numbers it, and its answer.
 #[derive(Debug)]
 struct Ask {
-    digest: Digest,
+    digest: Key,
     answer: oneshot::Sender<Vec<Peer>>,
 }
 
@@ -262,11 +263,7 @@ async fn hedged<T: Send>(
 }
 
 /// A `Lookup` of `digest` through the connection whose writer reads `queue`.
-fn ask(
-    queue: mpsc::Sender<Ask>,
-    digest: &Digest,
-) -> BoxFuture<'static, Result<Vec<Peer>, CallError>> {
-    let digest = digest.clone();
+fn ask(queue: mpsc::Sender<Ask>, digest: Key) -> BoxFuture<'static, Result<Vec<Peer>, CallError>> {
     async move {
         let (answer, answered) = oneshot::channel();
         let call = async {

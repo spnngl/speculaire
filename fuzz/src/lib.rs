@@ -474,16 +474,23 @@ pub fn node_subject(data: &[u8]) {
 /// reads (D2, D97, D98, D105).
 ///
 /// Decoding and parsing never panic. A request that parses encodes back to protobuf that parses to it again, and every
-/// member or peer an answer keeps has a node.
+/// member or peer an answer keeps has a node. Text parses as a digest of a request exactly when it parses as a
+/// [`Digest`](speculaire_oci::reference::Digest), to the same digest.
 ///
 /// # Panics
 ///
-/// When decoding or parsing panics, or what parses does not survive the round trip.
+/// When decoding or parsing panics, what parses does not survive the round trip, or the two digest parsers disagree.
 pub fn reflect(data: &[u8]) {
     use prost::Message as _;
+    use speculaire_oci::reference::Digest;
+    use speculaire_reflect::Key;
     use speculaire_reflect::client::{members, peers};
     use speculaire_reflect::message::Request;
     use speculaire_reflect::proto::{AgentMessage, LookupResponse, MembersResponse};
+    if let Ok(text) = std::str::from_utf8(data) {
+        let digest = Digest::parse(text).ok();
+        assert_eq!(Key::parse(text), digest.as_ref().map(Key::from));
+    }
     if let Ok(message) = AgentMessage::decode(data)
         && let Ok(request) = Request::try_from(message)
     {

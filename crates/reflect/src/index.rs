@@ -1,17 +1,16 @@
 //! Which agents hold which digests: soft state, as the agents' streams announce it (D2).
 //!
 //! Each node and each digest gets a small integer, so that a digest's holders and a node's digests are roaring
-//! bitmaps: D2 sizes 20 million pairs this way. A digest is a `Key` inside, made before taking the lock, and a snapshot
+//! bitmaps: D2 sizes 20 million pairs this way. A digest is a `Key`, parsed with its message, and a snapshot
 //! not yet ended is a bitmap of digest numbers too (D104).
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, PoisonError};
 
 use roaring::RoaringBitmap;
-use speculaire_oci::reference::Digest;
 
+use crate::key::Key;
 use crate::sync::{Mutex, MutexGuard};
 
 /// The index, shared by every stream and lookup.
@@ -76,62 +75,6 @@ struct Holders {
     staging: u32,
 }
 
-/// A digest as the index keeps it: the hash in bytes, inline, so that comparing two reads no other memory (D104).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Key {
-    Sha256([u8; 32]),
-    Sha384([u8; 48]),
-    Sha512([u8; 64]),
-}
-
-impl Key {
-    pub(crate) fn of(digest: &Digest) -> Self {
-        let hex = digest.encoded();
-        match digest.algorithm() {
-            "sha256" => decode(hex).map(Self::Sha256),
-            "sha384" => decode(hex).map(Self::Sha384),
-            "sha512" => decode(hex).map(Self::Sha512),
-            _ => None,
-        }
-        .expect("Digest::parse admits only the lower-case hex of sha256, sha384 and sha512")
-    }
-
-    fn all<'a>(digests: impl IntoIterator<Item = &'a Digest>) -> Vec<Self> {
-        digests.into_iter().map(Self::of).collect()
-    }
-}
-
-impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (algorithm, bytes): (&str, &[u8]) = match self {
-            Self::Sha256(bytes) => ("sha256", bytes),
-            Self::Sha384(bytes) => ("sha384", bytes),
-            Self::Sha512(bytes) => ("sha512", bytes),
-        };
-        write!(f, "{algorithm}:")?;
-        bytes.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
-    }
-}
-
-/// The `N` bytes lower-case `hex` spells; `None` when it spells another length or is not lower-case hex.
-fn decode<const N: usize>(hex: &str) -> Option<[u8; N]> {
-    fn nibble(c: u8) -> Option<u8> {
-        match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            _ => None,
-        }
-    }
-    if hex.len() != 2 * N {
-        return None;
-    }
-    let mut bytes = [0; N];
-    for (byte, [high, low]) in bytes.iter_mut().zip(hex.as_bytes().as_chunks().0) {
-        *byte = 16 * nibble(*high)? + nibble(*low)?;
-    }
-    Some(bytes)
-}
-
 impl Index {
     /// Opens a stream for `node`, whose peer API is at `peer`: it takes over the node's entry and empties it.
     pub(crate) fn join(&self, node: &str, peer: SocketAddr) -> Stream {
@@ -166,13 +109,12 @@ impl Index {
     pub(crate) fn stage(
         &self,
         stream: &Stream,
-        digests: &[Digest],
+        digests: &[Key],
         limit: usize,
     ) -> Result<(), Refused> {
-        let keys = Key::all(digests);
         let mut inner = self.lock();
         let slot = inner.owned(stream)?;
-        for key in keys {
+        for &key in digests {
             let number = inner.number(key);
             if inner.agent(slot).staged.insert(number) {
                 inner.holders_of(number).staging += 1;
@@ -211,16 +153,14 @@ impl Index {
     pub(crate) fn apply(
         &self,
         stream: &Stream,
-        added: &[Digest],
-        removed: &[Digest],
+        added: &[Key],
+        removed: &[Key],
         limit: usize,
     ) -> Result<(), Refused> {
-        let added = Key::all(added);
-        let removed = Key::all(removed);
         let mut inner = self.lock();
         let slot = inner.owned(stream)?;
         let mut next = inner.agent(slot).digests.clone();
-        for key in &removed {
+        for key in removed {
             if let Some(&number) = inner.digests.get(key) {
                 next.remove(number);
             }
@@ -237,12 +177,12 @@ impl Index {
         if usize::try_from(next.len()).map_or(true, |held| held + fresh.len() > limit) {
             return Err(Refused::Limit);
         }
-        for key in &removed {
+        for key in removed {
             if let Some(&number) = inner.digests.get(key) {
                 inner.release(slot, number);
             }
         }
-        for key in added {
+        for &key in added {
             inner.hold(slot, key);
         }
         inner.publish();
@@ -278,12 +218,11 @@ impl Index {
     }
 
     /// Up to `limit` holders of `digest`, from a random one on and never `asking`: lookups spread over the holders.
-    pub(crate) fn lookup(&self, digest: &Digest, asking: &str, limit: usize) -> Vec<Holder> {
-        let key = Key::of(digest);
+    pub(crate) fn lookup(&self, digest: &Key, asking: &str, limit: usize) -> Vec<Holder> {
         let inner = self.lock();
         let Some(holders) = inner
             .digests
-            .get(&key)
+            .get(digest)
             .and_then(|&number| inner.holders[at(number)].as_ref())
             // A digest only staged has none.
             .filter(|holders| !holders.nodes.is_empty())
@@ -431,7 +370,7 @@ fn allocate<T>(slots: &mut Vec<Option<T>>, free: &mut Vec<u32>, value: T) -> u32
 impl Index {
     /// Stages the digests `numbers` spell in two chunks, then commits them.
     fn snapshot(&self, stream: &Stream, numbers: &[u32]) -> Result<(), Refused> {
-        let digests: Vec<Digest> = numbers.iter().map(|&n| tests::digest(n)).collect();
+        let digests: Vec<Key> = numbers.iter().map(|&n| tests::digest(n)).collect();
         let (first, second) = digests.split_at(digests.len() / 2);
         self.stage(stream, first, usize::MAX)?;
         self.stage(stream, second, usize::MAX)?;
@@ -490,8 +429,8 @@ mod tests {
 
     use super::*;
 
-    pub(super) fn digest(n: u32) -> Digest {
-        Digest::parse(&format!("sha256:{n:064x}")).unwrap()
+    pub(super) fn digest(n: u32) -> Key {
+        Key::parse(&format!("sha256:{n:064x}")).unwrap()
     }
 
     pub(super) fn peer(n: u8) -> SocketAddr {
@@ -597,25 +536,6 @@ mod tests {
         }
         let inner = index.lock();
         assert_eq!((inner.agents.len(), inner.holders.len()), (1, 2));
-    }
-
-    #[test]
-    fn a_key_spells_its_digest_back() {
-        for text in [
-            format!("sha256:{}", "0a".repeat(32)),
-            format!("sha384:{}", "f9".repeat(48)),
-            format!("sha512:{}", "7c".repeat(64)),
-        ] {
-            assert_eq!(Key::of(&Digest::parse(&text).unwrap()).to_string(), text);
-        }
-    }
-
-    #[test]
-    fn decoding_takes_only_lower_case_hex_of_the_length() {
-        assert_eq!(decode::<2>("0aff"), Some([0x0a, 0xff]));
-        for hex in ["0aFF", "0afg", "0af", "0aff00"] {
-            assert_eq!(decode::<2>(hex), None, "{hex}");
-        }
     }
 }
 

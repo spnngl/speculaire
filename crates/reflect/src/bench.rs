@@ -2,17 +2,16 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use speculaire_oci::reference::Digest;
-
 use crate::LOOKUP_PEERS;
 use crate::index::Index;
+use crate::key::Key;
 use crate::server::Limits;
 
 /// An index holding a fleet's digests.
 #[derive(Debug)]
 pub struct Filled {
     index: Index,
-    pool: Vec<Digest>,
+    pool: Vec<Key>,
 }
 
 impl Filled {
@@ -23,8 +22,8 @@ impl Filled {
         if pool == 0 {
             return None;
         }
-        let pool: Vec<Digest> = (0..pool)
-            .map(|number| Digest::parse(&format!("sha256:{number:064x}")).ok())
+        let pool: Vec<Key> = (0..pool)
+            .map(|number| Key::parse(&format!("sha256:{number:064x}")))
             .collect::<Option<_>>()?;
         let mut rng = fastrand::Rng::with_seed(seed);
         let index = Index::default();
@@ -33,10 +32,9 @@ impl Filled {
                 &format!("agent-{agent}"),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
             );
-            let held: Vec<Digest> =
-                std::iter::repeat_with(|| pool[rng.usize(..pool.len())].clone())
-                    .take(blobs)
-                    .collect();
+            let held: Vec<Key> = std::iter::repeat_with(|| pool[rng.usize(..pool.len())])
+                .take(blobs)
+                .collect();
             index
                 .stage(&stream, &held, Limits::default().digests)
                 .ok()?;
