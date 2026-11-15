@@ -15,12 +15,12 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{Instrument as _, Span, debug, debug_span, field, info, warn};
 
 use crate::frame::{self, FrameError, Reader};
 use crate::index::Index;
 use crate::message::{Lookup, Request};
-use crate::metrics::{self, Reason};
+use crate::metrics::{self, Reason, ServerSeries};
 use crate::proto::{self, reflector_message};
 use crate::session::{Rejection, Reply, Session};
 
@@ -132,6 +132,7 @@ impl Reflector {
                     .collect(),
             },
             settings: Arc::new(settings),
+            series: ServerSeries::new(),
             stop: stop.clone(),
             held,
         };
@@ -176,6 +177,7 @@ struct Api {
     settings: Arc<Settings>,
     /// What `Members` answers, built once from the settings.
     members: proto::MembersResponse,
+    series: ServerSeries,
     stop: CancellationToken,
     #[expect(
         dead_code,
@@ -199,12 +201,23 @@ async fn accept(listener: TcpListener, acceptor: TlsAcceptor, api: Arc<Api>) {
                 }
             },
         };
-        tokio::spawn(serve(acceptor.clone(), tcp, address, Arc::clone(&api)));
+        let accepted = Instant::now();
+        // The node is known once the handshake is done.
+        let span = debug_span!("reflector connection", peer = %address, node = field::Empty);
+        tokio::spawn(
+            serve(acceptor.clone(), tcp, address, accepted, Arc::clone(&api)).instrument(span),
+        );
     }
 }
 
 /// Handshakes, then answers the agent's frames until the connection ends.
-async fn serve(acceptor: TlsAcceptor, tcp: TcpStream, address: SocketAddr, api: Arc<Api>) {
+async fn serve(
+    acceptor: TlsAcceptor,
+    tcp: TcpStream,
+    address: SocketAddr,
+    accepted: Instant,
+    api: Arc<Api>,
+) {
     let handshake = tokio::select! {
         () = api.stop.cancelled() => return,
         handshake = tokio::time::timeout(api.settings.limits.handshake, handshake(&acceptor, tcp)) => handshake,
@@ -214,6 +227,7 @@ async fn serve(acceptor: TlsAcceptor, tcp: TcpStream, address: SocketAddr, api: 
         Ok(Err(err)) => return debug!(%address, error = %err, "reflector handshake refused"),
         Err(_) => return debug!(%address, "reflector handshake timed out"),
     };
+    Span::current().record("node", &*node);
     let mut reader = Reader::new(api.settings.limits.message);
     let mut session = Session::new(
         Arc::clone(&api.index),
@@ -235,7 +249,7 @@ async fn serve(acceptor: TlsAcceptor, tcp: TcpStream, address: SocketAddr, api: 
             }
             Err(_) => return debug!(%node, "reflector connection silent; closing it"),
         };
-        let reply = match answer(&api, &mut session, message) {
+        let reply = match answer(&api, &mut session, message, accepted) {
             Ok(Some(reply)) => reply,
             Ok(None) => continue,
             Err(refusal) => break refusal,
@@ -291,12 +305,17 @@ fn answer(
     api: &Api,
     session: &mut Session,
     message: proto::AgentMessage,
+    accepted: Instant,
 ) -> Result<Option<reflector_message::Message>, proto::Refused> {
     let request =
         Request::try_from(message).map_err(|err| reject(session.node(), err.reason(), &err))?;
     Ok(match request {
         Request::Announcement(announcement) => match session.handle(announcement) {
             Ok(None) => None,
+            Ok(Some(Reply::Synced)) => {
+                api.series.resync.record(accepted.elapsed());
+                None
+            }
             Ok(Some(Reply::Resync)) => Some(reflector_message::Message::Resync(proto::Resync {})),
             Err(Rejection::Superseded) => {
                 return Err(refused(
@@ -330,7 +349,7 @@ fn lookup(api: &Api, node: &str, lookup: &Lookup) -> proto::LookupResponse {
             address: holder.peer.to_string(),
         })
         .collect();
-    ::metrics::histogram!(metrics::LOOKUP).record(start.elapsed());
+    api.series.lookup.record(start.elapsed());
     proto::LookupResponse {
         peers,
         id: lookup.id,

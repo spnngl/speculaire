@@ -16,9 +16,11 @@ pub(crate) enum Rejection {
     Superseded,
 }
 
-/// What the reflector answers a message with.
+/// What a message led to, beyond being taken in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Reply {
+    /// The stream's first snapshot is in the index: the agent's holdings are, from now on, found by lookups.
+    Synced,
     /// Send a new snapshot.
     Resync,
 }
@@ -38,6 +40,8 @@ struct Open {
     stream: Stream,
     /// The sequence number of the next delta; `None` until a snapshot ends.
     next: Option<u64>,
+    /// Whether a snapshot has ended.
+    synced: bool,
 }
 
 impl Session {
@@ -66,8 +70,7 @@ impl Session {
             (Announcement::Hello(_), Some(_)) => Err(refused(Reason::Malformed, "a second Hello")),
             (_, None) => Err(refused(Reason::Malformed, "no Hello first")),
             (Announcement::Snapshot(snapshot), Some(open)) => {
-                open.snapshot(&self.index, &snapshot, limit)?;
-                Ok(None)
+                open.snapshot(&self.index, &snapshot, limit)
             }
             (Announcement::Delta(delta), Some(open)) => open.delta(&self.index, &delta, limit),
         }
@@ -95,6 +98,7 @@ impl Session {
         Ok(Open {
             stream: self.index.join(&self.peer, hello.peer),
             next: None,
+            synced: false,
         })
     }
 }
@@ -105,17 +109,19 @@ impl Open {
         index: &Index,
         snapshot: &Snapshot,
         limit: usize,
-    ) -> Result<(), Rejection> {
+    ) -> Result<Option<Reply>, Rejection> {
         index
             .stage(&self.stream, &snapshot.digests, limit)
             .map_err(|refused| rejection(refused, limit))?;
-        if snapshot.last {
-            index
-                .commit(&self.stream)
-                .map_err(|refused| rejection(refused, limit))?;
-            self.next = Some(snapshot.seq);
+        if !snapshot.last {
+            return Ok(None);
         }
-        Ok(())
+        index
+            .commit(&self.stream)
+            .map_err(|refused| rejection(refused, limit))?;
+        self.next = Some(snapshot.seq);
+        let first = !std::mem::replace(&mut self.synced, true);
+        Ok(first.then_some(Reply::Synced))
     }
 
     fn delta(

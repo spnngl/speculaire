@@ -1,6 +1,9 @@
 //! The metrics of the reflector and of its client (D34); `docs/metrics.md` lists them.
 
-use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge};
+use metrics::{
+    Gauge, Histogram, counter, describe_counter, describe_gauge, describe_histogram, gauge,
+    histogram,
+};
 
 /// `speculaire_reflector_agents`: agents with an open `Announce` stream.
 pub const AGENTS: &str = "speculaire_reflector_agents";
@@ -10,6 +13,9 @@ pub const DIGESTS: &str = "speculaire_reflector_digests";
 pub const PAIRS: &str = "speculaire_reflector_pairs";
 /// `speculaire_reflector_lookup_seconds`: the time a `Lookup` takes in the reflector.
 pub const LOOKUP: &str = "speculaire_reflector_lookup_seconds";
+/// `speculaire_reflector_resync_seconds`: the time from accepting an agent's connection to holding its first
+/// snapshot.
+pub const RESYNC: &str = "speculaire_reflector_resync_seconds";
 /// `speculaire_reflector_announce_rejected_total`: `Announce` streams refused, by `reason`.
 pub const REJECTED: &str = "speculaire_reflector_announce_rejected_total";
 
@@ -70,12 +76,17 @@ pub fn describe() {
     describe_gauge!(DIGESTS, "Distinct digests in the reflector's index");
     describe_gauge!(PAIRS, "(digest, node) pairs in the reflector's index");
     describe_histogram!(LOOKUP, "Time a Lookup takes in the reflector");
+    describe_histogram!(
+        RESYNC,
+        "Time from accepting an agent's connection to holding its first snapshot"
+    );
     describe_counter!(REJECTED, "Announce streams the reflector refused");
     for gauge in [AGENTS, DIGESTS, PAIRS] {
         gauge!(gauge).set(0.0);
     }
     // Registering a histogram makes its series exist before the first sample.
-    drop(metrics::histogram!(LOOKUP));
+    drop(histogram!(LOOKUP));
+    drop(histogram!(RESYNC));
     for reason in Reason::ALL {
         counter!(REJECTED, "reason" => reason.label()).absolute(0);
     }
@@ -89,8 +100,43 @@ pub fn describe_client() {
         CLIENT_LOOKUP,
         "Time a Lookup takes for the agent, hedge included"
     );
-    for result in ["hit", "miss", "error", "no_reflector"] {
-        drop(metrics::histogram!(CLIENT_LOOKUP, "result" => result));
+}
+
+/// The client's `Lookup` times, by result.
+#[derive(Debug)]
+pub(crate) struct LookupSeries {
+    pub(crate) hit: Histogram,
+    pub(crate) miss: Histogram,
+    pub(crate) error: Histogram,
+    pub(crate) no_reflector: Histogram,
+}
+
+impl LookupSeries {
+    /// Registers every series.
+    pub(crate) fn new() -> Self {
+        Self {
+            hit: histogram!(CLIENT_LOOKUP, "result" => "hit"),
+            miss: histogram!(CLIENT_LOOKUP, "result" => "miss"),
+            error: histogram!(CLIENT_LOOKUP, "result" => "error"),
+            no_reflector: histogram!(CLIENT_LOOKUP, "result" => "no_reflector"),
+        }
+    }
+}
+
+/// The reflector's series that its connections record.
+#[derive(Debug)]
+pub(crate) struct ServerSeries {
+    pub(crate) lookup: Histogram,
+    pub(crate) resync: Histogram,
+}
+
+impl ServerSeries {
+    /// Registers every series.
+    pub(crate) fn new() -> Self {
+        Self {
+            lookup: histogram!(LOOKUP),
+            resync: histogram!(RESYNC),
+        }
     }
 }
 
@@ -99,13 +145,34 @@ pub(crate) fn rejected(reason: Reason) {
     counter!(REJECTED, "reason" => reason.label()).increment(1);
 }
 
-/// Sets the size of the index.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "a gauge is an f64; the index never nears 2^52 entries"
-)]
-pub(crate) fn index(agents: usize, digests: usize, pairs: u64) {
-    gauge!(AGENTS).set(agents as f64);
-    gauge!(DIGESTS).set(digests as f64);
-    gauge!(PAIRS).set(pairs as f64);
+/// The size of the index.
+#[derive(Debug)]
+pub(crate) struct IndexSeries {
+    agents: Gauge,
+    digests: Gauge,
+    pairs: Gauge,
+}
+
+impl Default for IndexSeries {
+    /// Registers every series.
+    fn default() -> Self {
+        Self {
+            agents: gauge!(AGENTS),
+            digests: gauge!(DIGESTS),
+            pairs: gauge!(PAIRS),
+        }
+    }
+}
+
+impl IndexSeries {
+    /// Sets the size of the index.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a gauge is an f64; the index never nears 2^52 entries"
+    )]
+    pub(crate) fn set(&self, agents: usize, digests: usize, pairs: u64) {
+        self.agents.set(agents as f64);
+        self.digests.set(digests as f64);
+        self.pairs.set(pairs as f64);
+    }
 }
