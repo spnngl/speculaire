@@ -38,31 +38,29 @@ pub(crate) struct Tokens {
 impl Tokens {
     /// The token for `key` if one is held that has not expired.
     pub(crate) fn get(&self, key: &Key, now: Instant) -> Option<SecretString> {
-        let mut held = self
-            .held
+        self.held
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match held.get(key) {
-            Some(entry) if entry.expires > now => Some(entry.token.clone()),
-            Some(_) => {
-                held.remove(key);
-                None
-            }
-            None => None,
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .filter(|entry| entry.expires > now)
+            .map(|entry| entry.token.clone())
     }
 
-    /// Holds `token` for `key`; one whose `lifetime` comes after what the clock can hold is used once, and not kept.
+    /// Holds `token` for `key`, and drops the tokens that have expired, whatever their scope; one whose `lifetime`
+    /// comes after what the clock can hold is used once, and not kept.
     pub(crate) fn put(&self, key: Key, token: SecretString, lifetime: Duration, now: Instant) {
         // Divided first: the token endpoint's `expires_in` can be any `u64`.
         let Some(expires) = now.checked_add(lifetime / LIFETIME_DENOMINATOR * LIFETIME_NUMERATOR)
         else {
             return;
         };
-        self.held
+        let mut held = self
+            .held
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, Held { token, expires });
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Otherwise a scope never asked again, one per repository pulled, would hold its token for good.
+        held.retain(|_, entry| entry.expires > now);
+        held.insert(key, Held { token, expires });
     }
 
     /// Forgets the token for `key`, which the registry refused.
@@ -140,9 +138,33 @@ mod tests {
         };
         assert_eq!(held(Duration::from_secs(89)).as_deref(), Some("t"));
         assert_eq!(held(Duration::from_secs(90)), None);
-        // Expired tokens are gone.
-        assert_eq!(held(Duration::ZERO), None);
         assert!(tokens.get(&key("b"), start).is_none());
+    }
+
+    #[test]
+    fn keeping_a_token_drops_the_expired_ones_of_every_scope() {
+        let tokens = Tokens::default();
+        let start = Instant::now();
+        let put = |scope: &str, at: Duration| {
+            tokens.put(
+                key(scope),
+                SecretString::from(scope.to_owned()),
+                Duration::from_secs(100),
+                start + at,
+            );
+        };
+        put("a", Duration::ZERO);
+        put("b", Duration::from_secs(50));
+        put("c", Duration::from_secs(90));
+        let mut scopes = tokens
+            .held
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|key| key.scope.clone())
+            .collect::<Vec<_>>();
+        scopes.sort();
+        assert_eq!(scopes, ["b", "c"]);
     }
 
     #[test]
