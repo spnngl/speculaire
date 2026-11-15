@@ -152,7 +152,7 @@ impl Reference {
         }
         let (domain, remainder) = split_docker_domain(text);
         let remote = remainder.split(':').next().unwrap_or(&remainder);
-        if remote.to_lowercase() != remote {
+        if crate::has_upper(remote) {
             return Err(ReferenceError::Uppercase);
         }
         Self::parse(&format!("{domain}/{remainder}"))
@@ -162,7 +162,7 @@ impl Reference {
     /// a domain and a slash.
     fn parse(text: &str) -> Result<Self, ReferenceError> {
         let Some((name, tag, digest)) = split_reference(text) else {
-            return Err(if split_reference(&text.to_lowercase()).is_some() {
+            return Err(if split_reference(&crate::go_lower(text)).is_some() {
                 ReferenceError::Uppercase
             } else {
                 ReferenceError::InvalidFormat
@@ -242,7 +242,7 @@ fn split_docker_domain(name: &str) -> (String, String) {
         (maybe_domain, maybe_remote)
     } else if maybe_domain == LEGACY_DEFAULT_DOMAIN {
         (DEFAULT_DOMAIN, maybe_remote)
-    } else if maybe_domain.contains(['.', ':']) || maybe_domain.to_lowercase() != maybe_domain {
+    } else if maybe_domain.contains(['.', ':']) || crate::has_upper(maybe_domain) {
         (maybe_domain, maybe_remote)
     } else {
         (DEFAULT_DOMAIN, name)
@@ -487,6 +487,9 @@ mod tests {
         for (text, error) in [
             ("", ReferenceError::InvalidFormat),
             ("org/App", ReferenceError::Uppercase),
+            // Go lowers `İ` to `i`, so the tag is upper case rather than invalid.
+            ("nginx:\u{130}", ReferenceError::Uppercase),
+            ("\u{130}/app", ReferenceError::Uppercase),
             ("a//b", ReferenceError::InvalidFormat),
             ("a/-b", ReferenceError::InvalidFormat),
             ("a/b-", ReferenceError::InvalidFormat),

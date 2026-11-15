@@ -154,7 +154,7 @@ fn normalize_os(os: &str, host: &Host) -> String {
     if os.is_empty() {
         return host.os.clone();
     }
-    let os = os.to_lowercase();
+    let os = crate::go_lower(os);
     if os == "macos" {
         "darwin".to_owned()
     } else {
@@ -164,7 +164,7 @@ fn normalize_os(os: &str, host: &Host) -> String {
 
 /// `normalizeArch`.
 fn normalize_arch(arch: &str, variant: &str) -> (String, String) {
-    let (arch, variant) = (arch.to_lowercase(), variant.to_lowercase());
+    let (arch, variant) = (crate::go_lower(arch), crate::go_lower(variant));
     let (arch, variant) = match arch.as_str() {
         "i386" => ("386", String::new()),
         "x86_64" | "x86-64" | "amd64" => (
@@ -248,7 +248,8 @@ fn is_os_component(part: &str) -> Option<(&str, &str, &str)> {
     features_ok.then_some((os, version, features))
 }
 
-/// `url.PathUnescape`, for the one place the library calls it: `%XX` is a byte.
+/// `url.PathUnescape`, for the one place the library calls it: `%XX` is a byte. Go keeps bytes that are not UTF-8;
+/// here each becomes U+FFFD, so features that differ only in such bytes sort and merge unlike Go's.
 fn path_unescape(text: &str) -> Option<String> {
     if !text.contains('%') {
         return Some(text.to_owned());
@@ -685,6 +686,18 @@ mod tests {
             ..Plain::default()
         }
         .into_platform()
+    }
+
+    #[test]
+    fn names_are_lowered_one_character_at_a_time_as_go_lowers_them() {
+        for ((os, arch), want) in [
+            (("L\u{130}NUX", "AMD64"), "linux/amd64"),
+            (("linux", "\u{130}386"), "linux/386"),
+            (("LINUX\u{3a3}", "ARM64"), "linux\u{3c3}/arm64"),
+        ] {
+            let normal = normalize(&platform(os, arch, ""), &host());
+            assert_eq!(format(&normal), want, "{os}/{arch}");
+        }
     }
 
     #[test]
