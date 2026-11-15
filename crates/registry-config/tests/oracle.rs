@@ -228,13 +228,18 @@ fn our_hosts(case: &HostsCase) -> Value {
         }
         answer["loaded"] = parsed(hosts::load_host_dir(dir));
     }
-    answer["resolved"] = resolved(hosts::resolve(
-        &roots,
-        &case.host,
-        Some(&case.default_scheme)
-            .filter(|s| !s.is_empty())
-            .map(String::as_str),
-    ));
+    let default_scheme = Some(case.default_scheme.as_str()).filter(|s| !s.is_empty());
+    answer["resolved"] = resolved(hosts::resolve(&roots, &case.host, default_scheme));
+    // The agent resolves through a tree read once (D91), which refuses a `hosts.toml` that does not parse: where it
+    // loads, it agrees with containerd too.
+    if let Ok(tree) = hosts::Tree::load(&roots) {
+        assert_eq!(
+            resolved::<()>(Ok(tree.resolve(&case.host, default_scheme))),
+            answer["resolved"],
+            "the tree of {}",
+            case.root.display()
+        );
+    }
     answer
 }
 
