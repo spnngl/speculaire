@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use zerocopy::IntoBytes as _;
+use zerocopy::big_endian::U32;
 
 /// The ALPN protocol of a connection to a reflector: this framing, with the messages of `proto/`.
 pub const ALPN: &[u8] = b"speculaire-reflect/1";
@@ -49,14 +51,14 @@ pub struct Reader<M> {
 #[derive(Debug)]
 enum State {
     /// The length, `filled` bytes of it read.
-    Head { bytes: [u8; 4], filled: usize },
+    Head { length: U32, filled: usize },
     /// The message, of exactly the length's size, `filled` bytes of it read.
     Body { bytes: Vec<u8>, filled: usize },
 }
 
 impl State {
     const START: Self = Self::Head {
-        bytes: [0; 4],
+        length: U32::ZERO,
         filled: 0,
     };
 }
@@ -84,7 +86,8 @@ impl<M: Message + Default> Reader<M> {
     ) -> Result<Option<M>, FrameError> {
         loop {
             match &mut self.state {
-                State::Head { bytes, filled } => {
+                State::Head { length, filled } => {
+                    let bytes = length.as_mut_bytes();
                     let unread = bytes.get_mut(*filled..).unwrap_or_default();
                     let read = io.read(unread).await?;
                     if read == 0 {
@@ -96,8 +99,7 @@ impl<M: Message + Default> Reader<M> {
                     }
                     *filled += read;
                     if *filled == bytes.len() {
-                        let size =
-                            usize::try_from(u32::from_be_bytes(*bytes)).unwrap_or(usize::MAX);
+                        let size = usize::try_from(length.get()).unwrap_or(usize::MAX);
                         if size > self.limit {
                             return Err(FrameError::Size {
                                 size,
@@ -140,12 +142,13 @@ pub async fn write<M: Message, W: AsyncWrite + Unpin>(
     limit: usize,
 ) -> Result<(), FrameError> {
     let size = message.encoded_len();
-    let head = u32::try_from(size)
+    let length = u32::try_from(size)
         .ok()
         .filter(|_| size <= limit)
+        .map(U32::new)
         .ok_or(FrameError::Size { size, limit })?;
-    let mut frame = Vec::with_capacity(size.saturating_add(4));
-    frame.extend_from_slice(&head.to_be_bytes());
+    let mut frame = Vec::with_capacity(size.saturating_add(size_of::<U32>()));
+    frame.extend_from_slice(length.as_bytes());
     message.encode_raw(&mut frame);
     io.write_all(&frame).await?;
     io.flush().await?;
