@@ -122,7 +122,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/fake-runtime` | Test support: a fake containerd on a socket, answering the CRI `Version`, `ListImages` and introspection `Plugins` (D87), and CRI-O's `GET /config` (D89, D90) |
 | `crates/pki` | the mirror's local CA and certificates (D14, D82); later kubelet certificate loading and rotation, rustls verifiers (D16) |
 | `crates/load` | The load scenario `speculaire-loadgen` runs: simulated agents on `crates/reflect`'s client, the reflector's targets measured from `/proc` and `/metrics` (D33, D104) |
-| `crates/reflect` | Protobuf, the reflector's server and index (D97), and the agent's client: `Members`, one `Announce` stream per member, hedged `Lookup` (D2, D98) |
+| `crates/reflect` | Protobuf frames over TLS (D105), the reflector's server and index (D97), and the agent's client: `Members`, one `Announce` stream per member carrying its numbered `Lookup`s, hedged (D2, D98) |
 | `crates/verify` | Artifact discovery and *artifact store*, sigstore glue, policy, SBOM checks, verdict cache (planned) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data, a workspace of its own, run by `just fuzz <target>` and nightly; `just check` replays their seeds on stable (D27). `config` takes raw bytes and `config_values` a config file written from the keys (D75) |

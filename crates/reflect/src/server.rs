@@ -1,32 +1,26 @@
-//! The reflector API over mutual TLS with node identities (D2, D16): accept, handshake, serve.
+//! The reflector API over mutual TLS with node identities (D2, D16, D105): accept, handshake, then serve each
+//! connection's frames in order.
 
 use std::io;
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use futures_util::stream;
-use rustls::ServerConfig;
 use speculaire_pki::node::{Credentials, node_subject};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::AsyncWriteExt as _;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
-use tonic::codegen::BoxStream;
-use tonic::transport::server::Connected;
-use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, info, warn};
 
+use crate::frame::{self, FrameError, Reader};
 use crate::index::Index;
-use crate::message::{self, Announcement};
+use crate::message::{Lookup, Request};
 use crate::metrics::{self, Reason};
-use crate::proto::reflector_server::{self, ReflectorServer};
 use crate::proto::{self, reflector_message};
 use crate::session::{Rejection, Reply, Session};
 
@@ -37,16 +31,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const LOOKUP_PEERS: usize = 8;
 
 /// How many digests an agent puts in one `Snapshot` chunk at most (D97, D104): about 1.8 KB of sha256 text, 3.4 KB of
-/// sha512. A stream's receive buffer keeps the size of its largest message, so a small chunk keeps the reflector's
-/// memory per agent small.
+/// sha512. The reflector holds the frame it reads, so a small chunk keeps its memory per agent small.
 pub const SNAPSHOT_CHUNK: usize = 25;
 
-/// How much an agent may send on a stream before the reflector reads it: a few chunks (D104). hyper's 1 MiB would let
-/// each agent park its whole snapshot in the reflector while the index is busy.
-const STREAM_WINDOW: u32 = 8 << 10;
-
-/// How much an agent may send on its connection before the reflector reads it: HTTP/2's own default (D104).
-const CONNECTION_WINDOW: u32 = 65_535;
+/// How long a stopping reflector gives a connection to take its `Refused` and the TLS close.
+const FAREWELL: Duration = Duration::from_secs(1);
 
 /// A reflector, as `reflector.members` lists it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -96,7 +85,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             handshake: Duration::from_secs(5),
-            message: 4 * 1024 * 1024,
+            message: frame::LIMIT,
             digests: 100_000,
         }
     }
@@ -108,7 +97,9 @@ pub struct Reflector {
     address: SocketAddr,
     index: Arc<Index>,
     stop: CancellationToken,
-    task: JoinHandle<()>,
+    accept: JoinHandle<()>,
+    /// Ends once every connection has dropped its [`Api`], whose sender it holds.
+    ended: mpsc::Receiver<()>,
 }
 
 impl Reflector {
@@ -124,51 +115,38 @@ impl Reflector {
     ) -> io::Result<Self> {
         let address = listener.local_addr()?;
         let mut tls = credentials.server();
-        tls.alpn_protocols = vec![b"h2".to_vec()];
+        tls.alpn_protocols = vec![frame::ALPN.to_vec()];
         let stop = CancellationToken::new();
-        let (links, mut incoming) = mpsc::channel(64);
-        let limits = settings.limits;
-        tokio::spawn(accept(
-            listener,
-            Arc::new(tls),
-            limits.handshake,
-            links,
-            stop.clone(),
-        ));
         let index = Arc::default();
+        let (held, ended) = mpsc::channel(1);
         let api = Api {
             index: Arc::clone(&index),
+            members: proto::MembersResponse {
+                members: settings
+                    .members
+                    .iter()
+                    .map(|member| proto::Member {
+                        node: member.node.clone(),
+                        address: member.address.to_string(),
+                    })
+                    .collect(),
+            },
             settings: Arc::new(settings),
             stop: stop.clone(),
+            held,
         };
-        let server = tonic::transport::Server::builder()
-            .http2_keepalive_interval(Some(Duration::from_secs(30)))
-            .http2_keepalive_timeout(Some(Duration::from_secs(10)))
-            .initial_stream_window_size(STREAM_WINDOW)
-            .initial_connection_window_size(CONNECTION_WINDOW)
-            .add_service(ReflectorServer::new(api).max_decoding_message_size(limits.message));
-        let incoming = stream::poll_fn(move |cx| {
-            incoming
-                .poll_recv(cx)
-                .map(|link| link.map(Ok::<_, io::Error>))
-        });
-        let task = tokio::spawn({
-            let stop = stop.clone();
-            async move {
-                if let Err(err) = server
-                    .serve_with_incoming_shutdown(incoming, stop.cancelled_owned())
-                    .await
-                {
-                    warn!(error = %err, "reflector stopped");
-                }
-            }
-        });
+        let accept = tokio::spawn(accept(
+            listener,
+            TlsAcceptor::from(Arc::new(tls)),
+            Arc::new(api),
+        ));
         info!(%address, "reflector open");
         Ok(Self {
             address,
             index,
             stop,
-            task,
+            accept,
+            ended,
         })
     }
 
@@ -178,28 +156,39 @@ impl Reflector {
         self.address
     }
 
-    /// Ends every stream and stops serving (D39): agents then announce to the other members.
-    pub async fn stop(self) {
+    /// Refuses every connection as stopping and waits for each to end (D39, D103): agents then announce to the
+    /// other members.
+    pub async fn stop(mut self) {
         self.stop.cancel();
         self.index.close();
-        if let Err(err) = self.task.await {
+        if let Err(err) = self.accept.await {
             warn!(error = %err, "reflector task ended abnormally");
         }
+        // Nothing is ever sent: `recv` returns `None` once the last sender drops.
+        while self.ended.recv().await.is_some() {}
     }
 }
 
-/// Accepts connections, each handshaking in its own task so that a slow one delays no other.
-async fn accept(
-    listener: TcpListener,
-    tls: Arc<ServerConfig>,
-    timeout: Duration,
-    links: mpsc::Sender<Link>,
+/// What every connection serves from.
+#[derive(Debug)]
+struct Api {
+    index: Arc<Index>,
+    settings: Arc<Settings>,
+    /// What `Members` answers, encoded once.
+    members: proto::MembersResponse,
     stop: CancellationToken,
-) {
-    let acceptor = TlsAcceptor::from(tls);
+    #[expect(
+        dead_code,
+        reason = "never sends: dropping the last `Api` ends `Reflector::stop`'s wait"
+    )]
+    held: mpsc::Sender<()>,
+}
+
+/// Accepts connections, each handshaking and served in its own task, so that a slow one delays no other.
+async fn accept(listener: TcpListener, acceptor: TlsAcceptor, api: Arc<Api>) {
     loop {
         let (tcp, address) = tokio::select! {
-            () = stop.cancelled() => return,
+            () = api.stop.cancelled() => return,
             accepted = listener.accept() => match accepted {
                 Ok(accepted) => accepted,
                 Err(err) => {
@@ -210,27 +199,79 @@ async fn accept(
                 }
             },
         };
-        let acceptor = acceptor.clone();
-        let links = links.clone();
-        let stop = stop.clone();
-        tokio::spawn(async move {
-            let link = tokio::select! {
-                () = stop.cancelled() => return,
-                link = tokio::time::timeout(timeout, handshake(&acceptor, tcp)) => link,
-            };
-            match link {
-                Ok(Ok(link)) => {
-                    // The server is gone when the receiver is.
-                    let _ = links.send(link).await;
-                }
-                Ok(Err(err)) => debug!(%address, error = %err, "reflector handshake refused"),
-                Err(_) => debug!(%address, "reflector handshake timed out"),
-            }
-        });
+        tokio::spawn(serve(acceptor.clone(), tcp, address, Arc::clone(&api)));
     }
 }
 
-async fn handshake(acceptor: &TlsAcceptor, tcp: TcpStream) -> io::Result<Link> {
+/// Handshakes, then answers the agent's frames until the connection ends.
+async fn serve(acceptor: TlsAcceptor, tcp: TcpStream, address: SocketAddr, api: Arc<Api>) {
+    let handshake = tokio::select! {
+        () = api.stop.cancelled() => return,
+        handshake = tokio::time::timeout(api.settings.limits.handshake, handshake(&acceptor, tcp)) => handshake,
+    };
+    let (mut tls, node) = match handshake {
+        Ok(Ok(handshake)) => handshake,
+        Ok(Err(err)) => return debug!(%address, error = %err, "reflector handshake refused"),
+        Err(_) => return debug!(%address, "reflector handshake timed out"),
+    };
+    let mut reader = Reader::new(api.settings.limits.message);
+    let mut session = Session::new(
+        Arc::clone(&api.index),
+        Arc::clone(&api.settings),
+        Arc::clone(&node),
+    );
+    let refusal = loop {
+        let read = tokio::select! {
+            () = api.stop.cancelled() => break stopping(),
+            read = tokio::time::timeout(frame::SILENCE, reader.next(&mut tls)) => read,
+        };
+        let message = match read {
+            Ok(Ok(Some(message))) => message,
+            Ok(Ok(None)) => return debug!(%node, "the agent closed its reflector connection"),
+            Ok(Err(err @ FrameError::Size { .. })) => break reject(&node, Reason::Size, &err),
+            Ok(Err(err @ FrameError::Decode(_))) => break reject(&node, Reason::Malformed, &err),
+            Ok(Err(FrameError::Io(err))) => {
+                return debug!(%node, error = %err, "reflector connection failed");
+            }
+            Err(_) => return debug!(%node, "reflector connection silent; closing it"),
+        };
+        let reply = match answer(&api, &mut session, message) {
+            Ok(Some(reply)) => reply,
+            Ok(None) => continue,
+            Err(refusal) => break refusal,
+        };
+        let reply = proto::ReflectorMessage {
+            message: Some(reply),
+        };
+        // Stopping inside a frame leaves the agent no frame to read the refusal from: the connection just closes.
+        let written = tokio::select! {
+            () = api.stop.cancelled() => return,
+            written = tokio::time::timeout(frame::SILENCE, frame::write(&mut tls, &reply, frame::LIMIT)) => written,
+        };
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return debug!(%node, error = %err, "reflector connection failed"),
+            Err(_) => return debug!(%node, "reflector connection stalled; closing it"),
+        }
+    };
+    // The session withdraws the announcement before the agent learns why.
+    drop(session);
+    let refused = proto::ReflectorMessage {
+        message: Some(reflector_message::Message::Refused(refusal)),
+    };
+    let farewell = async {
+        frame::write(&mut tls, &refused, frame::LIMIT).await?;
+        tls.shutdown().await.map_err(FrameError::from)
+    };
+    if let Ok(Err(err)) = tokio::time::timeout(FAREWELL, farewell).await {
+        debug!(%node, error = %err, "cannot tell the agent why the reflector ends its connection");
+    }
+}
+
+async fn handshake(
+    acceptor: &TlsAcceptor,
+    tcp: TcpStream,
+) -> io::Result<(TlsStream<TcpStream>, Arc<str>)> {
     // A lookup's answer is small: Nagle's algorithm would hold it for the client's delayed ACK.
     tcp.set_nodelay(true)?;
     let tls = acceptor.accept(tcp).await?;
@@ -242,193 +283,87 @@ async fn handshake(acceptor: &TlsAcceptor, tcp: TcpStream) -> io::Result<Link> {
         .and_then(<[_]>::first)
         .ok_or_else(|| io::Error::other("no peer certificate"))
         .and_then(|cert| node_subject(cert).map_err(io::Error::other))?;
-    Ok(Link {
-        tls,
-        peer: Peer {
-            node: Arc::from(node),
+    Ok((tls, Arc::from(node)))
+}
+
+/// The reply to one message, if it needs one; a refusal ends the connection.
+fn answer(
+    api: &Api,
+    session: &mut Session,
+    message: proto::AgentMessage,
+) -> Result<Option<reflector_message::Message>, proto::Refused> {
+    let request =
+        Request::try_from(message).map_err(|err| reject(session.node(), err.reason(), &err))?;
+    Ok(match request {
+        Request::Announcement(announcement) => match session.handle(announcement) {
+            Ok(None) => None,
+            Ok(Some(Reply::Resync)) => Some(reflector_message::Message::Resync(proto::Resync {})),
+            Err(Rejection::Superseded) => {
+                return Err(refused(
+                    proto::Reason::Superseded,
+                    "a later connection of this node took its announcement over",
+                ));
+            }
+            Err(Rejection::Refused(reason, why)) => {
+                return Err(reject(session.node(), reason, &why));
+            }
         },
+        Request::Lookup(lookup) => Some(reflector_message::Message::Lookup(self::lookup(
+            api,
+            session.node(),
+            &lookup,
+        ))),
+        Request::Members => Some(reflector_message::Message::Members(api.members.clone())),
+        Request::Ping => Some(reflector_message::Message::Pong(proto::Pong {})),
     })
 }
 
-/// A connection after its handshake, with the node it proved to be.
-struct Link {
-    tls: TlsStream<TcpStream>,
-    peer: Peer,
-}
-
-/// The node at the other end of a connection; tonic puts it in every request's extensions.
-#[derive(Clone, Debug)]
-struct Peer {
-    node: Arc<str>,
-}
-
-impl Connected for Link {
-    type ConnectInfo = Peer;
-
-    fn connect_info(&self) -> Peer {
-        self.peer.clone()
+/// Up to [`LOOKUP_PEERS`] holders of the digest other than `node`.
+fn lookup(api: &Api, node: &str, lookup: &Lookup) -> proto::LookupResponse {
+    let start = Instant::now();
+    let peers = api
+        .index
+        .lookup(&lookup.digest, node, LOOKUP_PEERS)
+        .into_iter()
+        .map(|holder| proto::Peer {
+            node: holder.node.to_string(),
+            address: holder.peer.to_string(),
+        })
+        .collect();
+    ::metrics::histogram!(metrics::LOOKUP).record(start.elapsed());
+    proto::LookupResponse {
+        peers,
+        id: lookup.id,
     }
 }
 
-impl AsyncRead for Link {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.tls).poll_read(cx, buf)
+fn stopping() -> proto::Refused {
+    refused(proto::Reason::Stopping, "the reflector is stopping")
+}
+
+fn refused(reason: proto::Reason, message: &str) -> proto::Refused {
+    proto::Refused {
+        reason: reason.into(),
+        message: message.to_owned(),
     }
 }
 
-impl AsyncWrite for Link {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.tls).poll_write(cx, buf)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.tls).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.tls).poll_shutdown(cx)
-    }
-}
-
-struct Api {
-    index: Arc<Index>,
-    settings: Arc<Settings>,
-    stop: CancellationToken,
-}
-
-fn peer<T>(request: &Request<T>) -> Result<Arc<str>, Status> {
-    request
-        .extensions()
-        .get::<Peer>()
-        .map(|peer| Arc::clone(&peer.node))
-        .ok_or_else(|| Status::unauthenticated("no node identity"))
-}
-
-#[tonic::async_trait]
-impl reflector_server::Reflector for Api {
-    async fn members(
-        &self,
-        _: Request<proto::MembersRequest>,
-    ) -> Result<Response<proto::MembersResponse>, Status> {
-        let members = self
-            .settings
-            .members
-            .iter()
-            .map(|member| proto::Member {
-                node: member.node.clone(),
-                address: member.address.to_string(),
-            })
-            .collect();
-        Ok(Response::new(proto::MembersResponse { members }))
-    }
-
-    type AnnounceStream = BoxStream<proto::ReflectorMessage>;
-
-    async fn announce(
-        &self,
-        request: Request<Streaming<proto::AgentMessage>>,
-    ) -> Result<Response<Self::AnnounceStream>, Status> {
-        let node = peer(&request)?;
-        let session = Session::new(Arc::clone(&self.index), Arc::clone(&self.settings), node);
-        let state = Some((session, request.into_inner(), self.stop.clone()));
-        let replies = stream::unfold(state, |state| async move {
-            let (mut session, mut inbound, stop) = state?;
-            match next(&mut session, &mut inbound, &stop).await {
-                Some(Ok(reply)) => Some((Ok(reply), Some((session, inbound, stop)))),
-                // An error ends the stream, and dropping the session withdraws what it announced.
-                Some(Err(status)) => Some((Err(status), None)),
-                None => None,
-            }
-        });
-        Ok(Response::new(Box::pin(replies)))
-    }
-
-    async fn lookup(
-        &self,
-        request: Request<proto::LookupRequest>,
-    ) -> Result<Response<proto::LookupResponse>, Status> {
-        let start = Instant::now();
-        let node = peer(&request)?;
-        let digest = message::digest(request.into_inner().digest)
-            .map_err(|err| Status::invalid_argument(err.to_string()))?;
-        let peers = self
-            .index
-            .lookup(&digest, &node, LOOKUP_PEERS)
-            .into_iter()
-            .map(|holder| proto::Peer {
-                node: holder.node.to_string(),
-                address: holder.peer.to_string(),
-            })
-            .collect();
-        ::metrics::histogram!(metrics::LOOKUP).record(start.elapsed());
-        Ok(Response::new(proto::LookupResponse { peers }))
-    }
-}
-
-/// The next reply of a stream, after any number of messages that need none; `None` at its end.
-async fn next(
-    session: &mut Session,
-    inbound: &mut Streaming<proto::AgentMessage>,
-    stop: &CancellationToken,
-) -> Option<Result<proto::ReflectorMessage, Status>> {
-    loop {
-        let received = tokio::select! {
-            () = stop.cancelled() => return Some(Err(Status::unavailable("the reflector is stopping"))),
-            received = inbound.message() => received,
-        };
-        let message = match received {
-            Ok(Some(message)) => message,
-            Ok(None) => return None,
-            // tonic refuses a message over the size limit with `OutOfRange`.
-            Err(status) if status.code() == tonic::Code::OutOfRange => {
-                return Some(Err(reject(session.node(), Reason::Size, status.message())));
-            }
-            Err(status) => return Some(Err(status)),
-        };
-        let reply = Announcement::try_from(message)
-            .map_err(|err| Rejection::Refused(err.reason(), err.to_string()))
-            .and_then(|announcement| session.handle(announcement));
-        match reply {
-            Ok(None) => {}
-            Ok(Some(Reply::Resync)) => {
-                return Some(Ok(proto::ReflectorMessage {
-                    message: Some(reflector_message::Message::Resync(proto::Resync {})),
-                }));
-            }
-            Err(Rejection::Superseded) => {
-                return Some(Err(Status::aborted(
-                    "a later stream of this node took over",
-                )));
-            }
-            Err(Rejection::Refused(reason, why)) => {
-                return Some(Err(reject(session.node(), reason, &why)));
-            }
-        }
-    }
-}
-
-/// Counts and logs a refused stream; an agent refused again reconnects at most once a minute (D33).
-fn reject(node: &str, reason: Reason, why: &str) -> Status {
+/// Counts and logs a refused agent; an agent refused again reconnects at most once a minute (D33).
+fn reject(node: &str, reason: Reason, why: &dyn std::fmt::Display) -> proto::Refused {
     metrics::rejected(reason);
     warn!(
         node,
         reason = reason.label(),
-        why,
+        why = %why,
         "announce stream refused"
     );
-    let status = match reason {
-        Reason::Identity => Status::permission_denied,
-        Reason::Version => Status::failed_precondition,
-        Reason::Size | Reason::Digests => Status::resource_exhausted,
-        Reason::Address | Reason::Malformed => Status::invalid_argument,
+    let code = match reason {
+        Reason::Identity => proto::Reason::Identity,
+        Reason::Version => proto::Reason::Version,
+        Reason::Size => proto::Reason::Size,
+        Reason::Digests => proto::Reason::Digests,
+        Reason::Address => proto::Reason::Address,
+        Reason::Malformed => proto::Reason::Malformed,
     };
-    status(format!("stream of node {node:?} refused: {why}"))
+    refused(code, &format!("connection of node {node:?} refused: {why}"))
 }

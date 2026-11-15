@@ -1,6 +1,7 @@
 //! The agent's reflector client against two reflectors over real TLS on loopback (D2, D33, D36, D98).
 #![expect(
     clippy::unwrap_used,
+    clippy::panic,
     reason = "the helpers of a test fail it by panicking"
 )]
 
@@ -14,8 +15,8 @@ use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
 use speculaire_pki::testing::Cluster;
 use speculaire_reflect::client::{Client, Config, Holdings, LookupError, PEER_PORT};
-use speculaire_reflect::proto::LookupRequest;
-use speculaire_reflect::proto::reflector_client::ReflectorClient;
+use speculaire_reflect::frame::{self, Reader};
+use speculaire_reflect::proto::{self, agent_message, reflector_message};
 use speculaire_reflect::{Member, Reflector, Settings, connect};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -95,15 +96,29 @@ impl Test {
         let credentials = credentials(&self.cluster, &self.dir, "observer");
         let mut answers = Vec::new();
         for member in &self.members {
-            let channel = connect(member.address, credentials.client(&member.node))
+            let mut tls = connect(member.address, credentials.client(&member.node))
                 .await
                 .unwrap();
-            let request = LookupRequest {
-                digest: digest.to_string(),
+            let request = proto::AgentMessage {
+                message: Some(agent_message::Message::Lookup(proto::LookupRequest {
+                    digest: digest.to_string(),
+                    id: 0,
+                })),
             };
-            let response = ReflectorClient::new(channel).lookup(request).await.unwrap();
+            frame::write(&mut tls, &request, frame::LIMIT)
+                .await
+                .unwrap();
+            let answer = Reader::<proto::ReflectorMessage>::new(frame::LIMIT)
+                .next(&mut tls)
+                .await
+                .unwrap();
+            let Some(proto::ReflectorMessage {
+                message: Some(reflector_message::Message::Lookup(response)),
+            }) = answer
+            else {
+                panic!("{answer:?} answers a lookup");
+            };
             let mut peers: Vec<(String, String)> = response
-                .into_inner()
                 .peers
                 .into_iter()
                 .map(|peer| (peer.node, peer.address))

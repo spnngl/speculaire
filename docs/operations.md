@@ -89,16 +89,16 @@ Shown in `kubectl describe pod` under `CreateContainerError`.
 
 ## Reflector refusals
 
-A reflector ends an agent's `Announce` stream and counts the reason in `speculaire_reflector_announce_rejected_total{reason}`; its `warn` log names the node and the cause (D97). The agent reconnects (D33), and is refused again until the cause is fixed.
+A reflector ends an agent's `Announce` stream with a `Refused` frame naming the reason (D105), and counts it in `speculaire_reflector_announce_rejected_total{reason}`; its `warn` log names the node and the cause (D97). The agent reconnects (D33), and is refused again until the cause is fixed.
 
 | Reason | Meaning | Action |
 |---|---|---|
 | `identity` | The `Hello` names another node than the TLS certificate's (D16) | Find the node: a bug, or a node forging announcements |
 | `version` | The agent speaks a protocol version the reflector does not accept: not its own nor the previous one (D2) | Finish the rolling upgrade, reflectors first |
 | `address` | The peer address is not an IP literal with a port | Report a bug |
-| `size` | A message is over 4 MiB | Report a bug |
+| `size` | A frame's length is over 4 MiB | Report a bug |
 | `digests` | The node announces more than 100k digests | Prune the node's images, or report it if it holds that many legitimately |
-| `malformed` | A message is not one the protocol allows there, such as a second `Hello` or a string that is not a digest | Report a bug |
+| `malformed` | A frame does not decode, or holds a message the protocol does not allow there, such as a second `Hello` or a string that is not a digest | Report a bug |
 
 ## Logs and audit
 

@@ -9,7 +9,7 @@ Each decision has three parts: the choice (**Decision**), its reasons (**Because
 Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 
 - D1 [reflector](reflector.md): reflectors replace the DHT; no libp2p
-- D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51, D97, D98)
+- D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51, D97, D98, D105)
 - D3 [distribution](distribution.md): every agent announces its own peer address and port (amended by D36)
 - D4 [build](build.md): no io_uring in v1, and the unit denies its syscalls
 - D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85)
@@ -20,7 +20,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node
-- D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57)
+- D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57, D105)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
 - D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81, D86)
 - D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60, D95)
@@ -104,13 +104,13 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63)
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
-- D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76; amended by D104)
-- D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33; amended by D102, D103)
+- D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76; amended by D104, D105)
+- D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33; amended by D102, D103, D105)
 - D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90)
 - D100 [distribution](distribution.md): the peer API routes `GET` and `HEAD` by digest through the mirror's parser, caps only blob bodies, answers `503` while the agent stops, and opens on the peer address the client fixes (amends D24, D36; amended by D103)
 - D101 [agent](agent.md): `configure` keeps the mirror's table only where containerd reads it first, and refuses a `hosts.toml` whose first host table is `[host.""]`, which containerd skips there and would read after the mirror's (amends D82)
 - D102 [distribution](distribution.md): the fetcher races and hedges a lookup's holders (4 at once, Spegel's 80th/85th/90th percentile delays, 50 ms floor), resumes with `Range`, checks a blob whole before serving it on containerd and streams it on CRI-O; `speculaire_lookup_seconds` gains `result`; every socket sets `TCP_NODELAY` (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103)
 - D103 [reflector](reflector.md): a lookup with no stream up counts as `no_reflector`, a restarted reflector refills from the agents' opening snapshots, the client stops without waiting on the load balancer, and the drain waits for each connection to close, not only for its body (amends D39, D98, D100, D102)
-
-- D104 [reflector](reflector.md): `speculaire-loadgen` runs D33's scenario from the library `crates/load` against a reflector process, measuring `/proc` and `/metrics`, in `load.yml` on dispatch until the transport change meets the 1 GiB peak; `Snapshot` chunks of 25 digests, unbatched messages, 8 KiB stream windows, snapshots staged as bitmaps and inline index keys bound the reflector's cost per agent; a stopping reflector empties its index at once; divan micro-benchmarks outside CI; `deep` runs the reflector under Valgrind (amends D27, D33, D97)
-Next free number: D105.
+- D104 [reflector](reflector.md): `speculaire-loadgen` runs D33's scenario from the library `crates/load` against a reflector process, measuring `/proc` and `/metrics`, in `load.yml` nightly and on dispatch with `args`; `Snapshot` chunks of 25 digests, unbatched messages, 8 KiB stream windows, snapshots staged as bitmaps and inline index keys bound the reflector's cost per agent; a stopping reflector empties its index at once; divan micro-benchmarks outside CI; `deep` runs the reflector under Valgrind (amends D27, D33, D97; amended by D105)
+- D105 [reflector](reflector.md): agents and reflectors speak 4-byte length-prefixed protobuf over TLS with ALPN `speculaire-reflect/1`, not gRPC: numbered lookups answered in order between announcements, `Ping` every 30 s and a close after 40 s of silence, `Refused` with a reason, frame lengths checked against 4 MiB before allocating (amends D2, D13, D97, D98, D104)
+Next free number: D106.

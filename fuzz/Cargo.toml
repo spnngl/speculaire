@@ -182,6 +182,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "reflect_frame"
+path = "fuzz_targets/reflect_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "peer_response"
 path = "fuzz_targets/peer_response.rs"
 test = false

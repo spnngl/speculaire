@@ -1,4 +1,4 @@
-//! What an agent sends on an `Announce` stream, parsed from its protobuf at the boundary (D2, D97).
+//! What an agent sends, parsed from its protobuf at the boundary (D2, D97, D105).
 
 use std::net::SocketAddr;
 
@@ -7,10 +7,32 @@ use speculaire_oci::reference::Digest;
 use crate::metrics::Reason;
 use crate::proto::{self, agent_message};
 
-/// One message of an `Announce` stream.
+/// One message of an agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// What the agent holds.
+    Announcement(Announcement),
+    /// Who else holds a digest.
+    Lookup(Lookup),
+    /// The reflectors, as `reflector.members` lists them.
+    Members,
+    /// A sign of life, answered with one.
+    Ping,
+}
+
+/// A digest to look up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lookup {
+    /// The number the answer carries back, chosen by the agent.
+    pub id: u64,
+    /// The digest.
+    pub digest: Digest,
+}
+
+/// What an agent announces on its connection to a member.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announcement {
-    /// The first message: who the agent is and where its peers reach it.
+    /// The first announcement: who the agent is and where its peers reach it.
     Hello(Hello),
     /// A chunk of every digest the agent holds.
     Snapshot(Snapshot),
@@ -18,7 +40,7 @@ pub enum Announcement {
     Delta(Delta),
 }
 
-/// The first message of a stream.
+/// The first announcement of a connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hello {
     /// The protocol version the agent speaks.
@@ -76,52 +98,76 @@ impl Malformed {
     }
 }
 
-impl TryFrom<proto::AgentMessage> for Announcement {
+impl TryFrom<proto::AgentMessage> for Request {
     type Error = Malformed;
 
     fn try_from(message: proto::AgentMessage) -> Result<Self, Malformed> {
         Ok(match message.message.ok_or(Malformed::Empty)? {
-            agent_message::Message::Hello(hello) => Self::Hello(Hello {
-                version: hello.protocol_version,
-                peer: hello
-                    .peer_address
-                    .parse()
-                    .map_err(|_| Malformed::Address(hello.peer_address))?,
-                node: hello.node,
+            agent_message::Message::Hello(hello) => {
+                Self::Announcement(Announcement::Hello(Hello {
+                    version: hello.protocol_version,
+                    peer: hello
+                        .peer_address
+                        .parse()
+                        .map_err(|_| Malformed::Address(hello.peer_address))?,
+                    node: hello.node,
+                }))
+            }
+            agent_message::Message::Snapshot(snapshot) => {
+                Self::Announcement(Announcement::Snapshot(Snapshot {
+                    digests: digests(snapshot.digests)?,
+                    last: snapshot.last,
+                    seq: snapshot.seq,
+                }))
+            }
+            agent_message::Message::Delta(delta) => {
+                Self::Announcement(Announcement::Delta(Delta {
+                    seq: delta.seq,
+                    added: digests(delta.added)?,
+                    removed: digests(delta.removed)?,
+                }))
+            }
+            agent_message::Message::Lookup(lookup) => Self::Lookup(Lookup {
+                id: lookup.id,
+                digest: digest(lookup.digest)?,
             }),
-            agent_message::Message::Snapshot(snapshot) => Self::Snapshot(Snapshot {
-                digests: digests(snapshot.digests)?,
-                last: snapshot.last,
-                seq: snapshot.seq,
-            }),
-            agent_message::Message::Delta(delta) => Self::Delta(Delta {
-                seq: delta.seq,
-                added: digests(delta.added)?,
-                removed: digests(delta.removed)?,
-            }),
+            agent_message::Message::Members(proto::MembersRequest {}) => Self::Members,
+            agent_message::Message::Ping(proto::Ping {}) => Self::Ping,
         })
     }
 }
 
-impl From<Announcement> for proto::AgentMessage {
-    fn from(announcement: Announcement) -> Self {
+impl From<Request> for proto::AgentMessage {
+    fn from(request: Request) -> Self {
         let texts = |digests: Vec<Digest>| digests.iter().map(ToString::to_string).collect();
-        let message = match announcement {
-            Announcement::Hello(hello) => agent_message::Message::Hello(proto::Hello {
-                protocol_version: hello.version,
-                node: hello.node,
-                peer_address: hello.peer.to_string(),
+        let message = match request {
+            Request::Announcement(Announcement::Hello(hello)) => {
+                agent_message::Message::Hello(proto::Hello {
+                    protocol_version: hello.version,
+                    node: hello.node,
+                    peer_address: hello.peer.to_string(),
+                })
+            }
+            Request::Announcement(Announcement::Snapshot(snapshot)) => {
+                agent_message::Message::Snapshot(proto::Snapshot {
+                    digests: texts(snapshot.digests),
+                    last: snapshot.last,
+                    seq: snapshot.seq,
+                })
+            }
+            Request::Announcement(Announcement::Delta(delta)) => {
+                agent_message::Message::Delta(proto::Delta {
+                    seq: delta.seq,
+                    added: texts(delta.added),
+                    removed: texts(delta.removed),
+                })
+            }
+            Request::Lookup(lookup) => agent_message::Message::Lookup(proto::LookupRequest {
+                digest: lookup.digest.to_string(),
+                id: lookup.id,
             }),
-            Announcement::Snapshot(snapshot) => agent_message::Message::Snapshot(proto::Snapshot {
-                digests: texts(snapshot.digests),
-                last: snapshot.last,
-                seq: snapshot.seq,
-            }),
-            Announcement::Delta(delta) => agent_message::Message::Delta(proto::Delta {
-                seq: delta.seq,
-                added: texts(delta.added),
-                removed: texts(delta.removed),
-            }),
+            Request::Members => agent_message::Message::Members(proto::MembersRequest {}),
+            Request::Ping => agent_message::Message::Ping(proto::Ping {}),
         };
         Self {
             message: Some(message),
@@ -129,12 +175,8 @@ impl From<Announcement> for proto::AgentMessage {
     }
 }
 
-/// Parses a digest an agent sent.
-///
-/// # Errors
-///
-/// When `text` is not `<algorithm>:<encoded>` with an algorithm the OCI image spec registers.
-pub fn digest(text: String) -> Result<Digest, Malformed> {
+/// A digest an agent sent: `<algorithm>:<encoded>`, with an algorithm the OCI image spec registers.
+fn digest(text: String) -> Result<Digest, Malformed> {
     Digest::parse(&text).map_err(|_| Malformed::Digest(text))
 }
 
@@ -148,56 +190,71 @@ mod tests {
 
     const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    fn hello(address: &str) -> proto::AgentMessage {
+    fn message(message: agent_message::Message) -> proto::AgentMessage {
         proto::AgentMessage {
-            message: Some(agent_message::Message::Hello(proto::Hello {
-                protocol_version: 1,
-                node: "a".to_owned(),
-                peer_address: address.to_owned(),
-            })),
+            message: Some(message),
         }
+    }
+
+    fn hello(address: &str) -> proto::AgentMessage {
+        message(agent_message::Message::Hello(proto::Hello {
+            protocol_version: 1,
+            node: "a".to_owned(),
+            peer_address: address.to_owned(),
+        }))
     }
 
     #[test]
     fn a_peer_address_is_an_ip_literal_with_a_port() {
         for address in ["10.0.0.1:7484", "[fd00::1]:7484"] {
-            let parsed = Announcement::try_from(hello(address)).unwrap();
+            let parsed = Request::try_from(hello(address)).unwrap();
             assert_eq!(proto::AgentMessage::from(parsed), hello(address));
         }
         for address in ["10.0.0.1", "node-a:7484", "fd00::1:7484", ""] {
-            let refused = Announcement::try_from(hello(address)).unwrap_err();
+            let refused = Request::try_from(hello(address)).unwrap_err();
             assert_eq!(refused.reason(), Reason::Address, "{address}");
         }
     }
 
     #[test]
-    fn every_string_of_a_delta_is_a_digest() {
-        let delta = |removed: &str| proto::AgentMessage {
-            message: Some(agent_message::Message::Delta(proto::Delta {
+    fn every_string_of_a_delta_and_a_lookup_is_a_digest() {
+        let delta = |removed: &str| {
+            message(agent_message::Message::Delta(proto::Delta {
                 seq: 3,
                 added: vec![DIGEST.to_owned()],
                 removed: vec![removed.to_owned()],
-            })),
+            }))
         };
         let digest = Digest::parse(DIGEST).unwrap();
-        let parsed = Announcement::try_from(delta(DIGEST)).unwrap();
+        let parsed = Request::try_from(delta(DIGEST)).unwrap();
         assert_eq!(
             parsed,
-            Announcement::Delta(Delta {
+            Request::Announcement(Announcement::Delta(Delta {
                 seq: 3,
                 added: vec![digest.clone()],
-                removed: vec![digest],
-            })
+                removed: vec![digest.clone()],
+            }))
         );
         assert_eq!(proto::AgentMessage::from(parsed), delta(DIGEST));
-        let refused = Announcement::try_from(delta("sha256:short")).unwrap_err();
+        let refused = Request::try_from(delta("sha256:short")).unwrap_err();
         assert_eq!(refused, Malformed::Digest("sha256:short".to_owned()));
+        assert_eq!(refused.reason(), Reason::Malformed);
+        let lookup = |digest: &str| {
+            message(agent_message::Message::Lookup(proto::LookupRequest {
+                digest: digest.to_owned(),
+                id: 9,
+            }))
+        };
+        let parsed = Request::try_from(lookup(DIGEST)).unwrap();
+        assert_eq!(parsed, Request::Lookup(Lookup { id: 9, digest }));
+        assert_eq!(proto::AgentMessage::from(parsed), lookup(DIGEST));
+        let refused = Request::try_from(lookup("latest")).unwrap_err();
         assert_eq!(refused.reason(), Reason::Malformed);
     }
 
     #[test]
     fn a_message_without_a_variant_is_malformed() {
         let empty = proto::AgentMessage { message: None };
-        assert_eq!(Announcement::try_from(empty), Err(Malformed::Empty));
+        assert_eq!(Request::try_from(empty), Err(Malformed::Empty));
     }
 }

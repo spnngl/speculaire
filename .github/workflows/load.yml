@@ -1,10 +1,16 @@
 name: load
 
-# D33's load against one reflector, manual, natively on each architecture (`just load`, D104): a missed target fails
+# D33's load against one reflector, nightly, natively on each architecture (`just load`, D104): a missed target fails
 # the run, and the job summary holds the measures.
 on:
-  # The transport change that meets D33's peak RSS turns the nightly run back on (D104).
+  schedule:
+    - cron: "0 2 * * *"
   workflow_dispatch:
+    inputs:
+      args:
+        description: Arguments to speculaire-loadgen, as `--rss-mib 64`
+        type: string
+        default: ""
 
 # Each job grants only what it needs.
 permissions: {}
@@ -35,7 +41,11 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: just musl "$TARGET"
       # The report goes to the job summary, a missed target or not.
+      # The input reaches the shell as data, split into words with no glob.
       - shell: bash
+        env:
+          ARGS: ${{ inputs.args }}
         run: |
           set -o pipefail
-          just load | tee -a "$GITHUB_STEP_SUMMARY"
+          read -ra args <<<"$ARGS"
+          just load "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
