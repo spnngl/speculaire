@@ -1,9 +1,26 @@
 //! D33's load scenario, scaled down, against `speculaire agent` as the reflector: `just load`'s path end to end (D104).
+//! And the pulls from a peer that `just profile peer` profiles, two of them (D116).
 #![cfg(target_os = "linux")]
 
 use std::time::Duration;
 
-use speculaire_load::{Scenario, Settings, Targets};
+use speculaire_load::{Pulls, Scenario, Settings, Targets};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blob_comes_whole_from_a_peer_each_time() {
+    let pulls = Pulls {
+        size: 1 << 20,
+        count: 2,
+        agent: vec![env!("CARGO_BIN_EXE_speculaire").into()],
+    };
+    let markdown = speculaire_load::pull(&pulls).await.unwrap().markdown();
+    assert!(
+        markdown.starts_with("2 pulls of a 1 MiB blob"),
+        "{markdown}"
+    );
+    // A pull through TLS, fetched whole from the peer and hashed, takes milliseconds: no time rounds to zero.
+    assert!(!markdown.contains(" 0.0 ms"), "{markdown}");
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_small_load_meets_loose_targets() {

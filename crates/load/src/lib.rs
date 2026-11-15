@@ -1,4 +1,5 @@
-//! `speculaire-load`: D33's load scenario against one reflector, and whether it meets D33's targets (D104).
+//! `speculaire-load`: D33's load scenario against one reflector, and whether it meets D33's targets (D104); and a blob
+//! pulled from a peer again and again, for profiles ([`pull`], D116).
 //!
 //! [`run`] starts the reflector as a process of its own on a fake containerd, connects the simulated agents, each a
 //! reflector client (D98) with its own node certificate, and then:
@@ -13,7 +14,8 @@
 
 mod agents;
 mod exposition;
-mod reflector;
+mod node;
+mod peer;
 mod report;
 
 use std::ffi::OsString;
@@ -22,13 +24,14 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
+pub use peer::{Pulls, Timings, pull};
 pub use report::{Measured, Report};
 use speculaire_pki::testing::Cluster;
 use speculaire_reflect::client::Config;
 use tokio::time::Instant;
 
 use crate::agents::Counts;
-use crate::reflector::{Node, Reflector};
+use crate::node::{Agent, Node};
 
 /// The load applied.
 #[derive(Clone, Debug)]
@@ -127,7 +130,7 @@ pub async fn run(settings: &Settings) -> anyhow::Result<Report> {
     ensure_descriptors(&limits, scenario.agents)?;
     let cluster = Arc::new(Cluster::new("speculaire-load"));
     let node = Node::new(&cluster)?;
-    let mut reflector = Reflector::start(&settings.reflector, &node).await?;
+    let mut reflector = Agent::start(&settings.reflector, &node).await?;
     tracing::info!(agents = scenario.agents, "building the agents");
     let fleet = agents::build(scenario.clone(), cluster, node.ca(), node.path().to_owned()).await?;
     let config = Config {
@@ -176,7 +179,7 @@ pub async fn run(settings: &Settings) -> anyhow::Result<Report> {
     reflector.stop().await?;
     let restart = Instant::now();
     tracing::info!(took = ?restart - stopping, peak, "the reflector stopped; starting it again");
-    reflector = Reflector::start(&settings.reflector, &node).await?;
+    reflector = Agent::start(&settings.reflector, &node).await?;
     tracing::info!(took = ?restart.elapsed(), "the reflector is ready");
     m.resync = reflector
         .settled(scenario.agents, pairs, FILL)

@@ -24,7 +24,7 @@ use crate::paths::Paths;
 
 /// The content store's ID, which names its directory below containerd's `root` (v2.4.2
 /// `cmd/containerd/server/server.go:171`).
-const CONTENT_PLUGIN: &str = "io.containerd.content.v1.content";
+pub const CONTENT_PLUGIN: &str = "io.containerd.content.v1.content";
 
 /// The namespace containerd's CRI plugin keeps its images in; the content service lists a blob only for a namespace
 /// that has a reference to it.

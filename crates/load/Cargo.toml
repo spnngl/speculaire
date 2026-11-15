@@ -10,13 +10,16 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+aws-lc-rs.workspace = true
 fastrand.workspace = true
 prost.workspace = true
+rustls.workspace = true
 secrecy.workspace = true
 speculaire-fake-runtime.workspace = true
 speculaire-oci.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }
 speculaire-reflect.workspace = true
+speculaire-runtime.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = [
   "io-util",
@@ -26,6 +29,7 @@ tokio = { workspace = true, features = [
   "sync",
   "time",
 ] }
+tokio-rustls.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

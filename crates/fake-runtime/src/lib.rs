@@ -1,6 +1,7 @@
 //! A fake containerd or CRI-O, for tests that run where there is no runtime (the CI runner, macOS): it answers the CRI's
-//! `Version` and `ListImages`, containerd's introspection `Plugins`, content `List` and events `Subscribe`, and CRI-O's
-//! `GET /config` on a Unix socket, which is all preflight, the registry config and the inventory ask (D86, D99).
+//! `Version` and `ListImages`, containerd's introspection `Plugins`, content `List` and `Info` and events `Subscribe`,
+//! and CRI-O's `GET /config` on a Unix socket, which is all preflight, the registry config, the inventory and the
+//! mirror ask (D86, D99).
 
 use std::convert::Infallible;
 use std::io;
@@ -87,7 +88,8 @@ pub struct Answers {
     pub images: Vec<(String, Vec<String>, Vec<String>)>,
     /// The body of CRI-O's `GET /config`, its merged TOML; `None` answers 503.
     pub crio_config: Option<String>,
-    /// The digests of containerd's content `List`, whatever the namespace; `Subscribe` sends no event.
+    /// The digests of containerd's content `List`, whatever the namespace; `Subscribe` sends no event, and `Info` finds
+    /// nothing: the fake holds no bytes.
     pub content: Vec<String>,
 }
 
@@ -322,6 +324,9 @@ async fn route(
                 .await
         }
         "/containerd.services.content.v1.Content/List" => content(answers, request).await,
+        "/containerd.services.content.v1.Content/Info" => {
+            Status::not_found("the fake runtime holds no bytes").into_http()
+        }
         "/containerd.services.events.v1.Events/Subscribe" => events(request).await,
         other => Status::unimplemented(format!("the fake runtime has no {other}")).into_http(),
     }
