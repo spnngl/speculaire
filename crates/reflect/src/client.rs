@@ -1,5 +1,6 @@
-//! The agent's side of the reflector API (D2, D33, D36, D98): it learns the members through the load balancer, keeps
-//! one `Announce` stream to each, and asks the members it streams to where a digest is.
+//! The agent's side of the reflector API (D2, D33, D36, D98, D105): it learns the members through the load balancer,
+//! keeps one connection to each that announces what the node holds, and asks the members it is connected to where a
+//! digest is.
 
 use std::collections::HashMap;
 use std::io;
@@ -10,24 +11,22 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt as _;
 use futures_util::future::{self, BoxFuture};
 pub use holdings::Holdings;
-use hyper_util::rt::TokioIo;
 use rustls::ClientConfig;
-use rustls::pki_types::ServerName;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::{Credentials, node_subject};
+use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpStream;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 use tokio_util::sync::CancellationToken;
-use tonic::Status;
-use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, info, warn};
 
-use crate::Member;
+use crate::frame::{self, FrameError, Reader};
+use crate::message::Request;
 use crate::metrics::CLIENT_LOOKUP;
-use crate::proto::reflector_client::ReflectorClient;
-use crate::proto::{self};
+use crate::proto::{self, reflector_message};
+use crate::{Member, connect};
 
 mod announce;
 mod backoff;
@@ -47,6 +46,9 @@ const DIAL: Duration = Duration::from_secs(5);
 
 /// The time a `Members` or `Lookup` call may take.
 const CALL: Duration = Duration::from_secs(5);
+
+/// How many lookups may wait for a connection's writer.
+const QUEUE: usize = 16;
 
 /// How long the load balancer or a member may fail before the failures are logged at `warn`: until then, a restart
 /// or a rollout explains them, and they go at `info`.
@@ -80,7 +82,38 @@ pub enum LookupError {
     NoMember,
     /// Every member asked failed.
     #[error("the reflectors did not answer: {0}")]
-    Call(#[from] Status),
+    Call(#[from] CallError),
+}
+
+/// Why a request to a reflector has no answer.
+#[derive(Debug, thiserror::Error)]
+pub enum CallError {
+    /// The connection ended first.
+    #[error("the connection to the reflector ended")]
+    Closed,
+    /// The reflector took too long, or stayed silent.
+    #[error("the reflector did not answer in time")]
+    Timeout,
+    /// A frame could not be read or written.
+    #[error(transparent)]
+    Frame(#[from] FrameError),
+    /// The reflector ended the connection, and said why.
+    #[error("the reflector refused the connection, {}: {message}", reason.as_str_name())]
+    Refused {
+        /// Its reason.
+        reason: proto::Reason,
+        /// Its explanation.
+        message: String,
+    },
+}
+
+impl From<proto::Refused> for CallError {
+    fn from(refused: proto::Refused) -> Self {
+        Self::Refused {
+            reason: refused.reason(),
+            message: refused.message,
+        }
+    }
 }
 
 /// The agent's reflector client: running until [`Client::stop`].
@@ -97,8 +130,8 @@ struct Shared {
     config: Config,
     credentials: Arc<Credentials>,
     holdings: Arc<Holdings>,
-    /// The channel of each member whose stream is up, by node.
-    links: Mutex<HashMap<String, Channel>>,
+    /// The lookup queue of each member whose connection is up, by node.
+    links: Mutex<HashMap<String, mpsc::Sender<Ask>>>,
     /// The peer address, fixed by the first stream unless set (D36): `None` until then, and never changed after.
     peer: watch::Sender<Option<SocketAddr>>,
     /// Woken when a stream drops, to ask for the members again (D2).
@@ -186,25 +219,32 @@ impl Lookups {
     }
 
     async fn ask(&self, digest: &Digest) -> Result<Vec<Peer>, LookupError> {
-        let mut channels: Vec<Channel> = self.0.links().values().cloned().collect();
-        fastrand::shuffle(&mut channels);
-        let mut channels = channels.into_iter();
-        let first = channels.next().ok_or(LookupError::NoMember)?;
-        Ok(hedged(ask(first, digest), channels.next().map(|c| ask(c, digest))).await?)
+        let mut queues: Vec<mpsc::Sender<Ask>> = self.0.links().values().cloned().collect();
+        fastrand::shuffle(&mut queues);
+        let mut queues = queues.into_iter();
+        let first = queues.next().ok_or(LookupError::NoMember)?;
+        Ok(hedged(ask(first, digest), queues.next().map(|q| ask(q, digest))).await?)
     }
 }
 
 impl Shared {
-    fn links(&self) -> MutexGuard<'_, HashMap<String, Channel>> {
+    fn links(&self) -> MutexGuard<'_, HashMap<String, mpsc::Sender<Ask>>> {
         self.links.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
+/// A lookup waiting for a connection's writer, which numbers it, and its answer.
+#[derive(Debug)]
+struct Ask {
+    digest: Digest,
+    answer: oneshot::Sender<Vec<Peer>>,
+}
+
 /// The answer of `first`, or, when it takes longer than [`HEDGE`], the first answer of `first` and `second`.
 async fn hedged<T: Send>(
-    first: BoxFuture<'static, Result<T, Status>>,
-    second: Option<BoxFuture<'static, Result<T, Status>>>,
-) -> Result<T, Status> {
+    first: BoxFuture<'static, Result<T, CallError>>,
+    second: Option<BoxFuture<'static, Result<T, CallError>>>,
+) -> Result<T, CallError> {
     let Some(second) = second else {
         return first.await;
     };
@@ -221,16 +261,24 @@ async fn hedged<T: Send>(
     }
 }
 
-/// A `Lookup` of `digest` on `channel`.
-fn ask(channel: Channel, digest: &Digest) -> BoxFuture<'static, Result<Vec<Peer>, Status>> {
-    let request = proto::LookupRequest {
-        digest: digest.to_string(),
-    };
+/// A `Lookup` of `digest` through the connection whose writer reads `queue`.
+fn ask(
+    queue: mpsc::Sender<Ask>,
+    digest: &Digest,
+) -> BoxFuture<'static, Result<Vec<Peer>, CallError>> {
+    let digest = digest.clone();
     async move {
-        let response = tokio::time::timeout(CALL, ReflectorClient::new(channel).lookup(request))
+        let (answer, answered) = oneshot::channel();
+        let call = async {
+            queue
+                .send(Ask { digest, answer })
+                .await
+                .map_err(|_| CallError::Closed)?;
+            answered.await.map_err(|_| CallError::Closed)
+        };
+        tokio::time::timeout(CALL, call)
             .await
-            .map_err(|_| Status::deadline_exceeded("the reflector did not answer the lookup"))??;
-        Ok(peers(response.into_inner()))
+            .map_err(|_| CallError::Timeout)?
     }
     .boxed()
 }
@@ -354,7 +402,7 @@ enum MembersError {
     #[error(transparent)]
     Dial(#[from] DialError),
     #[error("Members failed: {0}")]
-    Call(#[from] Status),
+    Call(#[from] CallError),
     #[error("the reflector that answered, {0:?}, is not in the members it returned")]
     Stranger(String),
 }
@@ -376,24 +424,44 @@ async fn ask_members(shared: &Shared) -> Result<Vec<Member>, MembersError> {
 }
 
 async fn members_at(address: SocketAddr, shared: &Shared) -> Result<Vec<Member>, MembersError> {
-    let (channel, link) = dial(address, shared.credentials.client_any()).await?;
-    let response = tokio::time::timeout(
-        CALL,
-        ReflectorClient::new(channel).members(proto::MembersRequest {}),
-    )
-    .await
-    .map_err(|_| Status::deadline_exceeded("the reflector did not answer Members"))??;
-    let members = members(response.into_inner());
-    if members.iter().any(|member| member.node == link.node) {
+    let Link { mut tls, node, .. } = dial(address, shared.credentials.client_any()).await?;
+    let response = tokio::time::timeout(CALL, ask_once(&mut tls))
+        .await
+        .map_err(|_| CallError::Timeout)??;
+    let members = members(response);
+    if members.iter().any(|member| member.node == node) {
         Ok(members)
     } else {
-        Err(MembersError::Stranger(link.node))
+        Err(MembersError::Stranger(node))
+    }
+}
+
+/// The one request of a connection: `Members`, then the TLS close that tells the reflector the connection is done.
+async fn ask_once(tls: &mut TlsStream<TcpStream>) -> Result<proto::MembersResponse, CallError> {
+    frame::write(
+        tls,
+        &proto::AgentMessage::from(Request::Members),
+        frame::LIMIT,
+    )
+    .await?;
+    let mut reader = Reader::<proto::ReflectorMessage>::new(frame::LIMIT);
+    loop {
+        match reader.next(tls).await?.and_then(|message| message.message) {
+            Some(reflector_message::Message::Members(response)) => {
+                tls.shutdown().await.map_err(FrameError::from)?;
+                return Ok(response);
+            }
+            Some(reflector_message::Message::Refused(refused)) => return Err(refused.into()),
+            Some(_) => {}
+            None => return Err(CallError::Closed),
+        }
     }
 }
 
 /// One connection to a reflector.
 #[derive(Debug)]
 struct Link {
+    tls: TlsStream<TcpStream>,
     /// The local side of the connection, whose IP is the default peer address (D36).
     local: SocketAddr,
     /// The node the reflector's certificate names.
@@ -409,52 +477,22 @@ enum DialError {
     Timeout,
     #[error("the reflector's certificate names no node: {0}")]
     Node(String),
-    #[error(transparent)]
-    Channel(#[from] tonic::transport::Error),
 }
 
-/// A channel over one TLS connection to `address`: when the connection ends, its calls fail, and the caller dials
-/// again, since it must know the local side and the node of each connection.
-async fn dial(address: SocketAddr, mut tls: ClientConfig) -> Result<(Channel, Link), DialError> {
-    tls.alpn_protocols = vec![b"h2".to_vec()];
-    let connector = TlsConnector::from(Arc::new(tls));
-    let (local, stream) = tokio::time::timeout(DIAL, async {
-        let tcp = TcpStream::connect(address).await?;
-        // A lookup is small: Nagle's algorithm would hold it for the reflector's delayed ACK.
-        tcp.set_nodelay(true)?;
-        let local = tcp.local_addr()?;
-        let stream = connector
-            .connect(ServerName::IpAddress(address.ip().into()), tcp)
-            .await?;
-        Ok::<_, io::Error>((local, stream))
-    })
-    .await
-    .map_err(|_| DialError::Timeout)??;
-    let node = match stream.get_ref().1.peer_certificates() {
+/// A TLS connection to `address`, with its local side and the node the reflector's certificate names: the caller
+/// needs both, so it dials each connection itself (D98).
+async fn dial(address: SocketAddr, tls: ClientConfig) -> Result<Link, DialError> {
+    let tls = tokio::time::timeout(DIAL, connect(address, tls))
+        .await
+        .map_err(|_| DialError::Timeout)??;
+    let local = tls.get_ref().0.local_addr()?;
+    let node = match tls.get_ref().1.peer_certificates() {
         Some([certificate, ..]) => {
             node_subject(certificate).map_err(|err| DialError::Node(err.to_string()))?
         }
         _ => return Err(DialError::Node("no certificate".to_owned())),
     };
-    let slot = Mutex::new(Some(stream));
-    // The URI only names the authority of requests: the connector hands over the connection made above, once.
-    let channel = Endpoint::from_shared(format!("http://{address}"))?
-        .http2_keep_alive_interval(Duration::from_secs(30))
-        .keep_alive_timeout(Duration::from_secs(10))
-        .keep_alive_while_idle(true)
-        .connect_with_connector(tower::service_fn(move |_| {
-            let stream = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
-            async move {
-                stream.map(TokioIo::new).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotConnected,
-                        "the connection to the reflector ended",
-                    )
-                })
-            }
-        }))
-        .await?;
-    Ok((channel, Link { local, node }))
+    Ok(Link { tls, local, node })
 }
 
 #[cfg(test)]
@@ -472,6 +510,7 @@ mod tests {
             entry("e", "[fd00::5]:7481"),
         ];
         let kept = peers(proto::LookupResponse {
+            id: 0,
             peers: entries
                 .iter()
                 .map(|(node, address)| proto::Peer {
@@ -513,14 +552,15 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_lookup_is_hedged_after_twenty_milliseconds_and_takes_the_first_answer() {
-        let after =
-            |delay: u64, answer: Result<u32, Status>| -> BoxFuture<'static, Result<u32, Status>> {
-                async move {
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                    answer
-                }
-                .boxed()
-            };
+        let after = |delay: u64,
+                     answer: Result<u32, CallError>|
+         -> BoxFuture<'static, Result<u32, CallError>> {
+            async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                answer
+            }
+            .boxed()
+        };
         let start = tokio::time::Instant::now();
         // A first answer within the hedge: the second is never asked.
         let answer = hedged(after(10, Ok(1)), Some(after(0, Ok(2)))).await;
@@ -537,21 +577,14 @@ mod tests {
         );
         // A slow first whose second fails: the first's answer.
         let start = tokio::time::Instant::now();
-        let answer = hedged(
-            after(100, Ok(1)),
-            Some(after(5, Err(Status::unavailable("")))),
-        );
+        let answer = hedged(after(100, Ok(1)), Some(after(5, Err(CallError::Closed))));
         assert_eq!(
             (answer.await.unwrap(), start.elapsed()),
             (1, Duration::from_millis(100))
         );
         // A first that fails fast: the second at once.
         let start = tokio::time::Instant::now();
-        let answer = hedged(
-            after(1, Err(Status::unavailable(""))),
-            Some(after(5, Ok(2))),
-        )
-        .await;
+        let answer = hedged(after(1, Err(CallError::Closed)), Some(after(5, Ok(2)))).await;
         assert_eq!(
             (answer.unwrap(), start.elapsed()),
             (2, Duration::from_millis(6))

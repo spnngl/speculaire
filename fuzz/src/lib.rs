@@ -45,6 +45,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("platform", platform),
     ("node_subject", node_subject),
     ("reflect", reflect),
+    ("reflect_frame", reflect_frame),
     ("containerd_event", containerd_event),
 ];
 
@@ -469,11 +470,11 @@ pub fn node_subject(data: &[u8]) {
     }
 }
 
-/// Every message of the reflector API: those the reflector reads from an agent, `Announce`'s, `Lookup`'s and
-/// `Members`', and the answers the agent reads (D2, D97, D98).
+/// Every message of the reflector API: the requests the reflector reads from an agent, and the answers the agent
+/// reads (D2, D97, D98, D105).
 ///
-/// Decoding and parsing never panic. An announcement that parses encodes back to protobuf that parses to it again,
-/// a digest a lookup names prints as the text it parsed from, and every member or peer an answer keeps has a node.
+/// Decoding and parsing never panic. A request that parses encodes back to protobuf that parses to it again, and every
+/// member or peer an answer keeps has a node.
 ///
 /// # Panics
 ///
@@ -481,22 +482,14 @@ pub fn node_subject(data: &[u8]) {
 pub fn reflect(data: &[u8]) {
     use prost::Message as _;
     use speculaire_reflect::client::{members, peers};
-    use speculaire_reflect::message::{Announcement, digest};
-    use speculaire_reflect::proto::{
-        AgentMessage, LookupRequest, LookupResponse, MembersRequest, MembersResponse,
-    };
+    use speculaire_reflect::message::Request;
+    use speculaire_reflect::proto::{AgentMessage, LookupResponse, MembersResponse};
     if let Ok(message) = AgentMessage::decode(data)
-        && let Ok(announcement) = Announcement::try_from(message)
+        && let Ok(request) = Request::try_from(message)
     {
-        let again = Announcement::try_from(AgentMessage::from(announcement.clone()));
-        assert_eq!(again, Ok(announcement));
+        let again = Request::try_from(AgentMessage::from(request.clone()));
+        assert_eq!(again, Ok(request));
     }
-    if let Ok(request) = LookupRequest::decode(data)
-        && let Ok(parsed) = digest(request.digest.clone())
-    {
-        assert_eq!(parsed.to_string(), request.digest);
-    }
-    drop(MembersRequest::decode(data));
     if let Ok(response) = MembersResponse::decode(data) {
         assert!(
             members(response)
@@ -506,6 +499,62 @@ pub fn reflect(data: &[u8]) {
     }
     if let Ok(response) = LookupResponse::decode(data) {
         assert!(peers(response).iter().all(|peer| !peer.node.is_empty()));
+    }
+}
+
+/// A connection to the reflector as frames: each side reads a 4-byte big-endian length, then a message of that many
+/// bytes (D105). The reflector reads `AgentMessage`s and the agent `ReflectorMessage`s.
+///
+/// Reading never panics, and refuses a length over the limit before reading its body. A message read writes as a frame
+/// that reads back to it.
+///
+/// # Panics
+///
+/// When reading panics or waits, refuses another length than the frame's, or the round trip fails.
+pub fn reflect_frame(data: &[u8]) {
+    use speculaire_reflect::proto::{AgentMessage, ReflectorMessage};
+    frames::<AgentMessage>(data);
+    frames::<ReflectorMessage>(data);
+}
+
+/// Reads every frame of `data` as `M`, with a 1 KiB limit so that lengths over it come by often.
+fn frames<M: prost::Message + Default + PartialEq>(data: &[u8]) {
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    use speculaire_reflect::frame::{self, FrameError, Reader};
+
+    const LIMIT: usize = 1024;
+    /// The output of `future`, which a slice or a `Vec` completes at its first poll.
+    fn ready<T>(future: impl Future<Output = T>) -> T {
+        match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("reading or writing memory waited"),
+        }
+    }
+    let mut rest = data;
+    let mut reader = Reader::<M>::new(LIMIT);
+    loop {
+        let start = rest;
+        match ready(reader.next(&mut rest)) {
+            Ok(Some(message)) => {
+                let mut written = Vec::new();
+                ready(frame::write(&mut written, &message, LIMIT))
+                    .unwrap_or_else(|err| panic!("a message read did not write back: {err}"));
+                let again = ready(Reader::<M>::new(LIMIT).next(&mut written.as_slice()));
+                assert!(matches!(again, Ok(Some(ref again)) if *again == message));
+            }
+            Err(FrameError::Size { size, limit }) => {
+                let head: [u8; 4] = start
+                    .get(..4)
+                    .and_then(|head| head.try_into().ok())
+                    .unwrap_or_else(|| panic!("a size refusal before 4 bytes of length"));
+                assert_eq!(u32::from_be_bytes(head).try_into(), Ok(size));
+                assert!(size > limit);
+                break;
+            }
+            Ok(None) | Err(_) => break,
+        }
     }
 }
 

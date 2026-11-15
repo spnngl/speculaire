@@ -15,7 +15,6 @@ bench = []
 [dependencies]
 fastrand.workspace = true
 futures-util.workspace = true
-hyper-util.workspace = true
 metrics.workspace = true
 prost.workspace = true
 roaring.workspace = true
@@ -23,16 +22,19 @@ rustls.workspace = true
 speculaire-oci.workspace = true
 speculaire-pki.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = [
+  "io-util",
+  "net",
+  "rt",
+  "sync",
+  "time",
+] }
 tokio-rustls.workspace = true
 tokio-util.workspace = true
-tonic.workspace = true
-tonic-prost.workspace = true
-tower.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-tonic-prost-build.workspace = true
+prost-build.workspace = true
 
 [dev-dependencies]
 divan.workspace = true

@@ -1,41 +1,42 @@
-// The reflector API (D2, D97): agents announce what they hold, and look up who holds a digest.
+// The reflector API (D2, D97, D105): agents announce what they hold, and look up who holds a digest.
+//
+// A connection is mutual TLS with ALPN `speculaire-reflect/1`. Each side sends frames: a 4-byte big-endian length,
+// then that many bytes of one message, `AgentMessage` from the agent and `ReflectorMessage` from the reflector. The
+// reflector reads its frames in order and answers each before it reads the next.
 //
 // Changes are additive only: a reflector accepts its own protocol version and the previous one.
 syntax = "proto3";
 
 package speculaire.reflect.v1;
 
-service Reflector {
-  // The reflectors, as `reflector.members` lists them; agents call it through the load balancer.
-  rpc Members(MembersRequest) returns (MembersResponse);
-  // One stream per agent and member: `Hello`, a `Snapshot`, then `Delta`s. Its end withdraws the agent.
-  rpc Announce(stream AgentMessage) returns (stream ReflectorMessage);
-  // Up to 8 agents that announced `digest`, never the one asking.
-  rpc Lookup(LookupRequest) returns (LookupResponse);
-}
-
-message MembersRequest {}
-
-message MembersResponse {
-  repeated Member members = 1;
-}
-
-message Member {
-  // The node name its kubelet certificate holds.
-  string node = 1;
-  // `ip:port` of its reflector API.
-  string address = 2;
-}
-
 message AgentMessage {
   oneof message {
+    // Announce: `Hello`, a `Snapshot`, then `Delta`s. The connection's end withdraws the agent.
     Hello hello = 1;
     Snapshot snapshot = 2;
     Delta delta = 3;
+    // Up to 8 agents that announced a digest, never the one asking.
+    LookupRequest lookup = 4;
+    // The reflectors, as `reflector.members` lists them; agents ask through the load balancer.
+    MembersRequest members = 5;
+    // Sent every 30 s: a side that reads nothing for 40 s closes the connection.
+    Ping ping = 6;
   }
 }
 
-// The first message of a stream.
+message ReflectorMessage {
+  oneof message {
+    Resync resync = 1;
+    Prewarm prewarm = 2;
+    LookupResponse lookup = 3;
+    MembersResponse members = 4;
+    Pong pong = 5;
+    // The last message of a connection the reflector ends.
+    Refused refused = 6;
+  }
+}
+
+// The first announcement of a connection.
 message Hello {
   uint32 protocol_version = 1;
   // The node of the TLS peer: another is refused.
@@ -59,13 +60,6 @@ message Delta {
   repeated string removed = 3;
 }
 
-message ReflectorMessage {
-  oneof message {
-    Resync resync = 1;
-    Prewarm prewarm = 2;
-  }
-}
-
 // Send a new `Snapshot`: a `Delta` arrived out of sequence.
 message Resync {}
 
@@ -76,14 +70,60 @@ message Prewarm {
 
 message LookupRequest {
   string digest = 1;
+  // Chosen by the agent, and sent back in the answer.
+  uint64 id = 2;
 }
 
 message LookupResponse {
   repeated Peer peers = 1;
+  uint64 id = 2;
 }
 
 message Peer {
   string node = 1;
   // `ip:port` of its peer API.
   string address = 2;
+}
+
+message MembersRequest {}
+
+message MembersResponse {
+  repeated Member members = 1;
+}
+
+message Member {
+  // The node name its kubelet certificate holds.
+  string node = 1;
+  // `ip:port` of its reflector API.
+  string address = 2;
+}
+
+message Ping {}
+
+message Pong {}
+
+message Refused {
+  Reason reason = 1;
+  string message = 2;
+}
+
+// Why the reflector ends a connection.
+enum Reason {
+  REASON_UNSPECIFIED = 0;
+  // The certificate's node is not the `Hello`'s.
+  REASON_IDENTITY = 1;
+  // A protocol version the reflector does not speak.
+  REASON_VERSION = 2;
+  // A frame over 4 MiB.
+  REASON_SIZE = 3;
+  // More digests than the node may announce.
+  REASON_DIGESTS = 4;
+  // A peer address that is not `ip:port`.
+  REASON_ADDRESS = 5;
+  // A message that does not decode or breaks the order of announcements.
+  REASON_MALFORMED = 6;
+  // A later connection of the same node took its announcement over.
+  REASON_SUPERSEDED = 7;
+  // The reflector is stopping.
+  REASON_STOPPING = 8;
 }

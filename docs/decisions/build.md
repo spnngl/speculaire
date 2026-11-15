@@ -17,7 +17,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Details: `~/src/github.com/spnngl/agent-skills/skills/kernel/io-uring/`.
 - **Revisit when:** a benchmark shows the agent CPU-bound at serving, at more than 1 core per 10 Gb/s. Then prototype a plaintext-peer `sendfile` path first. Try io_uring only after that, behind a cargo feature with owned buffers, and after reading the io-uring skill.
 
-## D13: Stack and binaries (amended by D34, D46, D57)
+## D13: Stack and binaries (amended by D34, D46, D57, D105)
 
 - **Decision:**
   - **Stack:** Rust edition 2024, tokio (multi-thread), axum/hyper, tonic/prost, `containerd-client` 0.9, `oci-spec`, rustls with the `aws-lc-rs` provider (+ `rcgen` for D14's local certificates), `sd-notify`, `toml`.
@@ -50,7 +50,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - A label per peer node or per image would multiply series by up to 10k on every node.
 - **Cost:**
   - Text exposition leaves out native histograms entirely (`src/recorder.rs:214-217`). A scraper that does not request protobuf, or a backend without native-histogram support, sees counters and gauges only. Prometheus asks for protobuf only with native-histogram ingestion turned on; the setting depends on its version.
-  - The `protobuf` feature runs `prost-build` (`build.rs`), so the build image needs `protoc`. tonic's code generation needs it anyway.
+  - The `protobuf` feature runs `prost-build` (`build.rs`), so the build image needs `protoc`. The reflector's messages need it anyway (D105).
 - **Revisit when:** users run a backend without native-histogram support. Then add classic buckets per metric with `set_buckets_for_metric`, which works in both formats.
 
 ## D19: Dev loop is Docker plus CI (amended by D57)
@@ -85,7 +85,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
     - `lint` (actionlint, zizmor);
     - `commit` (Conventional Commits);
     - `fuzz` (nightly cron);
-    - `load` (dispatch, and nightly cron once the reflector meets D33's peak, D104): `just load`, the reflector load test (D33);
+    - `load` (nightly cron, and dispatch with an `args` input for `speculaire-loadgen`, D104): `just load`, the reflector load test (D33);
     - `bench`: nightly on kind, and by `workflow_dispatch` on a real cluster, `just bench` against Spegel (D35);
     - `mutants` and `deep` (careful, shuttle), both informational;
     - `advisories`, `codeql`, `betterleaks`, `renovate`;

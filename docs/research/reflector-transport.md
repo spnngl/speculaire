@@ -2,7 +2,9 @@
 
 **Short answer:** one agent connection holds 54.8 KB of the reflector's heap over gRPC, 38.8 KB with h2's buffers cut to 4 KiB, and 9.2 KB over a length-prefixed protobuf framing on rustls. At 10,000 agents, the framing would take the M3 step 07 reflector from 1150–1180 MiB to about 600 MiB, and the h2 patch to about 970 MiB. The framing must rebuild lookup numbering, keepalive, the stop, and refusal reasons. It saves no dependency, because the containerd client keeps tonic in the binary.
 
-**Sources:** the prototype on branch `research/reflector-transport-prototype` (`apps/transport-bench`), built on main at b687617. Step 07's measurements come from branch `m3/07-load`. Upstream is cited from the crates.io sources of h2 0.4.20, tokio-util 0.7.20, tonic 0.14.9 and rustls 0.23.46.
+**Outcome:** D105 adopted the framing, with no dual-ALPN period.
+
+**Sources:** the prototype on branch `research/reflector-transport-prototype` (`apps/transport-bench`, deleted after D105), built on main at b687617. Step 07's measurements come from branch `m3/07-load`. Upstream is cited from the crates.io sources of h2 0.4.20, tokio-util 0.7.20, tonic 0.14.9 and rustls 0.23.46.
 
 ## Method
 

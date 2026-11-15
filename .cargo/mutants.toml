@@ -22,9 +22,6 @@ exclude_re = [
   'serve\.rs:\d+:\d+: replace empty -> Body with Default::default\(\)$',
   # A leaked empty `Vec` is the same empty list of hints.
   'node\.rs:\d+:\d+: replace <impl ClientCertVerifier for Verifier>::root_hint_subjects -> &\[DistinguishedName\] with Vec::leak\(Vec::new\(\)\)$',
-  # tokio-rustls writes its records to the socket within `poll_write`, and a TCP flush does nothing; a link not shut
-  # down is closed when dropped, so its client sees the end all the same.
-  'server\.rs:\d+:\d+: replace <impl AsyncWrite for Link>::poll_(flush|shutdown) -> Poll<io::Result<\(\)>> with Poll::from\(Ok\(\(\)\)\)$',
   # The load generator's agents joining at once, or not stopped before the reflector is: the small run of
   # `apps/speculaire/tests/load.rs` meets its targets either way, and D33's scale shows them in the nightly run.
   'agents\.rs:\d+:\d+: replace \+ with - in Fleet::connect$',
