@@ -6,7 +6,7 @@
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use hyper::Response;
@@ -47,6 +47,8 @@ pub const UPLOAD_SECONDS: &str = "speculaire_peer_upload_seconds";
 pub const FETCHES: &str = "speculaire_peer_fetches_total";
 /// `speculaire_peer_hedges_total`: hedged extra requests to other agents.
 pub const HEDGES: &str = "speculaire_peer_hedges_total";
+/// Time from the start of a request to a peer to its end, by `result`.
+pub const FETCH_SECONDS: &str = "speculaire_peer_fetch_seconds";
 
 /// Where the bytes of a served answer came from: the `source` label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -408,15 +410,6 @@ pub enum Fetched {
 }
 
 impl Fetched {
-    /// Every result, in the order of the catalog.
-    pub const ALL: [Self; 5] = [
-        Self::Ok,
-        Self::DigestMismatch,
-        Self::Busy,
-        Self::Timeout,
-        Self::Error,
-    ];
-
     /// The `result` label.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -430,27 +423,74 @@ impl Fetched {
     }
 }
 
-/// Describes the fetcher's metrics and gives each its zero, on every agent.
+/// Describes the fetcher's metrics, on every agent.
 pub fn describe_fetch() {
     describe_counter!(
         FETCHES,
         "Requests to other agents, by how they ended; timeout includes a stalled one"
     );
     describe_counter!(HEDGES, "Hedged extra requests to other agents");
-    for result in Fetched::ALL {
-        counter!(FETCHES, "result" => result.label()).absolute(0);
+    describe_histogram!(
+        FETCH_SECONDS,
+        "Time from the start of a request to another agent to its end"
+    );
+}
+
+/// The fetcher's series.
+pub(crate) struct FetchSeries {
+    ok: Ended,
+    digest_mismatch: Ended,
+    busy: Ended,
+    timeout: Ended,
+    error: Ended,
+    hedges: Counter,
+}
+
+/// The series of requests to peers that ended one way.
+struct Ended {
+    count: Counter,
+    seconds: Histogram,
+}
+
+impl Ended {
+    fn new(result: Fetched) -> Self {
+        Self {
+            count: counter!(FETCHES, "result" => result.label()),
+            seconds: histogram!(FETCH_SECONDS, "result" => result.label()),
+        }
     }
-    counter!(HEDGES).absolute(0);
 }
 
-/// Counts how a request to a peer ended.
-pub fn fetched(result: Fetched) {
-    counter!(FETCHES, "result" => result.label()).increment(1);
-}
+impl FetchSeries {
+    /// Registers every series.
+    pub(crate) fn new() -> Self {
+        Self {
+            ok: Ended::new(Fetched::Ok),
+            digest_mismatch: Ended::new(Fetched::DigestMismatch),
+            busy: Ended::new(Fetched::Busy),
+            timeout: Ended::new(Fetched::Timeout),
+            error: Ended::new(Fetched::Error),
+            hedges: counter!(HEDGES),
+        }
+    }
 
-/// Counts a hedged request.
-pub fn hedged() {
-    counter!(HEDGES).increment(1);
+    /// Counts a request to a peer that ended as `result` after `took`.
+    pub(crate) fn fetched(&self, result: Fetched, took: Duration) {
+        let ended = match result {
+            Fetched::Ok => &self.ok,
+            Fetched::DigestMismatch => &self.digest_mismatch,
+            Fetched::Busy => &self.busy,
+            Fetched::Timeout => &self.timeout,
+            Fetched::Error => &self.error,
+        };
+        ended.count.increment(1);
+        ended.seconds.record(took);
+    }
+
+    /// Counts a hedged request.
+    pub(crate) fn hedged(&self) {
+        self.hedges.increment(1);
+    }
 }
 
 /// Describes the blob cache's metrics, on a node whose mirror relays (CRI-O, D66).
