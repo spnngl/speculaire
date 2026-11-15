@@ -1,9 +1,11 @@
 //! Which agents hold which digests: soft state, as the agents' streams announce it (D2).
 //!
 //! Each node and each digest gets a small integer, so that a digest's holders and a node's digests are roaring
-//! bitmaps: D2 sizes 20 million pairs this way.
+//! bitmaps: D2 sizes 20 million pairs this way. A digest is a `Key` inside, made before taking the lock, and a snapshot
+//! not yet ended is a bitmap of digest numbers too (D104).
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, PoisonError};
 
@@ -49,7 +51,7 @@ struct Inner {
     /// By node number; `None` is free for the next node.
     agents: Vec<Option<Agent>>,
     free_agents: Vec<u32>,
-    digests: HashMap<Digest, u32>,
+    digests: HashMap<Key, u32>,
     /// By digest number; `None` is free for the next digest.
     holders: Vec<Option<Holders>>,
     free_holders: Vec<u32>,
@@ -62,12 +64,72 @@ struct Agent {
     peer: SocketAddr,
     stream: u64,
     digests: RoaringBitmap,
+    /// The chunks of a snapshot not yet ended.
+    staged: RoaringBitmap,
 }
 
 #[derive(Debug)]
 struct Holders {
-    digest: Digest,
+    key: Key,
     nodes: RoaringBitmap,
+    /// How many nodes stage the digest: its number stays its own while one does.
+    staging: u32,
+}
+
+/// A digest as the index keeps it: the hash in bytes, inline, so that comparing two reads no other memory (D104).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Key {
+    Sha256([u8; 32]),
+    Sha384([u8; 48]),
+    Sha512([u8; 64]),
+}
+
+impl Key {
+    pub(crate) fn of(digest: &Digest) -> Self {
+        let hex = digest.encoded();
+        match digest.algorithm() {
+            "sha256" => decode(hex).map(Self::Sha256),
+            "sha384" => decode(hex).map(Self::Sha384),
+            "sha512" => decode(hex).map(Self::Sha512),
+            _ => None,
+        }
+        .expect("Digest::parse admits only the lower-case hex of sha256, sha384 and sha512")
+    }
+
+    fn all<'a>(digests: impl IntoIterator<Item = &'a Digest>) -> Vec<Self> {
+        digests.into_iter().map(Self::of).collect()
+    }
+}
+
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (algorithm, bytes): (&str, &[u8]) = match self {
+            Self::Sha256(bytes) => ("sha256", bytes),
+            Self::Sha384(bytes) => ("sha384", bytes),
+            Self::Sha512(bytes) => ("sha512", bytes),
+        };
+        write!(f, "{algorithm}:")?;
+        bytes.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
+/// The `N` bytes lower-case `hex` spells; `None` when it spells another length or is not lower-case hex.
+fn decode<const N: usize>(hex: &str) -> Option<[u8; N]> {
+    fn nibble(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            _ => None,
+        }
+    }
+    if hex.len() != 2 * N {
+        return None;
+    }
+    let mut bytes = [0; N];
+    for (byte, [high, low]) in bytes.iter_mut().zip(hex.as_bytes().as_chunks().0) {
+        *byte = 16 * nibble(*high)? + nibble(*low)?;
+    }
+    Some(bytes)
 }
 
 impl Index {
@@ -89,6 +151,7 @@ impl Index {
                 peer,
                 stream: id,
                 digests: RoaringBitmap::new(),
+                staged: RoaringBitmap::new(),
             };
             let inner = &mut *inner;
             let slot = allocate(&mut inner.agents, &mut inner.free_agents, agent);
@@ -99,21 +162,47 @@ impl Index {
         Stream { node, id }
     }
 
-    /// Replaces what the stream's node holds with `digests`, a whole snapshot.
-    pub(crate) fn replace(&self, stream: &Stream, digests: HashSet<Digest>) -> Result<(), Refused> {
+    /// Adds a chunk of a snapshot to what the stream's node stages, if it then stages at most `limit` digests.
+    pub(crate) fn stage(
+        &self,
+        stream: &Stream,
+        digests: &[Digest],
+        limit: usize,
+    ) -> Result<(), Refused> {
+        let keys = Key::all(digests);
         let mut inner = self.lock();
         let slot = inner.owned(stream)?;
-        let kept: RoaringBitmap = digests
-            .iter()
-            .filter_map(|digest| inner.digests.get(digest).copied())
-            .collect();
-        let gone = &inner.agent(slot).digests - &kept;
-        for digest in &gone {
-            inner.release(slot, digest);
+        for key in keys {
+            let number = inner.number(key);
+            if inner.agent(slot).staged.insert(number) {
+                inner.holders_of(number).staging += 1;
+            }
         }
-        for digest in digests {
-            inner.hold(slot, digest);
+        if usize::try_from(inner.agent(slot).staged.len()).map_or(true, |staged| staged > limit) {
+            return Err(Refused::Limit);
         }
+        Ok(())
+    }
+
+    /// Replaces what the stream's node holds with what it staged, a whole snapshot.
+    pub(crate) fn commit(&self, stream: &Stream) -> Result<(), Refused> {
+        let mut inner = self.lock();
+        let slot = inner.owned(stream)?;
+        let agent = inner.agent(slot);
+        let held = std::mem::take(&mut agent.staged);
+        let was = std::mem::take(&mut agent.digests);
+        let (gone, fresh) = (&was - &held, &held - &was);
+        for number in &held {
+            inner.holders_of(number).staging -= 1;
+        }
+        for number in &fresh {
+            inner.holders_of(number).nodes.insert(slot);
+        }
+        for number in &gone {
+            inner.unhold(slot, number);
+        }
+        inner.pairs += fresh.len();
+        inner.agent(slot).digests = held;
         inner.publish();
         Ok(())
     }
@@ -122,37 +211,39 @@ impl Index {
     pub(crate) fn apply(
         &self,
         stream: &Stream,
-        added: Vec<Digest>,
+        added: &[Digest],
         removed: &[Digest],
         limit: usize,
     ) -> Result<(), Refused> {
+        let added = Key::all(added);
+        let removed = Key::all(removed);
         let mut inner = self.lock();
         let slot = inner.owned(stream)?;
         let mut next = inner.agent(slot).digests.clone();
-        for digest in removed {
-            if let Some(&number) = inner.digests.get(digest) {
+        for key in &removed {
+            if let Some(&number) = inner.digests.get(key) {
                 next.remove(number);
             }
         }
-        let fresh: HashSet<&Digest> = added
+        let fresh: HashSet<&Key> = added
             .iter()
-            .filter(|digest| {
+            .filter(|key| {
                 inner
                     .digests
-                    .get(*digest)
+                    .get(*key)
                     .is_none_or(|&number| !next.contains(number))
             })
             .collect();
         if usize::try_from(next.len()).map_or(true, |held| held + fresh.len() > limit) {
             return Err(Refused::Limit);
         }
-        for digest in removed {
-            if let Some(&number) = inner.digests.get(digest) {
+        for key in &removed {
+            if let Some(&number) = inner.digests.get(key) {
                 inner.release(slot, number);
             }
         }
-        for digest in added {
-            inner.hold(slot, digest);
+        for key in added {
+            inner.hold(slot, key);
         }
         inner.publish();
         Ok(())
@@ -171,13 +262,31 @@ impl Index {
         inner.publish();
     }
 
+    /// Empties the index at once, for a stopping reflector: the streams' ends then find nothing to remove (D104).
+    pub(crate) fn close(&self) {
+        let closed = {
+            let mut inner = self.lock();
+            // Keeping the stream count keeps every later stream's number new.
+            let streams = inner.streams;
+            let closed = std::mem::take(&mut *inner);
+            inner.streams = streams;
+            inner.publish();
+            closed
+        };
+        // Freeing the entries takes a while: outside the lock.
+        drop(closed);
+    }
+
     /// Up to `limit` holders of `digest`, from a random one on and never `asking`: lookups spread over the holders.
     pub(crate) fn lookup(&self, digest: &Digest, asking: &str, limit: usize) -> Vec<Holder> {
+        let key = Key::of(digest);
         let inner = self.lock();
         let Some(holders) = inner
             .digests
-            .get(digest)
+            .get(&key)
             .and_then(|&number| inner.holders[at(number)].as_ref())
+            // A digest only staged has none.
+            .filter(|holders| !holders.nodes.is_empty())
         else {
             return Vec::new();
         };
@@ -227,22 +336,28 @@ impl Inner {
     }
 
     /// Marks `slot` as a holder of `digest`, numbering the digest if new.
-    fn hold(&mut self, slot: u32, digest: Digest) {
-        let number = if let Some(&number) = self.digests.get(&digest) {
-            number
-        } else {
-            let holders = Holders {
-                digest: digest.clone(),
-                nodes: RoaringBitmap::new(),
-            };
-            let number = allocate(&mut self.holders, &mut self.free_holders, holders);
-            self.digests.insert(digest, number);
-            number
-        };
+    fn hold(&mut self, slot: u32, key: Key) {
+        let number = self.number(key);
         if self.agent(slot).digests.insert(number) {
             self.holders_of(number).nodes.insert(slot);
             self.pairs += 1;
         }
+    }
+
+    /// The number of the digest `key`, numbering it if new: a new digest has no holders until the caller adds or stages
+    /// one.
+    fn number(&mut self, key: Key) -> u32 {
+        if let Some(&number) = self.digests.get(&key) {
+            return number;
+        }
+        let holders = Holders {
+            key,
+            nodes: RoaringBitmap::new(),
+            staging: 0,
+        };
+        let number = allocate(&mut self.holders, &mut self.free_holders, holders);
+        self.digests.insert(key, number);
+        number
     }
 
     /// Removes digest `number` from what `slot` holds.
@@ -252,30 +367,45 @@ impl Inner {
         }
     }
 
-    /// Removes `slot` from the holders of digest `number`, forgetting the digest when none is left.
+    /// Removes `slot` from the holders of digest `number`.
     fn unhold(&mut self, slot: u32, number: u32) {
         self.pairs -= 1;
+        self.holders_of(number).nodes.remove(slot);
+        self.forget_unused(number);
+    }
+
+    /// Forgets digest `number` when no node holds or stages it.
+    fn forget_unused(&mut self, number: u32) {
         let holders = self.holders_of(number);
-        holders.nodes.remove(slot);
         if holders.nodes.is_empty()
+            && holders.staging == 0
             && let Some(holders) = self.holders[at(number)].take()
         {
-            self.digests.remove(&holders.digest);
+            self.digests.remove(&holders.key);
             self.free_holders.push(number);
         }
     }
 
+    /// Removes all `slot` holds and stages.
     fn empty(&mut self, slot: u32) {
-        let held = std::mem::take(&mut self.agent(slot).digests);
+        let agent = self.agent(slot);
+        let (held, staged) = (
+            std::mem::take(&mut agent.digests),
+            std::mem::take(&mut agent.staged),
+        );
         for number in &held {
             self.unhold(slot, number);
+        }
+        for number in &staged {
+            self.holders_of(number).staging -= 1;
+            self.forget_unused(number);
         }
     }
 
     fn holders_of(&mut self, number: u32) -> &mut Holders {
         self.holders[at(number)]
             .as_mut()
-            .expect("a digest number an agent holds has holders")
+            .expect("a digest number an agent holds or stages has holders")
     }
 
     fn publish(&self) {
@@ -299,7 +429,17 @@ fn allocate<T>(slots: &mut Vec<Option<T>>, free: &mut Vec<u32>, value: T) -> u32
 
 #[cfg(test)]
 impl Index {
-    /// What each node holds, after checking that both directions of the index and its counts agree.
+    /// Stages the digests `numbers` spell in two chunks, then commits them.
+    fn snapshot(&self, stream: &Stream, numbers: &[u32]) -> Result<(), Refused> {
+        let digests: Vec<Digest> = numbers.iter().map(|&n| tests::digest(n)).collect();
+        let (first, second) = digests.split_at(digests.len() / 2);
+        self.stage(stream, first, usize::MAX)?;
+        self.stage(stream, second, usize::MAX)?;
+        self.commit(stream)
+    }
+
+    /// What each node holds, after checking that both directions of the index and its counts agree, and that it numbers
+    /// only digests held or staged.
     fn held(&self) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
         let inner = self.lock();
         let mut held = std::collections::BTreeMap::new();
@@ -313,8 +453,8 @@ impl Index {
             for number in &agent.digests {
                 let holders = inner.holders[at(number)].as_ref().expect("holders");
                 assert!(holders.nodes.contains(slot));
-                assert_eq!(inner.digests.get(&holders.digest), Some(&number));
-                digests.insert(holders.digest.to_string());
+                assert_eq!(inner.digests.get(&holders.key), Some(&number));
+                digests.insert(holders.key.to_string());
                 pairs += 1;
             }
         }
@@ -326,6 +466,18 @@ impl Index {
             .sum();
         assert_eq!(holding, pairs);
         assert_eq!(inner.pairs, pairs);
+        for (number, holders) in inner.holders.iter().enumerate() {
+            let Some(holders) = holders else { continue };
+            let number = u32::try_from(number).expect("a digest number");
+            let staging = inner
+                .agents
+                .iter()
+                .flatten()
+                .filter(|agent| agent.staged.contains(number))
+                .count();
+            assert_eq!(usize::try_from(holders.staging), Ok(staging));
+            assert!(!holders.nodes.is_empty() || staging > 0, "{}", holders.key);
+        }
         assert_eq!(inner.digests.len(), inner.holders.iter().flatten().count());
         assert_eq!(inner.nodes.len(), inner.agents.iter().flatten().count());
         held
@@ -346,10 +498,6 @@ mod tests {
         SocketAddr::from(([10, 0, 0, n], 7484))
     }
 
-    fn set(numbers: &[u32]) -> HashSet<Digest> {
-        numbers.iter().copied().map(digest).collect()
-    }
-
     fn held(pairs: &[(&str, &[u32])]) -> BTreeMap<String, BTreeSet<String>> {
         pairs
             .iter()
@@ -364,19 +512,16 @@ mod tests {
     fn a_snapshot_replaces_and_a_delta_changes_what_a_node_holds() {
         let index = Index::default();
         let a = index.join("a", peer(1));
-        index.replace(&a, set(&[1, 2])).unwrap();
+        index.snapshot(&a, &[1, 2]).unwrap();
         let b = index.join("b", peer(2));
-        index.replace(&b, set(&[2, 3])).unwrap();
-        index.replace(&a, set(&[2, 4])).unwrap();
+        index.snapshot(&b, &[2, 3]).unwrap();
+        index.snapshot(&a, &[2, 4]).unwrap();
         assert_eq!(index.held(), held(&[("a", &[2, 4]), ("b", &[2, 3])]));
         index
-            .apply(&b, vec![digest(5), digest(3)], &[digest(3), digest(2)], 2)
+            .apply(&b, &[digest(5), digest(3)], &[digest(3), digest(2)], 2)
             .unwrap();
         assert_eq!(index.held(), held(&[("a", &[2, 4]), ("b", &[3, 5])]));
-        assert_eq!(
-            index.apply(&b, vec![digest(6)], &[], 2),
-            Err(Refused::Limit)
-        );
+        assert_eq!(index.apply(&b, &[digest(6)], &[], 2), Err(Refused::Limit));
         assert_eq!(index.held(), held(&[("a", &[2, 4]), ("b", &[3, 5])]));
         index.leave(&a);
         assert_eq!(index.held(), held(&[("b", &[3, 5])]));
@@ -386,13 +531,13 @@ mod tests {
     fn a_later_stream_empties_the_entry_and_the_earlier_one_changes_nothing() {
         let index = Index::default();
         let first = index.join("a", peer(1));
-        index.replace(&first, set(&[1])).unwrap();
+        index.snapshot(&first, &[1]).unwrap();
         let second = index.join("a", peer(2));
         assert_eq!(index.held(), held(&[("a", &[])]));
-        index.replace(&second, set(&[2])).unwrap();
-        assert_eq!(index.replace(&first, set(&[3])), Err(Refused::Superseded));
+        index.snapshot(&second, &[2]).unwrap();
+        assert_eq!(index.snapshot(&first, &[3]), Err(Refused::Superseded));
         assert_eq!(
-            index.apply(&first, vec![digest(3)], &[], 9),
+            index.apply(&first, &[digest(3)], &[], 9),
             Err(Refused::Superseded)
         );
         index.leave(&first);
@@ -408,15 +553,69 @@ mod tests {
     }
 
     #[test]
+    fn a_staged_digest_has_no_holder_and_keeps_its_number_until_unstaged() {
+        let index = Index::default();
+        let a = index.join("a", peer(1));
+        index.snapshot(&a, &[1, 2]).unwrap();
+        let b = index.join("b", peer(2));
+        index.stage(&b, &[digest(2), digest(3)], 2).unwrap();
+        assert_eq!(index.lookup(&digest(3), "c", 8), []);
+        // `a` gives digest 2 up while `b` stages it.
+        index.snapshot(&a, &[1]).unwrap();
+        assert_eq!(index.held(), held(&[("a", &[1]), ("b", &[])]));
+        assert_eq!(index.stage(&b, &[digest(4)], 2), Err(Refused::Limit));
+        index.leave(&b);
+        assert_eq!(index.held(), held(&[("a", &[1])]));
+        assert_eq!(index.lock().digests.len(), 1);
+        let b = index.join("b", peer(2));
+        index.stage(&b, &[digest(2)], 2).unwrap();
+        index.commit(&b).unwrap();
+        assert_eq!(index.held(), held(&[("a", &[1]), ("b", &[2])]));
+    }
+
+    #[test]
+    fn a_closed_index_is_empty_and_the_earlier_streams_change_nothing() {
+        let index = Index::default();
+        let a = index.join("a", peer(1));
+        index.snapshot(&a, &[1, 2]).unwrap();
+        index.close();
+        assert!(index.held().is_empty());
+        let later = index.join("a", peer(2));
+        index.snapshot(&later, &[3]).unwrap();
+        assert_eq!(index.snapshot(&a, &[4]), Err(Refused::Superseded));
+        index.leave(&a);
+        assert_eq!(index.held(), held(&[("a", &[3])]));
+    }
+
+    #[test]
     fn freed_numbers_are_reused() {
         let index = Index::default();
         for round in 0..3 {
             let a = index.join("a", peer(1));
-            index.replace(&a, set(&[round, round + 1])).unwrap();
+            index.snapshot(&a, &[round, round + 1]).unwrap();
             index.leave(&a);
         }
         let inner = index.lock();
         assert_eq!((inner.agents.len(), inner.holders.len()), (1, 2));
+    }
+
+    #[test]
+    fn a_key_spells_its_digest_back() {
+        for text in [
+            format!("sha256:{}", "0a".repeat(32)),
+            format!("sha384:{}", "f9".repeat(48)),
+            format!("sha512:{}", "7c".repeat(64)),
+        ] {
+            assert_eq!(Key::of(&Digest::parse(&text).unwrap()).to_string(), text);
+        }
+    }
+
+    #[test]
+    fn decoding_takes_only_lower_case_hex_of_the_length() {
+        assert_eq!(decode::<2>("0aff"), Some([0x0a, 0xff]));
+        for hex in ["0aFF", "0afg", "0af", "0aff00"] {
+            assert_eq!(decode::<2>(hex), None, "{hex}");
+        }
     }
 }
 
@@ -444,9 +643,9 @@ mod schedules {
                     let index = Arc::clone(&index);
                     shuttle::thread::spawn(move || {
                         let stream = index.join(node, peer(n));
-                        let _ = index.replace(&stream, [digest(n.into()), digest(0)].into());
+                        let _ = index.snapshot(&stream, &[n.into(), 0]);
                         let _ =
-                            index.apply(&stream, vec![digest(u32::from(n) + 10)], &[digest(0)], 10);
+                            index.apply(&stream, &[digest(u32::from(n) + 10)], &[digest(0)], 10);
                         if !open {
                             index.leave(&stream);
                         }

@@ -27,7 +27,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Reflector RSS exceeds 1 GiB.
   - Keeping `reflector.members` in sync by hand becomes painful. Then derive it from control-plane `Node` objects.
 
-## D33: Reconnects are jittered, and reflector scale is load-tested (amends D2; amended by D98)
+## D33: Reconnects are jittered, and reflector scale is load-tested (amends D2; amended by D98, D104)
 
 - **Decision:**
   - After a stream drops, the agent waits a random delay between 0 and 5 s, then retries with exponential backoff and full jitter, from 1 s up to 60 s.
@@ -54,7 +54,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - While an agent reconnects, members can disagree for a moment; the cost is one extra seed pulling from upstream.
 - **Revisit when:** benchmarks show extra upstream pulls during prewarm.
 
-## D97: The reflector's wire, index and limits (amends D2, D27, D76)
+## D97: The reflector's wire, index and limits (amends D2, D27, D76; amended by D104)
 
 - **Decision:**
   - **Wire:** protobuf package `speculaire.reflect.v1`, in `crates/reflect/proto/`. `protocol_version` is an integer, 1 for now. Digests travel as their text, and the reflector parses each one as an OCI digest (sha256, sha384 or sha512).
@@ -104,3 +104,34 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - hyper drops a body once it has buffered its end, before it has written it: a drain that waited for bodies let the agent exit with the end of a blob unsent, and the peer's pull went upstream.
 - **Measured (M3 step 06):** `e2e/tests/outage.rs` passes on containerd 2.4 and CRI-O 1.37 in 33 s. After a reflector restarts, its lookups find every holder 0.6 to 5.3 s after it is ready: the agents' 0 to 5 s wait after a drop (D33). An agent started with both reflectors down opens its peer API 0.6 to 3.9 s after one is ready, and 9.4 to 9.5 s after its certificate appears (`config.poll_interval`, 10 s). Stopping an agent that serves a 16 MiB layer at 32 Mbit/s takes it out of lookups in 160 to 350 ms, and the unit stops in 3.1 to 3.8 s while the peer's pull completes from it. Before the drain change, that pull went upstream.
 - **Revisit when:** a reflector keeps its index across restarts.
+
+## D104: The load scenario is a library under `speculaire-loadgen`, and the reflector bounds what each agent costs it (amends D27, D33, D97)
+
+- **Decision:**
+  - **Place:** `apps/loadgen`, the package `speculaire-loadgen`, parses arguments and prints the report (D62). The library `crates/load`, `speculaire-load`, holds the scenario. It makes a test CA with `speculaire-pki`'s `testing` feature, starts the reflector as a child `speculaire agent` with `role = "reflector"` on a fake containerd, and runs one `crates/reflect` client per simulated agent, each with its own node certificate.
+  - **Scenario (D33):** 10k agents each hold 2k digests drawn from a pool of 200k, so a digest has about 100 holders. They connect evenly over 30 s. Once the reflector holds every pair, 10 s of warm-up, then a measured minute of 5k lookups/s, each of a random digest by a random agent, and 1k deltas/s, one per digest removed or added. Then the reflector gets SIGTERM and starts again, and the agents' own reconnects refill it.
+  - **Measures:** RSS is the largest `VmHWM` in `/proc/<pid>/status` over the reflector's two runs. The lookup p99 is the upper bound of its bucket in `speculaire_reflector_lookup_seconds`, a native histogram scraped as protobuf before and after the measured minute. Resync runs from the restart until the gauges `speculaire_reflector_agents` and `speculaire_reflector_pairs` are back at 10k and 20M. Lookups and deltas must each reach 95 % of their rate. A missed target or rate exits 1, unless `--measure-only`. The Markdown report also gives the CPU count and the open-files limit.
+  - **Running:** `just load` runs both musl binaries in the build image, with the open-files limit at 1048576 and local ports from 1024 to 65535. Its arguments go to `speculaire-loadgen`. `load.yml` runs it on dispatch, on `ubuntu-26.04` and `ubuntu-26.04-arm`, and puts the report in the job summary. Its nightly run waits on the transport change below, so that it does not fail every night.
+  - **What an agent costs the reflector:** a `Snapshot` chunk holds at most 25 digests (`SNAPSHOT_CHUNK`, D97), about 1.8 KB of sha256 text. The API's codec, `crates/reflect/src/codec.rs`, sends each message on its own, from a 1 KiB buffer, and receives into 4 KiB, which two such chunks fit. An agent may send 8 KiB on its stream, and HTTP/2's default of 64 KiB on its connection, before the reflector reads them. The index keys a digest by its bytes, inline (`Key`), made outside its lock; a snapshot costs one map access a digest. Until its last chunk, a snapshot is a bitmap of digest numbers in the agent's entry (`Index::stage`), which the last chunk swaps in (`Index::commit`).
+  - **Restart:** a stopping reflector empties its index at once (`Index::close`), before its streams end.
+  - **Micro-benchmarks:** divan, in `benches/micro.rs` of `crates/reflect` (index lookup in D33's fleet) and of `crates/mirror` (blob hashing, D7). A `bench` feature exposes the private index and hash to them. `just bench-micro` runs them, never CI.
+  - **Valgrind:** `just valgrind` runs the glibc build of the reflector under 100 agents, in memcheck, where a definite leak fails it, then in DHAT. `deep`'s `valgrind` job runs it on each pull request, informational like `careful` (D76), and keeps DHAT's profiles.
+  - **Mutants (D74):** cargo-mutants skips `apps/loadgen/`, flags over `run` that the `load` workflow runs, and `crates/reflect/src/bench.rs`, benchmark support. `.cargo/mutants.toml` gives each generator change it skips its reason.
+- **Because:**
+  - D62 leaves binaries only argument parsing. As a library, the scenario also runs small in `apps/speculaire/tests/load.rs`, against the built binary, in every `just check` on Linux.
+  - A separate process is what `/proc` measures, with the agent's own config, TLS and metrics; in the generator's process, the agents would count in its RSS.
+  - The rate floor: a generator short of CPU sends fewer lookups, and a less loaded reflector answers faster.
+  - tonic keeps each stream's receive buffer at its largest message (tonic 0.14.9 `src/codec/decode.rs:223`). With 10k-digest chunks, a 2k-blob snapshot is one 150 KB message whose buffer stays for the stream's life. tonic's encoder also batches ready messages up to 32 KiB (`src/codec/encode.rs:144`), so chunks arrived in full 16 KiB frames and DHAT found each stream's buffer at 64 KiB. With 100-digest chunks, an 8 KiB buffer still doubled to 16 KiB on most streams.
+  - hyper's 1 MiB windows (hyper 1.12.0 `src/proto/h2/server.rs:37`) let every reconnecting agent park its whole snapshot in the reflector while the index is busy. 8 KiB is four chunks in flight.
+  - After a restart, all 10k agents send their snapshots at once. Staged as sets of keys, 270 KB each, they took the reflector out of 8 GB.
+  - A stopping reflector that withdrew each agent's 2k digests as its stream ended took 16.5 s to exit. The agents it refused meanwhile climbed their failure backoff (D98), and the last one was back 72 s after the restart. Emptied at once, the index lets it exit in 0.3 s, and every agent is back within 17 s.
+  - A `Digest` is two heap strings, which each map access reads. Filling 1k agents × 2k digests held the index's lock 1.1 s on an M-series core with `Digest` keys and two accesses a digest, 0.32 s with `Key` and one.
+  - Divan over criterion, and DHAT over the `dhat` crate: `docs/research/checkers.md`. Valgrind cannot follow mimalloc in the static musl binary (D46).
+- **Measured (M3 step 07):** on GitHub's runners, 4 CPUs, the reflector's peak RSS still misses D33's 1 GiB; every other target is met. On 2026-11-15 the user chose to replace gRPC between agents and reflectors with our own framing, length-prefixed protobuf over the rustls connection, projected at a 593–627 MiB peak (`docs/research/reflector-transport.md`). A following decision, amending D2 and D13, makes that change and turns the nightly run back on; until then the peak target is pending.
+  - With D46's allocator, runs 43654431900 and 43656035441 of the throwaway branch `m3/07-load-try`: peak 1147–1181 MiB on x86_64 and aarch64, 1083–1104 MiB at the end of the steady phase, lookup p99 28–56 µs, resync 31.8–40.4 s, no failed lookup.
+  - With mimalloc's padding off (`-DMI_PADDING=0`), runs 43658675208 and 43659875449: peak 1036 and 1051 MiB on x86_64, 963 and 973 MiB on aarch64, 924–944 MiB at the end of the steady phase, resync 36.9–50.9 s.
+  - The peak is the restarted reflector's. Its 10k agents reconnect within 28 s while it fills, on the 4 CPUs the generator also uses, and it holds 40–110 MB more than in the steady phase.
+  - Locally, Docker on an M-series Mac with 4 CPUs, aarch64: peak 950–1007 MiB with D46's allocator, 815 MiB with padding off, 842 MiB with mimalloc's non-secure build.
+  - DHAT with 1k agents puts the index at about 170 MB for 10k agents, and each connection at about 50 KiB of h2, tonic and rustls buffers. mimalloc's padding, on from `MI_SECURE` 3 (mimalloc v3 `include/mimalloc/types.h:96`), moves each of these power-of-two buffers to the next size class.
+  - `just valgrind`, locally on aarch64: memcheck finds no error and no definite leak in either run.
+- **Revisit when:** a target is missed. In DHAT's profile, each agent's connection costs the reflector about 50 KiB of h2, tonic and rustls buffers, which comes before the index (D2). 24 KiB of it are h2's write buffer and its 8 KiB read buffer, which no setting changes (h2 0.4.20 `src/codec/framed_write.rs:67`).

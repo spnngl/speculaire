@@ -1,0 +1,24 @@
+[package]
+name = "speculaire-loadgen"
+description = "Runs D33's load scenario against one reflector and reports its targets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+humantime.workspace = true
+speculaire-load.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber.workspace = true
+
+# D46: the global allocator on musl, `src/main.rs`.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc.workspace = true
+
+[lints]
+workspace = true

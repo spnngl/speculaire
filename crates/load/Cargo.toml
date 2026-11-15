@@ -1,0 +1,35 @@
+[package]
+name = "speculaire-load"
+description = "D33's load scenario against one reflector, and whether it meets the targets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+fastrand.workspace = true
+prost.workspace = true
+secrecy.workspace = true
+speculaire-fake-runtime.workspace = true
+speculaire-oci.workspace = true
+speculaire-pki = { workspace = true, features = ["testing"] }
+speculaire-reflect.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = [
+  "io-util",
+  "net",
+  "process",
+  "rt",
+  "sync",
+  "time",
+] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

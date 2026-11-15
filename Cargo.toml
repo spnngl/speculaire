@@ -15,6 +15,7 @@ publish = false
 [workspace.dependencies]
 speculaire-agent = { path = "crates/agent" }
 speculaire-fake-runtime = { path = "crates/fake-runtime" }
+speculaire-load = { path = "crates/load" }
 speculaire-mirror = { path = "crates/mirror" }
 speculaire-oci = { path = "crates/oci" }
 speculaire-oracle-harness = { path = "crates/oracle-harness" }
@@ -38,6 +39,8 @@ fastrand = "2.5.0"
 clap = { version = "4.6.7", features = ["derive"] }
 # D5: the content service of containerd, the fallback of the content directory.
 containerd-client = "0.9.0"
+# D104: the micro-benchmarks of `just bench-micro`.
+divan = { version = "0.1.21", default-features = false }
 futures-util = { version = "0.3.34", default-features = false, features = [
   "std",
 ] }
