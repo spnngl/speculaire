@@ -103,6 +103,8 @@
 [log]
 # Which diagnostic events reach the log, in EnvFilter syntax (D37).
 #filter = "warn"
+# Whether each span log.filter lets through is logged as JSON on stderr as it closes, with its busy and idle times.
+#timings = false
 
 [audit]
 # Whether audit events are written, whatever log.filter says (D37).

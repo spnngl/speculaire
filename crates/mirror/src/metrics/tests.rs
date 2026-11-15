@@ -14,7 +14,7 @@ async fn a_metered_body_tells_its_size_and_its_end_as_the_body_it_wraps() {
         response,
         Counter::noop(),
         Histogram::noop(),
-        Instant::now(),
+        (Instant::now(), Span::none()),
         |metered| metered,
     )
     .into_body();

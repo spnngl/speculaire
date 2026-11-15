@@ -103,6 +103,7 @@ A reflector ends an agent's `Announce` stream with a `Refused` frame naming the 
 ## Logs and audit
 
 - `journalctl -u speculaire` shows the agent's logs, at `warn` and above by default. Change `log.filter` (`EnvFilter` syntax) and reload to see more (D37).
+- At `log.filter = "debug"` (or `speculaire_mirror=debug,speculaire_reflect=debug`), set `log.timings = true` and reload to log each span as it closes, as JSON on stderr with `time.busy` and `time.idle`: `mirror request` (`kind`, `digest`, `source`, `result`) closes at the body's last byte, `peer fetch` (`peer`, `rank`, `result`) at the attempt's end, and `reflector connection` (`peer`, `node`) at the connection's end. Turn it off once read: each request writes a line.
 - Set `audit.enabled = true` and reload to record one `gate` event per container creation, one `verdict` event per changed verdict, and one `peer` event per peer denied for a wrong digest (D52). Read them with `journalctl -t speculaire-audit` (D37).
 - Registry credentials and tokens never appear in either.
 

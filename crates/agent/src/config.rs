@@ -133,7 +133,10 @@ impl Config {
                 images: _,
                 seeds: _,
             },
-            log: Log { filter: _ },
+            log: Log {
+                filter: _,
+                timings: _,
+            },
             audit: Audit { enabled: _ },
             shutdown: Shutdown { drain_timeout: _ },
         } = self;
@@ -545,12 +548,15 @@ impl Default for Prewarm {
 pub struct Log {
     /// Which diagnostic events reach the log (D37).
     pub filter: LogFilter,
+    /// Whether each span `filter` lets through is logged as it closes, with its busy and idle times.
+    pub timings: bool,
 }
 
 impl Default for Log {
     fn default() -> Self {
         Self {
             filter: LogFilter::new("warn"),
+            timings: false,
         }
     }
 }

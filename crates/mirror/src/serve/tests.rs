@@ -566,6 +566,33 @@ async fn the_metrics_count_requests_bytes_and_times() {
     }
 }
 
+#[tokio::test]
+async fn each_pull_is_a_span_naming_its_kind_digest_source_and_result_that_closes_with_the_body() {
+    let capture = crate::fetch::tests::Capture::default();
+    let _default = tracing::subscriber::set_default(capture.subscriber());
+    let held = digest_of(1);
+    let server = start(Fake(HashMap::from([(held.clone(), pattern(1000))]))).await;
+    let mut sender = client(&server).await;
+    get(&mut sender, &blob_path(&held)).await;
+    get(&mut sender, &blob_path(&digest_of(2))).await;
+    get(&mut sender, "/v2/x/manifests/latest").await;
+    let printed = capture.printed();
+    for span in [
+        format!(r#"mirror request{{kind="blob" digest={held} source="local" result="served"}}: "#),
+        format!(
+            r#"mirror request{{kind="blob" digest={} source="fall_through" result="fall_through"}}: "#,
+            digest_of(2)
+        ),
+        r#"mirror request{kind="manifest" source="fall_through" result="fall_through"}: "#
+            .to_owned(),
+    ] {
+        let closed = printed
+            .lines()
+            .any(|line| line.contains(&span) && line.contains("close time.busy="));
+        assert!(closed, "no close of `{span}` in\n{printed}");
+    }
+}
+
 /// Writes down every pull it is asked, and answers a manifest with a fixed body and everything else with a miss.
 struct Recording(std::sync::Mutex<Vec<String>>);
 
