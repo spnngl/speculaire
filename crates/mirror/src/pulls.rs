@@ -24,7 +24,7 @@ pub struct Pull<'a> {
     /// The repository name as the runtime wrote it, the registry first on CRI-O.
     pub name: &'a str,
     /// Its digest or tag; `None` when the text is neither.
-    pub reference: Option<&'a Reference>,
+    pub reference: Option<&'a Reference<'a>>,
     /// Only the head of the answer is wanted.
     pub head: bool,
     /// The `Range` header.
