@@ -28,15 +28,15 @@ impl Kind {
 
 /// What a pull names: a digest, or a tag.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Reference {
+pub enum Reference<'a> {
     /// `sha256:<hex>`: content, found by its hash.
     Digest(Digest),
     /// A tag: a name that someone has to resolve, which on containerd is a miss (D6) and on CRI-O is the relay's to
     /// resolve at upstream (D66).
-    Tag(String),
+    Tag(&'a str),
 }
 
-impl Reference {
+impl<'a> Reference<'a> {
     /// The digest, when it is one.
     #[must_use]
     pub const fn digest(&self) -> Option<&Digest> {
@@ -48,7 +48,7 @@ impl Reference {
 
     /// A reference by its text: a digest, else a tag (`[\w][\w.-]{0,127}`), else `None`.
     #[must_use]
-    pub fn parse(text: &str) -> Option<Self> {
+    pub fn parse(text: &'a str) -> Option<Self> {
         if let Ok(digest) = Digest::parse(text) {
             return Some(Self::Digest(digest));
         }
@@ -56,7 +56,7 @@ impl Reference {
         let first = chars.next()?;
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
         (word(first) && text.len() <= 128 && chars.all(|c| word(c) || c == '.' || c == '-'))
-            .then(|| Self::Tag(text.to_owned()))
+            .then_some(Self::Tag(text))
     }
 }
 
@@ -73,7 +73,7 @@ pub enum Route<'a> {
         /// image comes from (D66).
         name: &'a str,
         /// What the name is pulled by; `None` when it is no digest and no tag, which is a miss.
-        reference: Option<Reference>,
+        reference: Option<Reference<'a>>,
         /// Whether only the head of the response is wanted.
         head: bool,
     },
@@ -253,19 +253,16 @@ mod tests {
             pull(&Method::GET, "/v2/library/busybox/manifests/latest"),
             Some((Kind::Manifest, false, false))
         );
-        let reference = |text: &str| match route(&Method::GET, &format!("/v2/a/manifests/{text}")) {
-            Some(Route::Pull { reference, .. }) => reference,
+        let reference = |text: &str, expected: Option<Reference<'_>>| match route(
+            &Method::GET,
+            &format!("/v2/a/manifests/{text}"),
+        ) {
+            Some(Route::Pull { reference, .. }) => assert_eq!(reference, expected, "{text}"),
             other => panic!("{other:?}"),
         };
-        assert_eq!(
-            reference("1.37.2-alpine_3"),
-            Some(Reference::Tag("1.37.2-alpine_3".to_owned()))
-        );
-        assert_eq!(reference("_x"), Some(Reference::Tag("_x".to_owned())));
-        assert_eq!(
-            reference(&"a".repeat(128)),
-            Some(Reference::Tag("a".repeat(128)))
-        );
+        for tag in ["1.37.2-alpine_3", "_x", &"a".repeat(128)] {
+            reference(tag, Some(Reference::Tag(tag)));
+        }
         for bad in [
             "sha256:short",
             ".x",
@@ -275,7 +272,7 @@ mod tests {
             "a%20b",
             "é",
         ] {
-            assert_eq!(reference(bad), None, "{bad}");
+            reference(bad, None);
         }
         assert_eq!(
             pull(&Method::GET, "/v2/a/blobs/sha256:short"),

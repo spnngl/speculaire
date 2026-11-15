@@ -4,6 +4,7 @@
 //! manifest the relay served come from the *blob cache* or, once, from upstream, streamed to CRI-O and to a temporary
 //! file while they are hashed, with the last chunk held back until the digest matches (D7, D67).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -204,10 +205,10 @@ impl<I: Images> Relay<I> {
         protected
     }
 
-    async fn manifest(&self, pull: &Pull<'_>, reference: &Reference) -> Answer {
-        let text = match reference {
-            Reference::Digest(digest) => digest.to_string(),
-            Reference::Tag(tag) => tag.clone(),
+    async fn manifest(&self, pull: &Pull<'_>, reference: &Reference<'_>) -> Answer {
+        let text: Cow<'_, str> = match reference {
+            Reference::Digest(digest) => digest.to_string().into(),
+            Reference::Tag(tag) => (*tag).into(),
         };
         let asked = match reference {
             Reference::Digest(_) => registries::Reference::Digest(&text),
@@ -246,7 +247,7 @@ impl<I: Images> Relay<I> {
         &self,
         source: &Source,
         pull: &Pull<'_>,
-        reference: &Reference,
+        reference: &Reference<'_>,
         text: &str,
     ) -> Option<Answer> {
         // The head of a tag is asked as a head: it costs no pull, and the body is not read.

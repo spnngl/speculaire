@@ -369,7 +369,12 @@ impl Image {
     }
 }
 
-fn pull<'a>(kind: Kind, reference: &'a Reference, head: bool, range: Option<&'a str>) -> Pull<'a> {
+fn pull<'a>(
+    kind: Kind,
+    reference: &'a Reference<'a>,
+    head: bool,
+    range: Option<&'a str>,
+) -> Pull<'a> {
     Pull {
         kind,
         name: "reg.test/app/web",
@@ -380,11 +385,11 @@ fn pull<'a>(kind: Kind, reference: &'a Reference, head: bool, range: Option<&'a 
     }
 }
 
-fn tag(text: &str) -> Reference {
-    Reference::Tag(text.to_owned())
+const fn tag(text: &str) -> Reference<'_> {
+    Reference::Tag(text)
 }
 
-fn by(digest: &Digest) -> Reference {
+fn by(digest: &Digest) -> Reference<'static> {
     Reference::Digest(digest.clone())
 }
 

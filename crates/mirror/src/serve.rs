@@ -1,5 +1,6 @@
 //! The listener and the answers.
 
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
@@ -15,7 +16,7 @@ use hyper::header::{
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
+use hyper::{HeaderMap, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use rustls::ServerConfig;
 use serde::Deserialize;
@@ -183,14 +184,7 @@ async fn handle<P: Pulls>(pulls: &P, request: &Request<Incoming>) -> Response<Bo
             .get(name)
             .and_then(|value| value.to_str().ok())
     };
-    // Go clients, CRI-O's among them, send one `Accept` header per media type.
-    let accept = request
-        .headers()
-        .get_all(ACCEPT)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let accept = accept(request.headers());
     let answered = pulls
         .pull(Pull {
             kind,
@@ -198,7 +192,7 @@ async fn handle<P: Pulls>(pulls: &P, request: &Request<Incoming>) -> Response<Bo
             reference: reference.as_ref(),
             head,
             range: header(RANGE),
-            accept: (!accept.is_empty()).then_some(accept.as_str()),
+            accept: accept.as_deref(),
         })
         .await;
     let (response, outcome) = match answered {
@@ -212,6 +206,23 @@ async fn handle<P: Pulls>(pulls: &P, request: &Request<Incoming>) -> Response<Bo
     metrics::request(kind, outcome);
     metrics::first_byte(kind, started.elapsed().as_secs_f64());
     response
+}
+
+/// The `Accept` headers as one list, or `None` when there is none.
+///
+/// Go clients, CRI-O's among them, send one header per media type; containerd sends one list, borrowed as it is.
+fn accept(headers: &HeaderMap) -> Option<Cow<'_, str>> {
+    let mut values = headers
+        .get_all(ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok());
+    let first = values.next()?;
+    Some(values.fold(Cow::Borrowed(first), |mut list, value| {
+        let joined = list.to_mut();
+        joined.push_str(", ");
+        joined.push_str(value);
+        list
+    }))
 }
 
 /// The manifest as it is, with the content type it names.
@@ -305,7 +316,7 @@ pub(crate) async fn blob_response(
     Ok(response)
 }
 
-pub(crate) fn insert_digest(headers: &mut hyper::HeaderMap, digest: &Digest) {
+pub(crate) fn insert_digest(headers: &mut HeaderMap, digest: &Digest) {
     headers.insert("Docker-Content-Digest", header(&digest.to_string()));
 }
 
