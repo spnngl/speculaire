@@ -542,8 +542,8 @@ fn follow(inventory: Arc<dyn Inventory>) -> Arc<Holdings> {
         async move {
             while let Some(update) = received.recv().await {
                 match update {
-                    Update::Listing(digests) => holdings.replace(digests),
-                    Update::Change(Change::Added(digest)) => holdings.add(digest),
+                    Update::Listing(digests) => holdings.replace(&digests),
+                    Update::Change(Change::Added(digest)) => holdings.add(&digest),
                     Update::Change(Change::Removed(digest)) => holdings.remove(&digest),
                 }
             }

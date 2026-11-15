@@ -6,21 +6,23 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use speculaire_oci::reference::Digest;
 use tokio::sync::broadcast;
 
+use crate::Key;
+
 /// How many changes a stream may fall behind before it sends a snapshot again.
 const BACKLOG: usize = 1024;
 
 /// The digests the node can serve; the agent feeds it from the runtime's inventory.
 #[derive(Debug)]
 pub struct Holdings {
-    digests: Mutex<HashSet<Digest>>,
+    digests: Mutex<HashSet<Key>>,
     changes: broadcast::Sender<Arc<Batch>>,
 }
 
 /// One change of [`Holdings`]: digests that came and went, never the same in both.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Batch {
-    pub(crate) added: Vec<Digest>,
-    pub(crate) removed: Vec<Digest>,
+    pub(crate) added: Vec<Key>,
+    pub(crate) removed: Vec<Key>,
 }
 
 impl Default for Holdings {
@@ -34,22 +36,24 @@ impl Default for Holdings {
 
 impl Holdings {
     /// Replaces the digests with a full listing: the streams get what differs.
-    pub fn replace(&self, listing: HashSet<Digest>) {
+    pub fn replace<'a>(&self, listing: impl IntoIterator<Item = &'a Digest>) {
+        let listing: HashSet<Key> = listing.into_iter().map(Key::from).collect();
         let mut digests = self.digests();
         let batch = Batch {
-            added: listing.difference(&digests).cloned().collect(),
-            removed: digests.difference(&listing).cloned().collect(),
+            added: listing.difference(&digests).copied().collect(),
+            removed: digests.difference(&listing).copied().collect(),
         };
         *digests = listing;
         self.send(batch);
     }
 
     /// The node holds `digest`.
-    pub fn add(&self, digest: Digest) {
+    pub fn add(&self, digest: &Digest) {
+        let key = Key::from(digest);
         let mut digests = self.digests();
-        if digests.insert(digest.clone()) {
+        if digests.insert(key) {
             self.send(Batch {
-                added: vec![digest],
+                added: vec![key],
                 removed: Vec::new(),
             });
         }
@@ -57,19 +61,20 @@ impl Holdings {
 
     /// The node no longer holds `digest`.
     pub fn remove(&self, digest: &Digest) {
+        let key = Key::from(digest);
         let mut digests = self.digests();
-        if digests.remove(digest) {
+        if digests.remove(&key) {
             self.send(Batch {
                 added: Vec::new(),
-                removed: vec![digest.clone()],
+                removed: vec![key],
             });
         }
     }
 
     /// Every digest held now, and the changes after it.
-    pub(crate) fn subscribe(&self) -> (Vec<Digest>, broadcast::Receiver<Arc<Batch>>) {
+    pub(crate) fn subscribe(&self) -> (Vec<Key>, broadcast::Receiver<Arc<Batch>>) {
         let digests = self.digests();
-        (digests.iter().cloned().collect(), self.changes.subscribe())
+        (digests.iter().copied().collect(), self.changes.subscribe())
     }
 
     /// Sends under the lock, so that a subscriber's snapshot and its changes follow each other without a gap. With no
@@ -80,7 +85,7 @@ impl Holdings {
         }
     }
 
-    fn digests(&self) -> MutexGuard<'_, HashSet<Digest>> {
+    fn digests(&self) -> MutexGuard<'_, HashSet<Key>> {
         self.digests.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -93,33 +98,37 @@ mod tests {
         Digest::parse(&format!("sha256:{}", format!("{n:02x}").repeat(32))).unwrap()
     }
 
+    fn key(n: u8) -> Key {
+        Key::from(&digest(n))
+    }
+
     #[test]
     fn a_subscriber_gets_the_digests_then_what_changes() {
         let holdings = Holdings::default();
-        holdings.add(digest(1));
+        holdings.add(&digest(1));
         let (digests, mut changes) = holdings.subscribe();
-        assert_eq!(digests, [digest(1)]);
+        assert_eq!(digests, [key(1)]);
         // Adding what is held, or removing what is not, is no change.
-        holdings.add(digest(1));
+        holdings.add(&digest(1));
         holdings.remove(&digest(9));
-        holdings.add(digest(2));
-        holdings.replace(HashSet::from([digest(2), digest(3)]));
+        holdings.add(&digest(2));
+        holdings.replace(&[digest(2), digest(3)]);
         assert_eq!(
             *changes.try_recv().unwrap(),
             Batch {
-                added: vec![digest(2)],
+                added: vec![key(2)],
                 removed: Vec::new()
             }
         );
         assert_eq!(
             *changes.try_recv().unwrap(),
             Batch {
-                added: vec![digest(3)],
-                removed: vec![digest(1)]
+                added: vec![key(3)],
+                removed: vec![key(1)]
             }
         );
         // A listing equal to what is held is no change.
-        holdings.replace(HashSet::from([digest(2), digest(3)]));
+        holdings.replace(&[digest(2), digest(3)]);
         assert!(changes.try_recv().is_err());
     }
 }

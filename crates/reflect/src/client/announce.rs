@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use speculaire_oci::reference::Digest;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -242,9 +241,9 @@ impl<W: AsyncWrite + Unpin> Announcer<'_, W> {
         Ok(changes)
     }
 
-    async fn send_snapshot(&mut self, digests: &[Digest], last: bool) -> Result<(), FrameError> {
+    async fn send_snapshot(&mut self, digests: &[Key], last: bool) -> Result<(), FrameError> {
         let snapshot = Snapshot {
-            digests: keys(digests),
+            digests: digests.to_vec(),
             last,
             seq: self.seq,
         };
@@ -263,11 +262,11 @@ impl<W: AsyncWrite + Unpin> Announcer<'_, W> {
         Ok(())
     }
 
-    async fn send_delta(&mut self, added: &[Digest], removed: &[Digest]) -> Result<(), FrameError> {
+    async fn send_delta(&mut self, added: &[Key], removed: &[Key]) -> Result<(), FrameError> {
         let delta = Delta {
             seq: self.seq,
-            added: keys(added),
-            removed: keys(removed),
+            added: added.to_vec(),
+            removed: removed.to_vec(),
         };
         self.seq += 1;
         self.send(Request::Announcement(Announcement::Delta(delta)))
@@ -299,13 +298,10 @@ impl<W: AsyncWrite + Unpin> Announcer<'_, W> {
     }
 }
 
-/// The keys of `digests`, which a message carries.
-fn keys(digests: &[Digest]) -> Vec<Key> {
-    digests.iter().map(Key::from).collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use speculaire_oci::reference::Digest;
+
     use super::*;
     use crate::client::Holdings;
 
@@ -323,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn deltas_count_up_from_the_snapshot_and_the_next_snapshot_names_the_next_delta() {
         let holdings = Holdings::default();
-        holdings.add(digest(1));
+        holdings.add(&digest(1));
         let pending = Pending::default();
         let mut announcer = Announcer {
             io: Vec::new(),
@@ -333,8 +329,8 @@ mod tests {
         };
         let mut changes = announcer.snapshot(&holdings).await.unwrap();
         holdings.remove(&digest(1));
-        holdings.add(digest(2));
-        holdings.add(digest(3));
+        holdings.add(&digest(2));
+        holdings.add(&digest(3));
         for _ in 0..3 {
             let batch = changes.recv().await.unwrap();
             announcer.delta(&batch).await.unwrap();
