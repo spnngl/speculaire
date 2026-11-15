@@ -26,7 +26,7 @@ use speculaire_runtime::content::{Blob, Error};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, warn};
+use tracing::{Instrument as _, debug, debug_span, field, warn};
 
 use crate::metrics::{Outcome, PullSeries};
 use crate::pulls::{Answer, Body, Pull, Pulls};
@@ -199,6 +199,17 @@ async fn handle<P: Pulls>(
             .and_then(|value| value.to_str().ok())
     };
     let accept = accept(request.headers());
+    // Debug only (D37): the digest names what a node pulls. A tag stays out: it is a miss, or the relay's (D66).
+    let span = debug_span!(
+        "mirror request",
+        kind = kind.label(),
+        digest = field::Empty,
+        source = field::Empty,
+        result = field::Empty,
+    );
+    if let Some(digest) = reference.as_ref().and_then(|reference| reference.digest()) {
+        span.record("digest", field::display(digest));
+    }
     let answered = pulls
         .pull(Pull {
             kind,
@@ -208,20 +219,23 @@ async fn handle<P: Pulls>(
             range: header(RANGE),
             accept: accept.as_deref(),
         })
+        .instrument(span.clone())
         .await;
-    let (response, outcome) = match answered {
-        Answer::Served(source, response) => (
-            series.measure(kind, source, started, response),
-            Outcome::Served(source),
-        ),
-        Answer::Missing => (status(StatusCode::NOT_FOUND), Outcome::FallThrough),
+    let outcome = match &answered {
+        Answer::Served(source, _) => Outcome::Served(*source),
+        Answer::Missing => Outcome::FallThrough,
         Answer::Failed(err) => {
-            warn!(error = %err, kind = kind.label(), "the mirror could not read content it may hold");
-            (status(StatusCode::NOT_FOUND), Outcome::Error)
+            span.in_scope(|| warn!(error = %err, kind = kind.label(), "the mirror could not read content it may hold"));
+            Outcome::Error
         }
     };
+    span.record("source", outcome.source());
+    span.record("result", outcome.result());
     series.answered(kind, outcome, started);
-    response
+    match answered {
+        Answer::Served(source, response) => series.measure(kind, source, started, span, response),
+        Answer::Missing | Answer::Failed(_) => status(StatusCode::NOT_FOUND),
+    }
 }
 
 /// The `Accept` headers as one list, or `None` when there is none.

@@ -304,7 +304,25 @@ async fn nothing_is_fetched_before_the_fetcher_is_linked_or_from_no_holder() {
 
 /// What a test's subscriber writes.
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    /// A subscriber that writes every event and span close at DEBUG and above here.
+    pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+        let sink = self.clone();
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish()
+    }
+
+    /// What was written.
+    pub(crate) fn printed(&self) -> String {
+        String::from_utf8(lock(&self.0).clone()).expect("the formatter writes UTF-8")
+    }
+}
 
 impl std::io::Write for Capture {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -320,14 +338,7 @@ impl std::io::Write for Capture {
 #[tokio::test]
 async fn each_request_to_a_peer_is_a_span_naming_its_address_rank_and_result() {
     let capture = Capture::default();
-    let sink = capture.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .with_ansi(false)
-        .with_writer(move || sink.clone())
-        .finish();
-    let _default = tracing::subscriber::set_default(subscriber);
+    let _default = tracing::subscriber::set_default(capture.subscriber());
     let mut nodes = Nodes::new();
     let blob = pattern(1000, 0);
     let digest = sha(&blob);
@@ -339,7 +350,7 @@ async fn each_request_to_a_peer_is_a_span_naming_its_address_rank_and_result() {
     };
     let fetcher = nodes.fetcher(vec![impostor, b.clone()], SETTINGS);
     assert!(fetcher.whole(Kind::Blob, &digest).await.is_some());
-    let printed = String::from_utf8(lock(&capture.0).clone()).unwrap();
+    let printed = capture.printed();
     for span in [
         format!(r#"peer fetch{{peer={} rank=0 result="error"}}"#, a.address),
         format!(r#"peer fetch{{peer={} rank=1 result="ok"}}"#, b.address),

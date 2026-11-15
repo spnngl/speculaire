@@ -227,6 +227,7 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
             r#""""#,
         ],
     ),
+    ("log.timings", &["false", "true", r#""true""#, "1"]),
     ("audit.enabled", &["false", "true", r#""true""#, "1"]),
     ("shutdown.drain_timeout", SPANS),
 ];

@@ -16,6 +16,7 @@ use metrics::{
     Counter, Gauge, Histogram, counter, describe_counter, describe_gauge, describe_histogram,
     gauge, histogram,
 };
+use tracing::Span;
 
 use crate::pulls::Body;
 use crate::request::Kind;
@@ -82,6 +83,27 @@ pub enum Outcome {
     FallThrough,
     /// The mirror holds it, or may, and failed: also a 404.
     Error,
+}
+
+impl Outcome {
+    /// The `result` label.
+    #[must_use]
+    pub const fn result(self) -> &'static str {
+        match self {
+            Self::Served(_) => "served",
+            Self::FallThrough => "fall_through",
+            Self::Error => "error",
+        }
+    }
+
+    /// The `source` label of the first byte: a 404's is `fall_through`.
+    #[must_use]
+    pub const fn source(self) -> &'static str {
+        match self {
+            Self::Served(source) => source.label(),
+            Self::FallThrough | Self::Error => "fall_through",
+        }
+    }
 }
 
 /// Describes the pull API's metrics, on every agent.
@@ -170,15 +192,16 @@ impl PullSeries {
     pub(crate) fn new() -> Self {
         let kinds = ByKind::new(|kind| {
             let kind = kind.label();
-            let requests = |result| counter!(REQUESTS, "kind" => kind, "result" => result);
+            let requests =
+                |outcome: Outcome| counter!(REQUESTS, "kind" => kind, "result" => outcome.result());
             KindSeries {
-                served: requests("served"),
-                fall_through: requests("fall_through"),
-                error: requests("error"),
+                served: requests(Outcome::Served(Source::Local)),
+                fall_through: requests(Outcome::FallThrough),
+                error: requests(Outcome::Error),
                 first_byte: BySource::new(
                     |source| histogram!(FIRST_BYTE, "kind" => kind, "source" => source.label()),
                 ),
-                first_404: histogram!(FIRST_BYTE, "kind" => kind, "source" => "fall_through"),
+                first_404: histogram!(FIRST_BYTE, "kind" => kind, "source" => Outcome::FallThrough.source()),
                 body: BySource::new(
                     |source| histogram!(BODY, "kind" => kind, "source" => source.label()),
                 ),
@@ -200,13 +223,14 @@ impl PullSeries {
         first_byte.record(started.elapsed());
     }
 
-    /// `response`, served from `source`, measured: a blob's bytes are counted (D100), and the time from `started` to
-    /// the body's last byte is recorded.
+    /// `response`, served from `source`, measured: a blob's bytes are counted (D100), the time from `started` to the
+    /// body's last byte is recorded, and `span` stays open until then.
     pub(crate) fn measure(
         &self,
         kind: Kind,
         source: Source,
         started: Instant,
+        span: Span,
         response: Response<Body>,
     ) -> Response<Body> {
         let bytes = match kind {
@@ -214,12 +238,12 @@ impl PullSeries {
             Kind::Manifest | Kind::Referrers => Counter::noop(),
         };
         let seconds = self.kinds.get(kind).body.get(source).clone();
-        Metered::wrap(response, bytes, seconds, started, Body::new)
+        Metered::wrap(response, bytes, seconds, (started, span), Body::new)
     }
 }
 
-/// A body that counts its bytes, and records the time from `started` to its end. A body that breaks off, or that
-/// hyper drops before its end, records no time: the client did not get it.
+/// A body that counts its bytes, and records the time from `started` to its end, in its span. A body that breaks off,
+/// or that hyper drops before its end, records no time: the client did not get it.
 pub(crate) struct Metered<B> {
     body: B,
     /// The bytes `Content-Length` says are still to come.
@@ -228,15 +252,17 @@ pub(crate) struct Metered<B> {
     seconds: Histogram,
     /// `None` once the end is recorded.
     started: Option<Instant>,
+    /// Closed at the end, so that its timings end with the body.
+    span: Span,
 }
 
 impl<B> Metered<B> {
-    /// `response` with its body metered, then made a `T` by `into`.
+    /// `response` with its body metered from `started` in `span`, then made a `T` by `into`.
     pub(crate) fn wrap<T>(
         response: Response<B>,
         bytes: Counter,
         seconds: Histogram,
-        started: Instant,
+        (started, span): (Instant, Span),
         into: impl FnOnce(Self) -> T,
     ) -> Response<T> {
         let left = response
@@ -250,6 +276,7 @@ impl<B> Metered<B> {
                 bytes,
                 seconds,
                 started: Some(started),
+                span,
             })
         })
     }
@@ -258,6 +285,7 @@ impl<B> Metered<B> {
         if let Some(started) = self.started.take() {
             self.seconds.record(started.elapsed());
         }
+        self.span = Span::none();
     }
 }
 
@@ -273,7 +301,9 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
         let this = self.get_mut();
-        let polled = Pin::new(&mut this.body).poll_frame(cx);
+        let polled = this
+            .span
+            .in_scope(|| Pin::new(&mut this.body).poll_frame(cx));
         match &polled {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
@@ -378,7 +408,7 @@ impl PeerSeries {
             response,
             self.bytes.clone(),
             self.seconds.clone(),
-            started,
+            (started, Span::none()),
             into,
         )
     }
