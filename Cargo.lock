@@ -2166,6 +2166,7 @@ dependencies = [
 name = "speculaire-oci"
 version = "0.1.0"
 dependencies = [
+ "divan",
  "oci-spec",
  "serde",
  "serde_json",

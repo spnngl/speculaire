@@ -10,6 +10,7 @@
 //! exists is normalized.
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 /// `NameTotalLengthMax`: the longest repository path.
 const PATH_LENGTH_MAX: usize = 255;
@@ -49,10 +50,43 @@ pub enum ReferenceError {
 }
 
 /// A digest that names a known algorithm and holds a hash of its size.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// It holds its hex inline, so parsing, cloning and keying a map with one never allocate (D107).
+#[derive(Clone, PartialEq, Eq)]
 pub struct Digest {
-    algorithm: String,
-    encoded: String,
+    algorithm: Algorithm,
+    /// The hash in lower-case hex, then zeros up to the longest algorithm's size.
+    hex: [u8; HEX_MAX],
+}
+
+/// The hex size of sha512, the longest algorithm.
+const HEX_MAX: usize = 128;
+
+/// One of the algorithms go-digest registers by default.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Algorithm {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl Algorithm {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sha256 => "sha256",
+            Self::Sha384 => "sha384",
+            Self::Sha512 => "sha512",
+        }
+    }
+
+    /// The length of its hash in hex.
+    fn size(self) -> usize {
+        match self {
+            Self::Sha256 => 64,
+            Self::Sha384 => 96,
+            Self::Sha512 => HEX_MAX,
+        }
+    }
 }
 
 impl Digest {
@@ -69,10 +103,10 @@ impl Digest {
             }
             _ => return Err(ReferenceError::DigestFormat),
         };
-        let size = match algorithm {
-            "sha256" => 64,
-            "sha384" => 96,
-            "sha512" => 128,
+        let algorithm = match algorithm {
+            "sha256" => Algorithm::Sha256,
+            "sha384" => Algorithm::Sha384,
+            "sha512" => Algorithm::Sha512,
             _ => return Err(ReferenceError::DigestUnsupported),
         };
         if !encoded
@@ -81,31 +115,52 @@ impl Digest {
         {
             return Err(ReferenceError::DigestFormat);
         }
-        if encoded.len() != size {
+        if encoded.len() != algorithm.size() {
             return Err(ReferenceError::DigestLength);
         }
-        Ok(Self {
-            algorithm: algorithm.to_owned(),
-            encoded: encoded.to_owned(),
-        })
+        let mut hex = [0; HEX_MAX];
+        hex[..encoded.len()].copy_from_slice(encoded.as_bytes());
+        Ok(Self { algorithm, hex })
     }
 
     /// The algorithm, such as `sha256`.
     #[must_use]
-    pub fn algorithm(&self) -> &str {
-        &self.algorithm
+    pub fn algorithm(&self) -> &'static str {
+        self.algorithm.name()
     }
 
     /// The hash, in lower-case hexadecimal.
+    ///
+    /// # Panics
+    ///
+    /// Never: `parse` admits only hex digits, which are ASCII.
     #[must_use]
     pub fn encoded(&self) -> &str {
-        &self.encoded
+        std::str::from_utf8(&self.hex[..self.algorithm.size()])
+            .expect("`parse` admits only hex digits, which are ASCII")
     }
 }
 
 impl fmt::Display for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.algorithm, self.encoded)
+        write!(f, "{}:{}", self.algorithm(), self.encoded())
+    }
+}
+
+impl Hash for Digest {
+    /// Hashes the algorithm and its hex, not the zeros after it.
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.algorithm.hash(state);
+        self.hex[..self.algorithm.size()].hash(state);
+    }
+}
+
+impl fmt::Debug for Digest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Digest")
+            .field("algorithm", &self.algorithm())
+            .field("encoded", &self.encoded())
+            .finish()
     }
 }
 
@@ -547,6 +602,42 @@ mod tests {
         }
         let digest = Digest::parse(SHA).expect("a digest");
         assert_eq!((digest.algorithm(), digest.encoded().len()), ("sha256", 64));
+    }
+
+    #[test]
+    fn a_digest_prints_hashes_and_compares_by_its_text() {
+        let hash = |digest: &Digest| {
+            let mut hasher = std::hash::DefaultHasher::new();
+            digest.hash(&mut hasher);
+            hasher.finish()
+        };
+        let texts = [
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+            format!("sha512:{}", "a".repeat(128)),
+        ];
+        let digests = texts
+            .each_ref()
+            .map(|t| Digest::parse(t).expect("a digest"));
+        for (text, digest) in texts.iter().zip(&digests) {
+            assert_eq!(digest.to_string(), *text);
+            let again = Digest::parse(text).expect("a digest");
+            assert_eq!((&again, hash(&again)), (digest, hash(digest)));
+        }
+        for (i, a) in digests.iter().enumerate() {
+            for b in &digests[i + 1..] {
+                assert_ne!(a, b);
+                assert_ne!(hash(a), hash(b), "{a} and {b}");
+            }
+        }
+        let [first, ..] = &digests;
+        assert_eq!(
+            format!("{first:?}"),
+            format!(
+                "Digest {{ algorithm: \"sha256\", encoded: \"{}\" }}",
+                "a".repeat(64)
+            )
+        );
     }
 
     #[test]
