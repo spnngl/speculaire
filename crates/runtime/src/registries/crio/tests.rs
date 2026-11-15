@@ -326,7 +326,7 @@ fn a_credential_file_that_is_not_valid_leaves_the_hosts_that_reach_it_anonymous_
         .unwrap();
     assert_eq!(sources.len(), 2);
     // A poll that finds the files unchanged reads nothing; a reload that reads them says it again.
-    assert!(!registries.changed());
+    assert!(registries.poll().is_none());
     assert_eq!(registries.reload().unwrap().problems.len(), 1);
 }
 
@@ -408,7 +408,7 @@ fn a_client_key_that_is_not_pem_leaves_the_host_without_a_client_certificate_and
     assert_eq!(bad.roots, [CERT.as_bytes()]);
     assert!(bad.client.is_none());
     assert!(trust(&registries, "good.test/app").client.is_some());
-    assert!(!registries.changed());
+    assert!(registries.poll().is_none());
 }
 
 #[test]
@@ -439,8 +439,10 @@ fn certificates_are_read_at_reload_and_a_rotation_is_picked_up_by_the_next_poll(
     assert!(held.client.is_some());
     // A rotation changes a watched path, and the next poll finds it.
     node.put(ca, ROTATED);
-    assert!(registries.changed());
-    assert_eq!(registries.reload().unwrap().problems, Vec::<String>::new());
+    assert_eq!(
+        registries.poll().expect("a change").unwrap().problems,
+        Vec::<String>::new()
+    );
     assert_eq!(
         trust(&registries, "reg.test/app").roots,
         [ROTATED.as_bytes()]
@@ -493,12 +495,12 @@ fn a_change_to_the_auth_file_crio_names_is_found_by_the_next_poll() {
         named.display().to_string()
     );
     let registries = node.registries_with(&crio);
-    assert!(!registries.changed());
+    assert!(registries.poll().is_none());
     node.put(
         "/srv/kubelet.json",
         r#"{"auths":{"quay.io":{"auth":"Ym9iOmh1bnRlcjI="}}}"#,
     );
-    assert!(registries.changed());
+    assert!(registries.poll().is_some());
 }
 
 #[test]

@@ -34,20 +34,24 @@ impl Identity {
     pub(crate) fn reload(&mut self) {
         let credentials = &self.credentials;
         self.certificate
-            .read(|path| credentials.load_identity(path).map(drop));
-        self.ca.read(|path| credentials.load_authority(path));
+            .read(self.certificate.watch.again(), |path| {
+                credentials.load_identity(path).map(drop)
+            });
+        self.ca.read(self.ca.watch.again(), |path| {
+            credentials.load_authority(path)
+        });
         self.show();
     }
 
     /// Reads again each file whose stamp differs from the one taken before its last read (D93).
     pub(crate) fn poll(&mut self) {
         let credentials = &self.credentials;
-        if self.certificate.watch.changed() {
+        if let Some(now) = self.certificate.watch.changed() {
             self.certificate
-                .read(|path| credentials.load_identity(path).map(drop));
+                .read(now, |path| credentials.load_identity(path).map(drop));
         }
-        if self.ca.watch.changed() {
-            self.ca.read(|path| credentials.load_authority(path));
+        if let Some(now) = self.ca.watch.changed() {
+            self.ca.read(now, |path| credentials.load_authority(path));
         }
         // Every poll: an identity kubelet stopped renewing expires without a file changing.
         self.show();
@@ -99,10 +103,10 @@ impl Source {
         }
     }
 
-    /// Stamps the file, then reads it with `load`. An absent file is said once, at `info`: a joining node has none yet
-    /// (D16). Any other failure is logged and counted, and what was loaded before stays (D30).
-    fn read(&mut self, load: impl FnOnce(&Path) -> Result<(), Error>) {
-        self.watch = self.watch.again();
+    /// Reads the file with `load`, stamped `now` just before. An absent file is said once, at `info`: a joining node has
+    /// none yet (D16). Any other failure is logged and counted, and what was loaded before stays (D30).
+    fn read(&mut self, now: Watch, load: impl FnOnce(&Path) -> Result<(), Error>) {
+        self.watch = now;
         let what = self.what;
         match load(&self.path) {
             Ok(()) => {
@@ -210,11 +214,11 @@ mod tests {
         let second = files.rotate(&files.cluster.kubelet("a"));
         // kubelet deletes the older files.
         fs::remove_file(files.dir.path().join("kubelet-client-1.pem")).unwrap();
-        assert!(identity.certificate.watch.changed());
+        assert!(identity.certificate.watch.changed().is_some());
         identity.poll();
         assert_eq!(files.presented(&identity), der(&second));
         assert_eq!(node_subject(&der(&second)), Ok("a".to_owned()));
-        assert!(!identity.certificate.watch.changed(), "read once");
+        assert!(identity.certificate.watch.changed().is_none(), "read once");
     }
 
     #[test]
@@ -245,7 +249,7 @@ mod tests {
         identity.poll();
         assert!(!identity.certificate.absent);
         assert!(
-            !identity.certificate.watch.changed(),
+            identity.certificate.watch.changed().is_none(),
             "the same bad file is no change"
         );
         assert_eq!(files.presented(&identity), der(&first));

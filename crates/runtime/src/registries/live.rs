@@ -43,9 +43,15 @@ impl<T> Live<T> {
         }
     }
 
-    /// Whether a watched path changed since the last read began.
-    pub(crate) fn changed(&self) -> bool {
-        self.state.load().watch.changed()
+    /// Reads again by `read`, as [`Live::reload`] does, when a watched path changed since the last read began: `None`
+    /// when none did.
+    pub(crate) fn poll(
+        &self,
+        read: impl FnMut(&mut Vec<String>) -> (Vec<PathBuf>, Result<T, Error>),
+    ) -> Option<Result<Vec<String>, Error>> {
+        let current = self.state.load();
+        let before = current.watch.changed()?;
+        Some(self.read(&current, before, read))
     }
 
     /// Reads again by `read`, which returns the paths its result depends on, and the result, and adds the problems it
@@ -59,10 +65,20 @@ impl<T> Live<T> {
     /// When the read fails.
     pub(crate) fn reload(
         &self,
-        mut read: impl FnMut(&mut Vec<String>) -> (Vec<PathBuf>, Result<T, Error>),
+        read: impl FnMut(&mut Vec<String>) -> (Vec<PathBuf>, Result<T, Error>),
     ) -> Result<Vec<String>, Error> {
         let current = self.state.load();
-        let mut before = current.watch.again();
+        let before = current.watch.again();
+        self.read(&current, before, read)
+    }
+
+    /// [`Live::reload`] from `current`, its paths stamped `before` the read.
+    fn read(
+        &self,
+        current: &Loaded<T>,
+        mut before: Watch,
+        mut read: impl FnMut(&mut Vec<String>) -> (Vec<PathBuf>, Result<T, Error>),
+    ) -> Result<Vec<String>, Error> {
         // Each turn watches more paths, and a read names only the paths its files name: the turns end once those stop
         // naming new ones.
         let (mut paths, value, problems) = loop {
@@ -73,8 +89,6 @@ impl<T> Live<T> {
             }
             let mut roots = before.roots().to_vec();
             roots.extend(paths);
-            roots.sort_unstable();
-            roots.dedup();
             before = Watch::new(roots);
         };
         match value {
@@ -87,8 +101,6 @@ impl<T> Live<T> {
             }
             Err(error) => {
                 paths.extend_from_slice(before.roots());
-                paths.sort_unstable();
-                paths.dedup();
                 self.state.store(Arc::new(Loaded {
                     watch: before.follow(paths),
                     value: match &current.value {
@@ -134,25 +146,29 @@ mod tests {
         assert_eq!(*live.get().expect("a value"), 2);
     }
 
+    /// Whether a path `live` watches changed since its last read began.
+    fn changed<T>(live: &Live<T>) -> bool {
+        live.state.load().watch.changed().is_some()
+    }
+
     #[test]
-    fn a_change_is_a_watched_path_that_differs_from_before_the_read() {
+    fn a_poll_reads_again_when_a_watched_path_differs_from_before_the_read() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let file = dir.path().join("file");
         std::fs::write(&file, "a").expect("a file");
+        let read = |value| (vec![dir.path().to_owned()], Ok(value));
         let live = Live::new();
-        live.reload(|_| (vec![dir.path().to_owned()], Ok(0)))
-            .expect("a read");
-        assert!(!live.changed());
-        // A write during the read: the read saw the old file, so the next look finds a change.
+        live.reload(|_| read(0)).expect("a read");
+        assert!(live.poll(|_| read(1)).is_none());
+        // A write during the read: the read saw the old file, so the next poll finds a change.
         live.reload(|_| {
             std::fs::write(&file, "ab").expect("a write");
-            (vec![dir.path().to_owned()], Ok(1))
+            read(1)
         })
         .expect("a read");
-        assert!(live.changed());
-        live.reload(|_| (vec![dir.path().to_owned()], Ok(2)))
-            .expect("a read");
-        assert!(!live.changed());
+        live.poll(|_| read(2)).expect("a change").expect("a read");
+        assert!(live.poll(|_| read(3)).is_none());
+        assert_eq!(*live.get().expect("a value"), 2);
     }
 
     #[test]
@@ -178,14 +194,14 @@ mod tests {
         assert_eq!(reads, 2);
         assert_eq!(*live.get().expect("a value"), "ab");
         assert_eq!(problems, ["ab"]);
-        assert!(!live.changed());
+        assert!(!changed(&live));
     }
 
     #[test]
     fn the_paths_of_a_failed_read_are_watched_with_those_of_the_value_held() {
         let held = tempfile::tempdir().expect("a temporary directory");
         let new = tempfile::tempdir().expect("a temporary directory");
-        for changed in [&held, &new] {
+        for written in [&held, &new] {
             let live = Live::new();
             live.reload(|_| (vec![held.path().to_owned()], Ok(1)))
                 .expect("a read");
@@ -194,10 +210,10 @@ mod tests {
                     .is_err()
             );
             // The failure is not a change: the next poll says nothing more.
-            assert!(!live.changed());
-            let file = changed.path().join("file");
+            assert!(!changed(&live));
+            let file = written.path().join("file");
             std::fs::write(&file, "a").expect("a file");
-            assert!(live.changed());
+            assert!(changed(&live));
             std::fs::remove_file(&file).expect("removed");
         }
     }

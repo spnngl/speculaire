@@ -19,7 +19,7 @@ use speculaire_reflect::client::{self, Client, Holdings, LookupError, Lookups};
 use speculaire_reflect::{Member, Reflector, Settings};
 use speculaire_runtime::content::Content;
 use speculaire_runtime::inventory::{Change, Inventory, Update};
-use speculaire_runtime::registries::Registries;
+use speculaire_runtime::registries::{self, Registries, Reloaded};
 use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode};
 use tokio::signal::unix::{SignalKind, signal};
@@ -120,7 +120,7 @@ async fn serve(
     let mut identity = Identity::load(&config.identity);
     // `/readyz` answers 503 until the mirror listens (D45); an agent that cannot open it stops (D55).
     let registries = node.registries();
-    reload_registries(&*registries);
+    report_registries(registries.reload());
     let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
     status.mirror_listening();
     let mut reflector = None;
@@ -141,19 +141,19 @@ async fn serve(
                 watch = watch.again();
                 reload(path, &mut config, &logs);
                 mirror.apply(&config);
-                reload_registries(&*registries);
+                report_registries(registries.reload());
                 identity.reload();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
                 open_sharing(&config, &identity, &mirror, &node, &mut sharing);
             }
             _ = poll.tick() => {
-                if watch.changed() {
-                    watch = watch.again();
+                if let Some(now) = watch.changed() {
+                    watch = now;
                     reload(path, &mut config, &logs);
                     mirror.apply(&config);
                 }
-                if registries.changed() {
-                    reload_registries(&*registries);
+                if let Some(reloaded) = registries.poll() {
+                    report_registries(reloaded);
                 }
                 identity.poll();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
@@ -238,11 +238,11 @@ fn reload(path: &Path, running: &mut Config, logs: &Logs) {
     }
 }
 
-/// Reads the registry config again (D91). A config that is not valid stays unread: the one held serves, and the failure
-/// is logged and counted. A credential, certificate or key file that cannot be used does not fail the read: each is
-/// logged, and the reload counts as one failure however many there are (D92).
-fn reload_registries(registries: &dyn Registries) {
-    match registries.reload() {
+/// Reports a read of the registry config (D91). A config that is not valid stays unread: the one held serves, and the
+/// failure is logged and counted. A credential, certificate or key file that cannot be used does not fail the read: each
+/// is logged, and the reload counts as one failure however many there are (D92).
+fn report_registries(reloaded: Result<Reloaded, registries::Error>) {
+    match reloaded {
         Ok(reloaded) => {
             debug!("registry config reloaded");
             if !reloaded.problems.is_empty() {

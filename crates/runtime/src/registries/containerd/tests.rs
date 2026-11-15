@@ -239,7 +239,7 @@ fn a_login_that_is_no_user_and_password_is_anonymous() {
     assert!(
         matches!(&sources[0].credentials, Credentials::Login { username, .. } if username == "alice")
     );
-    assert!(!registries.changed());
+    assert!(registries.poll().is_none());
 }
 
 const CERT: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
@@ -299,14 +299,13 @@ fn certificates_are_read_at_reload_and_a_rotation_outside_the_host_directory_is_
     assert!(!format!("{held:?}").contains("CCCC"));
     // A rotation of a file that `config_path` does not hold is found by the poll all the same.
     std::fs::write(pki.path().join("ca.crt"), ROTATED).unwrap();
-    assert!(registries.changed());
-    let reloaded = registries.reload().unwrap();
+    let reloaded = registries.poll().expect("a change").unwrap();
     assert_eq!(trust(&registries).roots, [ROTATED.as_bytes()]);
     // The client files are gone now: the reload says so once and the host has no client certificate.
     assert_eq!(reloaded.problems.len(), 1, "{:?}", reloaded.problems);
     assert!(reloaded.problems[0].contains("c.cert"));
     assert!(trust(&registries).client.is_none());
-    assert!(!registries.changed());
+    assert!(registries.poll().is_none());
 }
 
 #[test]
@@ -375,9 +374,9 @@ fn nothing_is_answered_before_a_read_and_no_config_is_the_defaults() {
     let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
     assert_eq!(endpoints(&sources), [[("quay.io".to_owned(), true)]]);
     // A file that appears is a change.
-    assert!(!registries.changed());
+    assert!(registries.poll().is_none());
     std::fs::write(dir.path().join("config.toml"), "version = 3\n").unwrap();
-    assert!(registries.changed());
+    assert!(registries.poll().is_some());
 }
 
 #[test]
@@ -398,16 +397,15 @@ fn an_edit_of_a_hosts_file_shows_on_reload_and_only_then() {
             [("quay.io".to_owned(), true)]
         ]
     );
-    assert!(!registries.changed());
+    assert!(registries.poll().is_none());
     node.hosts(
         "quay.io",
         "[host.\"https://two.corp\"]\n  capabilities = [\"pull\", \"resolve\"]\n",
     );
     // The answer stays the one that was read, whatever the disk says, until a reload.
     assert_eq!(hosts(&registries)[0], [("one.corp".to_owned(), true)]);
-    assert!(registries.changed());
-    registries.reload().unwrap();
-    assert!(!registries.changed());
+    registries.poll().expect("a change").unwrap();
+    assert!(registries.poll().is_none());
     assert_eq!(hosts(&registries)[0], [("two.corp".to_owned(), true)]);
 }
 
@@ -428,10 +426,9 @@ fn a_file_that_is_not_valid_keeps_the_config_held_and_names_the_file_and_the_pla
     let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
     assert_eq!(endpoints(&sources)[0], [("one.corp".to_owned(), true)]);
     // The failure is no change; the file made right is one, and is read.
-    assert!(!registries.changed());
+    assert!(registries.poll().is_none());
     node.hosts("quay.io", "[host.\"https://three.corp\"]\n");
-    assert!(registries.changed());
-    registries.reload().unwrap();
+    registries.poll().expect("a change").unwrap();
     let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
     assert_eq!(endpoints(&sources)[0], [("three.corp".to_owned(), true)]);
 }

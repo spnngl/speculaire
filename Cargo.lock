@@ -2270,6 +2270,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "containerd-client",
+ "divan",
  "futures-util",
  "hyper",
  "hyper-util",

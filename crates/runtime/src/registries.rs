@@ -130,8 +130,9 @@ pub trait Registries: Send + Sync {
     /// When the registry config cannot be read, or `name` has no registry and repository in it.
     fn sources(&self, name: &str, reference: Reference<'_>) -> Result<Vec<Source>, Error>;
 
-    /// Whether a file or directory the registry config was read from changed since the last `reload` began (D93).
-    fn changed(&self) -> bool;
+    /// Reads the registry config again, as `reload` does, when a file or directory it was read from changed since the
+    /// last read began (D93): `None` when none did.
+    fn poll(&self) -> Option<Result<Reloaded, Error>>;
 
     /// Reads the registry config again. `sources` never reads the registry config from disk: what it answers is what the
     /// last successful `reload` read (D91).

@@ -30,12 +30,17 @@ tonic-prost.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+divan.workspace = true
 hyper = { workspace = true, features = ["client", "http2"] }
 hyper-util.workspace = true
 insta.workspace = true
 speculaire-fake-runtime.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower.workspace = true
+
+[[bench]]
+name = "micro"
+harness = false
 
 [lints]
 workspace = true
