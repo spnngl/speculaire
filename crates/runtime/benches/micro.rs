@@ -1,7 +1,11 @@
-//! The polls of the registry config (D93): `just bench-micro`.
+//! The polls of the registry config (D93) and the reads of a blob whole: `just bench-micro`.
 
 use divan::Bencher;
+use speculaire_runtime::content::Blob;
 use speculaire_runtime::registries::{ContainerdRegistries, Registries};
+
+#[global_allocator]
+static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
 
 /// The hosts below `config_path`, a `hosts.toml` each.
 const HOSTS: usize = 16;
@@ -54,5 +58,21 @@ fn changed(bencher: Bencher<'_, '_>) {
     bencher.bench_local(|| {
         std::fs::write(&hosts, texts.next().unwrap_or_default()).expect("a write");
         registries.poll().expect("a change")
+    });
+}
+
+/// A blob of `size` bytes read whole from a file, as the mirror reads a manifest it serves.
+#[divan::bench(args = [2 << 10, 64 << 10])]
+fn read_all(bencher: Bencher<'_, '_>, size: usize) {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("blob");
+    std::fs::write(&path, vec![0x5a; size]).expect("a blob");
+    let length = std::fs::metadata(&path).expect("the blob").len();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime");
+    bencher.bench_local(|| {
+        let blob = Blob::from_file(path.clone(), length);
+        runtime.block_on(blob.read_all(length)).expect("the blob")
     });
 }

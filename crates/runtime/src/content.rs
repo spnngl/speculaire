@@ -22,8 +22,14 @@ use tokio_util::io::ReaderStream;
 
 use crate::containerd::with_namespace;
 
-/// The size of a read from a file.
+/// The size of a read from a file, at most.
 const CHUNK: usize = 256 * 1024;
+
+/// The size of the reads of a span of `length` bytes from a file: the span, when shorter than [`CHUNK`], so that a small
+/// blob such as a manifest holds no more memory than its own length.
+fn chunk(length: u64) -> usize {
+    usize::try_from(length).map_or(CHUNK, |length| length.min(CHUNK))
+}
 
 /// A chunk of a blob.
 pub type Chunks = Pin<Box<dyn Stream<Item = Result<Bytes, Error>> + Send>>;
@@ -140,14 +146,16 @@ impl Blob {
                 let mut file = tokio::fs::File::open(path).await?;
                 file.seek(io::SeekFrom::Start(first)).await?;
                 Ok(Box::pin(
-                    ReaderStream::with_capacity(file.take(length), CHUNK).map_err(Error::Io),
+                    ReaderStream::with_capacity(file.take(length), chunk(length))
+                        .map_err(Error::Io),
                 ))
             }
             Source::Open(file) => {
                 let mut file = tokio::fs::File::from_std(file);
                 file.seek(io::SeekFrom::Start(first)).await?;
                 Ok(Box::pin(
-                    ReaderStream::with_capacity(file.take(length), CHUNK).map_err(Error::Io),
+                    ReaderStream::with_capacity(file.take(length), chunk(length))
+                        .map_err(Error::Io),
                 ))
             }
             Source::Grpc { channel, digest } => {
@@ -183,7 +191,7 @@ impl Blob {
         }
         let size = self.size;
         let mut chunks = self.stream(0, size).await?;
-        let mut all = Vec::new();
+        let mut all = Vec::with_capacity(usize::try_from(size).unwrap_or_default());
         while let Some(chunk) = chunks.next().await {
             all.extend_from_slice(&chunk?);
         }
@@ -199,4 +207,16 @@ pub trait Content: Send + Sync + 'static {
     ///
     /// When looking fails other than by the blob's absence.
     fn open(&self, digest: &Digest) -> impl Future<Output = Result<Option<Blob>, Error>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CHUNK, chunk};
+
+    #[test]
+    fn a_span_shorter_than_a_chunk_is_read_at_its_length() {
+        assert_eq!(chunk(0), 0);
+        assert_eq!(chunk(2048), 2048);
+        assert_eq!(chunk(u64::MAX), CHUNK);
+    }
 }
