@@ -10,6 +10,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use metrics_exporter_prometheus::PrometheusHandle;
 
+use crate::telemetry::Runtime;
+
 /// The content type of the protobuf exposition, as the exporter's own listener sends it
 /// (`metrics-exporter-prometheus` 0.18.3 `src/protobuf.rs:18-19`).
 const PROTOBUF: &str =
@@ -21,6 +23,7 @@ pub struct Status {
     mirror: AtomicBool,
     reflector: AtomicBool,
     metrics: PrometheusHandle,
+    runtime: Runtime,
 }
 
 impl Status {
@@ -33,6 +36,7 @@ impl Status {
             mirror: AtomicBool::new(false),
             reflector: AtomicBool::new(!reflector),
             metrics,
+            runtime: Runtime::new(),
         }
     }
 
@@ -72,6 +76,9 @@ async fn readyz(State(status): State<Arc<Status>>) -> StatusCode {
 
 /// Protobuf when `Accept` names it, text otherwise; native histograms exist only in protobuf (D34).
 async fn metrics(State(status): State<Arc<Status>>, headers: HeaderMap) -> Response {
+    status
+        .runtime
+        .sample(&tokio::runtime::Handle::current().metrics());
     let handle = status.metrics.clone();
     let rendered = if wants_protobuf(&headers) {
         tokio::task::spawn_blocking(move || (PROTOBUF, handle.render_protobuf())).await
@@ -137,6 +144,26 @@ mod tests {
             PrometheusBuilder::new().build_recorder().handle(),
             reflector,
         ))
+    }
+
+    #[tokio::test]
+    async fn each_scrape_reads_the_runtime() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let status = Arc::new(Status::new(recorder.handle(), false));
+        let _task = tokio::spawn(std::future::pending::<()>());
+        let request = Request::get("/metrics").body(Body::empty()).unwrap();
+        let response = router(status).oneshot(request).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        for line in [
+            "speculaire_runtime_alive_tasks 1",
+            "speculaire_runtime_global_queue_depth 0",
+        ] {
+            assert!(text.lines().any(|l| l == line), "no `{line}` in\n{text}");
+        }
     }
 
     #[tokio::test]

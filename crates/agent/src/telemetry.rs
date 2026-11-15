@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use metrics::{counter, describe_counter, describe_gauge, gauge};
+use metrics::{Gauge, counter, describe_counter, describe_gauge, gauge};
 use metrics_exporter_prometheus::{
     Matcher, NativeHistogramConfig, PrometheusBuilder, PrometheusHandle,
 };
@@ -16,6 +16,11 @@ pub const CONFIG_RELOAD_FAILURES: &str = "speculaire_config_reload_failures_tota
 pub const P2P_ENABLED: &str = "speculaire_p2p_enabled";
 /// `speculaire_identity_expiry_timestamp_seconds`: when the node identity in use expires, once one is loaded (D16).
 pub const IDENTITY_EXPIRY: &str = "speculaire_identity_expiry_timestamp_seconds";
+
+/// `speculaire_runtime_alive_tasks`: tasks alive in the agent's async runtime.
+pub const RUNTIME_ALIVE_TASKS: &str = "speculaire_runtime_alive_tasks";
+/// `speculaire_runtime_global_queue_depth`: tasks waiting in the async runtime's global queue.
+pub const RUNTIME_GLOBAL_QUEUE_DEPTH: &str = "speculaire_runtime_global_queue_depth";
 
 /// How often the recorder drains histogram samples; the exporter's own listener uses the same period.
 pub const UPKEEP_PERIOD: Duration = Duration::from_secs(5);
@@ -64,6 +69,37 @@ fn describe() {
         IDENTITY_EXPIRY,
         "When the kubelet certificate in use expires, in seconds since the epoch"
     );
+    describe_gauge!(
+        RUNTIME_ALIVE_TASKS,
+        "Tasks alive in the agent's async runtime"
+    );
+    describe_gauge!(
+        RUNTIME_GLOBAL_QUEUE_DEPTH,
+        "Tasks waiting in the async runtime's global queue"
+    );
+}
+
+/// The async runtime's gauges, read at each scrape: node-exporter sees the process, not its tasks (D34).
+pub(crate) struct Runtime {
+    alive: Gauge,
+    queued: Gauge,
+}
+
+impl Runtime {
+    /// Registers both gauges.
+    pub(crate) fn new() -> Self {
+        Self {
+            alive: gauge!(RUNTIME_ALIVE_TASKS),
+            queued: gauge!(RUNTIME_GLOBAL_QUEUE_DEPTH),
+        }
+    }
+
+    /// Reads both gauges from `runtime`.
+    pub(crate) fn sample(&self, runtime: &tokio::runtime::RuntimeMetrics) {
+        let value = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
+        self.alive.set(value(runtime.num_alive_tasks()));
+        self.queued.set(value(runtime.global_queue_depth()));
+    }
 }
 
 #[cfg(test)]
