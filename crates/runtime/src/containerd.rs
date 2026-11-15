@@ -22,8 +22,9 @@ use speculaire_registry_config::containerd::config as containerd_config;
 use crate::cri::{Error, block_on, connect};
 use crate::paths::Paths;
 
-/// containerd's content directory, where its root is `/var/lib/containerd`.
-const CONTENT_DIR: &str = "/var/lib/containerd/io.containerd.content.v1.content";
+/// The content store's ID, which names its directory below containerd's `root` (v2.4.2
+/// `cmd/containerd/server/server.go:171`).
+const CONTENT_PLUGIN: &str = "io.containerd.content.v1.content";
 
 /// The namespace containerd's CRI plugin keeps its images in; the content service lists a blob only for a namespace
 /// that has a reference to it.
@@ -53,7 +54,10 @@ impl Containerd {
     /// the default one (`runtime.containerd_config`, D87).
     #[must_use]
     pub fn new(paths: Paths, socket: impl Into<PathBuf>, config: Option<PathBuf>) -> Self {
-        let content_directory = paths.at(CONTENT_DIR);
+        let file = config
+            .clone()
+            .unwrap_or_else(|| paths.at(containerd_config::DEFAULT_PATH));
+        let content_directory = paths.at(&root(&file)).join(CONTENT_PLUGIN);
         Self {
             paths,
             socket: socket.into(),
@@ -90,6 +94,13 @@ impl Containerd {
     pub(crate) async fn forget_channel(&self) {
         *self.channel.lock().await = None;
     }
+}
+
+/// The `root` the config at `file` names (D5), else the default: containerd runs on it without a config, and the
+/// agent's preflight refuses a config that cannot be loaded (D86).
+fn root(file: &Path) -> String {
+    containerd_config::load_root(file)
+        .unwrap_or_else(|_| containerd_config::DEFAULT_ROOT.to_owned())
 }
 
 /// Whether `error` is `config` itself missing, where containerd runs on its defaults. A missing import fails containerd's

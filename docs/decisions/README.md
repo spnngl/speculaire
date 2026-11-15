@@ -12,7 +12,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51, D97, D98, D105)
 - D3 [distribution](distribution.md): every agent announces its own peer address and port (amended by D36)
 - D4 [build](build.md): no io_uring in v1, and the unit denies its syscalls
-- D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85)
+- D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85, D110)
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66)
 - D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73, D102)
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43)
@@ -92,7 +92,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D82 [agent](agent.md): `configure` makes one set of four certificate files, edits every `hosts.toml` under `config_path` with the mirror first, and `unconfigure` removes only what it added (amends D14, D32, D55, D56; amended by D85, D101)
 - D83 [distribution](distribution.md): the CRI-O drop-in copies the admin's entry of every mirrored registry (`mirror.registries` and the admin's prefixes), with the mirror's location the entry's own (amends D66; amended by D88)
 - D84 [agent](agent.md): `configure`, `unconfigure` and `check-config` find the runtime by its socket, `--runtime` names it, and `unconfigure` stops while the runtime's NRI config requires `speculaire` (amends D32, D64; amended by D90)
-- D85 [distribution](distribution.md): the mirror is hyper over TLS 1.3 with a required client certificate, finds a held blob by its digest in the content directory, answers every miss with a 404, and is checked by the distribution-spec conformance suite (amends D5, D14, D55, D82; amended by D102, D108)
+- D85 [distribution](distribution.md): the mirror is hyper over TLS 1.3 with a required client certificate, finds a held blob by its digest in the content directory, answers every miss with a 404, and is checked by the distribution-spec conformance suite (amends D5, D14, D55, D82; amended by D102, D108, D110)
 - D86 [gate](gate.md): one preflight stops the agent and fails `check-config` on a node where it would mirror or gate wrongly: runtime version floors, NRI, discard_unpacked_layers and config_path, certificates; `/readyz` is 503 until the mirror listens (amends D15, D54, D64; amended by D90)
 - D87 [agent](agent.md): `runtime.containerd_socket`, `runtime.containerd_config` and `runtime.crio_socket` are restart keys that every command reads, and the agent's tests run against a fake containerd; no switch skips preflight (amends D60)
 - D88 [distribution](distribution.md): the upstream client is our own on hyper, with Bearer tokens kept per host and scope; the CRI-O relay serves what its served manifests point to and keeps it in the blob cache (amends D17, D53, D67, D83)
@@ -117,4 +117,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D107 [build](build.md): hot paths borrow their input, reuse buffers, keep fixed sizes on the stack and read fixed binary layouts through `zerocopy`; a change made for speed or memory names its measure (amends D13)
 - D108 [distribution](distribution.md): the mirror reloads its certificates when a D93 stamp of their files changes, at most once a second (amends D85, D93)
 - D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34)
-Next free number: D110.
+- D110 [distribution](distribution.md): the content directory is `io.containerd.content.v1.content` below the `root` of containerd's config, `/var/lib/containerd` when it names none; an agent test serves a blob from a temporary root (amends D5, D85)
+Next free number: D111.

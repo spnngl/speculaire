@@ -26,6 +26,9 @@ use crate::header::Headers;
 /// Where containerd reads its config unless told otherwise.
 pub const DEFAULT_PATH: &str = "/etc/containerd/config.toml";
 
+/// containerd's `root` unless its config names another (`defaults.DefaultRootDir`).
+pub const DEFAULT_ROOT: &str = "/var/lib/containerd";
+
 /// The highest config version this containerd reads (`version.ConfigVersion`).
 const CONFIG_VERSION: i64 = 4;
 const CRI_PLUGIN: &str = "io.containerd.grpc.v1.cri";
@@ -297,6 +300,7 @@ pub enum LoadError {
 
 const FILE_FIELDS: &[&str] = &[
     "version",
+    "root",
     "imports",
     "plugins",
     "disabled_plugins",
@@ -394,6 +398,8 @@ struct File {
     #[serde(default)]
     version: i64,
     #[serde(default)]
+    root: String,
+    #[serde(default)]
     imports: Vec<String>,
     #[serde(default)]
     plugins: Table,
@@ -408,6 +414,8 @@ struct File {
 struct Merged {
     /// The files read, the config and its imports, in the order read.
     files: Vec<PathBuf>,
+    /// The last `root` set; empty when none is.
+    root: String,
     plugins: Table,
     disabled: Vec<String>,
     required: Vec<String>,
@@ -473,6 +481,21 @@ pub fn load_plugins(path: &Path) -> Result<Plugins, LoadError> {
             plugin_disabled: merged.disabled.iter().any(|name| name == NRI_PLUGIN),
             required_plugins: nri.default_validator.required_plugins,
         },
+    })
+}
+
+/// Loads `path` and its imports, and returns containerd's `root`, below which each plugin keeps its data in a
+/// directory named by the plugin's ID (`cmd/containerd/server/server.go:171`).
+///
+/// # Errors
+///
+/// As [`load_raw`].
+pub fn load_root(path: &Path) -> Result<String, LoadError> {
+    let merged = load_merged(path)?;
+    Ok(if merged.root.is_empty() {
+        DEFAULT_ROOT.to_owned()
+    } else {
+        merged.root
     })
 }
 
@@ -718,8 +741,11 @@ fn resolve_imports(parent: &Path, imports: &[String]) -> Result<Vec<PathBuf>, Lo
 }
 
 /// `mergeConfig` (`config.go:604`): later files win; plugin tables merge by key, deeply, and any other value, an array
-/// included, replaces; the plugin lists are unions.
+/// included, replaces; the plugin lists are unions; an empty `root` leaves the one before.
 fn merge(into: &mut Merged, file: File) {
+    if !file.root.is_empty() {
+        into.root = file.root;
+    }
     merge_table(&mut into.plugins, file.plugins);
     for (list, new) in [
         (&mut into.disabled, file.disabled_plugins),
@@ -770,6 +796,29 @@ mod tests {
             load_with_files(&conf),
             Err(LoadError::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn the_root_is_the_last_one_set_else_the_default() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let conf = dir.path().join("config.toml");
+        assert!(matches!(load_root(&conf), Err(LoadError::Read { .. })));
+        std::fs::write(&conf, "version = 3\n").expect("a file");
+        assert_eq!(load_root(&conf).expect("a valid config"), DEFAULT_ROOT);
+        // go-toml matches keys in any case; an import's empty `root` keeps the config's.
+        std::fs::write(
+            &conf,
+            "version = 3\nRoot = \"/data/containerd\"\nimports = [\"a.toml\"]\n",
+        )
+        .expect("a file");
+        let import = dir.path().join("a.toml");
+        std::fs::write(&import, "version = 3\nroot = \"\"\n").expect("a file");
+        assert_eq!(
+            load_root(&conf).expect("a valid config"),
+            "/data/containerd"
+        );
+        std::fs::write(&import, "version = 3\nroot = \"/srv/c\"\n").expect("a file");
+        assert_eq!(load_root(&conf).expect("a valid config"), "/srv/c");
     }
 
     #[test]

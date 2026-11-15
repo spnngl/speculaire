@@ -7,7 +7,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** Spegel assumes every peer listens on the same port as the local one (`docs/research/spegel.md` §3), which breaks mixed configurations.
 - **Revisit when:** —
 
-## D5: Serve blobs from containerd's content directory (amended by D67, D85)
+## D5: Serve blobs from containerd's content directory (amended by D67, D85, D110)
 
 - **Decision:** read `/var/lib/containerd/io.containerd.content.v1.content/blobs/` directly (read-only), with a gRPC `Content.Read` fallback.
 - **Because:** this is Spegel's proven path, and it is the cheapest one.
@@ -228,7 +228,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M2 step 03, arm64, Docker):** on CRI-O 1.37.2 `speculaire configure` wrote the drop-in and the three certificate files, the journal logged `Applied new registry configuration`, and `crictl pull docker.io/library/busybox:1.36.1` sent `GET /v2/` to a TLS server on `127.0.0.1:7480` with the client certificate; with that server killed the pull went on to Docker Hub and succeeded. `unconfigure` kept an admin's `50-admin.conf` with an edit made after `configure`, and a pull after it succeeded; the same on the three CRI-O legs of each architecture in CI run 43182634661.
 - **Revisit when:** CRI-O gains a per-blob fallback across sources (D66), or a node's CRI-O sets `registries_conf` (D80).
 
-## D85: The mirror is hyper over TLS 1.3, finds a held blob by its digest in the content directory, and is checked by the distribution-spec suite (amends D5, D14, D55, D82; amended by D102, D108)
+## D85: The mirror is hyper over TLS 1.3, finds a held blob by its digest in the content directory, and is checked by the distribution-spec suite (amends D5, D14, D55, D82; amended by D102, D108, D110)
 
 - **Decision:**
   - **Stack:** crate `speculaire-mirror`. `hyper` 1 (HTTP/1 only) serves each connection that `tokio-rustls` accepts, with rustls on aws-lc-rs and no `tls12` feature, so TLS 1.3 is the only version the binary has. `WebPkiClientVerifier` requires a client certificate that the local CA signed (D14). A client has 10 s for the handshake and for its request headers. The router is a `match` on the path, not axum's: a name has any number of segments, which axum's routes cannot match before `/blobs/<digest>`.
@@ -297,7 +297,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - One parser for the runtime's requests and the peers' keeps one fuzz target (`mirror_request`) and one set of `Range` rules; a peer never needs a tag, since the reflector maps digests only (D6).
   - A manifest or a `HEAD` costs no uplink to speak of; capping them would turn a flash crowd's small requests into `503`s while the bodies they wait for go out.
   - The address must match what the reflectors announce, or peers dial a port nobody listens on; binding it rather than every interface keeps the API off the interfaces the admin did not choose.
-- **Measured (M3 step 04):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass `e2e/tests/peer.rs` in 1.1 s and 0.8 s: the second worker's peer API serves a pulled 1 MiB layer whole (SHA-256 checked) and its first 100 bytes as a `206` to the first worker's kubelet certificate, and refuses no certificate and kube-apiserver's `apiserver-kubelet-client` one, of the cluster CA but not a node's. In `crates/mirror/src/peer/tests.rs`, with `peer.max_uploads = 1`, a second `GET` of a body while a 64 MiB one is in flight answers `503` at once, and once stopping a new request answers `503` while the 64 MiB body in flight completes. No agent test serves a blob yet (docs/TODECIDE.md).
+- **Measured (M3 step 04):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass `e2e/tests/peer.rs` in 1.1 s and 0.8 s: the second worker's peer API serves a pulled 1 MiB layer whole (SHA-256 checked) and its first 100 bytes as a `206` to the first worker's kubelet certificate, and refuses no certificate and kube-apiserver's `apiserver-kubelet-client` one, of the cluster CA but not a node's. In `crates/mirror/src/peer/tests.rs`, with `peer.max_uploads = 1`, a second `GET` of a body while a 64 MiB one is in flight answers `503` at once, and once stopping a new request answers `503` while the 64 MiB body in flight completes. The agent's own drain is D110's test.
 - **Revisit when:** peers need a request the mirror's parser does not route, or a node must serve on several addresses.
 
 ## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103)
@@ -334,3 +334,13 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** D85 compared modification times only, so files replaced with their times kept (`cp -p`), or written within one tick of the kernel's coarse clock, stayed unread until the next change or a restart: the flaw D93 fixed for the config poll. One watch serves both.
 - **Measured (arm64, local run):** `crates/mirror/src/tls.rs`'s test that rewrites the files and sets their modification times back failed on the previous code and passes now.
 - **Revisit when:** a filesystem keeps D93's stamp across edits the mirror must see.
+## D110: The content directory is below the `root` of containerd's config (amends D5, D85)
+
+- **Decision:**
+  - The mirror reads blobs from `<root>/io.containerd.content.v1.content`, `root` being the last one set in containerd's config and its imports, or `/var/lib/containerd` when none is or the config cannot be loaded (`containerd_config::load_root`).
+  - `apps/speculaire/tests/agent.rs` gives containerd's config a temporary `root`, serves a 64 MiB blob from it over the mirror, and stops the agent mid-body: the body arrives whole, so the mutants of `shut_down` and `Mirror::stop` are no longer excluded.
+- **Because:**
+  - containerd places each plugin's directory below `root`, by the plugin's ID (v2.4.2 `cmd/containerd/server/server.go:171`); a node whose `root` moved to another disk had no blob served from its directory.
+  - Before, no agent test could serve a blob: the content directory was fixed below the host's `/var/lib/containerd`, which on the CI runner exists and cannot be read.
+- **Cost:** containerd's `--root` flag overrides the config and the agent cannot see it; such a node serves from its content service only, as when the directory is missing (D85).
+- **Revisit when:** a supported setup sets `--root`.

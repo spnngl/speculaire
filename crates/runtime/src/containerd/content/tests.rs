@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
@@ -42,14 +42,20 @@ fn containerd(root: &Path, socket: impl Into<std::path::PathBuf>) -> Containerd 
     Containerd::new(Paths::under(root), socket, None)
 }
 
-fn put(root: &Path, digest: &Digest, bytes: &[u8]) {
-    let path = root
-        .join("var/lib/containerd/io.containerd.content.v1.content")
-        .join("blobs")
+/// Where the blob `digest` is on the node under `node`, whose containerd has the default root.
+fn path_of(node: &Path, digest: &Digest) -> PathBuf {
+    node.join("var/lib/containerd/io.containerd.content.v1.content/blobs")
         .join(digest.algorithm())
-        .join(digest.encoded());
+        .join(digest.encoded())
+}
+
+fn put_at(path: &Path, bytes: &[u8]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, bytes).unwrap();
+}
+
+fn put(root: &Path, digest: &Digest, bytes: &[u8]) {
+    put_at(&path_of(root, digest), bytes);
 }
 
 async fn collect(chunks: Chunks) -> Vec<u8> {
@@ -94,18 +100,34 @@ async fn a_blob_that_is_not_there_is_none_and_a_directory_is_not_a_blob() {
     let content = containerd(dir.path(), dir.path().join("no.sock"));
     assert!(content.open(&digest_of(b"x")).await.unwrap().is_none());
     let held = digest_of(b"y");
-    std::fs::create_dir_all(
-        dir.path()
-            .join("blobs")
-            .join(held.algorithm())
-            .join(held.encoded()),
-    )
-    .unwrap();
+    std::fs::create_dir_all(path_of(dir.path(), &held)).unwrap();
     assert!(content.open(&held).await.unwrap().is_none());
     let other = tempfile::tempdir().unwrap();
     let blocked = containerd(other.path(), other.path().join("no.sock"));
     std::fs::write(other.path().join("var"), "").unwrap();
     assert!(matches!(blocked.open(&held).await, Err(Error::Io(_))));
+}
+
+#[tokio::test]
+async fn the_content_directory_is_below_the_root_of_containerds_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "version = 3\nroot = \"/data/containerd\"\n").unwrap();
+    let bytes = pattern(10);
+    let digest = digest_of(&bytes);
+    put_at(
+        &dir.path()
+            .join("data/containerd/io.containerd.content.v1.content/blobs/sha256")
+            .join(digest.encoded()),
+        &bytes,
+    );
+    let content = Containerd::new(
+        Paths::under(dir.path()),
+        dir.path().join("no.sock"),
+        Some(config),
+    );
+    let blob = content.open(&digest).await.unwrap().unwrap();
+    assert_eq!(blob.read_all(10).await.unwrap(), bytes);
 }
 
 #[tokio::test]
