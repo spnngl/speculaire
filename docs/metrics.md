@@ -1,6 +1,6 @@
 # Metrics
 
-Every metric speculaire exports. A test fails when this list and `/metrics` disagree (D34). Every histogram is native, so it appears only in the protobuf exposition. Labels hold only the values listed here. Alerts: `docs/operations.md`.
+Every metric speculaire exports or will export. A row whose `Planned` cell names a milestone is not built yet, and the change that builds it removes the cell. Tests fail when the other rows and the metrics the code describes disagree, and when `/metrics` holds a metric missing here (D34, D109). Every histogram is native, so it appears only in the protobuf exposition. Labels hold only the values listed here. Alerts: `docs/operations.md`.
 
 ## Mirror
 
@@ -44,24 +44,24 @@ Every metric speculaire exports. A test fails when this list and `/metrics` disa
 
 ## Verification
 
-| Metric | Type | Labels | Meaning |
-|---|---|---|---|
-| `speculaire_verifications_total` | counter | `result` = `allow`\|`rejected`\|`unverifiable`; `trigger` = `manifest`\|`event`\|`synchronize`\|`gate_miss`\|`reverify` | Completed verifications (D20, D22); `reverify` follows a policy or trust-root change (D21) |
-| `speculaire_verification_seconds` | histogram | — | Time from trigger to verdict |
-| `speculaire_verdicts` | gauge | `state` = `allow`\|`rejected`\|`unverifiable`\|`pending` | Verdicts in the cache |
-| `speculaire_artifact_fetches_total` | counter | `source` = `peer`\|`upstream`; `upstream`; `result` = `ok`\|`not_found`\|`digest_mismatch`\|`rate_limited`\|`error` | Artifact fetches (D38); `upstream` is a host with a `hosts.toml` directory, else `other`, and empty for peer fetches (D50) |
-| `speculaire_artifact_store_bytes` | gauge | — | Size of the *artifact store* |
-| `speculaire_trust_root_expiry_timestamp_seconds` | gauge | — | When the current TUF metadata expires, as a Unix time |
-| `speculaire_cache_loads_total` | counter | `result` = `loaded`\|`discarded` | Loads of `/run/speculaire/cache.bin` at startup (D31) |
+| Metric | Type | Labels | Meaning | Planned |
+|---|---|---|---|---|
+| `speculaire_verifications_total` | counter | `result` = `allow`\|`rejected`\|`unverifiable`; `trigger` = `manifest`\|`event`\|`synchronize`\|`gate_miss`\|`reverify` | Completed verifications (D20, D22); `reverify` follows a policy or trust-root change (D21) | M5 |
+| `speculaire_verification_seconds` | histogram | — | Time from trigger to verdict | M5 |
+| `speculaire_verdicts` | gauge | `state` = `allow`\|`rejected`\|`unverifiable`\|`pending` | Verdicts in the cache | M5 |
+| `speculaire_artifact_fetches_total` | counter | `source` = `peer`\|`upstream`; `upstream`; `result` = `ok`\|`not_found`\|`digest_mismatch`\|`rate_limited`\|`error` | Artifact fetches (D38); `upstream` is a host with a `hosts.toml` directory, else `other`, and empty for peer fetches (D50) | M4 |
+| `speculaire_artifact_store_bytes` | gauge | — | Size of the *artifact store* | M4 |
+| `speculaire_trust_root_expiry_timestamp_seconds` | gauge | — | When the current TUF metadata expires, as a Unix time | M5 |
+| `speculaire_cache_loads_total` | counter | `result` = `loaded`\|`discarded` | Loads of `/run/speculaire/cache.bin` at startup (D31) | M6 |
 
 ## Gate
 
-| Metric | Type | Labels | Meaning |
-|---|---|---|---|
-| `speculaire_gate_total` | counter | `mode` = `audit`\|`enforce`; `result` = `allow`\|`rejected`\|`unverifiable`\|`pending`\|`unmatched`\|`exempt`; `stale` = `true`\|`false` | Gate decisions (D18, D21, D23) |
-| `speculaire_gate_seconds` | histogram | `path` = `nri`\|`annotation` | `CreateContainer` handling time (target: p99 under 5 ms on a cached verdict) |
-| `speculaire_identity_path` | gauge | `path` = `nri`\|`annotation` | 1 for the image-identity path in use (D15) |
-| `speculaire_nri_connected` | gauge | — | 1 while registered with the runtime's NRI (D41, D64) |
+| Metric | Type | Labels | Meaning | Planned |
+|---|---|---|---|---|
+| `speculaire_gate_total` | counter | `mode` = `audit`\|`enforce`; `result` = `allow`\|`rejected`\|`unverifiable`\|`pending`\|`unmatched`\|`exempt`; `stale` = `true`\|`false` | Gate decisions (D18, D21, D23) | M6 |
+| `speculaire_gate_seconds` | histogram | `path` = `nri`\|`annotation` | `CreateContainer` handling time (target: p99 under 5 ms on a cached verdict) | M6 |
+| `speculaire_identity_path` | gauge | `path` = `nri`\|`annotation` | 1 for the image-identity path in use (D15) | M6 |
+| `speculaire_nri_connected` | gauge | — | 1 while registered with the runtime's NRI (D41, D64) | M6 |
 
 ## Process
 

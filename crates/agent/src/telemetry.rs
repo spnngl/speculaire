@@ -38,13 +38,24 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
     metrics::set_global_recorder(recorder)
         .map_err(|_| anyhow::anyhow!("a metrics recorder is already installed"))?;
 
+    describe();
+    // The runtime, its version and NRI's come from NRI's `Configure` (D9, D68); empty until then.
+    gauge!(BUILD_INFO, "version" => env!("CARGO_PKG_VERSION"), "runtime" => "", "runtime_version" => "", "nri_version" => "").set(1);
+    counter!(CONFIG_RELOAD_FAILURES).absolute(0);
+    gauge!(P2P_ENABLED).set(0);
+    speculaire_mirror::metrics::describe();
+    speculaire_mirror::metrics::describe_peer();
+    speculaire_reflect::metrics::describe_client();
+    Ok(handle)
+}
+
+/// Describes the metrics of this crate.
+fn describe() {
     describe_gauge!(BUILD_INFO, "Always 1");
     describe_counter!(
         CONFIG_RELOAD_FAILURES,
         "Reloads rejected; the previous config is still in use"
     );
-    // The runtime, its version and NRI's come from NRI's `Configure` (D9, D68); empty until then.
-    gauge!(BUILD_INFO, "version" => env!("CARGO_PKG_VERSION"), "runtime" => "", "runtime_version" => "", "nri_version" => "").set(1);
     describe_gauge!(
         P2P_ENABLED,
         "1 while this node can make peer links: its kubelet certificate and the cluster CA are loaded"
@@ -53,10 +64,82 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
         IDENTITY_EXPIRY,
         "When the kubelet certificate in use expires, in seconds since the epoch"
     );
-    counter!(CONFIG_RELOAD_FAILURES).absolute(0);
-    gauge!(P2P_ENABLED).set(0);
-    speculaire_mirror::metrics::describe();
-    speculaire_mirror::metrics::describe_peer();
-    speculaire_reflect::metrics::describe_client();
-    Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    use metrics::{
+        Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+    };
+
+    /// Keeps the name of every metric described.
+    #[derive(Default)]
+    struct Names(Mutex<BTreeSet<String>>);
+
+    impl Names {
+        fn add(&self, key: &KeyName) {
+            self.0
+                .lock()
+                .expect("no test panics holding the lock")
+                .insert(key.as_str().to_owned());
+        }
+    }
+
+    impl Recorder for Names {
+        fn describe_counter(&self, key: KeyName, _: Option<Unit>, _: SharedString) {
+            self.add(&key);
+        }
+        fn describe_gauge(&self, key: KeyName, _: Option<Unit>, _: SharedString) {
+            self.add(&key);
+        }
+        fn describe_histogram(&self, key: KeyName, _: Option<Unit>, _: SharedString) {
+            self.add(&key);
+        }
+        fn register_counter(&self, _: &Key, _: &Metadata<'_>) -> Counter {
+            Counter::noop()
+        }
+        fn register_gauge(&self, _: &Key, _: &Metadata<'_>) -> Gauge {
+            Gauge::noop()
+        }
+        fn register_histogram(&self, _: &Key, _: &Metadata<'_>) -> Histogram {
+            Histogram::noop()
+        }
+    }
+
+    /// The metrics `docs/metrics.md` lists, less those whose `Planned` cell names a milestone (D109).
+    fn built() -> BTreeSet<String> {
+        include_str!("../../../docs/metrics.md")
+            .lines()
+            .filter_map(|row| {
+                let (name, rest) = row.strip_prefix("| `")?.split_once("` | ")?;
+                let last = rest.strip_suffix(" |")?.rsplit(" | ").next()?;
+                let planned = last
+                    .strip_prefix('M')
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+                (!planned).then(|| name.to_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_catalog_lists_every_metric_described_and_no_other_built_one() {
+        let names = Names::default();
+        metrics::with_local_recorder(&names, || {
+            super::describe();
+            speculaire_mirror::metrics::describe();
+            speculaire_mirror::metrics::describe_peer();
+            speculaire_mirror::metrics::describe_fetch();
+            speculaire_mirror::metrics::describe_relay();
+            speculaire_reflect::metrics::describe();
+            speculaire_reflect::metrics::describe_client();
+        });
+        let described = names
+            .0
+            .into_inner()
+            .expect("no test panics holding the lock");
+        assert_eq!(described, built());
+    }
 }
