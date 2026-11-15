@@ -188,7 +188,7 @@ async fn behind(holder: &Holder, fault: Fault) -> Holder {
 }
 
 /// A recorder for this test thread alone, with the fetcher's series described.
-fn recorder() -> (PrometheusHandle, ::metrics::LocalRecorderGuard<'static>) {
+pub(crate) fn recorder() -> (PrometheusHandle, ::metrics::LocalRecorderGuard<'static>) {
     let recorder = Box::leak(Box::new(PrometheusBuilder::new().build_recorder()));
     let handle = recorder.handle();
     let guard = ::metrics::set_default_local_recorder(recorder);
@@ -196,7 +196,7 @@ fn recorder() -> (PrometheusHandle, ::metrics::LocalRecorderGuard<'static>) {
     (handle, guard)
 }
 
-fn assert_counted(handle: &PrometheusHandle, lines: &[&str]) {
+pub(crate) fn assert_counted(handle: &PrometheusHandle, lines: &[&str]) {
     let rendered = handle.render();
     for line in lines {
         assert!(
