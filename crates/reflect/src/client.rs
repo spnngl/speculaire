@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 
 use crate::frame::{self, FrameError, Reader};
 use crate::message::Request;
-use crate::metrics::CLIENT_LOOKUP;
+use crate::metrics::LookupSeries;
 use crate::proto::{self, reflector_message};
 use crate::{Key, Member, connect};
 
@@ -136,6 +136,7 @@ struct Shared {
     peer: watch::Sender<Option<SocketAddr>>,
     /// Woken when a stream drops, to ask for the members again (D2).
     dropped: tokio::sync::Notify,
+    series: LookupSeries,
 }
 
 impl Client {
@@ -150,6 +151,7 @@ impl Client {
             links: Mutex::default(),
             peer,
             dropped: tokio::sync::Notify::new(),
+            series: LookupSeries::new(),
         });
         let stop = CancellationToken::new();
         let task = tokio::spawn(supervise(Arc::clone(&shared), stop.clone()));
@@ -207,14 +209,14 @@ impl Lookups {
     pub async fn lookup(&self, digest: &Digest) -> Result<Vec<Peer>, LookupError> {
         let start = Instant::now();
         let peers = self.ask(digest).await;
-        let result = match &peers {
-            Ok(found) if found.is_empty() => "miss",
-            Ok(_) => "hit",
-            Err(LookupError::Call(_)) => "error",
-            Err(LookupError::NoMember) => "no_reflector",
-        };
-        ::metrics::histogram!(CLIENT_LOOKUP, "result" => result)
-            .record(start.elapsed().as_secs_f64());
+        let series = &self.0.series;
+        match &peers {
+            Ok(found) if found.is_empty() => &series.miss,
+            Ok(_) => &series.hit,
+            Err(LookupError::Call(_)) => &series.error,
+            Err(LookupError::NoMember) => &series.no_reflector,
+        }
+        .record(start.elapsed());
         peers
     }
 

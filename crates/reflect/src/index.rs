@@ -13,12 +13,14 @@ use hashbrown::HashTable;
 use roaring::RoaringBitmap;
 
 use crate::key::Key;
+use crate::metrics::IndexSeries;
 use crate::sync::{Mutex, MutexGuard};
 
 /// The index, shared by every stream and lookup.
 #[derive(Debug, Default)]
 pub(crate) struct Index {
     inner: Mutex<Inner>,
+    series: IndexSeries,
 }
 
 /// One `Announce` stream's hold on its node's entry: a later stream for the node takes it over.
@@ -105,7 +107,7 @@ impl Index {
             inner.nodes.insert(Arc::clone(&name), slot);
             name
         };
-        inner.publish();
+        inner.publish(&self.series);
         Stream { node, id }
     }
 
@@ -149,7 +151,7 @@ impl Index {
         }
         inner.pairs += fresh.len();
         inner.agent(slot).digests = held;
-        inner.publish();
+        inner.publish(&self.series);
         Ok(())
     }
 
@@ -184,7 +186,7 @@ impl Index {
         for &key in added {
             inner.hold(slot, key);
         }
-        inner.publish();
+        inner.publish(&self.series);
         Ok(())
     }
 
@@ -198,7 +200,7 @@ impl Index {
         inner.nodes.remove(&stream.node);
         inner.agents[at(slot)] = None;
         inner.free_agents.push(slot);
-        inner.publish();
+        inner.publish(&self.series);
     }
 
     /// Empties the index at once, for a stopping reflector: the streams' ends then find nothing to remove (D104).
@@ -209,7 +211,7 @@ impl Index {
             let streams = inner.streams;
             let closed = std::mem::take(&mut *inner);
             inner.streams = streams;
-            inner.publish();
+            inner.publish(&self.series);
             closed
         };
         // Freeing the entries takes a while: outside the lock.
@@ -365,8 +367,8 @@ impl Inner {
             .expect("a digest number an agent holds or stages has holders")
     }
 
-    fn publish(&self) {
-        crate::metrics::index(self.nodes.len(), self.digests.len(), self.pairs);
+    fn publish(&self, series: &IndexSeries) {
+        series.set(self.nodes.len(), self.digests.len(), self.pairs);
     }
 }
 

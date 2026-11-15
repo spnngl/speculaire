@@ -43,6 +43,7 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 | `speculaire_reflector_digests` | gauge | — | Distinct digests in the index |
 | `speculaire_reflector_pairs` | gauge | — | (digest, node) pairs in the index |
 | `speculaire_reflector_lookup_seconds` | histogram | — | Server-side `Lookup` latency (D33 target: p99 at most 500 µs) |
+| `speculaire_reflector_resync_seconds` | histogram | — | Time from accepting an agent's connection to holding its first snapshot, once per connection; after a restart, its largest sample is the refill (D103, D104) |
 | `speculaire_reflector_announce_rejected_total` | counter | `reason` = `identity`\|`version`\|`address`\|`size`\|`digests`\|`malformed` | Refused `Announce` streams (D2, D16, D97); `docs/operations.md` § Reflector refusals |
 
 ## Verification

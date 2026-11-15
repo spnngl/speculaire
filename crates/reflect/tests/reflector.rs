@@ -419,6 +419,11 @@ async fn deltas_apply_in_sequence_and_a_gap_gets_a_resync() {
     a.delta(5, vec![digest(2)], vec![digest(1)]).await;
     b.wait_lookup(&digest(2), &["a"]).await;
     b.wait_lookup(&digest(1), &[]).await;
+    // The delta came after the snapshot on the same connection: the first snapshot's refill is timed by now.
+    assert_eq!(
+        test.metric("speculaire_reflector_resync_seconds_count"),
+        "1"
+    );
     a.delta(7, vec![digest(3)], vec![]).await;
     a.resync().await;
     // Until the next snapshot, deltas are of no use.
@@ -428,6 +433,11 @@ async fn deltas_apply_in_sequence_and_a_gap_gets_a_resync() {
     for gone in [2, 3, 4] {
         assert_eq!(b.lookup(&digest(gone)).await, Vec::<String>::new());
     }
+    // A later snapshot of the connection times nothing.
+    assert_eq!(
+        test.metric("speculaire_reflector_resync_seconds_count"),
+        "1"
+    );
 }
 
 #[tokio::test]
