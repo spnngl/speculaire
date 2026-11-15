@@ -110,7 +110,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | Path | Role |
 |---|---|
 | `apps/speculaire` | The binary: `version`, `check-config`, `configure`, `unconfigure` and `agent` today; `verify` (planned) (D62) |
-| `apps/loadgen` | Test-only reflector load generator, never packaged (D33) (planned) |
+| `apps/loadgen` | `speculaire-loadgen`, test only and never packaged: D33's load against one reflector, `just load` (D104) |
 | `crates/agent` | The agent: config (D60), the node its config names (D87), preflight at startup (D86), the mirror that `Node::fallback` calls for (D90), logs (D37), metrics (D34) and status listener (D42, D45) |
 | `crates/registry-config` | The *registry config* parsers, a module per runtime: containerd's `config.toml` and `hosts.toml` (D17, D78); CRI-O's `registries.conf`, `certs.d` and credential files (D66, D80) |
 | `crates/oracle-harness` | Test helper: runs `speculaire-oracle` and reads its answers; the differential tests of the parsers use it (D70, D79) |
@@ -121,6 +121,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/configure` | `configure`, `unconfigure`, the preflight and the node half of `check-config`, as thin functions over the runtime's `Wiring` and `Settings` traits; it names no runtime (D82, D83, D86, D90) |
 | `crates/fake-runtime` | Test support: a fake containerd on a socket, answering the CRI `Version`, `ListImages` and introspection `Plugins` (D87), and CRI-O's `GET /config` (D89, D90) |
 | `crates/pki` | the mirror's local CA and certificates (D14, D82); later kubelet certificate loading and rotation, rustls verifiers (D16) |
+| `crates/load` | The load scenario `speculaire-loadgen` runs: simulated agents on `crates/reflect`'s client, the reflector's targets measured from `/proc` and `/metrics` (D33, D104) |
 | `crates/reflect` | Protobuf, the reflector's server and index (D97), and the agent's client: `Members`, one `Announce` stream per member, hedged `Lookup` (D2, D98) |
 | `crates/verify` | Artifact discovery and *artifact store*, sigstore glue, policy, SBOM checks, verdict cache (planned) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |

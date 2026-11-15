@@ -1,9 +1,6 @@
 //! One `Announce` stream, from its `Hello` to its end, which withdraws what it announced (D2).
 
-use std::collections::HashSet;
 use std::sync::Arc;
-
-use speculaire_oci::reference::Digest;
 
 use crate::index::{Index, Refused, Stream};
 use crate::message::{Announcement, Delta, Hello, Snapshot};
@@ -39,8 +36,6 @@ pub(crate) struct Session {
 #[derive(Debug)]
 struct Open {
     stream: Stream,
-    /// The chunks of a snapshot not yet ended.
-    staged: HashSet<Digest>,
     /// The sequence number of the next delta; `None` until a snapshot ends.
     next: Option<u64>,
 }
@@ -71,10 +66,10 @@ impl Session {
             (Announcement::Hello(_), Some(_)) => Err(refused(Reason::Malformed, "a second Hello")),
             (_, None) => Err(refused(Reason::Malformed, "no Hello first")),
             (Announcement::Snapshot(snapshot), Some(open)) => {
-                open.snapshot(&self.index, snapshot, limit)?;
+                open.snapshot(&self.index, &snapshot, limit)?;
                 Ok(None)
             }
-            (Announcement::Delta(delta), Some(open)) => open.delta(&self.index, delta, limit),
+            (Announcement::Delta(delta), Some(open)) => open.delta(&self.index, &delta, limit),
         }
     }
 
@@ -99,7 +94,6 @@ impl Session {
         }
         Ok(Open {
             stream: self.index.join(&self.peer, hello.peer),
-            staged: HashSet::new(),
             next: None,
         })
     }
@@ -109,17 +103,16 @@ impl Open {
     fn snapshot(
         &mut self,
         index: &Index,
-        snapshot: Snapshot,
+        snapshot: &Snapshot,
         limit: usize,
     ) -> Result<(), Rejection> {
-        self.staged.extend(snapshot.digests);
-        if self.staged.len() > limit {
-            return Err(too_many(limit));
-        }
+        index
+            .stage(&self.stream, &snapshot.digests, limit)
+            .map_err(|refused| rejection(refused, limit))?;
         if snapshot.last {
             index
-                .replace(&self.stream, std::mem::take(&mut self.staged))
-                .map_err(|_| Rejection::Superseded)?;
+                .commit(&self.stream)
+                .map_err(|refused| rejection(refused, limit))?;
             self.next = Some(snapshot.seq);
         }
         Ok(())
@@ -128,17 +121,14 @@ impl Open {
     fn delta(
         &mut self,
         index: &Index,
-        delta: Delta,
+        delta: &Delta,
         limit: usize,
     ) -> Result<Option<Reply>, Rejection> {
         match self.next {
             Some(next) if next == delta.seq => {
                 index
-                    .apply(&self.stream, delta.added, &delta.removed, limit)
-                    .map_err(|refused| match refused {
-                        Refused::Superseded => Rejection::Superseded,
-                        Refused::Limit => too_many(limit),
-                    })?;
+                    .apply(&self.stream, &delta.added, &delta.removed, limit)
+                    .map_err(|refused| rejection(refused, limit))?;
                 self.next = Some(next.wrapping_add(1));
                 Ok(None)
             }
@@ -164,6 +154,9 @@ fn refused(reason: Reason, why: &str) -> Rejection {
     Rejection::Refused(reason, why.to_owned())
 }
 
-fn too_many(limit: usize) -> Rejection {
-    refused(Reason::Digests, &format!("more than {limit} digests"))
+fn rejection(why: Refused, limit: usize) -> Rejection {
+    match why {
+        Refused::Superseded => Rejection::Superseded,
+        Refused::Limit => refused(Reason::Digests, &format!("more than {limit} digests")),
+    }
 }

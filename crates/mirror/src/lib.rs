@@ -6,6 +6,8 @@
 //!
 //! The peer API, [`peer`], serves the same content to the agents of other nodes.
 
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod cache;
 pub mod fetch;
 mod hash;

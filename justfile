@@ -219,6 +219,32 @@ careful sanitizer="" package="":
     export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}"
     cargo careful test --target "$host" {{ if sanitizer == "" { "" } else { "-Zcareful-sanitizer=" + sanitizer } }} {{ if package == "" { "--workspace --exclude e2e" } else { "-p " + package } }} --all-features --locked
 
+# Divan's micro-benchmarks (D104): the reflector's index lookup in D33's fleet, and blob hashing as content arrives (D7).
+# On this machine, outside CI: the numbers compare changes on one machine only. Arguments go to divan, such as a filter.
+# Measure the hot paths: just bench-micro
+bench-micro *args:
+    cargo bench --locked -p speculaire-reflect -p speculaire-mirror --bench micro \
+        --features speculaire-reflect/bench,speculaire-mirror/bench -- {{ args }}
+
+# The reflector under a short load (D104), twice: Valgrind's memcheck, failing on a definite leak or a memory error, then
+# DHAT, whose profiles go to target/valgrind/dhat. The glibc build, with symbols: Valgrind does not follow the static
+# musl binary's allocator (D46). On Linux with Valgrind installed; own target dir; outside `just check`.
+valgrind:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR=target/valgrind CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_STRIP=none
+    cargo build --release --locked -p speculaire -p speculaire-loadgen
+    bin=target/valgrind/release
+    mkdir -p target/valgrind/dhat
+    # Small enough for Valgrind's pace; the measures mean nothing under it, so no target fails the run.
+    load=("$bin/speculaire-loadgen" --agents 100 --blobs 500 --pool 10000 --lookups 100 --deltas 50 --join 10s
+        --warmup 5s --steady 20s --measure-only --)
+    # No undefined-value check: it flags a branch in hyper's HTTP/1 head parsing (hyper 1.12.0 src/proto/h1/io.rs:205)
+    # that the optimiser reads early, and leaks are what this run is for.
+    "${load[@]}" valgrind --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite \
+        --undef-value-errors=no --error-exitcode=1 "$bin/speculaire"
+    "${load[@]}" valgrind --tool=dhat --dhat-out-file=target/valgrind/dhat/dhat.%p.json "$bin/speculaire"
+
 # Ported from dedens `justfile` at v0.1.0-131-gfd00747 (D16 there; D77 here).
 # Install RAPx at `rapx_rev` and what it builds on: the nightly's rustc-dev, rust-src and llvm-tools, and Z3 (on macOS
 # from Homebrew, `brew install z3`; on Linux, libz3-dev).
@@ -332,6 +358,33 @@ musl target:
             && rust-audit-info /out/speculaire | grep -q "\"name\":\"speculaire\"" \
             && file /out/speculaire | tee /dev/stderr | grep -q "static-pie linked"' \
         sh "{{ target }}"
+
+# D33's load against one reflector (D104): the musl `speculaire` and `speculaire-loadgen`, in the build image with the
+# open-files limit raised and every local port open to the agents' connections; a missed target fails. Arguments go to
+# `speculaire-loadgen`, such as `--agents 2000` on a laptop, and `RUST_LOG` filters its logs. Needs
+# `just musl <arch>-unknown-linux-musl`.
+# Run the load scenario and report D33's targets: just load
+load *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target='{{ arch() }}-unknown-linux-musl'
+    bin="target/musl/$target/speculaire"
+    if [[ ! -x "$bin" ]]; then
+        echo "load: no $bin: run just musl $target" >&2
+        exit 1
+    fi
+    mkdir -p target/musl-load
+    {{ container }} build --quiet --target build -t localhost/speculaire-build -f build/Containerfile build >/dev/null
+    {{ container }} run --rm -v "$(pwd):/src:ro" -v "$(pwd)/target/musl-load:/out" \
+        -v speculaire-registry:/usr/local/cargo/registry -v "speculaire-musl-{{ arch() }}:/target" \
+        -e CARGO_TARGET_DIR=/target localhost/speculaire-build \
+        sh -c 'cargo build --release --locked --target "$1" -p speculaire-loadgen \
+            && cp "/target/$1/release/speculaire-loadgen" /out/' sh "$target"
+    echo 'load: the open-files limit is raised to 1048576, and the local ports to 1024-65535, in the container' >&2
+    {{ container }} run --rm -e RUST_LOG --ulimit nofile=1048576:1048576 --sysctl net.ipv4.ip_local_port_range='1024 65535' \
+        -v "$(pwd)/$bin:/usr/bin/speculaire:ro" \
+        -v "$(pwd)/target/musl-load/speculaire-loadgen:/usr/bin/speculaire-loadgen:ro" \
+        localhost/speculaire-build speculaire-loadgen {{ args }} -- /usr/bin/speculaire
 
 # Needs Docker, and the binary of `just musl <arch>-unknown-linux-musl`, which it installs on each node.
 # Build the node image, start the cluster, run the suites, delete the cluster (D63): just e2e crio 1.37

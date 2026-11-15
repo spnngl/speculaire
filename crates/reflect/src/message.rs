@@ -196,20 +196,6 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_chunk_of_sha512_digests_fits_a_message() {
-        use prost::Message as _;
-        let digest = format!("sha512:{}", "a".repeat(128));
-        let chunk = proto::AgentMessage {
-            message: Some(agent_message::Message::Snapshot(proto::Snapshot {
-                digests: vec![digest; crate::SNAPSHOT_CHUNK],
-                last: false,
-                seq: u64::MAX,
-            })),
-        };
-        assert!(chunk.encoded_len() < crate::Limits::default().message / 2);
-    }
-
-    #[test]
     fn a_message_without_a_variant_is_malformed() {
         let empty = proto::AgentMessage { message: None };
         assert_eq!(Announcement::try_from(empty), Err(Malformed::Empty));

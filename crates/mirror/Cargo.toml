@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# D104: what `just bench-micro` measures, in `src/bench.rs`.
+[features]
+bench = []
+
 [dependencies]
 aws-lc-rs.workspace = true
 bytes.workspace = true
@@ -33,11 +37,17 @@ tokio-rustls.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+divan.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }
 hyper = { workspace = true, features = ["client", "http2"] }
 secrecy.workspace = true
 metrics-exporter-prometheus.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "micro"
+harness = false
+required-features = ["bench"]
 
 [lints]
 workspace = true

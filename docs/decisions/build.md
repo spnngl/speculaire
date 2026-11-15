@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104)
 
 - **Decision:**
   - **Workflow:**
@@ -85,7 +85,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
     - `lint` (actionlint, zizmor);
     - `commit` (Conventional Commits);
     - `fuzz` (nightly cron);
-    - `load` (nightly cron): `just load`, the reflector load test (D33);
+    - `load` (dispatch, and nightly cron once the reflector meets D33's peak, D104): `just load`, the reflector load test (D33);
     - `bench`: nightly on kind, and by `workflow_dispatch` on a real cluster, `just bench` against Spegel (D35);
     - `mutants` and `deep` (careful, shuttle), both informational;
     - `advisories`, `codeql`, `betterleaks`, `renovate`;

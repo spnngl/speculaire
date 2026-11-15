@@ -36,9 +36,17 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// How many holders a `Lookup` returns at most (D97).
 pub const LOOKUP_PEERS: usize = 8;
 
-/// How many digests an agent puts in one `Snapshot` chunk at most (D97): about 1.3 MiB of sha512 text, well under
-/// [`Limits::message`].
-pub const SNAPSHOT_CHUNK: usize = 10_000;
+/// How many digests an agent puts in one `Snapshot` chunk at most (D97, D104): about 1.8 KB of sha256 text, 3.4 KB of
+/// sha512. A stream's receive buffer keeps the size of its largest message, so a small chunk keeps the reflector's
+/// memory per agent small.
+pub const SNAPSHOT_CHUNK: usize = 25;
+
+/// How much an agent may send on a stream before the reflector reads it: a few chunks (D104). hyper's 1 MiB would let
+/// each agent park its whole snapshot in the reflector while the index is busy.
+const STREAM_WINDOW: u32 = 8 << 10;
+
+/// How much an agent may send on its connection before the reflector reads it: HTTP/2's own default (D104).
+const CONNECTION_WINDOW: u32 = 65_535;
 
 /// A reflector, as `reflector.members` lists it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -98,6 +106,7 @@ impl Default for Limits {
 #[derive(Debug)]
 pub struct Reflector {
     address: SocketAddr,
+    index: Arc<Index>,
     stop: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -126,14 +135,17 @@ impl Reflector {
             links,
             stop.clone(),
         ));
+        let index = Arc::default();
         let api = Api {
-            index: Arc::default(),
+            index: Arc::clone(&index),
             settings: Arc::new(settings),
             stop: stop.clone(),
         };
         let server = tonic::transport::Server::builder()
             .http2_keepalive_interval(Some(Duration::from_secs(30)))
             .http2_keepalive_timeout(Some(Duration::from_secs(10)))
+            .initial_stream_window_size(STREAM_WINDOW)
+            .initial_connection_window_size(CONNECTION_WINDOW)
             .add_service(ReflectorServer::new(api).max_decoding_message_size(limits.message));
         let incoming = stream::poll_fn(move |cx| {
             incoming
@@ -154,6 +166,7 @@ impl Reflector {
         info!(%address, "reflector open");
         Ok(Self {
             address,
+            index,
             stop,
             task,
         })
@@ -168,6 +181,7 @@ impl Reflector {
     /// Ends every stream and stops serving (D39): agents then announce to the other members.
     pub async fn stop(self) {
         self.stop.cancel();
+        self.index.close();
         if let Err(err) = self.task.await {
             warn!(error = %err, "reflector task ended abnormally");
         }

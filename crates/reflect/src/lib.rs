@@ -13,6 +13,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tonic::transport::{Channel, Endpoint};
 
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod client;
 pub mod message;
 pub mod metrics;
@@ -20,6 +22,7 @@ pub use server::{
     LOOKUP_PEERS, Limits, Member, PROTOCOL_VERSION, Reflector, SNAPSHOT_CHUNK, Settings,
 };
 
+mod codec;
 mod index;
 mod server;
 mod session;

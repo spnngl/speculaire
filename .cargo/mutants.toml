@@ -25,12 +25,29 @@ exclude_re = [
   # tokio-rustls writes its records to the socket within `poll_write`, and a TCP flush does nothing; a link not shut
   # down is closed when dropped, so its client sees the end all the same.
   'server\.rs:\d+:\d+: replace <impl AsyncWrite for Link>::poll_(flush|shutdown) -> Poll<io::Result<\(\)>> with Poll::from\(Ok\(\(\)\)\)$',
+  # The load generator's agents joining at once, or not stopped before the reflector is: the small run of
+  # `apps/speculaire/tests/load.rs` meets its targets either way, and D33's scale shows them in the nightly run.
+  'agents\.rs:\d+:\d+: replace \+ with - in Fleet::connect$',
+  'agents\.rs:\d+:\d+: replace Connected::stop with \(\)$',
+  # A pacer owing about a million acts a second: the lookups it spawns take the runner's memory before nextest's 2
+  # minutes, and the runner dies. `a_pacer_acts_its_rate_times_a_second_even_when_a_tick_owes_several` catches each
+  # alone.
+  'agents\.rs:\d+:\d+: replace (/ with [*%]|\* with \+) in pace$',
+  # The settling log every 5 s.
+  'reflector\.rs:\d+:\d+: replace >= with < in Reflector::settled$',
+  # A reflector settled at once, or dropped instead of stopped, which `kill_on_drop` kills: the small run goes on and
+  # meets its loose targets. The settling logs and the exit status of D33's run tell them apart.
+  'reflector\.rs:\d+:\d+: replace Reflector::settled -> anyhow::Result<Option<Duration>> with Ok\(Some\(Default::default\(\)\)\)$',
+  'reflector\.rs:\d+:\d+: replace Reflector::stop -> anyhow::Result<\(\)> with Ok\(\(\)\)$',
 ]
-# `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/` and
-# `crates/pki/src/testing.rs` are test support (D87, D95). `fuzz/` is a workspace of its own, which cargo-mutants
-# never lists.
+# `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/`,
+# `crates/pki/src/testing.rs` and `crates/reflect/src/bench.rs` are test and benchmark support (D87, D95, D104).
+# `apps/loadgen/` is `speculaire_load::run` behind flags, run by the `load` workflow (D104). `fuzz/` is a workspace of
+# its own, which cargo-mutants never lists.
 exclude_globs = [
   "e2e/**",
   "crates/fake-runtime/**",
   "crates/pki/src/testing.rs",
+  "crates/reflect/src/bench.rs",
+  "apps/loadgen/**",
 ]

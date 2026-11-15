@@ -34,13 +34,13 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100, D102)
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
-- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97)
+- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104)
 - D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
-- D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98)
+- D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104)
 - D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61)
 - D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower
 - D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56, D100)
@@ -104,7 +104,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63)
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
-- D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76)
+- D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76; amended by D104)
 - D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33; amended by D102, D103)
 - D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90)
 - D100 [distribution](distribution.md): the peer API routes `GET` and `HEAD` by digest through the mirror's parser, caps only blob bodies, answers `503` while the agent stops, and opens on the peer address the client fixes (amends D24, D36; amended by D103)
@@ -112,4 +112,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D102 [distribution](distribution.md): the fetcher races and hedges a lookup's holders (4 at once, Spegel's 80th/85th/90th percentile delays, 50 ms floor), resumes with `Range`, checks a blob whole before serving it on containerd and streams it on CRI-O; `speculaire_lookup_seconds` gains `result`; every socket sets `TCP_NODELAY` (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103)
 - D103 [reflector](reflector.md): a lookup with no stream up counts as `no_reflector`, a restarted reflector refills from the agents' opening snapshots, the client stops without waiting on the load balancer, and the drain waits for each connection to close, not only for its body (amends D39, D98, D100, D102)
 
-Next free number: D103.
+- D104 [reflector](reflector.md): `speculaire-loadgen` runs D33's scenario from the library `crates/load` against a reflector process, measuring `/proc` and `/metrics`, in `load.yml` on dispatch until the transport change meets the 1 GiB peak; `Snapshot` chunks of 25 digests, unbatched messages, 8 KiB stream windows, snapshots staged as bitmaps and inline index keys bound the reflector's cost per agent; a stopping reflector empties its index at once; divan micro-benchmarks outside CI; `deep` runs the reflector under Valgrind (amends D27, D33, D97)
+Next free number: D105.

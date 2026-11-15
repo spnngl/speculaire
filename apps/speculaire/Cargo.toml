@@ -18,8 +18,10 @@ speculaire-runtime.workspace = true
 [dev-dependencies]
 secrecy.workspace = true
 speculaire-fake-runtime.workspace = true
+speculaire-load.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 # D46: the global allocator on musl, `src/main.rs`.
 [target.'cfg(target_env = "musl")'.dependencies]

@@ -351,6 +351,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "condtype"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
+
+[[package]]
 name = "console"
 version = "0.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -549,6 +555,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "divan"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a405457ec78b8fe08b0e32b4a3570ab5dff6dd16eb9e76a5ee0a9d9cbd898933"
+dependencies = [
+ "cfg-if",
+ "clap",
+ "condtype",
+ "divan-macros",
+ "libc",
+ "regex-lite",
+]
+
+[[package]]
+name = "divan-macros"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9556bc800956545d6420a640173e5ba7dfa82f38d3ea5a167eb555bc69ac3323"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1630,6 +1661,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2001,9 +2038,11 @@ dependencies = [
  "speculaire-agent",
  "speculaire-configure",
  "speculaire-fake-runtime",
+ "speculaire-load",
  "speculaire-pki",
  "speculaire-runtime",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2064,11 +2103,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "speculaire-load"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fastrand",
+ "prost",
+ "secrecy",
+ "speculaire-fake-runtime",
+ "speculaire-oci",
+ "speculaire-pki",
+ "speculaire-reflect",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "speculaire-loadgen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "humantime",
+ "mimalloc",
+ "speculaire-load",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "speculaire-mirror"
 version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "bytes",
+ "divan",
  "futures-util",
  "http",
  "http-body-util",
@@ -2130,6 +2200,7 @@ dependencies = [
 name = "speculaire-reflect"
 version = "0.1.0"
 dependencies = [
+ "divan",
  "fastrand",
  "futures-util",
  "hyper-util",
