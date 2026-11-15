@@ -5,7 +5,6 @@ Open questions, each with a proposed default. Once a question is answered, recor
 ## Before M3
 
 - **What does a negative `dial_timeout` in a containerd `hosts.toml` mean?** Go's `time.ParseDuration` accepts `"-1s"` (containerd v2.3.7 `core/remotes/docker/config/hosts.go:539-545`), and `net.Dialer` then sets a deadline in the past (`net/dial.go:252` at go1.26.1), so every dial to that host fails at once and containerd tries the next host. `crates/registry-config/src/go.rs:381` refuses it, which rejects the whole file and keeps the previous registry config. [Read a negative `dial_timeout` as a host that cannot be dialled: the relay skips it, as containerd does. Amends D78.]
-- **How does an agent test put a blob on its node?** The agent reads containerd's content directory below `/var/lib/containerd` and CRI-O's registry config below `/etc/containers` (`Paths::system()`, `crates/agent/src/node.rs`), so `apps/speculaire/tests/agent.rs` can serve no blob: on the CI runner the content directory exists and cannot be read, which is an error, not a fall-through to the content service (D5). The agent's D39 steps 2 and 4 (`shut_down`, `crates/agent/src/serve.rs`) are checked only through `Uploads` in `crates/mirror/src/peer/tests.rs`, and their mutant is excluded. [The agent reads containerd's `root` from its `config.toml`, as containerd places every plugin's directory below it; the test points it at a temporary directory, and the exclusion goes. Amends D5.]
 
 ## Not scheduled
 

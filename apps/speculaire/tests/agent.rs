@@ -642,6 +642,86 @@ fn the_mirror_listens_while_the_agent_runs_and_stops_with_it() {
     assert!(TcpStream::connect(mirror).is_err());
 }
 
+/// A TLS connection to the mirror at `address`, made as the runtime makes it: trusting the mirror's CA and presenting
+/// its client certificate (D14).
+fn mirror_connection(
+    address: SocketAddr,
+) -> rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+    let read = |part: Part| std::fs::read(mirror_certificates().join(part.file_name())).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    for der in CertificateDer::pem_slice_iter(&read(Part::Ca)) {
+        roots.add(der.unwrap()).unwrap();
+    }
+    let client = read(Part::Client);
+    let chain = CertificateDer::pem_slice_iter(&client)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key = PrivateKeyDer::from_pem_slice(&client).unwrap();
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_client_auth_cert(chain, key)
+    .unwrap();
+    let name = ServerName::IpAddress(address.ip().into());
+    let connection = rustls::ClientConnection::new(std::sync::Arc::new(config), name).unwrap();
+    rustls::StreamOwned::new(connection, TcpStream::connect(address).unwrap())
+}
+
+#[test]
+fn the_mirror_serves_a_blob_below_containerds_root_and_a_stop_lets_it_finish() {
+    // containerd's root is the test's: the blob is on the node, as one containerd pulled (D5, D85).
+    let node = Node::new(
+        Answers::containerd("v2.4.2"),
+        Some("version = 3\nroot = \"@DIR@/root\"\n"),
+    );
+    let size = 64 << 20;
+    let bytes: Vec<u8> = (0..size).map(|i| u8::try_from(i % 251).unwrap()).collect();
+    // The content store does not check names against contents.
+    let hex = "ab".repeat(32);
+    let blobs = node
+        .dir
+        .path()
+        .join("root/io.containerd.content.v1.content/blobs/sha256");
+    std::fs::create_dir_all(&blobs).unwrap();
+    std::fs::write(blobs.join(&hex), &bytes).unwrap();
+    let mut agent = Agent::spawn_on(node, "", &[]);
+    wait_until(|| get(agent.port, "/readyz", "").is_some_and(|r| r.status == 200));
+    let mut mirror = mirror_connection(agent.address("mirror open"));
+    write!(
+        mirror,
+        "GET /v2/library/busybox/blobs/sha256:{hex}?ns=docker.io HTTP/1.1\r\nHost: mirror\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        mirror.read_exact(&mut byte).unwrap();
+        head.extend_from_slice(&byte);
+    }
+    let head = String::from_utf8(head).unwrap();
+    if !head.starts_with("HTTP/1.1 200") {
+        let (_, lines) = agent.stop();
+        panic!("{head}{}", lines.join("\n"));
+    }
+    assert!(
+        head.contains(&format!("content-length: {size}\r\n")),
+        "{head}"
+    );
+    // A transfer in flight at a stop is sent whole before the agent exits (D39 step 4).
+    agent.signal("TERM");
+    agent.line(&["stopping"]);
+    let mut body = Vec::new();
+    mirror.read_to_end(&mut body).unwrap();
+    assert!(body == bytes, "{} of {size} bytes", body.len());
+    let (status, _) = agent.stop();
+    assert!(status.success(), "{status}");
+}
+
 #[test]
 fn the_agent_stops_at_startup_without_the_mirror_certificates_and_says_how_to_make_them() {
     let node = Node::healthy();
