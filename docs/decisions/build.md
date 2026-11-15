@@ -141,7 +141,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Rejected:** pure Rust without an oracle. Drift from containerd would stay silent until a user hit it.
 - **Revisit when:** an upstream Rust NRI crate ships its own runtime harness (D9). Then drop `nri-runtime`. Keep the other subcommands while we maintain the ports.
 
-## D35: Benchmarks against Spegel, with the tool Spegel publishes with
+## D35: Benchmarks against Spegel, with the tool Spegel publishes with (amended by D106)
 
 - **Decision:**
   - **Tool:** `spegel-org/benchmark` at a pinned release, tracked by Renovate, run with its `suite` command. It deploys DaemonSets of the static `ghcr.io/spegel-org/benchmark` images (v1 and v2 of 10 MB, 100 MB and 1 GB, each in 1 and 4 layers), reads each pod's pull duration from its events, then rolls v1 to v2, 20% of pods at a time. Like the oracle (D29), it is test tooling and never shipped.
@@ -467,3 +467,34 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `tc netem` needs `sch_netem` in the host's kernel: Docker Desktop's and the runners' have it.
   - Until step 02 of M3 the reflectors listen on nothing, so `tests/harness.rs` puts a stand-in listener on port 7483 to check the balancer.
 - **Revisit when:** a leg passes 20 minutes (then the dual-stack pass and the slowest peer suites move to a nightly workflow), or kind's balancer image changes.
+
+
+## D106: The bench's kind tier runs speculaire without gate or policy, with the e2e cluster's reflectors (amends D35)
+
+- **Decision:**
+  - **Image sets:** `just bench <kubeconfig> [<set>...]` runs the tool's `measure` once per set, each set being `<size>-<layers>`, 10 MB and 100 MB in 1 and 4 layers by default. `suite` always adds the 1 GB sets.
+  - **speculaire's settings,** until the gate (M5) and the policy (M6) exist: `packaging/config.toml`'s defaults, with `role = "reflector"` on every node labelled `node-role.kubernetes.io/control-plane`, those nodes in `reflector.members` by `InternalIP` and port 7483, and `reflector.url` on the first of them. The run has no `gate.mode`, no policy and no `speculaire_gate_seconds`, so it prices the mirror and the peers only. The real-cluster tier puts `reflector.url` on its balancer (D2).
+  - **Agent cost:** CPU time per set is the growth of the cgroup's `usage_usec` across the set; peak memory is `memory.peak` at the end of the run, page cache charged to the cgroup included. Both report the node with the most.
+  - **Node pod:** Debian slim, pinned by digest: busybox's `nsenter` has no `-a`.
+  - **Workflow `bench`:** nightly at 03:00 UTC and on dispatch, `just e2e-up containerd 2.4` on the newest Kubernetes, then `just bench` on it, on `ubuntu-26.04` and `ubuntu-26.04-arm`, 60 minutes each. The tables go to the job summary and `target/bench` to an artifact. The arm64 runner registers QEMU for amd64 first: the bench images are amd64 only. Dispatch runs the kind tier until the real-cluster tier has a cluster.
+  - **Pins:** `spegel-org/benchmark`, Spegel's chart, Helm and the node pod's image, in the justfile, tracked by Renovate.
+- **Because:**
+  - Step 08 of M3 asks for the kind tier now; the gate and the policy arrive in M5 and M6.
+  - On kind, the 1 GB sets would take most of the budget for numbers one host cannot make real.
+  - The e2e cluster's balancer exists only in kind (D94); the first reflector serves `Members` as well.
+  - **Measured:** the first run (43702879308, Kubernetes 1.37.0, containerd 2.4.2, Spegel v0.8.1) took 12 minutes on each runner, `just musl` 5.5 and `just bench` 5. Two workers pull, so p50 is the faster pull and p95 the slower. p50 pull seconds, no mirror / Spegel / speculaire:
+
+    | Set | Phase | amd64 | arm64 |
+    |---|---|---|---|
+    | 10MB-1 | create | 1.07 / 0.93 / 0.81 | 1.21 / 1.90 / 1.09 |
+    | 10MB-1 | update | 0.75 / 0.11 / 0.28 | 0.87 / 0.10 / 0.34 |
+    | 10MB-4 | create | 0.99 / 1.06 / 1.05 | 1.10 / 1.17 / 0.97 |
+    | 10MB-4 | update | 0.85 / 0.11 / 0.41 | 0.93 / 0.11 / 0.95 |
+    | 100MB-1 | create | 3.73 / 3.72 / 1.85 | 3.88 / 3.89 / 2.00 |
+    | 100MB-1 | update | 2.56 / 0.80 / 1.16 | 1.52 / 0.67 / 1.10 |
+    | 100MB-4 | create | 2.13 / 2.62 / 1.85 | 2.42 / 2.37 / 1.83 |
+    | 100MB-4 | update | 1.40 / 0.98 / 1.00 | 1.36 / 0.62 / 1.11 |
+
+    An update rolls one worker at a time, so its p50 is the second worker's pull from the first: speculaire's takes up to 0.8 s more than Spegel's. Per set, speculaire used 0.03 to 0.30 CPU seconds against Spegel's 0.08 to 0.20, and peaked at 233 MiB on amd64 and 215 on arm64 against 31 and 33. On Docker Desktop arm64, `just bench` writes the same tables in 9 minutes.
+- **Cost:** 25 runner-minutes a night, and the kind tier's numbers carry no release bar.
+- **Revisit when:** the gate and the policy exist (then D35's third run applies in full), or a run passes 45 minutes.

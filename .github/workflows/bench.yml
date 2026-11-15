@@ -1,0 +1,54 @@
+name: bench
+
+# D35's kind tier (D106): `just bench` on the e2e cluster of containerd 2.4 and the newest Kubernetes, nightly,
+# natively on each architecture, with the tables in the job summary. Dispatch runs the same, until the real-cluster
+# tier has a cluster.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+# Each job grants only what it needs.
+permissions: {}
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - env:
+          TARGET: ${{ matrix.target }}
+        run: just musl "$TARGET"
+      # The bench images are amd64 only: the arm64 nodes run them through QEMU.
+      - if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: >-
+          docker run --rm --privileged
+          docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          --install amd64
+      - run: just e2e-up containerd 2.4
+      - shell: bash
+        run: |
+          set -o pipefail
+          just bench "$HOME/.kube/config" | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-${{ matrix.target }}
+          path: target/bench

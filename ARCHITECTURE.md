@@ -130,7 +130,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `packaging/` | `config.toml`, the reference of every setting (D30, D47); `speculaire.service`, the systemd unit (D53, D69); nfpm config, runtime drop-in examples and the Helm chart (planned) |
 | `e2e/` | kind node image per runtime (`node/containerd/`, `node/crio/`), cluster config (`kind.yaml`), the harness (`src/`: the cluster, its upstream registry, its reflectors'' balancer and the node helpers) and the suites (`tests/`, one binary per area): a Rust test crate run by `just e2e <runtime> <version> [<kubernetes minor>]` (D59, D63, D69, D94) |
 | `conformance/` | `just conformance`: the distribution-spec suite against the mirror in a container, its seed content, and the list of expected failures (D85) |
-| `bench/` | Benchmarks against Spegel: recipe, node-access pod, policy, results (D35) (planned) |
+| `bench/` | Benchmarks against Spegel, run by `just bench <kubeconfig>`: `bench.sh`, the node-access pod (`node.yaml`) and the scripts it runs on each node (`node/`) (D35, D106); the speculaire policy and the real-cluster results (planned) |
 | `justfile` | The only entry point, for humans and CI (D27); `just dev <recipe>` runs a recipe in the build image (D57) |
 | `build/Containerfile` | The build image: the musl build and, on macOS, every recipe (D57) |
 | `supply-chain/` | cargo-vet's store: imported audit sets, trusted publishers, exemptions; `just vet` (D71) |
