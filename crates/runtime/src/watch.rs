@@ -37,18 +37,22 @@ pub struct Watch {
 impl Watch {
     /// Stamps `roots` now; take it before reading them, so that a write during the read is a change.
     #[must_use]
-    pub fn new(roots: Vec<PathBuf>) -> Self {
-        let mut stamps = BTreeMap::new();
-        for root in &roots {
-            stamp(root, DEPTH, &mut stamps);
-        }
+    pub fn new(mut roots: Vec<PathBuf>) -> Self {
+        roots.sort_unstable();
+        roots.dedup();
+        let stamps = stamps(&roots);
         Self { roots, stamps }
     }
 
-    /// Whether a watched path differs from its stamp, or appeared or went.
+    /// The same paths stamped now, when a watched path differs from its stamp, or appeared or went; take it before
+    /// reading them again.
     #[must_use]
-    pub fn changed(&self) -> bool {
-        *self != self.again()
+    pub fn changed(&self) -> Option<Self> {
+        let stamps = stamps(&self.roots);
+        (stamps != self.stamps).then(|| Self {
+            roots: self.roots.clone(),
+            stamps,
+        })
     }
 
     /// The same paths, stamped now; take it before reading them again.
@@ -57,16 +61,20 @@ impl Watch {
         Self::new(self.roots.clone())
     }
 
-    /// `self`, taken before a read, once the read named `roots`: the paths it watched keep their stamps from before the
-    /// read; the others, first named by the read, are stamped now.
-    pub(crate) fn follow(self, roots: Vec<PathBuf>) -> Self {
-        let mut next = Self::new(roots);
-        for (path, stamp) in &mut next.stamps {
-            if let Some(before) = self.stamps.get(path) {
-                *stamp = *before;
-            }
-        }
-        next
+    /// `self`, taken before a read, once the read named `roots`, each with a stamp in `self`: the stamps from before the
+    /// read of `roots` and of what is below them, with no new `stat`. A root that `self` stamped below another keeps
+    /// the levels stamped there; the next poll finds any deeper entry new, and reads again.
+    pub(crate) fn follow(self, mut roots: Vec<PathBuf>) -> Self {
+        roots.sort_unstable();
+        roots.dedup();
+        let mut stamps = self.stamps;
+        stamps.retain(|path, _| {
+            roots.iter().any(|root| {
+                path.strip_prefix(root)
+                    .is_ok_and(|below| below.components().count() <= DEPTH)
+            })
+        });
+        Self { roots, stamps }
     }
 
     /// The paths watched.
@@ -78,6 +86,14 @@ impl Watch {
     pub(crate) fn stamped(&self, path: &Path) -> bool {
         self.stamps.contains_key(path)
     }
+}
+
+fn stamps(roots: &[PathBuf]) -> BTreeMap<PathBuf, Option<Stamp>> {
+    let mut stamps = BTreeMap::new();
+    for root in roots {
+        stamp(root, DEPTH, &mut stamps);
+    }
+    stamps
 }
 
 fn stamp(path: &Path, depth: usize, stamps: &mut BTreeMap<PathBuf, Option<Stamp>>) {
@@ -123,18 +139,18 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(3600);
         set_modified(&file, old);
         let watch = Watch::new(vec![file.clone()]);
-        assert!(!watch.changed());
+        assert!(watch.changed().is_none());
         // Written in place, as a coarse file clock dates it, or as `cp -p` keeps it.
         std::fs::write(&file, "ab").expect("a write");
         set_modified(&file, old);
-        assert!(watch.changed());
+        assert!(watch.changed().is_some());
         // Replaced by another file of the same length and time, as `rsync -t` does.
         let watch = Watch::new(vec![file.clone()]);
         let other = dir.path().join("other");
         std::fs::write(&other, "cd").expect("a file");
         set_modified(&other, old);
         std::fs::rename(&other, &file).expect("a rename");
-        assert!(watch.changed());
+        assert!(watch.changed().is_some());
     }
 
     #[test]
@@ -150,7 +166,7 @@ mod tests {
         // Same length, same inode, and the old time put back, as `touch -r` or an editor that keeps it does.
         std::fs::write(&file, "b").expect("a write");
         set_modified(&file, old);
-        assert!(watch.changed());
+        assert!(watch.changed().is_some());
     }
 
     /// Waits until the file clock has ticked past `file`'s change time: a coarse one dates writes within one tick alike
@@ -177,10 +193,10 @@ mod tests {
         let file = dir.path().join("file");
         let watch = Watch::new(vec![file.clone()]);
         std::fs::write(&file, "a").expect("a file");
-        assert!(watch.changed());
+        assert!(watch.changed().is_some());
         let watch = Watch::new(vec![file.clone()]);
         std::fs::remove_file(&file).expect("removed");
-        assert!(watch.changed());
+        assert!(watch.changed().is_some());
     }
 
     #[test]
@@ -193,26 +209,35 @@ mod tests {
         let fourth = third.join("file");
         std::fs::write(&fourth, "a").expect("a file");
         set_modified(&fourth, SystemTime::now() - Duration::from_secs(3600));
-        assert!(watch.changed());
+        assert!(watch.changed().is_some());
         // A write five levels below is not looked for.
         let fifth = third.join("4/file");
         std::fs::write(&fifth, "a").expect("a file");
         let watch = Watch::new(vec![dir.path().to_owned()]);
         std::fs::write(&fifth, "ab").expect("a write");
-        assert!(!watch.changed());
+        assert!(watch.changed().is_none());
     }
 
     #[test]
     fn a_path_watched_before_a_read_keeps_its_stamp_from_before() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let (kept, new) = (dir.path().join("kept"), dir.path().join("new"));
+        let (kept, dropped) = (dir.path().join("kept"), dir.path().join("dropped"));
         std::fs::write(&kept, "a").expect("a file");
-        let before = Watch::new(vec![kept.clone()]);
-        // The read: `kept` changes during it, and names `new`.
+        let before = Watch::new(vec![kept.clone(), dropped]);
+        // The read: `kept` changes during it, and is all it names, twice.
         std::fs::write(&kept, "ab").expect("a write");
-        std::fs::write(&new, "a").expect("a file");
-        let after = before.follow(vec![kept, new]);
-        assert!(after.changed());
-        assert_eq!(after.roots().len(), 2);
+        let after = before.follow(vec![kept.clone(), kept.clone()]);
+        assert!(after.changed().is_some());
+        assert_eq!(after.roots(), [kept]);
+    }
+
+    #[test]
+    fn a_read_that_names_the_paths_watched_keeps_every_stamp() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let third = dir.path().join("1/2/3");
+        std::fs::create_dir_all(&third).expect("directories");
+        std::fs::write(third.join("file"), "a").expect("a file");
+        let before = Watch::new(vec![dir.path().to_owned()]);
+        assert_eq!(before.clone().follow(vec![dir.path().to_owned()]), before);
     }
 }

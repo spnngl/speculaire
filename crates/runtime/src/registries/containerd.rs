@@ -170,8 +170,9 @@ impl Registries for ContainerdRegistries {
             .collect())
     }
 
-    fn changed(&self) -> bool {
-        self.live.changed()
+    fn poll(&self) -> Option<Result<Reloaded, Error>> {
+        let problems = self.live.poll(|problems| read(&self.config, problems))?;
+        Some(problems.map(|problems| Reloaded { problems }))
     }
 
     fn reload(&self) -> Result<Reloaded, Error> {

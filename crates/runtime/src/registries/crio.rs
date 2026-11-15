@@ -131,8 +131,9 @@ impl Registries for CrioRegistries {
         Ok(sources)
     }
 
-    fn changed(&self) -> bool {
-        self.live.changed()
+    fn poll(&self) -> Option<Result<Reloaded, Error>> {
+        let problems = self.live.poll(|problems| self.read(problems))?;
+        Some(problems.map(|problems| Reloaded { problems }))
     }
 
     fn reload(&self) -> Result<Reloaded, Error> {

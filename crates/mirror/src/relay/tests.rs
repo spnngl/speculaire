@@ -234,8 +234,8 @@ impl Registries for Fixed {
         Ok(self.0.lock().unwrap().clone())
     }
 
-    fn changed(&self) -> bool {
-        false
+    fn poll(&self) -> Option<Result<registries::Reloaded, ConfigError>> {
+        None
     }
 
     fn reload(&self) -> Result<registries::Reloaded, ConfigError> {
