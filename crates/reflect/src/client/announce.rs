@@ -19,7 +19,7 @@ use crate::frame::{self, FrameError, Reader};
 use crate::message::{Announcement, Delta, Hello, Lookup, Request, Snapshot};
 use crate::metrics::{CONNECTED, RECONNECTS};
 use crate::proto::{self, reflector_message};
-use crate::{Member, PROTOCOL_VERSION, SNAPSHOT_CHUNK};
+use crate::{Key, Member, PROTOCOL_VERSION, SNAPSHOT_CHUNK};
 
 /// How long a connection must have been up for its end to count as a drop rather than a failed attempt (D98).
 const STEADY: Duration = Duration::from_secs(5);
@@ -244,7 +244,7 @@ impl<W: AsyncWrite + Unpin> Announcer<'_, W> {
 
     async fn send_snapshot(&mut self, digests: &[Digest], last: bool) -> Result<(), FrameError> {
         let snapshot = Snapshot {
-            digests: digests.to_vec(),
+            digests: keys(digests),
             last,
             seq: self.seq,
         };
@@ -255,23 +255,19 @@ impl<W: AsyncWrite + Unpin> Announcer<'_, W> {
     /// Sends `batch` as deltas of at most a chunk each, removals first.
     async fn delta(&mut self, batch: &Batch) -> Result<(), FrameError> {
         for removed in batch.removed.chunks(SNAPSHOT_CHUNK) {
-            self.send_delta(Vec::new(), removed.to_vec()).await?;
+            self.send_delta(&[], removed).await?;
         }
         for added in batch.added.chunks(SNAPSHOT_CHUNK) {
-            self.send_delta(added.to_vec(), Vec::new()).await?;
+            self.send_delta(added, &[]).await?;
         }
         Ok(())
     }
 
-    async fn send_delta(
-        &mut self,
-        added: Vec<Digest>,
-        removed: Vec<Digest>,
-    ) -> Result<(), FrameError> {
+    async fn send_delta(&mut self, added: &[Digest], removed: &[Digest]) -> Result<(), FrameError> {
         let delta = Delta {
             seq: self.seq,
-            added,
-            removed,
+            added: keys(added),
+            removed: keys(removed),
         };
         self.seq += 1;
         self.send(Request::Announcement(Announcement::Delta(delta)))
@@ -301,6 +297,11 @@ impl<W: AsyncWrite + Unpin> Announcer<'_, W> {
         )
         .await
     }
+}
+
+/// The keys of `digests`, which a message carries.
+fn keys(digests: &[Digest]) -> Vec<Key> {
+    digests.iter().map(Key::from).collect()
 }
 
 #[cfg(test)]
@@ -405,7 +406,7 @@ mod tests {
             let (answer, answered) = oneshot::channel();
             announcer
                 .lookup(Ask {
-                    digest: digest(n),
+                    digest: Key::from(&digest(n)),
                     answer,
                 })
                 .await
@@ -421,7 +422,10 @@ mod tests {
                 other => panic!("only lookups were sent, not {other:?}"),
             }
         }
-        assert_eq!(ids, [(0, digest(1)), (1, digest(2))]);
+        assert_eq!(
+            ids,
+            [(0, Key::from(&digest(1))), (1, Key::from(&digest(2)))]
+        );
 
         let holder = proto::Peer {
             node: "b".to_owned(),

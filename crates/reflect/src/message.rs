@@ -2,8 +2,7 @@
 
 use std::net::SocketAddr;
 
-use speculaire_oci::reference::Digest;
-
+use crate::key::Key;
 use crate::metrics::Reason;
 use crate::proto::{self, agent_message};
 
@@ -26,7 +25,7 @@ pub struct Lookup {
     /// The number the answer carries back, chosen by the agent.
     pub id: u64,
     /// The digest.
-    pub digest: Digest,
+    pub digest: Key,
 }
 
 /// What an agent announces on its connection to a member.
@@ -55,7 +54,7 @@ pub struct Hello {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     /// The digests of the chunk.
-    pub digests: Vec<Digest>,
+    pub digests: Vec<Key>,
     /// Whether this chunk ends the snapshot, which then replaces what the reflector held for the agent.
     pub last: bool,
     /// The sequence number of the first [`Delta`] after the snapshot.
@@ -68,9 +67,9 @@ pub struct Delta {
     /// The sequence number.
     pub seq: u64,
     /// Digests the agent now holds; applied after `removed`.
-    pub added: Vec<Digest>,
+    pub added: Vec<Key>,
     /// Digests the agent no longer holds.
-    pub removed: Vec<Digest>,
+    pub removed: Vec<Key>,
 }
 
 /// Why a message cannot be parsed.
@@ -139,7 +138,7 @@ impl TryFrom<proto::AgentMessage> for Request {
 
 impl From<Request> for proto::AgentMessage {
     fn from(request: Request) -> Self {
-        let texts = |digests: Vec<Digest>| digests.iter().map(ToString::to_string).collect();
+        let texts = |digests: Vec<Key>| digests.iter().map(ToString::to_string).collect();
         let message = match request {
             Request::Announcement(Announcement::Hello(hello)) => {
                 agent_message::Message::Hello(proto::Hello {
@@ -176,12 +175,17 @@ impl From<Request> for proto::AgentMessage {
 }
 
 /// A digest an agent sent: `<algorithm>:<encoded>`, with an algorithm the OCI image spec registers.
-fn digest(text: String) -> Result<Digest, Malformed> {
-    Digest::parse(&text).map_err(|_| Malformed::Digest(text))
+fn digest(text: String) -> Result<Key, Malformed> {
+    Key::parse(&text).ok_or(Malformed::Digest(text))
 }
 
-fn digests(texts: Vec<String>) -> Result<Vec<Digest>, Malformed> {
-    texts.into_iter().map(digest).collect()
+/// The digests of a chunk, collected into one allocation: collecting a `Result` would grow the `Vec` as it goes.
+fn digests(texts: Vec<String>) -> Result<Vec<Key>, Malformed> {
+    let mut keys = Vec::with_capacity(texts.len());
+    for text in texts {
+        keys.push(digest(text)?);
+    }
+    Ok(keys)
 }
 
 #[cfg(test)]
@@ -225,14 +229,14 @@ mod tests {
                 removed: vec![removed.to_owned()],
             }))
         };
-        let digest = Digest::parse(DIGEST).unwrap();
+        let digest = Key::parse(DIGEST).unwrap();
         let parsed = Request::try_from(delta(DIGEST)).unwrap();
         assert_eq!(
             parsed,
             Request::Announcement(Announcement::Delta(Delta {
                 seq: 3,
-                added: vec![digest.clone()],
-                removed: vec![digest.clone()],
+                added: vec![digest],
+                removed: vec![digest],
             }))
         );
         assert_eq!(proto::AgentMessage::from(parsed), delta(DIGEST));
