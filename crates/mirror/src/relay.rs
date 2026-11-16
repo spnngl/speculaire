@@ -16,6 +16,7 @@ use http::{HeaderName, HeaderValue, Method, StatusCode};
 use http_body_util::{BodyExt as _, Limited, StreamBody};
 use hyper::Response;
 use hyper::body::{Frame, Incoming};
+use speculaire_oci::hash::{self, Hash};
 use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::reference::Digest;
 use speculaire_registry::{Client, Request, Response as Upstreamed};
@@ -27,7 +28,6 @@ use tracing::{debug, warn};
 
 use crate::cache::{Cache, Writer};
 use crate::fetch::{Download, Fetcher};
-use crate::hash::{self, Hash};
 use crate::metrics;
 use crate::pulls::{Answer, Body, Pull, Pulls, from_content};
 use crate::request::{Kind, Reference};

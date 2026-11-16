@@ -1,8 +1,7 @@
 //! Blob hashing as `just bench-micro` measures it (D7, D104), behind the `bench` feature: the hash is private otherwise.
 
+use speculaire_oci::hash::{self, Hash};
 use speculaire_oci::reference::Digest;
-
-use crate::hash::{self, Hash};
 
 /// The digest of `content` under `algorithm`, `None` for one the mirror does not hash.
 #[must_use]
