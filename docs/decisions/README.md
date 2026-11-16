@@ -127,6 +127,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D117 [reflector](reflector.md): a frame reader keeps one buffer per connection, grown to the largest frame and freed after one over 1 KiB, such as a snapshot chunk (amends D105)
 - D118 [build](build.md): `just dev` mounts the tree at its host path and builds it in `/target<path>` of the shared volume; `just musl` keeps `/src` (amends D57)
 - D119 [distribution](distribution.md): the upstream client bounds the TCP connect to a host, and to the token endpoint it names, by the host's positive `dial_timeout`, one connection pool per trust and timeout; zero and CRI-O keep its own 15 s (amends D78, D88, D115)
-- D120 [build](build.md): e2e pulls Docker Hub's images from mirror.gcr.io, then `public.ecr.aws/docker` for official images, then Docker Hub, on the host and in the node images' runtime config (amends D63, D112)
+- D120 [build](build.md): e2e pulls Docker Hub's images from mirror.gcr.io, then `public.ecr.aws/docker` for official images, then Docker Hub, on the host and in the node images' runtime config (amends D63, D112; amended by D122)
 - D121 [verification](verification.md): an `Images` trait follows the runtime's image list, and each digest it lists is a discovery root, asked of its repositories in list order; only Sigstore bundle referrers and `.sig` are fetched, under caps, into the artifact store (amends D17, D22, D50, D90, D99)
-Next free number: D122.
+- D122 [build](build.md): the justfile's recipes and the bench workflow pull Docker Hub's images through D120's mirrors with `just hub-pull`; build/Containerfile's base is a named build context of the one pulled (amends D120)
+Next free number: D123.
