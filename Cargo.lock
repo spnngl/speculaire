@@ -2077,6 +2077,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "speculaire-artifacts"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "speculaire-oci",
+ "speculaire-registry",
+ "speculaire-runtime",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "speculaire-configure"
 version = "0.1.0"
 dependencies = [
