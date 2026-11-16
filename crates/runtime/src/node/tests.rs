@@ -1,11 +1,53 @@
 //! A node of either runtime, through the traits a [`Node`](super::Node) hands out.
 
+use std::time::Duration;
+
 use speculaire_oci::reference::Digest;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use super::Fallback;
 use crate::content::Content as _;
 use crate::detect::Runtime;
 use crate::fixture::{Tree, has};
+use crate::{images, inventory};
+
+/// Waits for `follower` to end, which it does at once on a loss once the agent stops.
+async fn ends(follower: JoinHandle<()>, what: &str) {
+    tokio::time::timeout(Duration::from_secs(5), follower)
+        .await
+        .unwrap_or_else(|_| panic!("{what} goes on after the stop"))
+        .unwrap();
+}
+
+/// The agent's teardown cuts its connections to the runtime: then a follower that loses the runtime ends, where it
+/// would otherwise warn and follow again (D121).
+#[tokio::test]
+async fn a_follower_that_loses_the_runtime_once_the_agent_stops_ends() {
+    for runtime in [Runtime::Containerd, Runtime::CriO] {
+        let mut tree = Tree::new(runtime);
+        let (sender, mut listed) = mpsc::channel(8);
+        let images = tokio::spawn(tree.node.images().follow(sender));
+        assert!(
+            matches!(listed.recv().await, Some(images::Update::Listing(_))),
+            "{runtime}"
+        );
+        let (sender, mut held) = mpsc::channel(8);
+        let content = tokio::spawn(tree.node.inventory().follow(sender));
+        assert!(
+            matches!(held.recv().await, Some(inventory::Update::Listing(_))),
+            "{runtime}"
+        );
+        tree.node.stop();
+        tree.stop();
+        ends(images, &format!("{runtime}'s image list")).await;
+        if runtime == Runtime::Containerd {
+            ends(content, "containerd's content").await;
+        }
+        // The readers stay until the followers end: what ends them is the stop, not a reader gone.
+        drop((listed, held));
+    }
+}
 
 #[test]
 fn a_node_says_which_runtime_it_is_and_what_the_mirror_does_for_what_it_lacks() {

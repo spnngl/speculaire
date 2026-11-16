@@ -73,13 +73,17 @@ impl Inventory for Containerd {
 }
 
 impl Containerd {
-    /// Follows the content, listing it every `every`, until `updates` closes.
+    /// Follows the content, listing it every `every`, until `updates` closes or it is lost once the agent stops.
     async fn follow_every(&self, updates: &mpsc::Sender<Update>, every: Duration) {
         loop {
             let lost = tokio::select! {
                 () = updates.closed() => return,
                 lost = self.watch(updates, every) => lost,
             };
+            // The agent's own teardown cut the connection: that is no failure to report.
+            if self.stopping().is_set() {
+                return;
+            }
             match lost {
                 Lost::Closed => return,
                 Lost::Unreachable => debug!("no containerd to list content from"),

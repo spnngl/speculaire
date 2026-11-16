@@ -29,6 +29,7 @@ pub enum Update {
 pub trait Inventory: Send + Sync {
     /// Sends a listing to `updates`, then each change, and a listing again whenever changes may have been missed.
     ///
-    /// The future runs until `updates` closes; it retries whatever fails meanwhile.
+    /// The future runs until `updates` closes, or until a loss after [`Node::stop`](crate::Node::stop); it retries
+    /// whatever fails meanwhile.
     fn follow(self: Arc<Self>, updates: mpsc::Sender<Update>) -> BoxFuture<'static, ()>;
 }

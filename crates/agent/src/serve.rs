@@ -121,14 +121,15 @@ async fn serve(
     info!(%address, "status listener open");
     // P2P waits for the identity; readiness does not (D16, D45).
     let mut identity = Identity::load(&config.identity);
-    // `/readyz` answers 503 until the mirror listens (D45); an agent that cannot open it stops (D55).
+    // `/readyz` answers 503 until the mirror listens and the artifact store is open (D45, D121); an agent that cannot
+    // open either stops (D55).
     let registries = node.registries();
     report_registries(registries.reload());
     let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
-    status.mirror_listening();
     // Discovery waits for a reflector stream, so that it asks peers before upstream (D126).
     let (linked, peers) = tokio::sync::watch::channel(client_config(&config).is_none());
     let store = start_discovery(&config, &node, &mirror, Arc::clone(&registries), peers)?;
+    status.mirror_listening();
     let mut reflector = None;
     open_reflector(&config, &identity, &mut reflector, &status).await;
     let mut sharing = None;
@@ -184,6 +185,8 @@ async fn serve(
     systemd::stopping();
     status.stop();
     info!("stopping");
+    // The runtime's followers end as the teardown cuts them, without a warning.
+    node.stop();
     shut_down(&config, mirror, sharing, reflector).await;
     // An error means the server already ended; its result says why.
     let _ = stop.send(());

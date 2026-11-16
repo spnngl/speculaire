@@ -35,9 +35,14 @@ impl Images for Containerd {
 impl Containerd {
     /// Follows the image list, reading it every `every`, until `updates` closes.
     pub(crate) async fn follow_images(&self, updates: &mpsc::Sender<Update>, every: Duration) {
-        images::follow(self.socket(), updates, every, "containerd", |hint| {
-            self.image_events(hint)
-        })
+        images::follow(
+            self.socket(),
+            updates,
+            every,
+            "containerd",
+            self.stopping(),
+            |hint| self.image_events(hint),
+        )
         .await;
     }
 

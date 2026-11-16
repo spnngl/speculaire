@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 
 use crate::content::{Blob, Content};
 use crate::inventory::{Inventory, Update};
+use crate::node::Stopping;
 use crate::paths::Paths;
 
 /// A node that runs CRI-O: the files it reads, its socket and `systemctl` (D90).
@@ -31,6 +32,7 @@ pub struct CriO {
     paths: Paths,
     socket: PathBuf,
     systemctl: PathBuf,
+    stopping: Stopping,
 }
 
 impl CriO {
@@ -41,6 +43,7 @@ impl CriO {
             paths,
             socket: socket.into(),
             systemctl: systemctl.into(),
+            stopping: Stopping::default(),
         }
     }
 
@@ -48,6 +51,11 @@ impl CriO {
     #[must_use]
     pub fn socket(&self) -> &Path {
         &self.socket
+    }
+
+    /// Whether the agent stops.
+    pub(crate) fn stopping(&self) -> &Stopping {
+        &self.stopping
     }
 
     /// The drop-in `configure` writes (D66).

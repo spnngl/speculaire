@@ -21,6 +21,7 @@ pub use settings::MINIMUM;
 use speculaire_registry_config::containerd::config as containerd_config;
 
 use crate::cri::{Error, block_on, connect};
+use crate::node::Stopping;
 use crate::paths::Paths;
 
 /// The content store's ID, which names its directory below containerd's `root` (v2.4.2
@@ -48,6 +49,7 @@ pub struct Containerd {
     content_directory: PathBuf,
     /// A channel to the content service, made once and kept; shared by the clones of this value.
     channel: Arc<tokio::sync::Mutex<Option<Channel>>>,
+    stopping: Stopping,
 }
 
 impl Containerd {
@@ -65,6 +67,7 @@ impl Containerd {
             config,
             content_directory,
             channel: Arc::new(tokio::sync::Mutex::new(None)),
+            stopping: Stopping::default(),
         }
     }
 
@@ -94,6 +97,11 @@ impl Containerd {
     /// Drops the channel: containerd went away or restarted, and the next call connects again.
     pub(crate) async fn forget_channel(&self) {
         *self.channel.lock().await = None;
+    }
+
+    /// Whether the agent stops.
+    pub(crate) fn stopping(&self) -> &Stopping {
+        &self.stopping
     }
 }
 
