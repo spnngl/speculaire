@@ -3,8 +3,8 @@
 //!
 //! It shares the mirror's request parser and answers: `GET` and `HEAD` of a manifest or a blob by digest, from the
 //! runtime's content then the artifact store, one `Range` at most; of a manifest by a tag the runtime lists (D123); and
-//! `GET` of the referrers of a manifest the artifact store holds artifacts about, in any repository (D124). Anything else,
-//! and anything the node no longer holds, is a 404.
+//! `GET` of the referrers of a manifest the artifact store holds artifacts about, in any repository, and a 400 for
+//! referrers of anything but a digest (D124). Anything else, and anything the node no longer holds, is a 404.
 
 use std::future::Future;
 use std::io;
@@ -183,6 +183,13 @@ impl<C: Content, A: Referrers> Api for Peer<C, A> {
                 let wanted = artifact_type(request.uri().query());
                 return referrers::index(&*self.artifacts, &target, wanted.as_deref()).await;
             }
+            // A referrers API never answers 404, and a `<digest>` of invalid syntax is a 400 (distribution-spec
+            // v1.1.1-57-g9727462 `spec.md:626-627`).
+            Some(Route::Pull {
+                kind: Kind::Referrers,
+                head: false,
+                ..
+            }) => return status(StatusCode::BAD_REQUEST),
             _ => return status(StatusCode::NOT_FOUND),
         };
         // Only a blob's body counts against the cap (D24): a manifest is at most 4 MiB, and a `HEAD` sends nothing.

@@ -307,7 +307,6 @@ async fn everything_but_a_manifest_or_a_blob_by_digest_a_listed_tag_or_referrers
     for path in [
         "/v2/".to_owned(),
         "/v2/library/busybox/manifests/latest".to_owned(),
-        "/v2/library/busybox/referrers/latest".to_owned(),
         blob_path(&digest_of(2)),
         format!("/v3/library/busybox/blobs/{held}"),
     ] {
@@ -322,6 +321,22 @@ async fn everything_but_a_manifest_or_a_blob_by_digest_a_listed_tag_or_referrers
     let referrers = format!("/v2/library/busybox/referrers/{held}");
     let referrers_head = ask(&mut sender, Method::HEAD, &referrers, None).await;
     assert_eq!(referrers_head.status, StatusCode::NOT_FOUND);
+}
+
+/// distribution-spec v1.1.1-57-g9727462 `spec.md:626-627`: a referrers API never answers 404, and a `<digest>` of
+/// invalid syntax is a 400.
+#[tokio::test]
+async fn referrers_of_anything_but_a_digest_answer_400() {
+    let test = Test::start(Arc::new(Held(HashMap::new())), 4).await;
+    let mut sender = test.client("node-b").await;
+    for reference in ["latest", "sha256:zz", "sha256", "md5:aa"] {
+        let path = format!("/v2/library/busybox/referrers/{reference}");
+        assert_eq!(
+            get(&mut sender, &path).await.status,
+            StatusCode::BAD_REQUEST,
+            "{path}"
+        );
+    }
 }
 
 /// An artifact manifest about `target`, of `artifact_type` when there is one, with `annotations`.
