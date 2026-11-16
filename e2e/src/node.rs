@@ -1,6 +1,7 @@
 //! What the suites do to a node (D94): stop, start or kill its agent, slow its network, cut it off from a host, corrupt
 //! a blob it serves, and read its metrics.
 
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use prost::Message as _;
@@ -47,17 +48,10 @@ impl Cluster {
     ///
     /// When `docker inspect` or `iptables` fails.
     pub fn reject(&self, node: &str, host: &str) -> Result<Rules<'_>, Failure> {
-        // Both families: on a dual-stack cluster, the node may resolve the name to either.
-        let addresses = docker(&[
-            "inspect",
-            "-f",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}",
-            host,
-        ])?;
-        let rules = addresses
-            .split_whitespace()
+        let rules = addresses(host)?
+            .into_iter()
             .map(|address| {
-                let tables = if address.contains(':') {
+                let tables = if address.is_ipv6() {
                     "ip6tables"
                 } else {
                     "iptables"
@@ -228,6 +222,31 @@ impl Cluster {
         }
         Ok(count)
     }
+}
+
+/// Every address of `container`, a node or a registry, on kind's network, in both families: on a dual-stack cluster, a
+/// node may resolve a name to either.
+///
+/// # Errors
+///
+/// When `docker inspect` fails, or prints an address that does not parse.
+pub fn addresses(container: &str) -> Result<Vec<IpAddr>, Failure> {
+    docker(&[
+        "inspect",
+        "-f",
+        "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}",
+        container,
+    ])?
+    .split_whitespace()
+    .map(|address| {
+        address.parse().map_err(|e| {
+            fail(
+                &format!("the addresses of {container}"),
+                &format!("{address:?}: {e}"),
+            )
+        })
+    })
+    .collect()
 }
 
 /// What [`Cluster::histogram_count`] reads of a `MetricFamily` of Prometheus' `metrics.proto`.
