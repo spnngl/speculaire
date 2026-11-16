@@ -14,6 +14,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use super::*;
+use crate::listed::Listed;
 use crate::peer::{Uploads, serve};
 
 const IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -23,7 +24,7 @@ const CLIENT: &str = "node-z";
 const SIZE: usize = 1 << 20;
 
 /// Blobs held in memory, under whatever digest the test says.
-pub(crate) struct Held(HashMap<Digest, Bytes>);
+pub(crate) struct Held(pub(crate) HashMap<Digest, Bytes>);
 
 impl Content for Held {
     fn open(&self, digest: &Digest) -> impl Future<Output = Result<Option<Blob>, Error>> + Send {
@@ -50,7 +51,7 @@ pub(crate) fn pattern(len: usize, seed: u8) -> Bytes {
         .into()
 }
 
-fn sha(bytes: &[u8]) -> Digest {
+pub(crate) fn sha(bytes: &[u8]) -> Digest {
     speculaire_oci::hash::of("sha256", bytes).unwrap()
 }
 
@@ -88,6 +89,18 @@ impl Nodes {
         blobs: &[(&Digest, &Bytes)],
         max_uploads: usize,
     ) -> (Holder, Arc<Uploads>) {
+        self.listing(node, blobs, Listed::of(Vec::new()), max_uploads)
+            .await
+    }
+
+    /// The peer API of `node`, holding `blobs` and the tags of `listed`, at most `max_uploads` at once.
+    pub(crate) async fn listing(
+        &mut self,
+        node: &str,
+        blobs: &[(&Digest, &Bytes)],
+        listed: Listed,
+        max_uploads: usize,
+    ) -> (Holder, Arc<Uploads>) {
         let held = blobs
             .iter()
             .map(|(digest, bytes)| ((*digest).clone(), (*bytes).clone()))
@@ -100,6 +113,7 @@ impl Nodes {
             listener,
             self.credentials(node).server(),
             Arc::new(Held(held)),
+            listed,
             Arc::clone(&uploads),
             async {
                 // An error means the sender went with the test: stop too.
@@ -136,6 +150,7 @@ impl Nodes {
 pub(crate) const SETTINGS: Settings = Settings {
     stall_timeout: Duration::from_secs(5),
     deny_ttl: Duration::from_secs(600),
+    resolve_tags: true,
 };
 
 /// What a network does wrong to the answers it carries.
@@ -275,6 +290,7 @@ async fn on_containerd_a_whole_get_of_a_digest_the_node_lacks_is_served_from_a_p
     let pull = |head, range| Pull {
         kind: Kind::Blob,
         name: "library/busybox",
+        namespace: None,
         reference: Some(&reference),
         head,
         range,

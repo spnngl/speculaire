@@ -1,8 +1,9 @@
 //! On CRI-O the mirror sits in every pull's path and relays it (D66, D67, D88).
 //!
-//! A manifest by tag is resolved at upstream, never from a peer (D6); a manifest by digest and the blobs below a
-//! manifest the relay served come from the *blob cache* or, once, from upstream, streamed to CRI-O and to a temporary
-//! file while they are hashed, with the last chunk held back until the digest matches (D7, D67).
+//! A manifest by tag is resolved by the peers that hold the tag, else at upstream (D123); a manifest by digest and the
+//! blobs below a manifest the relay served come from the *blob cache*, else from peers, else, once, from upstream,
+//! streamed to CRI-O and to a temporary file while they are hashed, with the last chunk held back until the digest
+//! matches (D7, D67, D102).
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -21,13 +22,14 @@ use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::reference::Digest;
 use speculaire_registry::{Client, Request, Response as Upstreamed};
 use speculaire_runtime::content::Error;
-use speculaire_runtime::images::{Images, List};
+use speculaire_runtime::images::Images;
 use speculaire_runtime::registries::{self, Registries, Source};
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::Notify;
 use tracing::{debug, warn};
 
 use crate::cache::{Cache, Writer};
 use crate::fetch::{Download, Fetcher};
+use crate::listed::Listed;
 use crate::metrics;
 use crate::pulls::{Answer, Body, Pull, Pulls, from_content};
 use crate::request::{Kind, Reference};
@@ -82,7 +84,7 @@ pub struct Relay {
     registries: Arc<dyn Registries>,
     known: Known,
     /// The runtime's image list, whose blobs the cache evicts last (D67); `None` until it is first read.
-    listed: watch::Receiver<Option<List>>,
+    listed: Listed,
     over: Arc<Notify>,
 }
 
@@ -96,15 +98,13 @@ impl Relay {
         registries: Arc<dyn Registries>,
         images: Arc<dyn Images>,
     ) -> Self {
-        let (list, listed) = watch::channel(None);
-        tokio::spawn(follow(images, list));
         Self {
             cache: Arc::new(cache),
             fetcher,
             client: Client::new(),
             registries,
             known: Known::default(),
-            listed,
+            listed: Listed::follow(images),
             over: Arc::new(Notify::new()),
         }
     }
@@ -128,14 +128,10 @@ impl Relay {
         }
     }
 
-    /// Waits until the image list is read.
-    #[cfg(test)]
-    async fn read_list(&self) {
-        let mut listed = self.listed.clone();
-        listed
-            .wait_for(Option::is_some)
-            .await
-            .expect("the list is followed while the relay lives");
+    /// The runtime's image list it follows.
+    #[must_use]
+    pub const fn listed(&self) -> &Listed {
+        &self.listed
     }
 
     /// Evicts whenever a blob kept makes the cache exceed its bound; never returns.
@@ -194,12 +190,32 @@ impl Relay {
             Ok(sources) => sources,
             Err(err) => return Answer::Failed(Error::Relay(err.to_string())),
         };
-        // A manifest by digest that this relay served for this name is its own to serve again.
+        if sources.is_empty() {
+            return Answer::Missing;
+        }
+        // A manifest by digest that this relay served for this name, or that one it served points to, is its own to
+        // serve again, else the peers' (D123).
         if let Reference::Digest(digest) = reference
             && self.known.has(digest, pull.name)
-            && self.cache.contains(digest)
         {
-            return from_content(&*self.cache, Kind::Manifest, digest, pull.head, None).await;
+            if self.cache.contains(digest) {
+                return from_content(&*self.cache, Kind::Manifest, digest, pull.head, None).await;
+            }
+            if let Some(blob) = self.fetcher.whole(Kind::Manifest, digest).await
+                && let Ok(bytes) = blob.read_all(MAX_MANIFEST as u64).await
+                && let Some(media_type) = media_type(&bytes)
+                && let Some(answer) = self.peer_manifest(pull, digest, &bytes, media_type).await
+            {
+                return answer;
+            }
+        }
+        if let Some(tagged) = pull.tagged()
+            && let Some(resolved) = self.fetcher.tag(&tagged).await
+            && let Some(answer) = self
+                .peer_manifest(pull, &resolved.digest, &resolved.bytes, resolved.media_type)
+                .await
+        {
+            return answer;
         }
         for source in &sources {
             if let Some(answer) = self.relay_manifest(source, pull, reference, &text).await {
@@ -268,17 +284,38 @@ impl Relay {
             .map(str::trim)
             .and_then(header_value)
             .or_else(|| media_type(&bytes))?;
-        self.learn(pull.name, &digest, &children);
-        match self.keep(&digest, &bytes).await {
-            Ok(()) => {}
-            Err(err) => {
-                warn!(error = %err, digest = %digest, "the blob cache could not keep a manifest");
-            }
-        }
+        self.hold(pull.name, &digest, &bytes, &children).await;
         Some(Answer::Served(
             metrics::Source::Upstream,
             manifest_response(&bytes, &digest, media_type, false),
         ))
+    }
+
+    /// Serves manifest `bytes`, which peers sent, as the relay serves one from upstream; `None` when it is of a kind
+    /// the relay does not read.
+    async fn peer_manifest(
+        &self,
+        pull: &Pull<'_>,
+        digest: &Digest,
+        bytes: &Bytes,
+        media_type: HeaderValue,
+    ) -> Option<Answer> {
+        let children = manifest::children(bytes)
+            .map_err(|err| debug!(error = %err, name = pull.name, "a peer's manifest is of a kind the relay does not read"))
+            .ok()?;
+        self.hold(pull.name, digest, bytes, &children).await;
+        Some(Answer::Served(
+            metrics::Source::Peer,
+            manifest_response(bytes, digest, media_type, pull.head),
+        ))
+    }
+
+    /// Learns what is below a manifest served for `name`, and keeps it in the cache.
+    async fn hold(&self, name: &str, digest: &Digest, bytes: &[u8], children: &Children) {
+        self.learn(name, digest, children);
+        if let Err(err) = self.keep(digest, bytes).await {
+            warn!(error = %err, digest = %digest, "the blob cache could not keep a manifest");
+        }
     }
 
     /// Remembers that `digest` and what is below it may be served for `name`.
@@ -453,23 +490,6 @@ impl Pulls for Relay {
             (Kind::Manifest, _) => self.manifest(&pull, reference).await,
             (Kind::Blob, Reference::Digest(digest)) => self.blob(&pull, digest).await,
             _ => Answer::Missing,
-        }
-    }
-}
-
-/// Keeps `list` as `images` says, until the relay that reads it is gone.
-async fn follow(images: Arc<dyn Images>, list: watch::Sender<Option<List>>) {
-    let (sender, mut updates) = mpsc::channel(16);
-    let mut following = images.follow(sender);
-    loop {
-        tokio::select! {
-            () = list.closed() => return,
-            // Polled here, since it is what sends the updates; it ends only once they close.
-            () = &mut following => return,
-            update = updates.recv() => match update {
-                Some(update) => list.send_modify(|list| list.get_or_insert_default().apply(update)),
-                None => return,
-            },
         }
     }
 }

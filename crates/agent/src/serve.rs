@@ -11,6 +11,7 @@ use speculaire_artifacts::{Discovery, Limits, Store};
 use speculaire_mirror::Local;
 use speculaire_mirror::cache::Cache;
 use speculaire_mirror::fetch::{self, Fetcher, Holder};
+use speculaire_mirror::listed::Listed;
 use speculaire_mirror::peer::Uploads;
 use speculaire_mirror::relay::Relay;
 use speculaire_mirror::tls::Tls;
@@ -278,6 +279,8 @@ struct Mirror {
     uploads: Arc<Uploads>,
     /// What fetches from peers, linked to the reflectors once the agent shares.
     fetcher: Fetcher,
+    /// The images the runtime lists, whose tags the agent announces and the peer API resolves (D123).
+    listed: Listed,
 }
 
 impl Mirror {
@@ -299,9 +302,22 @@ impl Mirror {
         credentials: Arc<Credentials>,
     ) -> Peers {
         let uploads = Arc::clone(&self.uploads);
+        let listed = self.listed.clone();
         match &self.relay {
-            Some(relay) => Peers::open(Arc::clone(relay.cache()), fixed, credentials, uploads),
-            None => Peers::open(Arc::new(node.content()), fixed, credentials, uploads),
+            Some(relay) => Peers::open(
+                Arc::clone(relay.cache()),
+                listed,
+                fixed,
+                credentials,
+                uploads,
+            ),
+            None => Peers::open(
+                Arc::new(node.content()),
+                listed,
+                fixed,
+                credentials,
+                uploads,
+            ),
         }
     }
 
@@ -354,7 +370,7 @@ async fn start_mirror(
     // On containerd, a blob from peers waits there until it is whole and checked (D102).
     let fetcher = Fetcher::new(blobs.join("staging"), fetch_settings(config));
     speculaire_mirror::metrics::describe_fetch();
-    let (task, relay) = match node.fallback() {
+    let (task, relay, listed) = match node.fallback() {
         Fallback::PerBlob => (
             tokio::spawn(speculaire_mirror::serve(
                 listener,
@@ -363,6 +379,7 @@ async fn start_mirror(
                 stopped,
             )),
             None,
+            Listed::follow(node.images()),
         ),
         Fallback::Relay => {
             let cache = Cache::open(blobs, config.blob_cache.max_size.get())
@@ -384,7 +401,8 @@ async fn start_mirror(
                 Arc::clone(&relay),
                 stopped,
             ));
-            (task, Some(relay))
+            let listed = relay.listed().clone();
+            (task, Some(relay), listed)
         }
     };
     info!(%address, "mirror open");
@@ -394,6 +412,7 @@ async fn start_mirror(
         relay,
         uploads,
         fetcher,
+        listed,
     })
 }
 
@@ -426,6 +445,7 @@ fn fetch_settings(config: &Config) -> fetch::Settings {
     fetch::Settings {
         stall_timeout: config.peer.stall_timeout.get(),
         deny_ttl: config.peer.deny_ttl.get(),
+        resolve_tags: config.mirror.resolve_tags,
     }
 }
 
@@ -469,6 +489,7 @@ impl Peers {
     /// listened on is logged: peers fall through to other nodes.
     fn open<C: Content>(
         content: Arc<C>,
+        listed: Listed,
         fixed: impl Future<Output = Option<SocketAddr>> + Send + 'static,
         credentials: Arc<Credentials>,
         uploads: Arc<Uploads>,
@@ -500,6 +521,7 @@ impl Peers {
                 listener,
                 credentials.server(),
                 content,
+                listed,
                 uploads,
                 stopped,
             )
@@ -559,8 +581,8 @@ async fn open_reflector(
     }
 }
 
-/// Follows `inventory` into the holdings the agent announces (D99).
-fn follow(inventory: Arc<dyn Inventory>) -> Arc<Holdings> {
+/// Follows `inventory` and the tags `listed` into the holdings the agent announces (D99, D123).
+fn follow(inventory: Arc<dyn Inventory>, listed: Listed) -> Arc<Holdings> {
     let holdings = Arc::new(Holdings::default());
     let (updates, mut received) = tokio::sync::mpsc::channel(64);
     tokio::spawn(inventory.follow(updates));
@@ -575,6 +597,10 @@ fn follow(inventory: Arc<dyn Inventory>) -> Arc<Holdings> {
                 }
             }
         }
+    });
+    tokio::spawn({
+        let holdings = Arc::clone(&holdings);
+        listed.tag_keys(move |keys| holdings.replace_tags(&keys))
     });
     holdings
 }
@@ -602,7 +628,7 @@ fn open_sharing(
         let client = Client::spawn(
             settings,
             Arc::clone(&credentials),
-            follow(mirror.inventory(node)),
+            follow(mirror.inventory(node), mirror.listed.clone()),
         );
         mirror.fetcher.link(
             Arc::new(Holders(client.lookups())),
@@ -682,6 +708,7 @@ mod tests {
                 fetch::Settings {
                     stall_timeout: Duration::from_secs(1),
                     deny_ttl: Duration::from_secs(1),
+                    resolve_tags: false,
                 },
             );
             let relay = Arc::new(Relay::new(
@@ -701,6 +728,7 @@ mod tests {
                 relay: Some(Arc::clone(&relay)),
                 uploads: Arc::new(Uploads::new(NonZeroUsize::MIN)),
                 fetcher,
+                listed: relay.listed().clone(),
             };
             let config = Config::default();
             assert_ne!(config.blob_cache.max_size.get(), 1 << 30);

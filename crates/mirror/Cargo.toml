@@ -21,6 +21,7 @@ humantime.workspace = true
 hyper = { workspace = true, features = ["client"] }
 hyper-util.workspace = true
 metrics.workspace = true
+percent-encoding.workspace = true
 rustls.workspace = true
 serde.workspace = true
 secrecy.workspace = true

@@ -13,7 +13,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Because:** this is Spegel's proven path, and it is the cheapest one.
 - **Revisit when:** —
 
-## D6: Tag resolution is off by default (amended by D66)
+## D6: Tag resolution is off by default (amended by D66, D123)
 
 - **Decision:** the mirror host gets capability `pull` only, never `resolve`.
 - **Because:** with `resolve`, a peer could answer a tag with any digest it serves. Without it, tags resolve upstream (a small request) and blobs, the bulk of the bytes, still go P2P. Measured on containerd 2.3.7 and 2.4.2: the mirror sees no tag request, only manifests and blobs by digest (D22).
@@ -146,7 +146,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - It has the same form as `metrics.address` and `reflector.listen`.
 - **Revisit when:** —
 
-## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80, D83, D102)
+## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80, D83, D102, D123)
 
 - **Decision:**
   - `speculaire configure` writes `/etc/containers/registries.conf.d/99-speculaire.conf`. For each registry it mirrors, the file holds one `[[registry]]` that copies the admin's effective entry for that prefix (`location`, `insecure`, `blocked`, its mirrors) and puts first `[[registry.mirror]] location = "<mirror.address>/<registry host>"` with `pull-from-mirror = "all"`.
@@ -228,7 +228,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M2 step 03, arm64, Docker):** on CRI-O 1.37.2 `speculaire configure` wrote the drop-in and the three certificate files, the journal logged `Applied new registry configuration`, and `crictl pull docker.io/library/busybox:1.36.1` sent `GET /v2/` to a TLS server on `127.0.0.1:7480` with the client certificate; with that server killed the pull went on to Docker Hub and succeeded. `unconfigure` kept an admin's `50-admin.conf` with an edit made after `configure`, and a pull after it succeeded; the same on the three CRI-O legs of each architecture in CI run 43182634661.
 - **Revisit when:** CRI-O gains a per-blob fallback across sources (D66), or a node's CRI-O sets `registries_conf` (D80).
 
-## D85: The mirror is hyper over TLS 1.3, finds a held blob by its digest in the content directory, and is checked by the distribution-spec suite (amends D5, D14, D55, D82; amended by D102, D108, D110)
+## D85: The mirror is hyper over TLS 1.3, finds a held blob by its digest in the content directory, and is checked by the distribution-spec suite (amends D5, D14, D55, D82; amended by D102, D108, D110, D123)
 
 - **Decision:**
   - **Stack:** crate `speculaire-mirror`. `hyper` 1 (HTTP/1 only) serves each connection that `tokio-rustls` accepts, with rustls on aws-lc-rs and no `tls12` feature, so TLS 1.3 is the only version the binary has. `WebPkiClientVerifier` requires a client certificate that the local CA signed (D14). A client has 10 s for the handshake and for its request headers. The router is a `match` on the path, not axum's: a name has any number of segments, which axum's routes cannot match before `/blobs/<digest>`.
@@ -248,7 +248,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - `crictl pull docker.io/library/busybox:1.36.0` sent the mirror a manifest request that counted as `fall_through`, and the pull succeeded, on containerd 2.4 and CRI-O 1.37; a client without the certificate, and one that did not trust the CA, were refused.
 - **Revisit when:** a node needs a mirror on TLS 1.2, or the suite's `results.yaml` panic is fixed upstream: then `check` reads `junit.xml`.
 
-## D88: The upstream client is our own on hyper; the relay on CRI-O keeps a blob cache and tokens per host and scope (amends D17, D53, D67, D83; amended by D111, D119)
+## D88: The upstream client is our own on hyper; the relay on CRI-O keeps a blob cache and tokens per host and scope (amends D17, D53, D67, D83; amended by D111, D119, D123)
 
 - **Decision:**
   - **Client:** crate `speculaire-registry`, our own on `hyper` 1 and `tokio-rustls`, not `oci-client`. It asks an *endpoint* (D89) for one `GET` or `HEAD` and returns the status, the headers and the body still to be read, so the relay streams a blob to CRI-O and to a temporary file while hashing it (D7, D67). TLS is built per endpoint from its own trust (the CA files, a client certificate, `insecure`), on the system's roots (`rustls-native-certs`) and aws-lc-rs; one connection pool per distinct trust. TLS 1.2 is enabled for the upstream client only: registries that a runtime reaches may speak nothing newer, and the mirror's server config still names 1.3 alone (D85).
@@ -283,7 +283,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Revisit when:** a CRI-O whose `crio.sock` does not serve `GET /config`, or M5 needs the trait to give a registry's whole host list rather than the sources of one image.
 
 
-## D100: The peer API shares the mirror's parser, caps blob bodies, and opens on the address the first stream fixes (amends D24, D36; amended by D103)
+## D100: The peer API shares the mirror's parser, caps blob bodies, and opens on the address the first stream fixes (amends D24, D36; amended by D103, D123)
 
 - **Decision:**
   - **Routes:** `speculaire_mirror::peer` answers `GET` and `HEAD` of `/v2/<name>/manifests/<digest>` and `/v2/<name>/blobs/<digest>`, with one `Range` at most, through the mirror's own request parser and responses (D85). The name is not read: content is keyed by digest. Everything else is a 404: `/v2/`, tags, referrers, other methods, and a digest the node no longer holds, as when containerd's garbage collector deleted it without an event (D99).
@@ -300,7 +300,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M3 step 04):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass `e2e/tests/peer.rs` in 1.1 s and 0.8 s: the second worker's peer API serves a pulled 1 MiB layer whole (SHA-256 checked) and its first 100 bytes as a `206` to the first worker's kubelet certificate, and refuses no certificate and kube-apiserver's `apiserver-kubelet-client` one, of the cluster CA but not a node's. In `crates/mirror/src/peer/tests.rs`, with `peer.max_uploads = 1`, a second `GET` of a body while a 64 MiB one is in flight answers `503` at once, and once stopping a new request answers `503` while the 64 MiB body in flight completes. The agent's own drain is D110's test.
 - **Revisit when:** peers need a request the mirror's parser does not route, or a node must serve on several addresses.
 
-## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103)
+## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103, D123)
 
 - **Decision:**
   - **Where:** `speculaire_mirror::fetch::Fetcher`, linked once P2P starts to a `Lookup` (the agent's adapter over the reflector client) and the node identity. Before that, or when the lookup fails, names no holder or only denied ones, the pull falls through (D66).
@@ -375,3 +375,23 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - containerd gives a host with a `dial_timeout` its own transport, whose `net.Dialer` has that `Timeout` (v2.3.7 `core/remotes/docker/config/hosts.go:186-191`), and fetches its tokens with that client (`:209`). A mirror set to fail over within 200 ms waited 15 s for a dead host before the next one.
   - The pool is hyper's, keyed by the URI alone, and its connector has no endpoint: the timeout must key the client.
 - **Revisit when:** containerd applies `dial_timeout` beyond the TCP connect, or hosts with many distinct timeouts make the pools per key costly.
+
+## D123: Peers that hold a tag resolve it, unless `mirror.resolve_tags` is off (amends D6, D66, D82, D85, D88, D99, D100, D102)
+
+- **Decision:**
+  - **Announcement:** each agent announces every tag the runtime lists (CRI `ListImages` `repoTags`, followed as D121 follows the image list), under the key `sha256("speculaire tag\0" + "<registry>/<repository>:<tag>")`, the name normalised as containerd names it (`speculaire_oci::tagged::Tagged`, D81): `busybox` is `docker.io/library/busybox`, and a name without a tag is no tag. The key sits beside the blob digests in the same holdings, on the same wire and index (D97, D99); a digest never collides with it, since no blob hashes to a domain-separated string.
+  - **Lookup:** a manifest request by tag asks the reflector for the tag key, then asks the first 2 holders in lookup order, at once, for `GET /v2/<name>/manifests/<tag>` over the peer API. The first answer that is a manifest or an index of 4 MiB at most wins; the mirror computes its sha256 itself and serves it with that `Docker-Content-Digest`. When the two differ, the agent logs a warning and counts `speculaire_tag_conflicts_total`. No holder, or no good answer, is a fall through. There is no max age: a holder answers what its runtime lists, as Spegel does.
+  - **containerd:** the mirror's `hosts.toml` entry has `capabilities = ["pull", "resolve"]` (D82), so containerd sends the tag's `HEAD`, with the registry in the `ns` query (v2.4.2 `core/remotes/docker/resolver.go:245-277`, `:644-651`), then the manifests by digest, which a node lacking them fetches whole from peers (D102).
+  - **CRI-O:** the drop-in already sends the tag (D66); the relay asks the tag's holders first, then upstream. A manifest by digest below one it served comes from the blob cache, else from peers, else upstream (D102 took only blobs from peers).
+  - **Peer API (D100):** answers a tag the runtime lists with the manifest it holds under one of that image's repository digests in the same repository, an index first, since the asking node picks its own platform.
+  - **Off:** `mirror.resolve_tags = false` (live) answers every tag 404 without a lookup, as D6 did; `hosts.toml` keeps `resolve`, so turning it back on needs no restart. Digest pulls are unchanged.
+  - **Metrics:** `speculaire_tag_lookups_total{result="peer|miss"}`; the manifest's first byte counts under `speculaire_mirror_first_byte_seconds{source="peer"}` (D116).
+- **Because:**
+  - Resolving a tag upstream cost a pull from peers about 0.45 s on kind against ghcr.io, most of D106's gap behind Spegel, and a tag pull still failed while upstream was down. The user chose this design on 2026-11-16, accepting the risks in `docs/security.md`.
+  - Asking 2 holders lets one dead or slow holder cost nothing, and shows a disagreement without waiting for a quorum.
+  - containerd trusts the `HEAD`'s `Docker-Content-Digest` and `Content-Length` (`resolver.go:393-405`), so the digest must be the mirror's own hash of the bytes, never the peer's header.
+- **Limit:** any node with a node identity can name any manifest for a tag; a moved tag keeps resolving to the old image while peers hold it, until their runtimes drop it. M5's signature check rejects an unsigned image, not an older signed one.
+- **Measured** (M4 step 06, locally on Docker Desktop arm64, kind, containerd 2.4.2, Kubernetes 1.37, Spegel v0.8.1):
+  - `just bench`'s update phase, the second worker's pull from the first, in seconds, Spegel / speculaire: 10MB-1 0.046 / 0.064, 10MB-4 0.060 / 0.071, 100MB-1 0.263 / 0.350, 100MB-4 0.213 / 0.246, against up to 0.8 s more than Spegel before (D106). The benchmark gave speculaire's 100MB-4 update a third sample, a copy of a create sample, so its table's p50 there is the first worker's upstream pull.
+  - `e2e/tests/tags.rs`: with upstream rejected, the first worker pulled `e2e/signed:1` by tag from the second in 98 ms, upstream logging none of its requests.
+- **Revisit when:** a tag must follow upstream within a bound; then add a max age, or a `HEAD` upstream that wins when it answers.

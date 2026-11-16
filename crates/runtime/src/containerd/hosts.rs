@@ -1,4 +1,4 @@
-//! containerd: the mirror as a `hosts.toml` entry (D14, D32, D56, D82).
+//! containerd: the mirror as a `hosts.toml` entry (D14, D32, D56, D82, D123).
 //!
 //! `config_path` names directories, one per registry, each with a `hosts.toml` whose `[host."<url>"]` tables are the
 //! endpoints containerd tries, in file order (`core/remotes/docker/config/hosts.go`, containerd v2.4.2). `configure`
@@ -214,7 +214,8 @@ fn set_fields(table: &mut dyn TableLike, entry: &Entry) {
             }
         }
     };
-    set("capabilities", value(Array::from_iter(["pull"])));
+    // `resolve` sends tags to the mirror, which answers them from peers or falls through (D123).
+    set("capabilities", value(Array::from_iter(["pull", "resolve"])));
     set("ca", value(entry.ca.to_string_lossy().into_owned()));
     set("client", value(entry.client.to_string_lossy().into_owned()));
     set("dial_timeout", value("200ms"));
@@ -426,8 +427,8 @@ mod tests {
         let once = added(FILES[2].1);
         let edited = once
             .replace(
-                "capabilities = [\"pull\"]\n  ca = \"/var",
                 "capabilities = [\"pull\", \"resolve\"]\n  ca = \"/var",
+                "capabilities = [\"pull\"]\n  ca = \"/var",
             )
             .replace("dial_timeout = \"200ms\"", "dial_timeout = \"5s\"");
         assert_ne!(edited, once);

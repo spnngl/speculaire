@@ -1,5 +1,7 @@
 //! What a request asks for: a route of the pull API, and a `Range`.
 
+use std::borrow::Cow;
+
 pub use hyper::Method;
 use speculaire_oci::reference::Digest;
 
@@ -81,7 +83,7 @@ pub enum Route<'a> {
 
 /// The route of a request, or `None` when it is none of the pull API's: the mirror answers those with a 404 too.
 ///
-/// Query parameters, such as containerd's `ns`, are ignored.
+/// Query parameters are left out: [`namespace`] reads containerd's `ns`.
 #[must_use]
 pub fn route<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
     let head = match *method {
@@ -110,6 +112,18 @@ pub fn route<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
         reference: Reference::parse(reference),
         head,
     })
+}
+
+/// The registry of the name, from containerd's `ns` query parameter: containerd adds it when the mirror is not the
+/// registry (`core/remotes/docker/resolver.go:644-651` at v2.4.2). `None` without one, or one that does not decode.
+#[must_use]
+pub fn namespace(query: Option<&str>) -> Option<Cow<'_, str>> {
+    let value = query?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("ns="))?;
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .ok()
 }
 
 /// A byte range of a body of `size` bytes, both ends included.
@@ -244,6 +258,21 @@ mod tests {
                 panic!("no pull");
             };
             assert_eq!(got, name);
+        }
+    }
+
+    #[test]
+    fn the_namespace_is_the_decoded_ns_parameter() {
+        assert_eq!(
+            namespace(Some("ns=docker.io")).as_deref(),
+            Some("docker.io")
+        );
+        assert_eq!(
+            namespace(Some("a=1&ns=reg.test%3A5000")).as_deref(),
+            Some("reg.test:5000")
+        );
+        for query in [None, Some(""), Some("name=docker.io"), Some("ns=%FF")] {
+            assert_eq!(namespace(query), None, "{query:?}");
         }
     }
 

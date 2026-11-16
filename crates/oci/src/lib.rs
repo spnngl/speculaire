@@ -2,6 +2,7 @@
 //! parsing, and a platform is matched as containerd's `platforms.Only` matches it. [`manifest::children`] reads what a
 //! manifest points to (D88). [`referrers`] reads OCI 1.1 referrers and [`index`] an image index's platform and
 //! attestation manifests, for artifact discovery (D43, D49). [`hash`] checks content against its digest as it arrives (D7).
+//! [`tagged::Tagged`] names a tag and the key nodes announce it under (D123).
 
 pub mod hash;
 pub mod index;
@@ -9,6 +10,7 @@ pub mod manifest;
 pub mod platform;
 pub mod reference;
 pub mod referrers;
+pub mod tagged;
 
 /// Go's `strings.ToLower`: each character's simple lower case, so `İ` is `i` and `Σ` always `σ`, where
 /// `str::to_lowercase` gives `i̇` and, at the end of a word, `ς`.

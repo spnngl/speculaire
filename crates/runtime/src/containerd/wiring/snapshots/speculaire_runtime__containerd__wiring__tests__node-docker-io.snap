@@ -1,5 +1,5 @@
 ---
-source: crates/configure/src/tests.rs
+source: crates/runtime/src/containerd/wiring/tests.rs
 expression: "docker.replace(node.dir.path().to_str().unwrap(), \"<root>\")"
 ---
 # docker.io, through the corporate proxy
@@ -7,7 +7,7 @@ server = "https://registry-1.docker.io"
 
 # Added by `speculaire configure`; `speculaire unconfigure` removes it.
 [host."https://127.0.0.1:7480"]
-  capabilities = ["pull"]
+  capabilities = ["pull", "resolve"]
   ca = "<root>/var/lib/speculaire/mirror/ca.crt"
   client = "<root>/var/lib/speculaire/mirror/client.pem"
   dial_timeout = "200ms"

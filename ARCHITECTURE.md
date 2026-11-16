@@ -57,7 +57,7 @@ The trust boundaries and the risks we accept are in [`docs/security.md`](docs/se
 ## Flows
 
 ### Pull
-1. containerd requests `GET /v2/<repo>/blobs/<digest>?ns=<registry>` from the local mirror (D14).
+1. containerd asks the local mirror for the tag, `HEAD /v2/<repo>/manifests/<tag>?ns=<registry>`, which the agent resolves from 2 peers that hold the tag, else falls through (D123); then each manifest and blob by digest, as `GET /v2/<repo>/blobs/<digest>?ns=<registry>` (D14).
 2. The agent sends `Lookup(digest)` to a reflector, hedged to a second one. The reflector returns a shuffled subset of `(node identity, address)` pairs, never including the requester.
 3. The agent races and hedges fetches from the peer API, as Spegel does. It checks that each peer's certificate names the node identity the reflector returned. It streams the bytes to the runtime while hashing them (D7).
    - If the hash doesn't match the digest, the agent aborts and denies that peer locally for `peer.deny_ttl` (D52).

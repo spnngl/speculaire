@@ -50,6 +50,10 @@ pub const FETCHES: &str = "speculaire_peer_fetches_total";
 pub const HEDGES: &str = "speculaire_peer_hedges_total";
 /// Time from the start of a request to a peer to its end, by `result`.
 pub const FETCH_SECONDS: &str = "speculaire_peer_fetch_seconds";
+/// `speculaire_tag_lookups_total`: tags the mirror asked peers to resolve, by `result` (D123).
+pub const TAG_LOOKUPS: &str = "speculaire_tag_lookups_total";
+/// `speculaire_tag_conflicts_total`: tags two peers resolved to different digests (D123).
+pub const TAG_CONFLICTS: &str = "speculaire_tag_conflicts_total";
 
 /// Where the bytes of a served answer came from: the `source` label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -464,6 +468,14 @@ pub fn describe_fetch() {
         FETCH_SECONDS,
         "Time from the start of a request to another agent to its end"
     );
+    describe_counter!(
+        TAG_LOOKUPS,
+        "Tags the mirror asked other agents to resolve, by whether one answered"
+    );
+    describe_counter!(
+        TAG_CONFLICTS,
+        "Tags two other agents resolved to different digests"
+    );
 }
 
 /// The fetcher's series.
@@ -474,6 +486,9 @@ pub(crate) struct FetchSeries {
     timeout: Ended,
     error: Ended,
     hedges: Counter,
+    tag_peer: Counter,
+    tag_miss: Counter,
+    tag_conflicts: Counter,
 }
 
 /// The series of requests to peers that ended one way.
@@ -501,6 +516,9 @@ impl FetchSeries {
             timeout: Ended::new(Fetched::Timeout),
             error: Ended::new(Fetched::Error),
             hedges: counter!(HEDGES),
+            tag_peer: counter!(TAG_LOOKUPS, "result" => "peer"),
+            tag_miss: counter!(TAG_LOOKUPS, "result" => "miss"),
+            tag_conflicts: counter!(TAG_CONFLICTS),
         }
     }
 
@@ -520,6 +538,21 @@ impl FetchSeries {
     /// Counts a hedged request.
     pub(crate) fn hedged(&self) {
         self.hedges.increment(1);
+    }
+
+    /// Counts a tag lookup: whether a peer resolved the tag.
+    pub(crate) fn tag(&self, resolved: bool) {
+        if resolved {
+            &self.tag_peer
+        } else {
+            &self.tag_miss
+        }
+        .increment(1);
+    }
+
+    /// Counts a tag two peers resolved to different digests.
+    pub(crate) fn tag_conflict(&self) {
+        self.tag_conflicts.increment(1);
     }
 }
 

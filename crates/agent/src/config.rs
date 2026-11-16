@@ -114,6 +114,7 @@ impl Config {
                     address: mirror,
                     registries,
                     directory,
+                    resolve_tags: _,
                 },
             peer:
                 Peer {
@@ -461,6 +462,8 @@ pub struct Mirror {
     pub registries: Restart<Vec<RegistryName>>,
     /// Where `configure` puts the mirror's CA and certificates, and the agent reads them (D14).
     pub directory: Restart<Absolute>,
+    /// Whether a tag the node lacks is asked of the peers that hold it (D123).
+    pub resolve_tags: bool,
 }
 
 impl Default for Mirror {
@@ -473,6 +476,7 @@ impl Default for Mirror {
                     .to_vec(),
             ),
             directory: Restart(Absolute::new("/var/lib/speculaire/mirror")),
+            resolve_tags: true,
         }
     }
 }

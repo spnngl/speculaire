@@ -15,6 +15,7 @@ fn image(hex: &str) -> Image {
     Image {
         id: Digest::parse(&format!("sha256:{hex}")).unwrap(),
         repo_digests: Vec::new(),
+        tags: Vec::new(),
     }
 }
 

@@ -30,11 +30,11 @@ use tracing::{Instrument as _, debug, debug_span, field, warn};
 
 use crate::metrics::{Outcome, PullSeries};
 use crate::pulls::{Answer, Body, Pull, Pulls};
-use crate::request::{Ranged, Route, Span, range, route};
+use crate::request::{Ranged, Route, Span, namespace, range, route};
 use crate::tls::Tls;
 
 /// The largest manifest the mirror reads, as containerd limits one (`core/remotes/docker/resolver.go`).
-const MAX_MANIFEST: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_MANIFEST: u64 = 4 * 1024 * 1024;
 
 /// How long a client may take to finish the TLS handshake, and to send a request's headers.
 const CLIENT_TIME: Duration = Duration::from_secs(10);
@@ -199,7 +199,8 @@ async fn handle<P: Pulls>(
             .and_then(|value| value.to_str().ok())
     };
     let accept = accept(request.headers());
-    // Debug only (D37): the digest names what a node pulls. A tag stays out: it is a miss, or the relay's (D66).
+    let namespace = namespace(request.uri().query());
+    // Debug only (D37): the digest names what a node pulls; a tag is left out.
     let span = debug_span!(
         "mirror request",
         kind = kind.label(),
@@ -214,6 +215,7 @@ async fn handle<P: Pulls>(
         .pull(Pull {
             kind,
             name,
+            namespace: namespace.as_deref(),
             reference: reference.as_ref(),
             head,
             range: header(RANGE),

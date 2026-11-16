@@ -39,6 +39,10 @@ use tracing::{Instrument as _, Span, debug, debug_span, field, info, warn};
 use crate::metrics::{FetchSeries, Fetched};
 use crate::request::Kind;
 
+mod tag;
+
+pub use tag::Resolved;
+
 /// The target of audit events, which the agent's logs send to the audit log alone (D37).
 pub const AUDIT_TARGET: &str = "speculaire::audit";
 
@@ -81,6 +85,8 @@ pub struct Settings {
     pub stall_timeout: Duration,
     /// `peer.deny_ttl`: how long a peer that sent a wrong digest is skipped (D52).
     pub deny_ttl: Duration,
+    /// `mirror.resolve_tags`: whether a tag is asked of peers (D123).
+    pub resolve_tags: bool,
 }
 
 /// Fetches from peers; a handle, cheap to clone.

@@ -101,6 +101,10 @@ A reflector ends an agent's `Announce` stream with a `Refused` frame naming the 
 | `digests` | The node announces more than 100k digests | Prune the node's images, or report it if it holds that many legitimately |
 | `malformed` | A frame does not decode, or holds a message the protocol does not allow there, such as a second `Hello` or a string that is not a digest | Report a bug |
 
+## Tags from peers
+
+A pull by tag asks the peers whose runtime lists that tag before upstream, so it works while upstream is down (D123). A peer can name any image for a tag, and a tag moved upstream keeps resolving to the image peers hold (`docs/security.md`). To resolve every tag upstream, as before, set `mirror.resolve_tags = false` and reload: the next tag request answers 404 and the runtime asks upstream. No restart and no `configure` is needed; containerd's `hosts.toml` keeps `resolve`. `speculaire_tag_lookups_total{result}` counts the tags peers resolved (`peer`) and missed (`miss`). On containerd, a node configured by an earlier release sends the mirror no tag until `speculaire configure` runs again and adds `resolve` to its `hosts.toml` entry (D82).
+
 ## Logs and audit
 
 - `journalctl -u speculaire` shows the agent's logs, at `warn` and above by default. Change `log.filter` (`EnvFilter` syntax) and reload to see more (D37).
@@ -123,6 +127,7 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | `speculaire_lookup_seconds_count{result="error"}` | It rises: lookups fail at every reflector asked, and pulls fall through to upstream (D102) |
 | `speculaire_lookup_seconds_count{result="no_reflector"}` | It rises: the agent streams to no reflector, asks nobody, and pulls fall through to upstream (D103) |
 | `speculaire_lookup_seconds_count{result="miss"}` | Its share of lookups rises while every `speculaire_reflector_connected` is 1: the reflectors answer, but lack what the nodes hold; look for refused streams (`speculaire_reflector_announce_rejected_total`) and for nodes whose `speculaire_p2p_enabled` is 0 (D103) |
+| `speculaire_tag_conflicts_total` | It increases: two peers resolved one tag to different manifests; the warning log `two peers resolved a tag to different digests` names it. Usually a tag moved while nodes still hold the old image; else a node may lie (D123) |
 | `speculaire_mirror_requests_total{result="error"}` | It increases: the mirror could not read content it may hold, and answered 404; the warning log names the error (D85) |
 | `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, or on its previous registry config, or a registry config read left a credential, certificate or key file out, or the kubelet certificate or the cluster CA cannot be loaded and the previous one stays; the error log names the file and the line (D30, D91, D92, D95) |
 | `speculaire_identity_path{path="annotation"}` | It is 1: the node runs containerd 2.3, with its known identity gap (D15) |

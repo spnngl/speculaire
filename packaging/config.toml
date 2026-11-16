@@ -69,6 +69,8 @@
 #registries = ["docker.io", "registry.k8s.io", "quay.io", "ghcr.io"]
 # Where `speculaire configure` puts the mirror's CA and certificates, and the agent reads them (D14, D82). Restart.
 #directory = "/var/lib/speculaire/mirror"
+# Whether a tag pull asks the peers that hold the tag before upstream; any node can name any image for a tag (D123).
+#resolve_tags = true
 
 [peer]
 # "auto" is the local IP of the reflector connection on port 7481; or an ip:port (D36, D56). Restart.

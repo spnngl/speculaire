@@ -18,6 +18,7 @@ use std::path::Path;
 use speculaire_agent::config;
 use speculaire_oci::platform::{self as oci_platform, Host, Matcher};
 use speculaire_oci::reference::Reference;
+use speculaire_oci::tagged::Tagged;
 use speculaire_registry_config::containerd::config::{self as containerd_config_file, Registry};
 use speculaire_registry_config::containerd::hosts;
 use speculaire_registry_config::crio::{auth, registries};
@@ -183,10 +184,10 @@ fn round_trip(text: &str) {
     }
 }
 
-/// An image reference as the CRI plugin parses it (D11, D81).
+/// An image reference as the CRI plugin parses it (D11, D81), and as a tag the agent announces (D123).
 ///
 /// A reference that parses prints as text that parses to the same reference, and never has a tag together with a
-/// digest.
+/// digest. A tag that parses prints as text that parses to the same tag, with the same key.
 ///
 /// # Panics
 ///
@@ -205,6 +206,9 @@ pub fn reference(data: &[u8]) {
             Ok(&parsed),
             "{text}"
         );
+    }
+    if let Some(tagged) = Tagged::parse(text) {
+        assert_eq!(Tagged::parse(&tagged.to_string()), Some(tagged), "{text}");
     }
 }
 
@@ -281,24 +285,28 @@ pub fn hosts_edit(data: &[u8]) {
     }
 }
 
-/// A request of the runtime to the mirror, or of another agent to the peer API, which shares its parser: its path,
-/// then a line with its `Range` header (D85, D100).
+/// A request of the runtime to the mirror, or of another agent to the peer API, which shares its parser: its path
+/// and query, then a line with its `Range` header (D85, D100, D123).
 ///
-/// Routing never panics. A range lies inside a body of any size: it starts at or before its end, and its end is the
+/// Routing and reading containerd's `ns` never panic. A range lies inside a body of any size: it starts at or before its end, and its end is the
 /// body's last byte at most; the whole of an empty body has no range.
 ///
 /// # Panics
 ///
 /// When routing or reading a range panics, or a range does not lie in the body.
 pub fn mirror_request(data: &[u8]) {
-    use speculaire_mirror::request::{Method, Ranged, Span, range, route};
+    use speculaire_mirror::request::{Method, Ranged, Span, namespace, range, route};
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
-    let (path, header) = text.split_once('\n').unwrap_or((text, ""));
+    let (target, header) = text.split_once('\n').unwrap_or((text, ""));
+    let (path, query) = target
+        .split_once('?')
+        .map_or((target, None), |(path, query)| (path, Some(query)));
     for method in [Method::GET, Method::HEAD] {
         let _ = route(&method, path);
     }
+    let _ = namespace(query);
     for size in [0, 1, 2, 1000, u64::MAX] {
         if let Ranged::Part(span) = range(Some(header), size) {
             assert!(

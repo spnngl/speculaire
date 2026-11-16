@@ -31,6 +31,7 @@ fn image(id: &str, repo_digests: &[(&str, &str)]) -> Image {
                 digest: digest(text),
             })
             .collect(),
+        tags: Vec::new(),
     }
 }
 
@@ -42,18 +43,25 @@ async fn next(updates: &mut mpsc::Receiver<Update>) -> Update {
 }
 
 #[test]
-fn an_image_reads_its_id_with_or_without_algorithm_and_its_repo_digests() {
+fn an_image_reads_its_id_with_or_without_algorithm_its_repo_digests_and_tags() {
     let hex = A.trim_start_matches("sha256:");
     let crio = ListedImage {
         id: hex.to_owned(),
-        repo_tags: vec!["docker.io/library/busybox:1".to_owned()],
+        repo_tags: vec![
+            "docker.io/library/busybox:1".to_owned(),
+            "busybox".to_owned(),
+            format!("busybox@{B}"),
+        ],
         repo_digests: vec![
             format!("docker.io/library/busybox@{B}"),
             "no-digest".to_owned(),
             "docker.io/library/busybox@sha256:short".to_owned(),
         ],
     };
-    let want = image(A, &[("docker.io/library/busybox", B)]);
+    let want = Image {
+        tags: vec![Tagged::parse("busybox:1").unwrap()],
+        ..image(A, &[("docker.io/library/busybox", B)])
+    };
     assert_eq!(Image::from_listed(&crio), Some(want.clone()));
     let containerd = ListedImage {
         id: A.to_owned(),
