@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use speculaire_oci::reference::Digest;
 
@@ -163,6 +164,30 @@ impl Node {
             Kind::Containerd(containerd) => NodeContent::Containerd(containerd.clone()),
             Kind::CriO(crio) => NodeContent::CriO(crio.clone()),
         }
+    }
+
+    /// The agent stops: a follower of [`images`](Self::images) or [`inventory`](Self::inventory) that loses the
+    /// runtime from now on ends, and says nothing, since the agent's own teardown is what cut it.
+    pub fn stop(&self) {
+        match &self.kind {
+            Kind::Containerd(containerd) => containerd.stopping().stop(),
+            Kind::CriO(crio) => crio.stopping().stop(),
+        }
+    }
+}
+
+/// Whether the agent stops, shared by the clones of a runtime and so by every follower it handed out.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Stopping(Arc<AtomicBool>);
+
+impl Stopping {
+    fn stop(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`Node::stop`] was called.
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
     }
 }
 

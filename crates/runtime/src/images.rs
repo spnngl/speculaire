@@ -18,6 +18,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::warn;
 
 use crate::cri::{self, ListedImage};
+use crate::node::Stopping;
 
 /// How often the image list is read again, whatever the hints said (D121).
 pub const RELIST: Duration = Duration::from_secs(60);
@@ -129,8 +130,9 @@ impl List {
 
 /// The runtime's image list, followed (D121).
 pub trait Images: Send + Sync {
-    /// Sends the image list, then each change, until `updates` closes. The list comes again every [`RELIST`] and when
-    /// the runtime's hints stopped; while the runtime cannot be reached, nothing is sent.
+    /// Sends the image list, then each change, until `updates` closes or the runtime is lost after
+    /// [`Node::stop`](crate::Node::stop). The list comes again every [`RELIST`] and when the runtime's hints stopped;
+    /// while the runtime cannot be reached, nothing is sent.
     fn follow(self: Arc<Self>, updates: mpsc::Sender<Update>) -> BoxFuture<'static, ()>;
 }
 
@@ -145,13 +147,14 @@ pub(crate) enum Lost {
     Closed,
 }
 
-/// Follows the list on `socket` until `updates` closes: `watch` runs a source of hints into the sender it is given, and
-/// returns why it stopped; it is run again after [`RETRY`].
+/// Follows the list on `socket` until `updates` closes, or until it is lost once the agent is `stopping`: `watch` runs a
+/// source of hints into the sender it is given, and returns why it stopped; it is run again after [`RETRY`].
 pub(crate) async fn follow<W, F>(
     socket: &Path,
     updates: &mpsc::Sender<Update>,
     every: Duration,
     runtime: &str,
+    stopping: &Stopping,
     mut watch: W,
 ) where
     W: FnMut(mpsc::Sender<()>) -> F,
@@ -163,6 +166,10 @@ pub(crate) async fn follow<W, F>(
             () = updates.closed() => return,
             lost = relist(socket, updates, every, hints, watch(hint)) => lost,
         };
+        // The agent's own teardown cut the connection: that is no failure to report.
+        if stopping.is_set() {
+            return;
+        }
         match lost {
             Lost::Closed => return,
             Lost::Unreachable(error) => {

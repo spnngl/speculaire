@@ -137,6 +137,7 @@ async fn hints_send_changes_and_a_lost_watch_sends_the_list_again() {
                 &sender,
                 Duration::from_secs(3600),
                 "fake",
+                &Stopping::default(),
                 |hint| {
                     let hints = hints.clone();
                     let ended = std::sync::Arc::clone(&ended);
@@ -194,6 +195,7 @@ async fn the_list_comes_whole_every_interval() {
             &sender,
             Duration::from_millis(50),
             "fake",
+            &Stopping::default(),
             |_hint| std::future::pending(),
         )
         .await;
@@ -221,6 +223,7 @@ async fn a_change_before_the_first_hint_comes_once_the_watch_settled() {
             &sender,
             Duration::from_secs(3600),
             "fake",
+            &Stopping::default(),
             |_hint| std::future::pending(),
         )
         .await;
@@ -245,6 +248,7 @@ async fn an_unreachable_runtime_is_asked_again() {
                 &sender,
                 Duration::from_secs(3600),
                 "fake",
+                &Stopping::default(),
                 |_hint| std::future::pending(),
             )
             .await;

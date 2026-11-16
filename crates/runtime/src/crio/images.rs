@@ -23,9 +23,14 @@ impl Images for CriO {
 impl CriO {
     /// Follows the image list, reading it every `every`, until `updates` closes.
     pub(crate) async fn follow_images(&self, updates: &mpsc::Sender<Update>, every: Duration) {
-        images::follow(&self.socket, updates, every, "CRI-O", |hint| {
-            self.image_hints(hint)
-        })
+        images::follow(
+            &self.socket,
+            updates,
+            every,
+            "CRI-O",
+            self.stopping(),
+            |hint| self.image_hints(hint),
+        )
         .await;
     }
 
