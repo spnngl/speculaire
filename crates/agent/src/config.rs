@@ -39,6 +39,8 @@ pub struct Config {
     pub verify: Verify,
     /// `[sbom]`: SBOM attestations (D12).
     pub sbom: Sbom,
+    /// `[artifacts]`: the *artifact store* of signatures and attestations found upstream (D113).
+    pub artifacts: Artifacts,
     /// `[mirror]`: the local registry mirror the runtime pulls through (D14, D66).
     pub mirror: Mirror,
     /// `[peer]`: the peer API other nodes fetch from (D3).
@@ -104,6 +106,9 @@ impl Config {
                     stale_max: _,
                 },
             sbom: Sbom { max_size: _ },
+            artifacts: Artifacts {
+                directory: artifact_directory,
+            },
             mirror:
                 Mirror {
                     address: mirror,
@@ -186,6 +191,12 @@ impl Config {
             "blob_cache.directory",
             blob_directory,
             &running.blob_cache.directory,
+        );
+        keep(
+            &mut kept,
+            "artifacts.directory",
+            artifact_directory,
+            &running.artifacts.directory,
         );
         keep(&mut kept, "peer.address", peer, &running.peer.address);
         keep(
@@ -400,6 +411,22 @@ impl Default for Sbom {
     fn default() -> Self {
         Self {
             max_size: ByteSize::mebibytes(64),
+        }
+    }
+}
+
+/// `[artifacts]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Artifacts {
+    /// Where the *artifact store* keeps what discovery fetched (D113).
+    pub directory: Restart<Absolute>,
+}
+
+impl Default for Artifacts {
+    fn default() -> Self {
+        Self {
+            directory: Restart(Absolute::new("/var/lib/speculaire/artifacts")),
         }
     }
 }
