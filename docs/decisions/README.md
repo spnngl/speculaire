@@ -95,7 +95,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D85 [distribution](distribution.md): the mirror is hyper over TLS 1.3 with a required client certificate, finds a held blob by its digest in the content directory, answers every miss with a 404, and is checked by the distribution-spec conformance suite (amends D5, D14, D55, D82; amended by D102, D108, D110)
 - D86 [gate](gate.md): one preflight stops the agent and fails `check-config` on a node where it would mirror or gate wrongly: runtime version floors, NRI, discard_unpacked_layers and config_path, certificates; `/readyz` is 503 until the mirror listens (amends D15, D54, D64; amended by D90)
 - D87 [agent](agent.md): `runtime.containerd_socket`, `runtime.containerd_config` and `runtime.crio_socket` are restart keys that every command reads, and the agent's tests run against a fake containerd; no switch skips preflight (amends D60)
-- D88 [distribution](distribution.md): the upstream client is our own on hyper, with Bearer tokens kept per host and scope; the CRI-O relay serves what its served manifests point to and keeps it in the blob cache (amends D17, D53, D67, D83)
+- D88 [distribution](distribution.md): the upstream client is our own on hyper, with Bearer tokens kept per host and scope; the CRI-O relay serves what its served manifests point to and keeps it in the blob cache (amends D17, D53, D67, D83; amended by D111)
 - D89 [distribution](distribution.md): a `Registries` trait gives the client its sources from either runtime's registry config; CRI-O's auth file is the one its own config names, read from `crio.sock` (amends D17, D80; amended by D91, D92)
 - D90 [agent](agent.md): all runtime-specific code sits in `speculaire-runtime` behind four traits (`Wiring`, `Settings`, `Registries`, `Content`) that a `Node` hands out; only the relay-or-per-blob `Fallback` is visible to the agent (amends D64, D84, D86; amended by D99)
 - D91 [agent](agent.md): the registry config is parsed into a snapshot that a reload swaps (SIGHUP, or a poll that finds a watched file changed); a bad file keeps the previous one and is logged once and counted; `blob_cache.max_size` is live (amends D47, D89; amended by D92, D93)
@@ -118,4 +118,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D108 [distribution](distribution.md): the mirror reloads its certificates when a D93 stamp of their files changes, at most once a second (amends D85, D93)
 - D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34)
 - D110 [distribution](distribution.md): the content directory is `io.containerd.content.v1.content` below the `root` of containerd's config, `/var/lib/containerd` when it names none; an agent test serves a blob from a temporary root (amends D5, D85)
-Next free number: D111.
+- D111 [distribution](distribution.md): every request of the upstream client carries `User-Agent: speculaire/<version>` (amends D88)
+Next free number: D112.

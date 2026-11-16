@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use http::header::{AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE};
+use http::header::{AUTHORIZATION, CONTENT_TYPE, LOCATION, USER_AGENT, WWW_AUTHENTICATE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper::body::Incoming;
@@ -27,6 +27,10 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The largest answer of a token endpoint that is read.
 const MAX_TOKEN_ANSWER: usize = 1 << 20;
+
+/// The `User-Agent` of every request, which tells a registry's access log the agent's requests from the runtime's
+/// (D111).
+const AGENT: &str = concat!("speculaire/", env!("CARGO_PKG_VERSION"));
 
 /// `client_id` of the token requests that carry an identity token.
 const CLIENT_ID: &str = "speculaire";
@@ -417,7 +421,8 @@ async fn follow_uri(
     for _ in 0..=MAX_REDIRECTS {
         let mut builder = http::Request::builder()
             .method(method.clone())
-            .uri(uri.clone());
+            .uri(uri.clone())
+            .header(USER_AGENT, HeaderValue::from_static(AGENT));
         for (name, value) in headers {
             builder = builder.header(name, value);
         }
