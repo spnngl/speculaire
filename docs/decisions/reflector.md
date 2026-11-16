@@ -136,13 +136,13 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - `just valgrind`, locally on aarch64: memcheck finds no error and no definite leak in either run.
 - **Revisit when:** a target is missed. In DHAT's profile, each agent's connection costs the reflector about 50 KiB of h2, tonic and rustls buffers, which comes before the index (D2). 24 KiB of it are h2's write buffer and its 8 KiB read buffer, which no setting changes (h2 0.4.20 `src/codec/framed_write.rs:67`).
 
-## D105: Agents and reflectors speak length-prefixed protobuf over TLS, not gRPC (amends D2, D13, D97, D98, D104)
+## D105: Agents and reflectors speak length-prefixed protobuf over TLS, not gRPC (amends D2, D13, D97, D98, D104; amended by D117)
 
 - **Decision:**
   - **Wire:** a TLS connection with the ALPN protocol `speculaire-reflect/1` (`frame::ALPN`). Each frame is a 4-byte big-endian length, then that many bytes of one protobuf message: an `AgentMessage` from the agent, a `ReflectorMessage` from the reflector (`crates/reflect/proto/`). There is no gRPC service; `protocol_version` stays 1.
   - **Connections:** `Members` is a connection of its own through the load balancer, closed after the answer. Each member gets one connection per agent, the `Announce` stream: `Hello`, snapshots, deltas, lookups and pings, with `Resync` and `Prewarm` back.
   - **Order:** the reflector handles one frame at a time and writes each reply before it reads the next frame. A `LookupRequest` carries a number that its `LookupResponse` repeats, so the agent finds the lookup an answer is for among those it sent between announcements. `Lookup` and `Members` need no `Hello` first.
-  - **Size:** the reader checks a frame's length against 4 MiB before it allocates, then reads into a buffer of exactly that length, dropped once the message is decoded. The writer encodes into a buffer of the message's length and refuses one over the limit.
+  - **Size:** the reader checks a frame's length against 4 MiB before it allocates, then reads it into the connection's buffer (D117). The writer encodes into a buffer of the message's length and refuses one over the limit.
   - **Liveness:** the agent sends `Ping` every 30 s and the reflector answers `Pong`. Either side closes a connection silent for 40 s.
   - **Refusals:** `Refused{reason, message}`, then TLS `close_notify`. Its `Reason` is D97's limit (`identity`, `version`, `size`, `digests`, `address`, `malformed`), counted as before, or `superseded`, sent to the older connection of a node that opened another, or `stopping`. A frame that does not decode is `malformed`, and so is a lookup of an unparsable digest. A stopping reflector refuses each connection with `stopping` and waits for each, at most 1 s for the farewell (D103).
   - **Crate:** `crates/reflect` reads and writes frames in `frame.rs`, and compiles the messages with `prost-build`. D104's codec and HTTP/2 windows go with gRPC; its 25-digest chunks stay. tonic stays only for `containerd-client` (D13).
@@ -159,3 +159,15 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - lookup p99 72.6 and 111.9 µs, resync 45.1 and 43.6 s, 5000 lookups and 1000 deltas a second, no failed lookup;
   - the goal of 256 MiB is still missed: the index holds about 170 MB of it (D104).
 - **Revisit when:** a target of D33 is missed, or the reflector sends agents enough unasked messages (D51's `Prewarm`) that they need a queue of their own.
+
+## D117: A frame reader keeps one buffer per connection, up to 1 KiB (amends D105)
+
+- **Decision:** `frame::Reader`, on both ends, reads each frame's body into one buffer, kept between frames and grown to the largest frame read. After a frame over 1 KiB (`frame::KEEP`), it frees the buffer instead.
+- **Because:**
+  - D107 has a reader keep one read buffer for its connection. D105 allocated each frame's body and dropped it after decoding.
+  - The steady frames fit in 1 KiB and reuse the buffer: a lookup, its answer with D97's 8 peers, a delta of a few digests.
+  - A snapshot chunk of 25 digests (D104), 1.8 KB, comes only at connect and resync. Kept, it would pin about 2 KiB on each of 10k idle connections; past 1 KiB it is freed, so a connection holds what D105's did. A 4 MiB frame cannot stay pinned either.
+- **Measured:**
+  - `just bench-micro`, `speculaire-reflect`'s `read` (100 lookups through one reader): 101 allocations and 7.2 KB, against 200 and 14.8 KB; median 3.2 µs, against 4.5 µs.
+  - `just load` (D104), locally, 10 CPUs, two runs each: peak RSS 466 and 464 MiB, against 464 and 465 MiB; lookup p99 145 and 56 µs, against 188 and 158 µs. A 4 KiB `KEEP` that kept snapshot chunks peaked at 484 and 485 MiB.
+- **Revisit when:** a steady frame grows past 1 KiB, or snapshot chunks grow.

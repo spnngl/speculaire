@@ -21,6 +21,10 @@ pub const PING: Duration = Duration::from_secs(30);
 /// How long either side reads nothing before it closes the connection: a ping's period, and 10 s for its answer.
 pub const SILENCE: Duration = Duration::from_secs(40);
 
+/// The largest read buffer a [`Reader`] keeps between frames: a lookup, its answer and a small delta fit, while a
+/// `Snapshot` chunk of 25 digests (D104), 1.8 KB, is read into a buffer dropped after it.
+const KEEP: usize = 1 << 10;
+
 /// Why a frame could not be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
@@ -40,11 +44,14 @@ pub enum FrameError {
     Decode(#[from] prost::DecodeError),
 }
 
-/// Reads the frames of `M` off a connection. Its state survives a dropped [`Reader::next`]: it is cancel-safe.
+/// Reads the frames of `M` off a connection into one buffer, reused from frame to frame (D107). Its state survives a
+/// dropped [`Reader::next`]: it is cancel-safe.
 #[derive(Debug)]
 pub struct Reader<M> {
     limit: usize,
     state: State,
+    /// At least the current frame's body; kept for the next frame unless it grew over [`KEEP`].
+    buffer: Vec<u8>,
     message: PhantomData<fn() -> M>,
 }
 
@@ -52,8 +59,8 @@ pub struct Reader<M> {
 enum State {
     /// The length, `filled` bytes of it read.
     Head { length: U32, filled: usize },
-    /// The message, of exactly the length's size, `filled` bytes of it read.
-    Body { bytes: Vec<u8>, filled: usize },
+    /// The message, `size` bytes, `filled` bytes of it read into the buffer.
+    Body { size: usize, filled: usize },
 }
 
 impl State {
@@ -70,6 +77,7 @@ impl<M: Message + Default> Reader<M> {
         Self {
             limit,
             state: State::START,
+            buffer: Vec::new(),
             message: PhantomData,
         }
     }
@@ -106,24 +114,28 @@ impl<M: Message + Default> Reader<M> {
                                 limit: self.limit,
                             });
                         }
-                        self.state = State::Body {
-                            bytes: vec![0; size],
-                            filled: 0,
-                        };
+                        // Exact: the buffer stays the largest frame's size, not the next power of two.
+                        self.buffer
+                            .reserve_exact(size.saturating_sub(self.buffer.len()));
+                        self.buffer.resize(size.max(self.buffer.len()), 0);
+                        self.state = State::Body { size, filled: 0 };
                     }
                 }
-                State::Body { bytes, filled } if *filled < bytes.len() => {
-                    let unread = bytes.get_mut(*filled..).unwrap_or_default();
+                State::Body { size, filled } if *filled < *size => {
+                    let unread = self.buffer.get_mut(*filled..*size).unwrap_or_default();
                     let read = io.read(unread).await?;
                     if read == 0 {
                         return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
                     }
                     *filled += read;
                 }
-                State::Body { bytes, .. } => {
-                    let message = M::decode(bytes.as_slice());
-                    // The body goes with the frame: a connection holds no buffer between messages.
+                State::Body { size, .. } => {
+                    let message = M::decode(self.buffer.get(..*size).unwrap_or_default());
                     self.state = State::START;
+                    if self.buffer.len() > KEEP {
+                        // One outsized frame does not pin its size for the connection's life.
+                        self.buffer = Vec::new();
+                    }
                     return Ok(Some(message?));
                 }
             }
@@ -171,7 +183,14 @@ mod tests {
 
     /// The frames of `bytes`, read with a limit of `limit`, and how the reading ended.
     fn read(bytes: &[u8], limit: usize) -> (Vec<proto::AgentMessage>, Result<(), FrameError>) {
-        let mut reader = Reader::new(limit);
+        read_with(&mut Reader::new(limit), bytes)
+    }
+
+    /// The frames of `bytes`, read by `reader`, and how the reading ended.
+    fn read_with(
+        reader: &mut Reader<proto::AgentMessage>,
+        bytes: &[u8],
+    ) -> (Vec<proto::AgentMessage>, Result<(), FrameError>) {
         let mut io = bytes;
         let mut messages = Vec::new();
         loop {
@@ -209,6 +228,46 @@ mod tests {
         let (messages, end) = read(&bytes, LIMIT);
         assert_eq!(messages, [ping(), lookup]);
         end.unwrap();
+    }
+
+    /// A lookup whose frame's body is `size` bytes.
+    fn lookup_of(size: usize) -> proto::AgentMessage {
+        // The digest's 2-byte length, and 4 bytes of tags and lengths around it, at the sizes used here.
+        let lookup = proto::AgentMessage {
+            message: Some(agent_message::Message::Lookup(proto::LookupRequest {
+                digest: "0".repeat(size - 6),
+                id: 0,
+            })),
+        };
+        assert_eq!(lookup.encoded_len(), size);
+        lookup
+    }
+
+    #[tokio::test]
+    async fn the_buffer_grows_to_the_largest_frame_and_is_dropped_past_keep() {
+        let mut reader = Reader::new(LIMIT);
+        let mut frames = written(&lookup_of(500), LIMIT).await.unwrap();
+        frames.extend(written(&lookup_of(700), LIMIT).await.unwrap());
+        frames.extend(written(&ping(), LIMIT).await.unwrap());
+        let (messages, end) = read_with(&mut reader, &frames);
+        end.unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(reader.buffer.capacity(), 700);
+
+        let (_, end) = read_with(
+            &mut reader,
+            &written(&lookup_of(KEEP), LIMIT).await.unwrap(),
+        );
+        end.unwrap();
+        assert_eq!(reader.buffer.capacity(), KEEP);
+
+        let (messages, end) = read_with(
+            &mut reader,
+            &written(&lookup_of(KEEP + 1), LIMIT).await.unwrap(),
+        );
+        end.unwrap();
+        assert_eq!(messages, [lookup_of(KEEP + 1)]);
+        assert_eq!(reader.buffer.capacity(), 0);
     }
 
     #[test]
