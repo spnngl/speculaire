@@ -6,6 +6,8 @@ use speculaire_oci::reference::Digest;
 use tokio::sync::mpsc;
 
 use super::CriO;
+#[cfg(target_os = "linux")]
+use crate::images::Lost;
 use crate::images::{Image, Images, Update};
 use crate::paths::Paths;
 
@@ -63,4 +65,59 @@ async fn the_list_comes_then_each_replaced_images_json_hints() {
         .await
         .expect("the follower ends with its reader")
         .unwrap();
+}
+
+/// What the watch of `directory` comes to within 5 s, with `act` run once it started and its hints counted.
+#[cfg(target_os = "linux")]
+async fn watched(directory: &std::path::Path, act: impl FnOnce()) -> (Option<Lost>, usize) {
+    let (hint, mut hints) = mpsc::channel(1);
+    let watching = tokio::task::spawn_blocking({
+        let directory = directory.to_owned();
+        move || super::watch_blocking(&directory, &hint)
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    act();
+    let mut count = 0;
+    let lost = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut watching = std::pin::pin!(watching);
+        loop {
+            tokio::select! {
+                lost = &mut watching => break lost.unwrap(),
+                Some(()) = hints.recv() => count += 1,
+            }
+        }
+    })
+    .await
+    .ok();
+    while hints.try_recv().is_ok() {
+        count += 1;
+    }
+    (lost, count)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn images_json_written_in_place_hints_and_the_directory_removed_ends_the_watch() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = dir.path().join("overlay-images");
+    std::fs::create_dir(&images).unwrap();
+    let (lost, hints) = watched(&images, || {
+        std::fs::write(images.join("other.json"), "[]").unwrap();
+        std::fs::write(images.join("images.json"), "[]").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::remove_dir_all(&images).unwrap();
+    })
+    .await;
+    assert!(matches!(lost, Some(Lost::Ended)), "{lost:?}");
+    assert_eq!(hints, 1);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_path_that_is_no_directory_is_unreachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("images.json");
+    std::fs::write(&file, "[]").unwrap();
+    let (lost, _) = watched(&file, || {}).await;
+    assert!(matches!(lost, Some(Lost::Unreachable(_))), "{lost:?}");
 }

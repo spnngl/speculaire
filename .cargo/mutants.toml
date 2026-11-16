@@ -35,6 +35,8 @@ exclude_re = [
   'node\.rs:\d+:\d+: replace Agent::stop -> anyhow::Result<\(\)> with Ok\(\(\)\)$',
   # A target with exactly as many referrers as the cap: truncating to the cap keeps them all, only a warning differs.
   'discover\.rs:\d+:\d+: replace > with >= in Discovery::bundles$',
+  # inotify's flags are distinct bits: `^` sets the same ones as `|`.
+  'crio/images\.rs:\d+:\d+: replace \| with \^ in watch_blocking$',
 ]
 # `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/`,
 # `crates/pki/src/testing.rs` and `crates/reflect/src/bench.rs` are test and benchmark support (D87, D95, D104).

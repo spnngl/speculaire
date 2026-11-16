@@ -75,10 +75,8 @@ fn watch_blocking(directory: &Path, hint: &mpsc::Sender<()>) -> Lost {
     use rustix::io::Errno;
 
     let unreachable = |e: Errno| Lost::Unreachable(format!("{}: {e}", directory.display()));
-    let flags = WatchFlags::MOVED_TO
-        | WatchFlags::CLOSE_WRITE
-        | WatchFlags::DELETE_SELF
-        | WatchFlags::ONLYDIR;
+    // The kernel sends `IGNORED` when the directory goes, whatever the mask.
+    let flags = WatchFlags::MOVED_TO | WatchFlags::CLOSE_WRITE | WatchFlags::ONLYDIR;
     let fd = match inotify::init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC)
         .and_then(|fd| inotify::add_watch(&fd, directory, flags).map(|_| fd))
     {
