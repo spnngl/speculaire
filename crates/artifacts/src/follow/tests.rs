@@ -92,8 +92,18 @@ fn start(
     store: Arc<Store>,
     asked: &Arc<Asked>,
 ) -> (mpsc::Sender<Update>, tokio::task::JoinHandle<()>) {
+    let unlinked = speculaire_mirror::fetch::Fetcher::new(
+        std::path::PathBuf::new(),
+        speculaire_mirror::fetch::Settings {
+            stall_timeout: std::time::Duration::from_secs(1),
+            deny_ttl: std::time::Duration::from_secs(1),
+            resolve_tags: false,
+        },
+    );
     let discovery = Arc::new(Discovery::new(
+        Arc::clone(&store),
         store,
+        unlinked,
         Arc::clone(asked) as Arc<dyn Registries>,
         "127.0.0.1:7480".to_owned(),
         Host::current(),

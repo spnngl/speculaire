@@ -51,6 +51,16 @@ impl Lookup for Fixed {
     }
 }
 
+/// `blobs`, held.
+pub(crate) fn held(blobs: &[(&Digest, &Bytes)]) -> Held {
+    Held(
+        blobs
+            .iter()
+            .map(|(digest, bytes)| ((*digest).clone(), (*bytes).clone()))
+            .collect(),
+    )
+}
+
 pub(crate) fn pattern(len: usize, seed: u8) -> Bytes {
     (0..len)
         .map(|i| u8::try_from(i % 251).unwrap() ^ seed)
@@ -108,10 +118,19 @@ impl Nodes {
         listed: Listed,
         max_uploads: usize,
     ) -> (Holder, Arc<Uploads>) {
-        let held = blobs
-            .iter()
-            .map(|(digest, bytes)| ((*digest).clone(), (*bytes).clone()))
-            .collect();
+        self.serving(node, held(blobs), listed, Held(HashMap::new()), max_uploads)
+            .await
+    }
+
+    /// The peer API of `node`, serving `content`, the tags of `listed` and `artifacts`, at most `max_uploads` at once.
+    pub(crate) async fn serving<A: crate::referrers::Referrers + Send + Sync + 'static>(
+        &mut self,
+        node: &str,
+        content: Held,
+        listed: Listed,
+        artifacts: A,
+        max_uploads: usize,
+    ) -> (Holder, Arc<Uploads>) {
         let listener = TcpListener::bind((IP, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let uploads = Arc::new(Uploads::new(NonZeroUsize::new(max_uploads).unwrap()));
@@ -119,9 +138,9 @@ impl Nodes {
         tokio::spawn(serve(
             listener,
             self.credentials(node).server(),
-            Arc::new(Held(held)),
+            Arc::new(content),
             listed,
-            Arc::new(Held(HashMap::new())),
+            Arc::new(artifacts),
             Arc::clone(&uploads),
             async {
                 // An error means the sender went with the test: stop too.
@@ -163,7 +182,7 @@ pub(crate) const SETTINGS: Settings = Settings {
 
 /// What a network does wrong to the answers it carries.
 #[derive(Clone, Copy)]
-enum Fault {
+pub(crate) enum Fault {
     /// Closes the connection after this many bytes.
     Cut(usize),
     /// Holds the connection open but carries nothing after this many bytes.
@@ -173,7 +192,7 @@ enum Fault {
 }
 
 /// `holder` behind a TCP relay that carries the requests as they are and the answers with `fault`.
-async fn behind(holder: &Holder, fault: Fault) -> Holder {
+pub(crate) async fn behind(holder: &Holder, fault: Fault) -> Holder {
     let listener = TcpListener::bind((IP, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let to = holder.address;
@@ -282,6 +301,18 @@ async fn a_blob_and_a_manifest_come_whole_from_a_peer_that_holds_them() {
             r#"speculaire_peer_fetch_seconds_count{result="timeout"} 0"#,
         ],
     );
+}
+
+#[tokio::test]
+async fn content_larger_than_wanted_is_not_fetched() {
+    let mut nodes = Nodes::new();
+    let blob = pattern(100, 7);
+    let digest = sha(&blob);
+    let (a, _) = nodes.peer("node-a", &[(&digest, &blob)], 4).await;
+    let fetcher = nodes.fetcher(vec![a], SETTINGS);
+    assert!(fetcher.whole_up_to(Kind::Blob, &digest, 99).await.is_none());
+    let got = fetcher.whole_up_to(Kind::Blob, &digest, 100).await.unwrap();
+    assert_eq!(read(got).await, blob);
 }
 
 #[tokio::test]

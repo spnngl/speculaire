@@ -196,16 +196,11 @@ async fn an_agent_announces_to_every_member_and_keeps_both_maps_the_same() {
     test.wait(&digest(3), &[]).await;
     // Another agent's lookup finds node-a, and node-a's own lookup does not.
     let b = test.agent("node-b", &Arc::new(Holdings::default()), None);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let found = loop {
-        match b.lookup(&digest(2)).await {
-            Ok(found) => break found,
-            Err(LookupError::NoMember) if Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(err) => panic!("{err}"),
-        }
-    };
+    // Once linked, a lookup asks a member.
+    tokio::time::timeout(Duration::from_secs(5), b.linked())
+        .await
+        .unwrap();
+    let found = b.lookup(&digest(2)).await.unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!((found[0].node.as_str(), found[0].address), ("node-a", peer));
     assert_eq!(a.lookup(&digest(2)).await.unwrap(), []);

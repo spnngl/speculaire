@@ -126,11 +126,21 @@ async fn serve(
     report_registries(registries.reload());
     let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
     status.mirror_listening();
-    let store = start_discovery(&config, &node, Arc::clone(&registries))?;
+    // Discovery waits for a reflector stream, so that it asks peers before upstream (D126).
+    let (linked, peers) = tokio::sync::watch::channel(client_config(&config).is_none());
+    let store = start_discovery(&config, &node, &mirror, Arc::clone(&registries), peers)?;
     let mut reflector = None;
     open_reflector(&config, &identity, &mut reflector, &status).await;
     let mut sharing = None;
-    open_sharing(&config, &identity, &mirror, &node, &store, &mut sharing);
+    open_sharing(
+        &config,
+        &identity,
+        &mirror,
+        &node,
+        &store,
+        &linked,
+        &mut sharing,
+    );
     systemd::watchdog();
     systemd::ready();
 
@@ -148,7 +158,7 @@ async fn serve(
                 report_registries(registries.reload());
                 identity.reload();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
-                open_sharing(&config, &identity, &mirror, &node, &store, &mut sharing);
+                open_sharing(&config, &identity, &mirror, &node, &store, &linked, &mut sharing);
             }
             _ = poll.tick() => {
                 if let Some(now) = watch.changed() {
@@ -161,7 +171,7 @@ async fn serve(
                 }
                 identity.poll();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
-                open_sharing(&config, &identity, &mirror, &node, &store, &mut sharing);
+                open_sharing(&config, &identity, &mirror, &node, &store, &linked, &mut sharing);
             }
         }
         if config.config.poll_interval.get() != period {
@@ -332,6 +342,14 @@ impl Mirror {
         }
     }
 
+    /// The manifests the node holds, for discovery: the blob cache where the node relays, else the runtime's content.
+    fn manifests(&self, node: &RuntimeNode) -> Arc<dyn speculaire_artifacts::Local> {
+        match &self.relay {
+            Some(relay) => Arc::<Cache>::clone(relay.cache()),
+            None => Arc::new(node.content()),
+        }
+    }
+
     async fn stop(self) {
         // An error means the mirror already ended.
         let _ = self.stop.send(());
@@ -419,12 +437,20 @@ async fn start_mirror(
     })
 }
 
-/// Opens the artifact store and discovers the artifacts of each image the runtime lists (D121); the store is what the
-/// node serves of them (D124).
+/// How long discovery waits at startup for `peers` to say a reflector stream is up, before it starts without peers.
+const LINK_WAIT: Duration = Duration::from_secs(10);
+
+/// Opens the artifact store and discovers the artifacts of each image the runtime lists, from the store, then peers
+/// through the mirror's fetcher, then upstream (D121, D126); the store is what the node serves of them (D124).
+///
+/// Discovery starts once `peers` turns true, or after [`LINK_WAIT`]: a root it found unreachable waits
+/// [`speculaire_artifacts::follow::RETRY`], so its first pass asks peers when the node has any.
 fn start_discovery(
     config: &Config,
     node: &RuntimeNode,
+    mirror: &Mirror,
     registries: Arc<dyn Registries>,
+    peers: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<Arc<Store>> {
     let directory = config.artifacts.directory.get().get();
     let store = Store::open(directory)
@@ -433,16 +459,29 @@ fn start_discovery(
     let store = Arc::new(store);
     let discovery = Discovery::new(
         Arc::clone(&store),
+        mirror.manifests(node),
+        mirror.fetcher.clone(),
         registries,
         config.mirror.address.get().get().to_string(),
         Host::current(),
         Limits::new(config.sbom.max_size.get()),
     );
-    tokio::spawn(speculaire_artifacts::follow(
-        Arc::new(discovery),
-        node.images(),
-    ));
+    let images = node.images();
+    tokio::spawn(async move {
+        linked_or_after(peers, LINK_WAIT).await;
+        speculaire_artifacts::follow(Arc::new(discovery), images).await;
+    });
     Ok(store)
+}
+
+/// Resolves once `linked` turns true, or its sender drops, or after `wait`.
+async fn linked_or_after(mut linked: tokio::sync::watch::Receiver<bool>, wait: Duration) {
+    if tokio::time::timeout(wait, linked.wait_for(|linked| *linked))
+        .await
+        .is_err()
+    {
+        info!("no reflector stream after {wait:?}: discovery starts without peers");
+    }
 }
 
 /// The fetcher's live keys in `config`.
@@ -633,6 +672,7 @@ fn open_sharing(
     mirror: &Mirror,
     node: &RuntimeNode,
     store: &Arc<Store>,
+    linked: &tokio::sync::watch::Sender<bool>,
     sharing: &mut Option<Sharing>,
 ) {
     if sharing.is_some() || !identity.enabled(SystemTime::now()) {
@@ -653,6 +693,14 @@ fn open_sharing(
             Arc::new(Holders(client.lookups())),
             Arc::clone(&credentials),
         );
+        tokio::spawn({
+            let up = client.linked();
+            let linked = linked.clone();
+            async move {
+                up.await;
+                linked.send_replace(true);
+            }
+        });
         let peers = mirror.open_peers(
             node,
             Arc::clone(store),
@@ -694,6 +742,18 @@ mod tests {
     use speculaire_runtime::registries::ContainerdRegistries;
 
     use super::*;
+
+    #[tokio::test]
+    async fn discovery_starts_once_a_stream_is_up_or_after_the_wait() {
+        let (linked, receiver) = tokio::sync::watch::channel(false);
+        let start = std::time::Instant::now();
+        linked_or_after(receiver.clone(), Duration::from_millis(50)).await;
+        assert!(start.elapsed() >= Duration::from_millis(50));
+        linked.send_replace(true);
+        let start = std::time::Instant::now();
+        linked_or_after(receiver, Duration::from_secs(60)).await;
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn a_poll_interval_past_the_clocks_range_starts_the_polls() {

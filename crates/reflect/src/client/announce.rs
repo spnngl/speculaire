@@ -140,6 +140,7 @@ async fn connection(
         };
         *up = Some(Instant::now());
         shared.links().insert(member.node.clone(), queue);
+        shared.linked.send_replace(true);
         connected.set(1.0);
         info!(node = %member.node, address = %member.address, "reflector stream up");
         announcer

@@ -11,9 +11,11 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use serde_json::{Value, json};
+use speculaire_mirror::fetch::Settings;
 use speculaire_oci::referrers::{
     BUNDLE, COSIGN_ATTESTATION, EMPTY, INDEX, MANIFEST, SIMPLE_SIGNING,
 };
+use speculaire_runtime::content::{self, Blob, Content};
 use speculaire_runtime::registries::{
     Credentials, Endpoint, Error as ConfigError, Reloaded, Source,
 };
@@ -21,14 +23,14 @@ use tokio::net::TcpListener;
 
 use super::*;
 
-const NAME: &str = "reg.test/app";
+pub(super) const NAME: &str = "reg.test/app";
 const MIRROR: &str = "127.0.0.1:7480";
 
 /// A status, headers and a body.
 type Reply = (u16, Vec<(&'static str, String)>, Bytes);
 
 /// A fake registry: each path with its query answers its status and body, and every request is logged.
-struct Registry {
+pub(super) struct Registry {
     address: SocketAddr,
     replies: Arc<Mutex<HashMap<String, Reply>>>,
     log: Arc<Mutex<Vec<String>>>,
@@ -80,7 +82,7 @@ impl Registry {
         }
     }
 
-    fn put(&self, path: &str, status: u16, body: impl Into<Bytes>) {
+    pub(super) fn put(&self, path: &str, status: u16, body: impl Into<Bytes>) {
         self.put_with(path, status, Vec::new(), body);
     }
 
@@ -98,7 +100,7 @@ impl Registry {
     }
 
     /// Serves `bytes` as the manifest `digest`, with its media type, and returns the digest.
-    fn manifest(&self, bytes: &[u8]) -> Digest {
+    pub(super) fn manifest(&self, bytes: &[u8]) -> Digest {
         let digest = digest_of(bytes);
         let manifest: Value = serde_json::from_slice(bytes).unwrap();
         let media_type = manifest["mediaType"].as_str().unwrap().to_owned();
@@ -118,11 +120,11 @@ impl Registry {
         digest
     }
 
-    fn requests(&self) -> Vec<String> {
+    pub(super) fn requests(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
     }
 
-    fn endpoint(&self) -> Endpoint {
+    pub(super) fn endpoint(&self) -> Endpoint {
         Endpoint::new(false, self.address.to_string())
     }
 }
@@ -153,6 +155,25 @@ impl Registries for Fixed {
     }
 }
 
+/// The fetcher's settings in tests.
+pub(super) const SETTINGS: Settings = Settings {
+    stall_timeout: std::time::Duration::from_secs(5),
+    deny_ttl: std::time::Duration::from_secs(600),
+    resolve_tags: false,
+};
+
+/// A node that holds nothing.
+pub(super) struct Nothing;
+
+impl Content for Nothing {
+    fn open(
+        &self,
+        _: &Digest,
+    ) -> impl Future<Output = Result<Option<Blob>, content::Error>> + Send {
+        std::future::ready(Ok(None))
+    }
+}
+
 fn digest_of(bytes: &[u8]) -> Digest {
     speculaire_oci::hash::of("sha256", bytes).unwrap()
 }
@@ -170,9 +191,9 @@ fn platform() -> Host {
 }
 
 /// A test: one registry, a store, and discovery through `Fixed` with the limits of D121.
-struct Test {
-    registry: Registry,
-    discovery: Discovery,
+pub(super) struct Test {
+    pub(super) registry: Registry,
+    pub(super) discovery: Discovery,
     _dir: tempfile::TempDir,
 }
 
@@ -182,11 +203,25 @@ impl Test {
     }
 
     async fn with(limits: Limits, candidates: impl FnOnce(&Registry) -> Vec<Endpoint>) -> Self {
-        let registry = Registry::start().await;
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path()).unwrap());
+        let unlinked = Fetcher::new(dir.path().join("staging"), SETTINGS);
+        Self::near(limits, candidates, Arc::new(Nothing), unlinked, dir).await
+    }
+
+    /// A test whose node holds what `local` does and asks `peers`, its store below `dir`.
+    pub(super) async fn near(
+        limits: Limits,
+        candidates: impl FnOnce(&Registry) -> Vec<Endpoint>,
+        local: Arc<dyn Local>,
+        peers: Fetcher,
+        dir: tempfile::TempDir,
+    ) -> Self {
+        let registry = Registry::start().await;
+        let store = Arc::new(Store::open(dir.path().join("store")).unwrap());
         let discovery = Discovery::new(
             store,
+            local,
+            peers,
             Arc::new(Fixed(candidates(&registry))),
             MIRROR.to_owned(),
             platform(),
@@ -200,7 +235,7 @@ impl Test {
     }
 
     /// An image manifest served as the root.
-    fn root(&self) -> Digest {
+    pub(super) fn root(&self) -> Digest {
         let config = self.registry.blob(b"config");
         self.registry.manifest(
             json!({
@@ -266,7 +301,7 @@ impl Test {
         self.registry.put_with(path, 200, headers, index);
     }
 
-    async fn discover(&self, root: &Digest) -> Result<Vec<Artifact>, Error> {
+    pub(super) async fn discover(&self, root: &Digest) -> Result<Vec<Artifact>, Error> {
         self.discovery.discover(root, &[NAME.to_owned()]).await
     }
 }

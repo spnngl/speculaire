@@ -251,9 +251,10 @@ fn a_peer_whose_certificate_names_another_node_than_the_lookup_is_refused() {
             address: c,
         }],
     );
-    let (errors, served) = (
+    // B's side: C's uploads also count the referrers lists other nodes' discovery asks for (D124, D126).
+    let (errors, bytes) = (
         nodes.metric(&nodes.b, r#"speculaire_peer_fetches_total{result="error"}"#),
-        nodes.metric(&nodes.c, UPLOADED),
+        nodes.metric(&nodes.b, r#"speculaire_mirror_bytes_total{source="peer"}"#),
     );
     nodes.pulled(&nodes.b, &image);
     assert!(
@@ -261,7 +262,11 @@ fn a_peer_whose_certificate_names_another_node_than_the_lookup_is_refused() {
         "B did not fall through"
     );
     assert!(nodes.metric(&nodes.b, r#"speculaire_peer_fetches_total{result="error"}"#) > errors);
-    assert_eq!(nodes.metric(&nodes.c, UPLOADED), served, "C answered B");
+    assert_eq!(
+        nodes.metric(&nodes.b, r#"speculaire_mirror_bytes_total{source="peer"}"#),
+        bytes,
+        "C answered B"
+    );
     nodes.rmi(&[&nodes.a, &nodes.b], &image);
 }
 

@@ -29,6 +29,7 @@ futures-util.workspace = true
 hyper = { workspace = true, features = ["server"] }
 hyper-util.workspace = true
 metrics-exporter-prometheus.workspace = true
+speculaire-pki = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

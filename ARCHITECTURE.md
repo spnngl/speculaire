@@ -76,7 +76,7 @@ The verifier works asynchronously, so the gate never waits on the network.
    - a change of the runtime's image list, which containerd's `/images/*` events and CRI-O's `images.json` signal (D65, D121); at M4, discovery's only trigger;
    - NRI `Synchronize`, which lists the containers already running;
    - a gate cache miss.
-2. **Discover** referrers for the index digest and the platform manifest digest. Try sources in this order:
+2. **Discover** referrers for the index digest and the platform manifest digest. Try sources in this order (D126):
    1. the artifact store;
    2. peers, through the reflector;
    3. upstream, using the *registry config* for endpoints, TLS and credentials: the referrers API, then the `sha256-<hex>` fallback tag, then the cosign legacy `.sig` tag. `.att` tags are ignored (D43).
@@ -123,7 +123,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/pki` | the mirror's local CA and certificates (D14, D82); later kubelet certificate loading and rotation, rustls verifiers (D16) |
 | `crates/load` | The load scenario `speculaire-loadgen` runs: simulated agents on `crates/reflect`'s client, the reflector's targets measured from `/proc` and `/metrics` (D33, D104) |
 | `crates/reflect` | Protobuf frames over TLS (D105), the reflector's server and index (D97), and the agent's client: `Members`, one `Announce` stream per member carrying its numbered `Lookup`s, hedged (D2, D98) |
-| `crates/artifacts` | Discovery of each listed image's artifacts upstream, through the runtime's `Registries`, into the *artifact store*, which the peer API serves (D17, D43, D121, D124) |
+| `crates/artifacts` | Discovery of each listed image's artifacts from the *artifact store*, then peers through the mirror's fetcher, then upstream through the runtime's `Registries`, into the store, which the peer API serves (D17, D43, D121, D124, D126) |
 | `crates/verify` | Sigstore glue, policy, SBOM checks and verdict cache, over `crates/artifacts` (planned) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data, a workspace of its own, run by `just fuzz <target>` and nightly; `just check` replays their seeds on stable (D27). `config` takes raw bytes and `config_values` a config file written from the keys (D75) |
