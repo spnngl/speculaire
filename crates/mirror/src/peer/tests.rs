@@ -78,6 +78,10 @@ struct Test {
 
 impl Test {
     async fn start<C: Content>(content: Arc<C>, max_uploads: usize) -> Self {
+        Self::listing(content, Listed::of(Vec::new()), max_uploads).await
+    }
+
+    async fn listing<C: Content>(content: Arc<C>, listed: Listed, max_uploads: usize) -> Self {
         let cluster = Cluster::new("kubernetes");
         let dir = tempfile::tempdir().unwrap();
         let tls = credentials(&cluster, &dir, SERVER).server();
@@ -85,10 +89,17 @@ impl Test {
         let address = listener.local_addr().unwrap();
         let uploads = Arc::new(Uploads::new(NonZeroUsize::new(max_uploads).unwrap()));
         let (stop, stopped) = oneshot::channel::<()>();
-        let served = tokio::spawn(serve(listener, tls, content, Arc::clone(&uploads), async {
-            // An error means the sender went with the test: stop too.
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            tls,
+            content,
+            listed,
+            Arc::clone(&uploads),
+            async {
+                // An error means the sender went with the test: stop too.
+                let _ = stopped.await;
+            },
+        ));
         Self {
             cluster,
             dir,
@@ -249,7 +260,7 @@ async fn another_node_reads_a_blob_whole_and_in_part_and_a_manifest_by_digest() 
 }
 
 #[tokio::test]
-async fn everything_but_a_manifest_or_a_blob_by_digest_answers_404() {
+async fn everything_but_a_manifest_or_a_blob_by_digest_or_a_listed_tag_answers_404() {
     let held = digest_of(1);
     let test = Test::start(
         Arc::new(Held(HashMap::from([(held.clone(), pattern(10))]))),
@@ -272,6 +283,107 @@ async fn everything_but_a_manifest_or_a_blob_by_digest_answers_404() {
     }
     let post = ask(&mut sender, Method::POST, &blob_path(&held), None).await;
     assert_eq!(post.status, StatusCode::NOT_FOUND);
+}
+
+fn listed(tags: &[&str], repo_digests: &[(&str, &Digest)]) -> Listed {
+    Listed::of(vec![speculaire_runtime::images::Image {
+        id: digest_of(9),
+        repo_digests: repo_digests
+            .iter()
+            .map(
+                |&(repository, digest)| speculaire_runtime::images::RepoDigest {
+                    repository: repository.to_owned(),
+                    digest: digest.clone(),
+                },
+            )
+            .collect(),
+        tags: tags.iter().filter_map(|tag| Tagged::parse(tag)).collect(),
+    }])
+}
+
+#[tokio::test]
+async fn a_listed_tag_answers_the_index_it_was_pulled_by_before_a_manifest() {
+    let manifest = Bytes::from_static(br#"{"schemaVersion":2,"config":{},"layers":[]}"#);
+    let index = Bytes::from_static(br#"{"schemaVersion":2,"manifests":[]}"#);
+    let (manifest_digest, index_digest) = (digest_of(1), digest_of(2));
+    let other = digest_of(3);
+    let test = Test::listing(
+        Arc::new(Held(HashMap::from([
+            (manifest_digest.clone(), manifest.clone()),
+            (index_digest.clone(), index.clone()),
+            (other.clone(), index.clone()),
+        ]))),
+        listed(
+            &["busybox:1.37"],
+            &[
+                // Another repository's digest is not this tag's.
+                ("docker.io/library/other", &other),
+                ("docker.io/library/busybox", &digest_of(4)),
+                ("docker.io/library/busybox", &manifest_digest),
+                ("docker.io/library/busybox", &index_digest),
+            ],
+        ),
+        4,
+    )
+    .await;
+    let mut sender = test.client("node-b").await;
+    let path = "/v2/docker.io/library/busybox/manifests/1.37";
+    let got = get(&mut sender, path).await;
+    assert_eq!(got.status, StatusCode::OK);
+    assert_eq!(got.body, index);
+    assert_eq!(
+        header(&got, "docker-content-digest"),
+        index_digest.to_string()
+    );
+    assert_eq!(
+        header(&got, CONTENT_TYPE),
+        "application/vnd.oci.image.index.v1+json"
+    );
+    let head = ask(&mut sender, Method::HEAD, path, None).await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(header(&head, CONTENT_LENGTH), index.len().to_string());
+    assert!(head.body.is_empty());
+    for missing in [
+        "/v2/docker.io/library/busybox/manifests/1.36",
+        "/v2/docker.io/library/other/manifests/1.37",
+        "/v2/docker.io/library/busybox/blobs/1.37",
+    ] {
+        assert_eq!(
+            get(&mut sender, missing).await.status,
+            StatusCode::NOT_FOUND,
+            "{missing}"
+        );
+    }
+
+    // Without the index, the manifest; without either, a 404.
+    let only_manifest = Test::listing(
+        Arc::new(Held(HashMap::from([(
+            manifest_digest.clone(),
+            manifest.clone(),
+        )]))),
+        listed(
+            &["busybox:1.37"],
+            &[
+                ("docker.io/library/busybox", &manifest_digest),
+                ("docker.io/library/busybox", &index_digest),
+            ],
+        ),
+        4,
+    )
+    .await;
+    let got = get(&mut only_manifest.client("node-b").await, path).await;
+    assert_eq!(got.body, manifest);
+    let nothing = Test::listing(
+        Arc::new(Held(HashMap::new())),
+        listed(
+            &["busybox:1.37"],
+            &[("docker.io/library/busybox", &index_digest)],
+        ),
+        4,
+    )
+    .await;
+    let got = get(&mut nothing.client("node-b").await, path).await;
+    assert_eq!(got.status, StatusCode::NOT_FOUND);
 }
 
 /// Whether the peer API refuses a client with `config`: in TLS 1.3, the handshake completes on the client's side, and

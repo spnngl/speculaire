@@ -2175,6 +2175,7 @@ dependencies = [
  "hyper-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "percent-encoding",
  "rustls",
  "secrecy",
  "serde",

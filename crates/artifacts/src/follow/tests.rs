@@ -27,6 +27,7 @@ fn image(id: u8, repo_digests: &[(&str, u8)]) -> Image {
                 digest: digest(*n),
             })
             .collect(),
+        tags: Vec::new(),
     }
 }
 

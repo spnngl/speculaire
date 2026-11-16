@@ -174,7 +174,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Measured (M1 step 06, `just e2e containerd 2.4 1.37` and `just e2e crio 1.37`, arm64):** the unit is active on every node with `Type=notify` and `WatchdogUSec=30s`; `systemd-analyze security` reports D53's settings set, except `SystemCallFilter=~@resources`, `RestrictAddressFamilies=~AF_UNIX` and `RestrictAddressFamilies=~AF_(INET|INET6)`, which D53 leaves open; removing `ProtectClock=` and `WatchdogSec=` from one node failed the suite; `systemctl stop` exits 0 in under a second; `/run/speculaire` survives a restart; the journal holds the agent's fields with tracing-journald's `F_` prefix, such as `F_ADDRESS=[::]:7482`.
 - **Revisit when:** a component holds a thread for longer than the watchdog allows by design.
 
-## D82: `configure` makes one set of certificates and edits every `hosts.toml` under `config_path` (amends D14, D32, D55, D56; amended by D85, D101)
+## D82: `configure` makes one set of certificates and edits every `hosts.toml` under `config_path` (amends D14, D32, D55, D56; amended by D85, D101, D123)
 
 - **Decision:**
   - **Certificates:** four files in `/var/lib/speculaire/mirror/`: `ca.crt` and `server.crt` (0644), `server.key` and `client.pem` (0600). `client.pem` is the client certificate and its key, in that order, as containerd's `client` reads them (D14). The keys are ECDSA P-256 (`rcgen` on aws-lc-rs, D13), the certificates valid from an hour before they are made for ten years, and the CA's own key is dropped after it signs the two others. Crates `speculaire-pki` (`mirror`) and `speculaire-configure`.
@@ -303,7 +303,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Revisit when:** a watched filesystem moves the change time without a change, so polls read for nothing.
 
 
-## D99: What a node serves to peers is a fifth trait, `Inventory` (amends D90; amended by D121)
+## D99: What a node serves to peers is a fifth trait, `Inventory` (amends D90; amended by D121, D123)
 
 - **Decision:**
   - **Trait:** `Inventory::follow` sends a listing, then each blob added or removed, until its receiver closes; a later listing replaces the earlier one. A `Node` hands it out, and the agent turns it into what it announces (D98). The M5 `Images` trait becomes the sixth.

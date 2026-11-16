@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use speculaire_oci::reference::Digest;
+use speculaire_oci::tagged::Tagged;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tracing::warn;
@@ -53,11 +54,13 @@ pub struct Image {
     /// Its repository digests, in the runtime's order. On CRI-O they pair each repository with each digest the image
     /// was pulled by, so a registry may never have served some of them (D65).
     pub repo_digests: Vec<RepoDigest>,
+    /// The tags it is known by, which peers resolve from (D123).
+    pub tags: Vec<Tagged>,
 }
 
 impl Image {
     /// The image of a CRI answer; `None` when its ID is no digest. containerd lists the ID with its algorithm, CRI-O
-    /// with the hex alone; a repository digest that does not parse is left out.
+    /// with the hex alone; a repository digest or tag that does not parse is left out.
     #[must_use]
     pub fn from_listed(listed: &ListedImage) -> Option<Self> {
         let id = if listed.id.contains(':') {
@@ -72,6 +75,11 @@ impl Image {
                 .repo_digests
                 .iter()
                 .filter_map(|text| RepoDigest::parse(text))
+                .collect(),
+            tags: listed
+                .repo_tags
+                .iter()
+                .filter_map(|text| Tagged::parse(text))
                 .collect(),
         })
     }

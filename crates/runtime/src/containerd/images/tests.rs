@@ -47,6 +47,7 @@ async fn the_list_is_what_the_cri_lists() {
     let image = Image {
         id: Digest::parse(&id).unwrap(),
         repo_digests: Vec::new(),
+        tags: Vec::new(),
     };
     assert_eq!(first, Some(Update::Listing(vec![image])));
     drop(updates);

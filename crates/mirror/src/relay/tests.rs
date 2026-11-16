@@ -11,6 +11,7 @@ use secrecy::SecretString;
 use speculaire_runtime::images::{Image as RuntimeImage, RepoDigest, Update};
 use speculaire_runtime::registries::{Credentials, Endpoint, Error as ConfigError};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 use super::*;
 use crate::fetch::tests::{Nodes, SETTINGS, pattern};
@@ -384,6 +385,7 @@ fn pull<'a>(
     Pull {
         kind,
         name: "reg.test/app/web",
+        namespace: None,
         reference: Some(reference),
         head,
         range,
@@ -737,6 +739,69 @@ async fn a_blob_a_peer_holds_is_relayed_from_it_before_upstream_and_kept() {
 }
 
 #[tokio::test]
+async fn a_tag_and_the_manifests_below_it_come_from_peers_before_upstream() {
+    let node = Node::new().await;
+    let image = Image::new(&node.registry, &[1000]);
+    let index = Bytes::from(format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"digest":"{}","size":{}}}]}}"#,
+        image.manifest_digest,
+        image.manifest.len()
+    ));
+    let index_digest = sha(&index);
+    let layer = sha(&image.layers[0]);
+    let mut nodes = Nodes::new();
+    let listed = crate::listed::Listed::of(vec![RuntimeImage {
+        id: sha(&image.config),
+        repo_digests: vec![RepoDigest {
+            repository: "reg.test/app/web".to_owned(),
+            digest: index_digest.clone(),
+        }],
+        tags: vec![speculaire_oci::tagged::Tagged::parse("reg.test/app/web:1.0").unwrap()],
+    }]);
+    let held = [
+        (&index_digest, &index),
+        (&image.manifest_digest, &image.manifest),
+        (&layer, &image.layers[0]),
+    ];
+    let (a, _) = nodes.listing("node-a", &held, listed, 4).await;
+    let relay = node.relay_from(
+        1 << 30,
+        Listed(Vec::new()),
+        nodes.fetcher(vec![a], SETTINGS),
+    );
+    let got = read(
+        relay
+            .pull(pull(Kind::Manifest, &tag("1.0"), false, None))
+            .await,
+    )
+    .await
+    .unwrap();
+    assert_eq!(got.source, metrics::Source::Peer);
+    assert!(got.body == index.as_ref(), "the index differs");
+    assert_eq!(
+        got.headers["docker-content-digest"],
+        index_digest.to_string().as_str()
+    );
+    let below = by(&image.manifest_digest);
+    let got = read(relay.pull(pull(Kind::Manifest, &below, false, None)).await)
+        .await
+        .unwrap();
+    assert_eq!(got.source, metrics::Source::Peer);
+    assert!(got.body == image.manifest.as_ref(), "the manifest differs");
+    assert!(relay.cache().contains(&index_digest));
+    assert!(relay.cache().contains(&image.manifest_digest));
+    let got = read(relay.pull(pull(Kind::Blob, &by(&layer), false, None)).await)
+        .await
+        .unwrap();
+    assert_eq!(got.source, metrics::Source::Peer);
+    assert!(
+        node.registry.requests().is_empty(),
+        "{:?}",
+        node.registry.requests()
+    );
+}
+
+#[tokio::test]
 async fn a_wrong_blob_from_a_peer_fails_the_pull_and_the_retry_goes_upstream() {
     let node = Node::new().await;
     let image = Image::new(&node.registry, &[300_000]);
@@ -992,6 +1057,7 @@ impl Images for Listed {
                     repository: "app/web".to_owned(),
                     digest: digest.clone(),
                 }],
+                tags: Vec::new(),
             })
             .collect();
         Box::pin(async move {
@@ -1082,7 +1148,7 @@ async fn above_the_bound_the_blobs_of_unlisted_images_go_before_those_of_listed_
     )
     .await
     .unwrap();
-    relay.read_list().await;
+    relay.listed().read().await;
     relay.evict().await;
     // The unlisted image's oldest blob went; every blob of the listed image is still there.
     assert!(!relay.cache().contains(&sha(&other_manifest)));
@@ -1095,7 +1161,7 @@ async fn above_the_bound_the_blobs_of_unlisted_images_go_before_those_of_listed_
     assert!(!relay.cache().over());
     // A bound that leaves only room for the listed image's smallest blob evicts what it protects as a last resort.
     relay.cache().set_max_size(10);
-    relay.read_list().await;
+    relay.listed().read().await;
     relay.evict().await;
     assert!(relay.cache().size() <= 10);
 }
@@ -1129,7 +1195,7 @@ async fn the_blobs_of_listed_images_go_least_recently_served_first() {
     }
     // One byte short of the two layers: the manifest, the config and the layer served first go.
     relay.cache().set_max_size(5999);
-    relay.read_list().await;
+    relay.listed().read().await;
     relay.evict().await;
     assert!(!relay.cache().contains(&sha(&image.layers[0])));
     assert!(relay.cache().contains(&sha(&image.layers[1])));

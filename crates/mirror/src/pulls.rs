@@ -7,6 +7,7 @@ use bytes::Bytes;
 use http_body_util::combinators::UnsyncBoxBody;
 use hyper::Response;
 use speculaire_oci::reference::Digest;
+use speculaire_oci::tagged::Tagged;
 use speculaire_runtime::content::{Blob, Content, Error};
 
 use crate::fetch::Fetcher;
@@ -23,6 +24,8 @@ pub struct Pull<'a> {
     pub kind: Kind,
     /// The repository name as the runtime wrote it, the registry first on CRI-O.
     pub name: &'a str,
+    /// The registry of the name, which containerd sends apart (`ns`); `None` on CRI-O.
+    pub namespace: Option<&'a str>,
     /// Its digest or tag; `None` when the text is neither.
     pub reference: Option<&'a Reference<'a>>,
     /// Only the head of the answer is wanted.
@@ -31,6 +34,20 @@ pub struct Pull<'a> {
     pub range: Option<&'a str>,
     /// The `Accept` headers, joined.
     pub accept: Option<&'a str>,
+}
+
+impl Pull<'_> {
+    /// The tag pulled, named in full: `None` for a digest, or a name that is no image reference.
+    #[must_use]
+    pub fn tagged(&self) -> Option<Tagged> {
+        let Some(Reference::Tag(tag)) = self.reference else {
+            return None;
+        };
+        Tagged::parse(&match self.namespace {
+            Some(namespace) => format!("{namespace}/{}:{tag}", self.name),
+            None => format!("{}:{tag}", self.name),
+        })
+    }
 }
 
 /// What became of a pull.
@@ -49,7 +66,8 @@ pub trait Pulls: Send + Sync + 'static {
     fn pull(&self, pull: Pull<'_>) -> impl Future<Output = Answer> + Send;
 }
 
-/// containerd: what the node holds, by digest, whatever the name, else what peers hold. A tag is a miss (D6).
+/// containerd: what the node holds, by digest, whatever the name, else what peers hold; a tag, what its holders
+/// resolve it to (D123).
 pub struct Local<C> {
     content: C,
     fetcher: Fetcher,
@@ -64,10 +82,18 @@ impl<C: Content> Local<C> {
 
 impl<C: Content> Pulls for Local<C> {
     async fn pull(&self, pull: Pull<'_>) -> Answer {
-        let (Kind::Manifest | Kind::Blob, Some(Reference::Digest(digest))) =
-            (pull.kind, pull.reference)
-        else {
-            return Answer::Missing;
+        let digest = match (pull.kind, pull.reference) {
+            (Kind::Manifest | Kind::Blob, Some(Reference::Digest(digest))) => digest,
+            (Kind::Manifest, Some(Reference::Tag(_))) => {
+                let resolved = match pull.tagged() {
+                    Some(tagged) => self.fetcher.tag(&tagged).await,
+                    None => None,
+                };
+                return resolved.map_or(Answer::Missing, |resolved| {
+                    Answer::Served(Source::Peer, resolved.response(pull.head))
+                });
+            }
+            _ => return Answer::Missing,
         };
         let answer = from_content(&self.content, pull.kind, digest, pull.head, pull.range).await;
         // A peer's content is served once it is whole and checked, which a head or a range would not wait for: those

@@ -11,7 +11,7 @@ D1 names this trigger: "Revisit when: … multi-cluster sharing."
 ## Non-goals
 
 - Private repositories (settled 13). Nothing pulled with credentials ever crosses a link.
-- Tag resolution without upstream. The runtime resolves tags upstream (D6, D66), so federation serves only digest-addressed content. A pull by digest works with upstream unreachable, as long as some swarm holds the image.
+- Tag resolution without upstream. Tags resolve from the peers of the node's own swarm, else upstream (D123), so federation serves only digest-addressed content. A pull by digest works with upstream unreachable, as long as some swarm holds the image.
 - Sharing verdicts. Every node still verifies for itself (D26, `docs/security.md`).
 - Transit routing. A swarm serves only what its own nodes hold; it never relays from a third swarm.
 - Judging licences. Sharing an image with another organisation's swarm redistributes it, and some vendor images are public to pull but licensed against redistribution. Share rules are the admin's call on licensing too: the default list suits swarms of one organisation, and `docs/operations.md` says so beside `federation.share`.

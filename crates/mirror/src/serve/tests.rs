@@ -79,6 +79,7 @@ async fn start<C: Content>(content: C) -> Server {
         crate::fetch::Settings {
             stall_timeout: std::time::Duration::from_secs(5),
             deny_ttl: std::time::Duration::from_secs(600),
+            resolve_tags: true,
         },
     );
     start_pulls(Local::new(content, fetcher)).await
