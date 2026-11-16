@@ -121,7 +121,7 @@ pub async fn pull(settings: &Pulls) -> anyhow::Result<Timings> {
         .await?
         .context("the reflector never heard from both agents")?;
     tracing::info!(count = settings.count, size = settings.size, "pulling");
-    let mirror = Mirror::new(&puller)?;
+    let mirror = Mirror::new(&puller, agents[2].mirror)?;
     let mut timings = Timings {
         size: settings.size,
         first_byte: Vec::with_capacity(settings.count),
@@ -157,7 +157,8 @@ struct Mirror {
 }
 
 impl Mirror {
-    fn new(node: &Node) -> anyhow::Result<Self> {
+    /// The mirror at `address` of `node`'s agent.
+    fn new(node: &Node, address: SocketAddr) -> anyhow::Result<Self> {
         let read = |part: Part| std::fs::read(node.path().join("mirror").join(part.file_name()));
         let mut roots = RootCertStore::empty();
         for der in CertificateDer::pem_slice_iter(&read(Part::Ca)?) {
@@ -174,7 +175,7 @@ impl Mirror {
         .with_client_auth_cert(chain, key)?;
         Ok(Self {
             connector: TlsConnector::from(Arc::new(config)),
-            address: node.mirror,
+            address,
         })
     }
 
