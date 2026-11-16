@@ -201,3 +201,17 @@ path = "fuzz_targets/containerd_event.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "referrers"
+path = "fuzz_targets/referrers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "link"
+path = "fuzz_targets/link.rs"
+test = false
+doc = false
+bench = false

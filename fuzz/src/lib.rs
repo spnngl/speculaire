@@ -47,6 +47,8 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("reflect", reflect),
     ("reflect_frame", reflect_frame),
     ("containerd_event", containerd_event),
+    ("referrers", referrers),
+    ("link", link),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -585,5 +587,106 @@ pub fn containerd_event(data: &[u8]) {
             "{}",
             envelope.topic
         );
+    }
+}
+
+/// A referrers index, a referrer's manifest and an image index, as discovery reads them (D43, D49).
+///
+/// Reading never panics. Every digest read prints as it parses and forms a valid tag, an artifact type read is never
+/// empty, a referrer's blobs are its config then its layers, and a referrer is a bundle only by a type that may say so.
+///
+/// # Panics
+///
+/// When reading panics, or what it reads breaks one of those.
+pub fn referrers(data: &[u8]) {
+    use speculaire_oci::index::Index;
+    use speculaire_oci::referrers::{self, BUNDLE, Descriptor, EMPTY, Referrer};
+    if let Ok(descriptors) = referrers::index(data) {
+        descriptors.iter().for_each(descriptor);
+    }
+    if let Ok(referrer) = Referrer::parse(data) {
+        referrer.subject.iter().for_each(digest);
+        assert_ne!(referrer.artifact_type.as_deref(), Some(""));
+        descriptor(&referrer.config);
+        referrer.layers.iter().for_each(descriptor);
+        let blobs: Vec<&Descriptor> = referrer.blobs().collect();
+        assert_eq!(blobs.len(), referrer.layers.len() + 1);
+        assert_eq!(blobs.first(), Some(&&referrer.config));
+        if referrer.is_bundle() {
+            assert!(
+                matches!(
+                    referrer.artifact_type.as_deref(),
+                    None | Some(BUNDLE | EMPTY)
+                ),
+                "{:?}",
+                referrer.artifact_type
+            );
+        }
+    }
+    if let Ok(index) = Index::parse(data) {
+        for arch in ["amd64", "arm64", "arm"] {
+            let host = Host {
+                os: "linux".to_owned(),
+                arch: arch.to_owned(),
+                variant: if arch == "arm" { "v7" } else { "" }.to_owned(),
+            };
+            if let Some(manifest) = index.platform_manifest(&host) {
+                digest(manifest);
+                index.attestations(manifest).into_iter().for_each(digest);
+            }
+        }
+    }
+}
+
+/// A descriptor discovery read: its digest holds, its artifact type is never empty.
+fn descriptor(descriptor: &speculaire_oci::referrers::Descriptor) {
+    digest(&descriptor.digest);
+    assert_ne!(descriptor.artifact_type.as_deref(), Some(""));
+}
+
+/// A digest discovery read: it prints as it parses, and forms valid tags.
+fn digest(digest: &speculaire_oci::reference::Digest) {
+    use speculaire_oci::reference::Digest;
+    assert_eq!(Digest::parse(&digest.to_string()).as_ref(), Ok(digest));
+    let fallback = speculaire_oci::referrers::fallback_tag(digest);
+    // distribution-spec v1.1.1-57-g9727462 `spec.md:786-788`: `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`.
+    assert!(
+        fallback.len() <= 128
+            && fallback.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            && fallback
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)),
+        "{fallback}"
+    );
+    let signature = speculaire_oci::referrers::signature_tag(digest);
+    assert!(
+        signature
+            .strip_suffix(".sig")
+            .is_some_and(|stem| stem.starts_with(&fallback)),
+        "{signature}"
+    );
+}
+
+/// The `Link` header of a paginated referrers answer, as discovery reads it to fetch the next page (D43).
+///
+/// Reading never panics. The next link is a non-empty part of the value, between its `<` and `>`.
+///
+/// # Panics
+///
+/// When reading panics, or a next link breaks that.
+pub fn link(data: &[u8]) {
+    let Ok(value) = std::str::from_utf8(data) else {
+        return;
+    };
+    if let Some(uri) = speculaire_registry::link::next(value) {
+        let at = uri
+            .as_ptr()
+            .addr()
+            .checked_sub(value.as_ptr().addr())
+            .expect("the next link lies in the value");
+        assert!(!uri.is_empty() && !uri.contains('>'), "{uri:?}");
+        assert_eq!(value.get(at..at + uri.len()), Some(uri));
+        assert_eq!(value.as_bytes().get(at.wrapping_sub(1)), Some(&b'<'));
+        assert_eq!(value.as_bytes().get(at + uri.len()), Some(&b'>'));
     }
 }
