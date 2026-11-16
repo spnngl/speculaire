@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use http::header::{ACCEPT, LINK};
+use http::header::{ACCEPT, CONTENT_TYPE, LINK};
 use http::{HeaderValue, Method, StatusCode};
 use http_body_util::{BodyExt as _, Limited};
 use hyper::body::Incoming;
@@ -26,6 +26,12 @@ use crate::store::{self, Artifact, Kind, Store};
 
 /// What a manifest request accepts.
 const MANIFESTS: &str = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json";
+
+/// The media types of an index: OCI's and Docker's.
+const INDEXES: [&str; 2] = [
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+];
 
 /// How much discovery fetches (D113).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,10 +127,11 @@ impl Discovery {
     ///
     /// When no source serves the root's manifest, or the store fails.
     pub async fn discover(&self, root: &Digest, names: &[String]) -> Result<Vec<Artifact>, Error> {
-        let (upstream, bytes) = self.root(root, names).await.ok_or(Error::Unreachable)?;
+        let (upstream, index) = self.root(root, names).await.ok_or(Error::Unreachable)?;
         let mut targets = vec![root.clone()];
         let mut artifacts = Vec::new();
-        if let Ok(index) = Index::parse(&bytes)
+        if let Some(bytes) = index
+            && let Ok(index) = Index::parse(&bytes)
             && let Some(platform) = index.platform_manifest(&self.platform)
         {
             targets.push(platform.clone());
@@ -145,8 +152,11 @@ impl Discovery {
         Ok(artifacts)
     }
 
-    /// The first source, of each name in order, that serves the root's manifest, and the manifest.
-    async fn root(&self, root: &Digest, names: &[String]) -> Option<(Upstream, Vec<u8>)> {
+    /// The first source, of each name in order, that serves the root's manifest, and the manifest when it is an index.
+    ///
+    /// The root is asked by `HEAD`, and fetched only when its media type is an index's: Docker Hub counts each `GET` of
+    /// a manifest against its pull limit, and an image manifest names no target (D49).
+    async fn root(&self, root: &Digest, names: &[String]) -> Option<(Upstream, Option<Vec<u8>>)> {
         let text = root.to_string();
         for name in names {
             let sources = match self.registries.sources(name, Reference::Digest(&text)) {
@@ -174,8 +184,26 @@ impl Discovery {
                     label: label.clone(),
                 };
                 let path = format!("/{}/manifests/{text}", upstream.source.repository);
+                let Some(response) = self.send(&upstream, Method::HEAD, &path, MANIFESTS).await
+                else {
+                    continue;
+                };
+                let result = outcome(response.status);
+                metrics::fetched(&upstream.label, result);
+                if result != Outcome::Ok {
+                    continue;
+                }
+                let index = response
+                    .headers
+                    .get(CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.split(';').next())
+                    .is_some_and(|media_type| INDEXES.contains(&media_type.trim()));
+                if !index {
+                    return Some((upstream, None));
+                }
                 if let Fetched::Got(bytes) = self.manifest(&upstream, path, Some(root)).await {
-                    return Some((upstream, bytes));
+                    return Some((upstream, Some(bytes)));
                 }
             }
         }
