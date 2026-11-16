@@ -49,7 +49,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Ports avoid 5000, which local kind registries commonly use.
 - **Revisit when:** a benchmark shows loopback TLS costing more than 10% of the agent's serving CPU.
 
-## D17: Upstream access reuses containerd's registry config (amended by D66, D78, D88, D89, D113)
+## D17: Upstream access reuses containerd's registry config (amended by D66, D78, D88, D89, D114)
 
 - **Decision:**
   - Artifact discovery, referrers and prewarm resolution reuse containerd's *registry config*, in containerd's own formats.

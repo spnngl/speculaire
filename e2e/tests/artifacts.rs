@@ -1,4 +1,4 @@
-//! Artifact discovery (D113): a pull of the signed test image puts its Sigstore bundles and its `.sig` manifest, with
+//! Artifact discovery (D114): a pull of the signed test image puts its Sigstore bundles and its `.sig` manifest, with
 //! their blobs, in the node's artifact store, fetched from the upstream it was pulled from with the node's own
 //! registry config only (D17).
 #![expect(
