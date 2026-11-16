@@ -392,6 +392,18 @@ async fn a_file_is_streamed_in_chunks_of_a_quarter_mebibyte() {
 }
 
 #[tokio::test]
+async fn a_blob_deleted_once_opened_still_streams() {
+    // As when containerd's garbage collector deletes it while the mirror serves it.
+    let dir = tempfile::tempdir().unwrap();
+    let digest = digest_of(b"gone");
+    put(dir.path(), &digest, b"gone");
+    let content = containerd(dir.path(), dir.path().join("no.sock"));
+    let blob = content.open(&digest).await.unwrap().unwrap();
+    std::fs::remove_file(path_of(dir.path(), &digest)).unwrap();
+    assert_eq!(collect(blob.stream(0, 4).await.unwrap()).await, b"gone");
+}
+
+#[tokio::test]
 async fn a_blob_prints_where_it_comes_from_and_not_what_it_holds() {
     let memory = format!("{:?}", Blob::from_bytes(pattern(10)));
     assert!(memory.contains("Memory(10 bytes)"), "{memory}");

@@ -192,7 +192,7 @@ impl<I: Images> Relay<I> {
                 continue;
             }
             // Looking is no serving: the blobs it protects keep their place in the eviction order (D67).
-            let Some(blob) = self.cache.peek(&digest) else {
+            let Some(blob) = self.cache.peek(&digest).await else {
                 continue;
             };
             // A blob that is no manifest, or too large to be one, has nothing below it.

@@ -48,10 +48,15 @@ impl Containerd {
 
 impl Content for Containerd {
     async fn open(&self, digest: &Digest) -> Result<Option<Blob>, Error> {
-        let path = self.blob_path(digest);
-        match tokio::fs::metadata(&path).await {
-            Ok(meta) if meta.is_file() => return Ok(Some(Blob::from_file(path, meta.len()))),
-            Ok(_) => {}
+        // The blob streams from the handle that gave its size: containerd's garbage collector may delete the file
+        // meanwhile.
+        match tokio::fs::File::open(self.blob_path(digest)).await {
+            Ok(file) => {
+                let meta = file.metadata().await?;
+                if meta.is_file() {
+                    return Ok(Some(Blob::from_open(file.into_std().await, meta.len())));
+                }
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(Error::Io(e)),
         }

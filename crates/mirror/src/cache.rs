@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -164,9 +164,10 @@ impl Cache {
     }
 
     /// The blob with `digest`, read without counting as served: the order of eviction stays as it was.
-    pub(crate) fn peek(&self, digest: &Digest) -> Option<Blob> {
+    pub(crate) async fn peek(&self, digest: &Digest) -> Option<Blob> {
         let size = self.state().entries.get(digest)?.size;
-        Some(Blob::from_file(self.path(digest), size))
+        let file = tokio::fs::File::open(self.path(digest)).await.ok()?;
+        Some(Blob::from_open(file.into_std().await, size))
     }
 
     /// Whether the cache holds `digest`.
@@ -322,19 +323,21 @@ impl Content for Cache {
             entry.size
         };
         let path = self.path(digest);
-        // One trip to the blocking pool looks at the file and moves its time to now.
+        // One trip to the blocking pool opens the file, looks at it and moves its time to now. The blob streams from
+        // that handle: an eviction meanwhile deletes only the name.
         let looked = tokio::task::spawn_blocking(move || {
-            let meta = std::fs::metadata(&path)?;
+            let file = std::fs::File::open(path)?;
+            let meta = file.metadata()?;
             let held = meta.is_file() && meta.len() == size;
             if held {
-                touch(&path);
+                touch(&file);
             }
-            Ok(held.then_some(path))
+            Ok(held.then_some(file))
         })
         .await
         .unwrap_or_else(|err| Err(io::Error::other(err)));
         match looked {
-            Ok(Some(path)) => Ok(Some(Blob::from_file(path, size))),
+            Ok(Some(file)) => Ok(Some(Blob::from_open(file, size))),
             // Deleted or changed behind our back: it is not in the cache.
             Ok(None) => {
                 self.forget(digest);
@@ -393,13 +396,11 @@ impl Inventory for Cache {
     }
 }
 
-/// Sets the modification time of `path` to now, so that a restart orders the blobs by when they were last served.
-fn touch(path: &Path) {
+/// Sets the modification time of `file` to now, so that a restart orders the blobs by when they were last served. The
+/// agent owns the file, which lets a read-only handle set its times.
+fn touch(file: &std::fs::File) {
     // A failure only costs the order after a restart.
-    let _ = std::fs::File::options()
-        .write(true)
-        .open(path)
-        .and_then(|file| file.set_modified(std::time::SystemTime::now()));
+    let _ = file.set_modified(std::time::SystemTime::now());
 }
 
 #[cfg(test)]
