@@ -2,7 +2,7 @@
 //! profile are its own (D33, D116). The reflector under load is one with `role = "reflector"`.
 
 use std::ffi::OsString;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime};
@@ -13,9 +13,10 @@ use speculaire_fake_runtime::{Answers, Fake};
 use speculaire_pki::mirror::{Mirror, Part};
 use speculaire_pki::testing::Cluster;
 use speculaire_runtime::containerd::CONTENT_PLUGIN;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpStream;
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::net::{TcpSocket, TcpStream};
+use tokio::process::{Child, ChildStderr, Command};
+use tokio::sync::mpsc;
 
 use crate::exposition::{self, Buckets, PROTOBUF};
 
@@ -35,27 +36,28 @@ const POLL: Duration = Duration::from_millis(250);
 /// How often a wait for the gauges logs them.
 const PROGRESS: Duration = Duration::from_secs(5);
 
-/// A node's files: its config, certificates and fake containerd, removed on drop.
+/// A node's files: its config, certificates and fake containerd, removed on drop. Its status listener and mirror take
+/// port 0, and [`Agent::start`] reads where they opened from the agent's log.
 pub(crate) struct Node {
     dir: tempfile::TempDir,
     _containerd: Fake,
     name: &'static str,
-    /// Where the reflector listens for agents.
-    pub(crate) listen: SocketAddr,
-    /// Where the node's mirror listens.
-    pub(crate) mirror: SocketAddr,
-    metrics: SocketAddr,
+    /// The port of [`Node::address`], held for as long as the node lives.
+    _port: TcpSocket,
+    /// Where the node listens at an address others know before it starts: the reflector's, which its members name, or
+    /// the agent's peer API, which it announces (D36).
+    pub(crate) address: SocketAddr,
 }
 
 impl Node {
-    /// Writes the files of a reflector whose certificate `cluster` issues, on ports free now.
+    /// Writes the files of a reflector whose certificate `cluster` issues.
     pub(crate) fn new(cluster: &Cluster) -> anyhow::Result<Self> {
-        let listen = free_port()?;
+        let (port, listen) = hold_port()?;
         Self::write(
             cluster,
             NODE,
             Answers::containerd(CONTAINERD),
-            listen,
+            (port, listen),
             "role = \"reflector\"\n",
             &format!(
                 "[reflector]\nlisten = \"{listen}\"\nmembers = [{{ node = \"{NODE}\", address = \"{listen}\" }}]\n"
@@ -64,36 +66,36 @@ impl Node {
     }
 
     /// Writes the files of the agent `name`, whose certificate `cluster` issues, which announces the `content` its fake
-    /// containerd lists to the reflector of `reflector`, and serves peers on a port free now.
+    /// containerd lists to the reflector of `reflector`.
     pub(crate) fn agent(
         cluster: &Cluster,
         name: &'static str,
         content: Vec<String>,
         reflector: &Self,
     ) -> anyhow::Result<Self> {
-        let peer = free_port()?;
+        let (port, peer) = hold_port()?;
         let mut containerd = Answers::containerd(CONTAINERD);
         containerd.content = content;
         Self::write(
             cluster,
             name,
             containerd,
-            reflector.listen,
+            (port, peer),
             "",
             &format!(
                 "[peer]\naddress = \"{peer}\"\n[reflector]\nurl = \"https://{}\"\n",
-                reflector.listen
+                reflector.address
             ),
         )
     }
 
-    /// Writes the files of the node `name`, whose fake containerd gives `containerd`: its config is `top`, the tables
-    /// every node has, and `tables`.
+    /// Writes the files of the node `name`, whose fake containerd gives `containerd` and which listens at `held`: its
+    /// config is `top`, the tables every node has, and `tables`.
     fn write(
         cluster: &Cluster,
         name: &'static str,
         containerd: Answers,
-        listen: SocketAddr,
+        held: (TcpSocket, SocketAddr),
         top: &str,
         tables: &str,
     ) -> anyhow::Result<Self> {
@@ -110,7 +112,7 @@ impl Node {
         }
         std::fs::write(path.join("ca.crt"), cluster.ca())?;
         std::fs::write(path.join("node.pem"), cluster.kubelet(name))?;
-        let (mirror, metrics) = (free_port()?, free_port()?);
+        let any = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         let d = path.display();
         std::fs::write(
             path.join("containerd.toml"),
@@ -123,10 +125,11 @@ impl Node {
                  [identity]\ncertificate = \"{d}/node.pem\"\nca = \"{d}/ca.crt\"\n\
                  [runtime]\ncontainerd_socket = \"{d}/containerd.sock\"\ncontainerd_config = \"{d}/containerd.toml\"\n\
                  crio_socket = \"{d}/crio.sock\"\n\
-                 [mirror]\naddress = \"{mirror}\"\ndirectory = \"{d}/mirror\"\n\
+                 [mirror]\naddress = \"{any}\"\ndirectory = \"{d}/mirror\"\n\
                  [blob_cache]\ndirectory = \"{d}/blobs\"\n\
                  [artifacts]\ndirectory = \"{d}/artifacts\"\n\
-                 [metrics]\naddress = \"{metrics}\"\n\
+                 [metrics]\naddress = \"{any}\"\n\
+                 [log]\nfilter = \"{LOG_FILTER}\"\n\
                  {tables}"
             ),
         )?;
@@ -134,9 +137,8 @@ impl Node {
             dir,
             _containerd: containerd,
             name,
-            listen,
-            mirror,
-            metrics,
+            _port: held.0,
+            address: held.1,
         })
     }
 
@@ -156,9 +158,16 @@ impl Node {
     }
 }
 
-/// A port nobody listens on now; an agent binds it a moment later, and again after its restart.
-fn free_port() -> std::io::Result<SocketAddr> {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()
+/// A loopback port, and the socket that holds it: bound with `SO_REUSEADDR` and never listening, so that Linux gives
+/// the port to no bind on port 0 and no outgoing connection, only to a bind that names it with `SO_REUSEADDR`, as the
+/// agent's listeners do (tokio's `TcpListener::bind`). A port picked and let go would be free to any socket until the
+/// agent binds it, and again while it restarts.
+fn hold_port() -> std::io::Result<(TcpSocket, SocketAddr)> {
+    let socket = TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind((Ipv4Addr::LOCALHOST, 0).into())?;
+    let address = socket.local_addr()?;
+    Ok((socket, address))
 }
 
 /// A running agent, killed on drop.
@@ -166,11 +175,13 @@ pub(crate) struct Agent {
     child: Child,
     pid: u32,
     metrics: SocketAddr,
+    /// Where its mirror listens.
+    pub(crate) mirror: SocketAddr,
 }
 
 impl Agent {
     /// Starts `command` followed by `agent --config` and `node`'s config, with the node's name in [`NODE_VARIABLE`],
-    /// and returns once `/readyz` answers 200.
+    /// and returns once `/readyz` answers 200. The agent's stderr is copied to this process's.
     pub(crate) async fn start(command: &[OsString], node: &Node) -> anyhow::Result<Self> {
         let (program, args) = command.split_first().context("no agent command")?;
         let mut child = Command::new(program)
@@ -184,6 +195,7 @@ impl Agent {
             .env(NODE_VARIABLE, node.name)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("cannot start {}", program.display()))?;
@@ -191,12 +203,34 @@ impl Agent {
         let pid = child
             .id()
             .with_context(|| format!("{name} exited at once"))?;
+        let mut opened = relay(child.stderr.take().context("no stderr pipe")?);
         let deadline = Instant::now() + READY;
+        let listening = async {
+            let (mut metrics, mut mirror) = (None, None);
+            while let Some((listener, address)) = opened.recv().await {
+                match listener {
+                    Listener::Status => metrics = Some(address),
+                    Listener::Mirror => mirror = Some(address),
+                }
+                if let (Some(metrics), Some(mirror)) = (metrics, mirror) {
+                    return Some((metrics, mirror));
+                }
+            }
+            None
+        };
+        let Some((metrics, mirror)) = tokio::time::timeout(READY, listening)
+            .await
+            .with_context(|| format!("{name} did not open its listeners within {READY:?}"))?
+        else {
+            // Its stderr closed: it exited.
+            let status = child.wait().await?;
+            bail!("{name} exited before it was ready: {status}");
+        };
         loop {
             if let Some(status) = child.try_wait()? {
                 bail!("{name} exited before it was ready: {status}");
             }
-            if let Ok((200, _)) = get(node.metrics, "/readyz", "").await {
+            if let Ok((200, _)) = get(metrics, "/readyz", "").await {
                 break;
             }
             ensure!(
@@ -208,7 +242,8 @@ impl Agent {
         Ok(Self {
             child,
             pid,
-            metrics: node.metrics,
+            metrics,
+            mirror,
         })
     }
 
@@ -285,6 +320,54 @@ impl Agent {
     }
 }
 
+/// The default filter, and the `info` lines of [`Listener`].
+const LOG_FILTER: &str = "warn,speculaire_agent::serve=info";
+
+/// A listener the agent opens on the port 0 of its config, and logs the address of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Listener {
+    Status,
+    Mirror,
+}
+
+impl Listener {
+    const ALL: [Self; 2] = [Self::Status, Self::Mirror];
+
+    /// The message of the `info` line that gives its address (`crates/agent/src/serve.rs`).
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Status => "status listener open",
+            Self::Mirror => "mirror open",
+        }
+    }
+}
+
+/// Copies the agent's `stderr` to this process's, and sends each listener it opens with its address; the channel
+/// closes with the agent's stderr.
+fn relay(stderr: ChildStderr) -> mpsc::UnboundedReceiver<(Listener, SocketAddr)> {
+    let (send, opened) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            eprintln!("{line}");
+            if let Some(open) = listener_open(&line) {
+                // The receiver is gone once the agent is ready; the copy goes on.
+                let _ = send.send(open);
+            }
+        }
+    });
+    opened
+}
+
+/// The listener and address of a JSON log line that says a listener opened.
+fn listener_open(line: &str) -> Option<(Listener, SocketAddr)> {
+    let listener = Listener::ALL
+        .into_iter()
+        .find(|l| line.contains(&format!(r#""message":"{}""#, l.message())))?;
+    let (_, rest) = line.split_once(r#""address":""#)?;
+    Some((listener, rest.split('"').next()?.parse().ok()?))
+}
+
 /// The value of `field` in a `/proc/<pid>/status`, such as `VmRSS:\t  1234 kB`, in kB.
 fn kilobytes(status: &str, field: &str) -> Option<u64> {
     status.lines().find_map(|line| {
@@ -343,6 +426,29 @@ mod tests {
         assert_eq!(kilobytes(status, "VmHWM"), Some(204_800));
         assert_eq!(kilobytes(status, "Vm"), None);
         assert_eq!(kilobytes(status, "Threads"), None);
+    }
+
+    #[test]
+    fn a_listener_open_line_gives_its_address() {
+        let line = |message: &str| {
+            format!(
+                r#"{{"timestamp":"t","level":"INFO","fields":{{"message":"{message}","address":"127.0.0.1:41234"}}}}"#
+            )
+        };
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 41234));
+        assert_eq!(
+            listener_open(&line("status listener open")),
+            Some((Listener::Status, address))
+        );
+        assert_eq!(
+            listener_open(&line("mirror open")),
+            Some((Listener::Mirror, address))
+        );
+        assert_eq!(listener_open(&line("peer API open")), None);
+        assert_eq!(
+            listener_open(r#"{"fields":{"message":"mirror open"}}"#),
+            None
+        );
     }
 
     #[test]

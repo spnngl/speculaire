@@ -134,8 +134,8 @@ pub async fn run(settings: &Settings) -> anyhow::Result<Report> {
     tracing::info!(agents = scenario.agents, "building the agents");
     let fleet = agents::build(scenario.clone(), cluster, node.ca(), node.path().to_owned()).await?;
     let config = Config {
-        host: node.listen.ip().to_string(),
-        port: node.listen.port(),
+        host: node.address.ip().to_string(),
+        port: node.address.port(),
         peer: None,
     };
     tracing::info!("connecting the agents");
