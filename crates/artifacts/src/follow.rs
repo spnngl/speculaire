@@ -1,4 +1,4 @@
-//! The trigger of discovery at M4: every manifest digest the runtime's image list names is a root (D116).
+//! The trigger of discovery at M4: every manifest digest the runtime's image list names is a root (D117).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
