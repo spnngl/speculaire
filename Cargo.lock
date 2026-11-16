@@ -2089,7 +2089,6 @@ dependencies = [
  "hyper-util",
  "metrics",
  "metrics-exporter-prometheus",
- "secrecy",
  "serde",
  "serde_json",
  "speculaire-oci",
@@ -2166,7 +2165,6 @@ dependencies = [
 name = "speculaire-mirror"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
  "bytes",
  "divan",
  "futures-util",

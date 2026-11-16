@@ -13,7 +13,6 @@ publish.workspace = true
 bench = []
 
 [dependencies]
-aws-lc-rs.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 http.workspace = true
