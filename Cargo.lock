@@ -2285,6 +2285,7 @@ dependencies = [
  "hyper-util",
  "insta",
  "prost",
+ "rustix",
  "rustls-pki-types",
  "secrecy",
  "serde",

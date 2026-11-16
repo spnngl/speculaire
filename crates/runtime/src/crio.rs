@@ -4,6 +4,7 @@
 //! merged TOML of `crio.conf` and `crio.conf.d/` (what `crio status config` prints).
 
 pub mod dropin;
+mod images;
 mod settings;
 mod wiring;
 
@@ -281,9 +282,58 @@ pub fn global_auth_file(config: &str) -> Result<Option<PathBuf>, Error> {
     Ok((!image.global_auth_file.is_empty()).then(|| PathBuf::from(image.global_auth_file)))
 }
 
+/// The directory of CRI-O's `images.json`, `<root>/<storage_driver>-images` (D65), in the text of its config: CRI-O
+/// writes there the root and driver its store opened with (v1.37.0 `pkg/config/config.go:1448-1449`).
+///
+/// # Errors
+///
+/// When the text is not TOML, or `[crio] root` or `storage_driver` is missing or empty.
+pub fn images_directory(config: &str) -> Result<String, Error> {
+    #[derive(Default, Deserialize)]
+    struct Root {
+        #[serde(default)]
+        crio: Crio,
+    }
+    #[derive(Default, Deserialize)]
+    struct Crio {
+        #[serde(default)]
+        root: String,
+        #[serde(default)]
+        storage_driver: String,
+    }
+    let Root { crio } = toml::from_str(config)?;
+    if crio.root.is_empty() || crio.storage_driver.is_empty() {
+        return Err(Error::Response(
+            "a config without `root` or `storage_driver`".to_owned(),
+        ));
+    }
+    Ok(format!(
+        "{}/{}-images",
+        crio.root.trim_end_matches('/'),
+        crio.storage_driver
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn the_images_directory_is_below_the_root_named_by_the_driver() {
+        let set = "[crio]\nroot = \"/var/lib/containers/storage\"\nstorage_driver = \"overlay\"\n";
+        assert_eq!(
+            super::images_directory(set).unwrap(),
+            "/var/lib/containers/storage/overlay-images"
+        );
+        for text in [
+            "",
+            "[crio]\nroot = \"/r\"\n",
+            "[crio]\nstorage_driver = \"vfs\"\n",
+            "[crio\n",
+        ] {
+            assert!(super::images_directory(text).is_err(), "{text:?}");
+        }
+    }
 
     #[test]
     fn the_global_auth_file_is_under_crio_image_and_empty_means_none() {

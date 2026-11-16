@@ -6,6 +6,7 @@
 
 pub mod content;
 pub mod hosts;
+pub mod images;
 pub mod inventory;
 mod settings;
 mod wiring;

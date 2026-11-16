@@ -11,7 +11,7 @@ use speculaire_mirror::Local;
 use speculaire_mirror::cache::Cache;
 use speculaire_mirror::fetch::{self, Fetcher, Holder};
 use speculaire_mirror::peer::Uploads;
-use speculaire_mirror::relay::{CriImages, Relay};
+use speculaire_mirror::relay::Relay;
 use speculaire_mirror::tls::Tls;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
@@ -270,7 +270,7 @@ struct Mirror {
     stop: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
     /// The relay, where the node has one.
-    relay: Option<Arc<Relay<CriImages>>>,
+    relay: Option<Arc<Relay>>,
     /// The cap on the peer API's bodies, which it holds from startup so that a reload reaches it before it opens.
     uploads: Arc<Uploads>,
     /// What fetches from peers, linked to the reflectors once the agent shares.
@@ -368,7 +368,7 @@ async fn start_mirror(
                 cache,
                 fetcher.clone(),
                 registries,
-                CriImages::new(node.socket(), node.name()),
+                node.images(),
             ));
             speculaire_mirror::metrics::describe_relay();
             tokio::spawn({
@@ -661,7 +661,11 @@ mod tests {
                 Cache::open(dir.path(), 1 << 30).unwrap(),
                 fetcher.clone(),
                 Arc::new(ContainerdRegistries::new(dir.path().join("config.toml"))),
-                CriImages::new(dir.path().join("crio.sock"), "cri-o"),
+                Arc::new(speculaire_runtime::crio::CriO::new(
+                    speculaire_runtime::paths::Paths::under(dir.path()),
+                    dir.path().join("crio.sock"),
+                    "systemctl",
+                )),
             ));
             let (stop, _stopped) = tokio::sync::oneshot::channel();
             let mirror = Mirror {
