@@ -26,6 +26,7 @@ use http_body_util::{BodyExt as _, Empty};
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
+use speculaire_oci::hash::Hash;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
 use speculaire_runtime::content::Blob;
@@ -35,7 +36,6 @@ use tokio::time::{Instant, timeout};
 use tokio_rustls::TlsConnector;
 use tracing::{Instrument as _, Span, debug, debug_span, field, info, warn};
 
-use crate::hash::Hash;
 use crate::metrics::{FetchSeries, Fetched};
 use crate::request::Kind;
 

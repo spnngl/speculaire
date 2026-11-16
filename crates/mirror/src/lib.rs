@@ -10,7 +10,6 @@
 pub mod bench;
 pub mod cache;
 pub mod fetch;
-mod hash;
 pub mod metrics;
 pub mod peer;
 mod pulls;

@@ -51,7 +51,7 @@ pub(crate) fn pattern(len: usize, seed: u8) -> Bytes {
 }
 
 fn sha(bytes: &[u8]) -> Digest {
-    crate::hash::of("sha256", bytes).unwrap()
+    speculaire_oci::hash::of("sha256", bytes).unwrap()
 }
 
 /// A cluster whose nodes serve peer APIs until the test ends.

@@ -1,8 +1,9 @@
 //! OCI image references and platforms, as containerd reads them (D81): a [`reference::Reference`] can only be made by
 //! parsing, and a platform is matched as containerd's `platforms.Only` matches it. [`manifest::children`] reads what a
 //! manifest points to (D88). [`referrers`] reads OCI 1.1 referrers and [`index`] an image index's platform and
-//! attestation manifests, for artifact discovery (D43, D49).
+//! attestation manifests, for artifact discovery (D43, D49). [`hash`] checks content against its digest as it arrives (D7).
 
+pub mod hash;
 pub mod index;
 pub mod manifest;
 pub mod platform;
