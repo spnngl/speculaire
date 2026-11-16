@@ -204,7 +204,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:** pod authors choose registry hosts, so "a host from the registry config" was not bounded: a pod naming a new host would add series on every node. The `hosts.toml` tree is written by the admin.
 - **Revisit when:** admins need per-host numbers for hosts without a `hosts.toml` directory; the audit log (D37) already names them.
 
-## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58, D62, D116)
+## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58, D62, D116, D118)
 
 - **Decision:**
   - `rust-toolchain.toml` pins stable `1.99.1` with clippy and rustfmt; the justfile pins one nightly, for rustfmt (`rustfmt.toml` uses unstable options) and `-Z` flags. `rust-version` is `1.95`, which `just msrv` checks.
@@ -602,3 +602,12 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Measured**, frame pointers, on the same host shared with other builds, without then with the flag, alternated: the arm64 musl binary grows 0.8% (10.57 to 10.66 MB). `just bench-micro`, 4 rounds each: the index lookup's median 1.7 to 4.2 µs without and 1.3 to 2.8 µs with, SHA-256 of 16 MiB at best 5.14 ms both. `just load --agents 2000 --measure-only`, 2 rounds each: peak RSS 181 and 181 MiB without, 182 and 185 MiB with; resync 16.8 and 9.0 s without, 12.0 and 10.8 s with; lookup p99 345 µs and 2.8 ms without, 205 µs and 2.8 ms with (the second round of each ran beside other builds). No difference stands out of the noise.
 - **Cost:** profiles need a privileged container. The `deep` job's Valgrind build starts cold each run. Frame pointers cost one register and a push per call, below what the measures above can show; a release still checks its pulls against Spegel with `just bench` (D35).
 - **Revisit when:** a diagnosis needs off-CPU time (perf's `--off-cpu`, or eBPF); or frame pointers cost more than 2% in `just load` or `just bench`.
+## D118: `just dev` mounts the tree at its own path and builds it in its own directory of the volume (amends D57)
+
+- **Decision:**
+  - `just dev <recipe>` mounts the tree at its host path, and the git directory of a linked worktree at its own, and sets `CARGO_TARGET_DIR` to `/target<host path>` in `speculaire-dev-<arch>`. The registry volume stays shared.
+  - `just musl`, `just conformance` and `just load` keep `/src` and `speculaire-musl-<arch>`: `.cargo/config.toml` remaps `/src` out of the release binary, which D57's reproducibility measure holds to.
+- **Because:** every worktree was mounted at `/src` and built in `/target`. Cargo tracks a source by path and mtime, so a worktree run after another one reused artifacts of the other's sources: `just dev check` tested old code, and doctests failed with "can't find crate for `speculaire_*`".
+- **Measured:** worktrees A (this change) and B (A plus a failing test) ran `just dev check` one after the other: B ran 573 tests and failed on its own, then A ran its 572 and passed, recompiling nothing: each built in its own directory of the volume, about 7 GB each.
+- **Cost:** each worktree builds from scratch once, and its directory stays in the volume after the worktree is removed, until deleted (`docker run --rm -v speculaire-dev-<arch>:/target alpine rm -rf /target<path>`).
+- **Revisit when:** parallel worktrees run `just musl`, which then reuse each other's artifacts the same way.

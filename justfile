@@ -131,12 +131,13 @@ cov *report:
     # The pinned stable's own cargo and rustc first: llvm-tools belongs to that toolchain.
     rustc="$(rustup which rustc)"
     export PATH="$(dirname "$rustc"):$PATH"
-    # In the build image the host is musl, whose rustflags remap /src and /usr/local/cargo for release binaries
-    # (.cargo/config.toml). Cargo appends these after them, and rustc applies the last match: the report keeps the
-    # real paths, which it needs to tell the workspace from its dependencies.
+    # In the build image the host is musl, whose rustflags remap /usr/local/cargo for release binaries
+    # (.cargo/config.toml). Cargo appends this after them, and rustc applies the last match: the report keeps the
+    # real paths, which it needs to tell the workspace from its dependencies. `just dev` mounts the tree at its own
+    # path, which no rustflag remaps.
     host="$(rustc -vV | sed -n 's/^host: //p')"
     if [[ $host == *-musl ]]; then
-        export "CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<< "$host")_RUSTFLAGS=--remap-path-prefix=/src=/src --remap-path-prefix=/usr/local/cargo=/usr/local/cargo"
+        export "CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<< "$host")_RUSTFLAGS=--remap-path-prefix=/usr/local/cargo=/usr/local/cargo"
     fi
     cargo llvm-cov nextest --no-report --workspace --exclude e2e --all-features --locked
     cargo llvm-cov report --summary-only
@@ -365,12 +366,22 @@ oracle-build:
 oracle-test:
     SPECULAIRE_ORACLE="$(pwd)/target/oracle/speculaire-oracle" cargo test --workspace --test oracle --locked -- --nocapture
 
-# Volumes speculaire-registry and speculaire-dev-<arch> keep the registry and the build between runs.
+# The tree is mounted at its own path, with the git directory a worktree points to, and builds in /target<its path>:
+# worktrees share volume speculaire-dev-<arch>, each with its own build (D118). Volume speculaire-registry keeps the
+# registry.
 # Run a recipe in the dev image (D57), as on macOS: just dev check
 dev *recipe:
+    #!/usr/bin/env bash
+    set -euo pipefail
     {{ container }} build --quiet --target dev --build-arg NIGHTLY={{ nightly }} -t localhost/speculaire-dev -f build/Containerfile build >/dev/null
-    {{ container }} run --rm -v "$(pwd):/src" -v speculaire-registry:/usr/local/cargo/registry \
-        -v "speculaire-dev-{{ arch() }}:/target" -e CARGO_TARGET_DIR=/target localhost/speculaire-dev just {{ recipe }}
+    tree="$(pwd)"
+    mounts=(-v "$tree:$tree")
+    git="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$git" && "$git" != "$tree"/* ]]; then
+        mounts+=(-v "$git:$git")
+    fi
+    {{ container }} run --rm "${mounts[@]}" -w "$tree" -v speculaire-registry:/usr/local/cargo/registry \
+        -v "speculaire-dev-{{ arch() }}:/target" -e CARGO_TARGET_DIR="/target$tree" localhost/speculaire-dev just {{ recipe }}
 
 # The distribution-spec conformance suite against the mirror of the musl binary, in the Go image (D85): the agent runs in
 # a container seeded with content, and the suite pulls from it. Needs Docker and `just musl <arch>-unknown-linux-musl`.
