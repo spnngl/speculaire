@@ -388,6 +388,14 @@ mod tests {
             vec![item.as_str(); MAX_DESCRIPTORS + 1].join(",")
         );
         assert!(matches!(Index::parse(text.as_bytes()), Err(Error::TooMany)));
+        let text = format!(
+            r#"{{"manifests":[{}]}}"#,
+            vec![item.as_str(); MAX_DESCRIPTORS].join(",")
+        );
+        assert_eq!(
+            Index::parse(text.as_bytes()).unwrap().entries.len(),
+            MAX_DESCRIPTORS
+        );
     }
 
     #[test]
