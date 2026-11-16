@@ -592,6 +592,28 @@ async fn a_manifest_that_does_not_match_its_digest_is_dropped_and_counted() {
     assert_eq!(count("not_found").as_deref(), Some("1"), "{rendered}");
 }
 
+#[tokio::test]
+async fn a_429_is_counted_as_rate_limited() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _local = ::metrics::set_default_local_recorder(&recorder);
+    let test = Test::start().await;
+    let root = digest_of(b"limited");
+    test.registry
+        .put(&format!("/app/manifests/{root}"), 429, "");
+
+    assert!(matches!(
+        test.discover(&root).await,
+        Err(Error::Unreachable)
+    ));
+
+    let rendered = handle.render();
+    assert!(
+        rendered.contains(r#"upstream="other",result="rate_limited"} 1"#),
+        "{rendered}"
+    );
+}
+
 #[test]
 fn a_link_is_followed_below_the_api_root_relative_or_absolute() {
     assert_eq!(

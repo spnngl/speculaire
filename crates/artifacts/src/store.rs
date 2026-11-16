@@ -81,10 +81,8 @@ impl Store {
     pub fn open(directory: impl Into<PathBuf>) -> Result<Self, Error> {
         let directory = directory.into();
         let tmp = directory.join("tmp");
-        match std::fs::remove_dir_all(&tmp) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(io_error(&tmp, e)),
-            _ => {}
-        }
+        // Best effort: a part left behind only takes room, and creating `tmp` below reports a directory it cannot use.
+        let _ = std::fs::remove_dir_all(&tmp);
         for name in ["tmp", "blobs", "roots"] {
             let path = directory.join(name);
             std::fs::create_dir_all(&path).map_err(|e| io_error(&path, e))?;
