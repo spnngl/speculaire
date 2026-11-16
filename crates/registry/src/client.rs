@@ -97,10 +97,13 @@ pub enum Error {
     },
 }
 
-/// The client: connections kept by trust, and the tokens in use.
+/// What tells two hyper clients apart: the fingerprint of a trust, and a dial timeout (D119).
+type ClientKey = ([u8; 32], Option<Duration>);
+
+/// The client: connections kept by trust and dial timeout, and the tokens in use.
 #[derive(Default)]
 pub struct Client {
-    clients: Mutex<HashMap<[u8; 32], HyperClient>>,
+    clients: Mutex<HashMap<ClientKey, HyperClient>>,
     tokens: Tokens,
 }
 
@@ -283,14 +286,14 @@ impl Client {
         Ok(authorization)
     }
 
-    /// The hyper client for the trust of `endpoint`, made on first use.
+    /// The hyper client for the trust and dial timeout of `endpoint`, made on first use.
     fn hyper(&self, endpoint: &Endpoint) -> Result<HyperClient, Error> {
-        let fingerprint = connect::fingerprint(&endpoint.tls);
+        let key = (connect::fingerprint(&endpoint.tls), endpoint.dial_timeout);
         let mut clients = self
             .clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(client) = clients.get(&fingerprint) {
+        if let Some(client) = clients.get(&key) {
             return Ok(client.clone());
         }
         let config = connect::config(&endpoint.tls).map_err(|source| Error::Tls {
@@ -299,8 +302,8 @@ impl Client {
         })?;
         let client = Hyper::builder(TokioExecutor::new())
             .pool_idle_timeout(Duration::from_secs(30))
-            .build(Connector::new(config));
-        clients.insert(fingerprint, client.clone());
+            .build(Connector::new(config, endpoint.dial_timeout));
+        clients.insert(key, client.clone());
         Ok(client)
     }
 }

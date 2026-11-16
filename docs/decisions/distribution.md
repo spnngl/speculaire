@@ -64,7 +64,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Pull secrets travel with each CRI request (`image_pull.go:105-114`) and never reach a file the agent could read.
 - **Revisit when:** users need pull-secret-only images verified. Then add kubelet credential-provider support.
 
-## D78: One `registry-config` crate holds both runtimes' parsers, and reads what containerd reads (amends D17; amended by D115)
+## D78: One `registry-config` crate holds both runtimes' parsers, and reads what containerd reads (amends D17; amended by D115, D119)
 
 - **Decision:**
   - The *registry config* parsers are one crate, `crates/registry-config` (`speculaire-registry-config`), a module per runtime: `containerd::config` for `config.toml`, `containerd::hosts` for `hosts.toml` and the host directories, and `crio` for CRI-O's files (D80).
@@ -248,7 +248,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - `crictl pull docker.io/library/busybox:1.36.0` sent the mirror a manifest request that counted as `fall_through`, and the pull succeeded, on containerd 2.4 and CRI-O 1.37; a client without the certificate, and one that did not trust the CA, were refused.
 - **Revisit when:** a node needs a mirror on TLS 1.2, or the suite's `results.yaml` panic is fixed upstream: then `check` reads `junit.xml`.
 
-## D88: The upstream client is our own on hyper; the relay on CRI-O keeps a blob cache and tokens per host and scope (amends D17, D53, D67, D83; amended by D111)
+## D88: The upstream client is our own on hyper; the relay on CRI-O keeps a blob cache and tokens per host and scope (amends D17, D53, D67, D83; amended by D111, D119)
 
 - **Decision:**
   - **Client:** crate `speculaire-registry`, our own on `hyper` 1 and `tokio-rustls`, not `oci-client`. It asks an *endpoint* (D89) for one `GET` or `HEAD` and returns the status, the headers and the body still to be read, so the relay streams a blob to CRI-O and to a temporary file while hashing it (D7, D67). TLS is built per endpoint from its own trust (the CA files, a client certificate, `insecure`), on the system's roots (`rustls-native-certs`) and aws-lc-rs; one connection pool per distinct trust. TLS 1.2 is enabled for the upstream client only: registries that a runtime reaches may speak nothing newer, and the mirror's server config still names 1.3 alone (D85).
@@ -355,11 +355,23 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Cost:** a registry learns the agent's version; the runtime already tells it its own.
 - **Revisit when:** an operator needs to hide the version, or a registry treats the header specially.
 
-## D115: A negative `dial_timeout` is a host containerd cannot dial (amends D78)
+## D115: A negative `dial_timeout` is a host containerd cannot dial (amends D78; amended by D119)
 
 - **Decision:** `parse_hosts_file` accepts a negative `dial_timeout`, as Go's `time.ParseDuration` does (containerd v2.4.2 `core/remotes/docker/config/hosts.go:539-545`), and reads it as `DialTimeout::Expired`. The containerd `Registries` leaves such a host out of a registry's sources.
 - **Because:**
   - Go's dialer sets a deadline in the past for a negative timeout (`net/dial.go:255` at go1.27.4), so every dial to that host fails at once and containerd tries the next host (`core/remotes/docker/resolver.go:343`). Leaving the host out does the same without the failed dial.
   - Refusing the value refused the whole file, so the agent kept the previous registry config (D91) while containerd pulled through the next host.
-- **Limit:** a timeout of zero or more is parsed and not applied: the upstream client opens every connection within its own 15 s (`crates/registry/src/connect.rs`).
+- **Limit:** a timeout of zero is parsed and not applied; D119 applies a positive one.
 - **Revisit when:** Go reads a negative `net.Dialer.Timeout` otherwise.
+
+## D119: The upstream client dials a host within its positive `dial_timeout` (amends D78, D88, D115)
+
+- **Decision:**
+  - The containerd `Registries` gives each candidate of a host its positive `dial_timeout` as `Endpoint::dial_timeout`. The upstream client bounds the TCP connect to it, name resolution included, by that time; without one, by its own 15 s. The whole open, TLS included, stays within 15 s, or within a longer `dial_timeout`.
+  - A token endpoint is reached through the client of the endpoint whose challenge named it, so within its `dial_timeout`.
+  - The client keeps one connection pool per trust and `dial_timeout`, not per trust alone (D88).
+  - A `dial_timeout` of zero, Go's dialer without a limit, keeps the client's own 15 s. CRI-O has no such setting: its endpoints have none.
+- **Because:**
+  - containerd gives a host with a `dial_timeout` its own transport, whose `net.Dialer` has that `Timeout` (v2.3.7 `core/remotes/docker/config/hosts.go:186-191`), and fetches its tokens with that client (`:209`). A mirror set to fail over within 200 ms waited 15 s for a dead host before the next one.
+  - The pool is hyper's, keyed by the URI alone, and its connector has no endpoint: the timeout must key the client.
+- **Revisit when:** containerd applies `dial_timeout` beyond the TCP connect, or hosts with many distinct timeouts make the pools per key costly.

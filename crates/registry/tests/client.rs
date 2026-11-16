@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
@@ -643,6 +644,66 @@ async fn an_endpoint_that_is_down_is_an_error_naming_it() {
         .unwrap_err();
     assert!(matches!(err, Error::Request { .. }), "{err}");
     assert!(err.to_string().contains(&address.to_string()), "{err}");
+}
+
+#[tokio::test]
+async fn a_dial_timeout_bounds_the_connects_even_when_the_trust_has_a_client() {
+    let client = Client::new();
+    // The client of the default trust, made by an endpoint without a `dial_timeout`.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let refusing = Endpoint::new(false, listener.local_addr().unwrap().to_string());
+    drop(listener);
+    client
+        .send(&refusing, &Credentials::Anonymous, &get("/", "a"))
+        .await
+        .unwrap_err();
+    // TEST-NET-1 (RFC 5737): nothing answers its SYN, on a port no transparent proxy takes.
+    let blackholed = Endpoint {
+        dial_timeout: Some(Duration::from_millis(200)),
+        ..Endpoint::new(false, "192.0.2.1:9")
+    };
+    let started = Instant::now();
+    let err = client
+        .send(&blackholed, &Credentials::Anonymous, &get("/", "a"))
+        .await
+        .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(matches!(err, Error::Request { .. }), "{err}");
+    assert!(err.to_string().contains("192.0.2.1:9"), "{err}");
+    // A token endpoint is dialed as its registry is, as containerd fetches tokens with the registry's client.
+    let fake = serve(
+        None,
+        Box::new(|_| {
+            respond(
+                401,
+                &[(
+                    "www-authenticate",
+                    r#"Bearer realm="http://192.0.2.1:9/token""#,
+                )],
+                "",
+            )
+        }),
+    )
+    .await;
+    let challenging = Endpoint {
+        dial_timeout: Some(Duration::from_millis(200)),
+        ..endpoint(&fake)
+    };
+    let started = Instant::now();
+    let err = client
+        .send(&challenging, &alice(), &get("/a/manifests/1", "a"))
+        .await
+        .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(err.to_string().contains("192.0.2.1:9"), "{err}");
 }
 
 // ---- TLS ----

@@ -12,6 +12,8 @@ pub mod containerd;
 pub mod crio;
 mod live;
 
+use std::time::Duration;
+
 pub use containerd::ContainerdRegistries;
 pub use crio::CrioRegistries;
 use rustls_pki_types::pem::PemObject as _;
@@ -54,6 +56,9 @@ pub struct Endpoint {
     pub tls: Tls,
     /// Headers to add to every request to it, such as `hosts.toml`'s `header`; their values are secrets (D37).
     pub headers: Vec<(String, SecretString)>,
+    /// How long a TCP connect to it may take, name resolution included: containerd's positive `dial_timeout` (D119).
+    /// `None` is the client's own limit. CRI-O has no such setting.
+    pub dial_timeout: Option<Duration>,
 }
 
 impl Endpoint {
@@ -67,6 +72,7 @@ impl Endpoint {
             namespace: None,
             tls: Tls::default(),
             headers: Vec::new(),
+            dial_timeout: None,
         }
     }
 }

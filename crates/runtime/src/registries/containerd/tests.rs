@@ -1,5 +1,7 @@
 //! Sources from a containerd config on a temporary tree.
 
+use std::time::Duration;
+
 use secrecy::ExposeSecret as _;
 
 use super::*;
@@ -165,6 +167,38 @@ fn a_host_with_a_negative_dial_timeout_is_skipped_as_containerd_cannot_dial_it()
         [
             vec![("now.corp".to_owned(), true)],
             vec![("registry-1.docker.io".to_owned(), true)],
+        ]
+    );
+}
+
+#[test]
+fn a_positive_dial_timeout_goes_to_each_candidate_and_zero_keeps_the_clients_own() {
+    let node = Node::new("");
+    node.hosts(
+        "docker.io",
+        "[host.\"http://quick.corp\"]\ndial_timeout = \"200ms\"\nskip_verify = true\n\
+         [host.\"https://now.corp\"]\ndial_timeout = \"0s\"\n",
+    );
+    let sources = node
+        .registries()
+        .sources("docker.io/library/busybox", tag("1"))
+        .unwrap();
+    let timeouts: Vec<Vec<_>> = sources
+        .iter()
+        .map(|source| {
+            source
+                .candidates
+                .iter()
+                .map(|endpoint| endpoint.dial_timeout)
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        timeouts,
+        [
+            vec![Some(Duration::from_millis(200)); 2],
+            vec![None],
+            vec![None],
         ]
     );
 }
