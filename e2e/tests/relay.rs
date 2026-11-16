@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use e2e::registry::{
     self, Access, Certificates, LARGE_IMAGE, PASSWORD, Proxy, Registry, TokenServer, USER,
 };
+use e2e::upstream::CRIO_AUTH_FILE;
 use e2e::{Cluster, Output, Runtime, TEST_IMAGE};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -110,13 +111,16 @@ impl Worker {
         }
     }
 
-    /// Writes a file of the node, and removes it at the end.
+    /// Writes a file of the node, and puts back what it held, or removes it, at the end.
     fn file(&mut self, path: &str, text: &str) {
         let dir = path.rsplit_once('/').unwrap().0;
         self.sh(&format!(
-            "mkdir -p {dir} && cat > {path} <<'EOF'\n{text}EOF\n"
+            "rm -f {path}.e2e && {{ [ ! -e {path} ] || cp -p {path} {path}.e2e; }} \
+             && mkdir -p {dir} && cat > {path} <<'EOF'\n{text}EOF\n"
         ));
-        self.undo.push(format!("rm -f {path}"));
+        self.undo.push(format!(
+            "if [ -e {path}.e2e ]; then mv {path}.e2e {path}; else rm -f {path}; fi"
+        ));
     }
 
     /// Copies a file to the node.
@@ -531,10 +535,7 @@ fn on_crio_the_relay_logs_in_with_the_nodes_credentials_and_ca_and_logs_no_secre
     let image = private.image.clone();
     let basic = basic_credentials();
     // The login, only in the node's own credential file.
-    worker.file(
-        "/run/containers/0/auth.json",
-        &auth_file(&private.address, &basic),
-    );
+    worker.file(CRIO_AUTH_FILE, &auth_file(&private.address, &basic));
     worker.agent_config(&["s/^filter = .*/filter = \"trace\"/"]);
     let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
 
@@ -580,7 +581,7 @@ fn on_crio_a_login_added_to_the_auth_file_is_used_by_the_next_pull_without_a_res
     assert!(!without.success, "{without:?}");
 
     worker.file(
-        "/run/containers/0/auth.json",
+        CRIO_AUTH_FILE,
         &auth_file(&private.address, &basic_credentials()),
     );
     // No SIGHUP and no restart: a poll finds the file, within `config.poll_interval` (10 s).

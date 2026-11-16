@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::balancer::PORT;
 use e2e::reflector::Holder;
-use e2e::upstream::{Digest, Image};
+use e2e::upstream::{Digest, Image, Kind};
 use e2e::{Cluster, Output, Runtime};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -73,7 +73,7 @@ impl Nodes {
             .unwrap()
             .as_nanos();
         self.cluster
-            .upstream()
+            .upstream(Kind::Plain)
             .push(&format!("outage/{nanos}"), size)
             .unwrap()
     }
@@ -191,7 +191,7 @@ impl Nodes {
     }
 
     fn gets(&self, image: &Image) -> BTreeMap<Digest, usize> {
-        self.cluster.upstream().blob_gets(image).unwrap()
+        self.cluster.upstream(Kind::Plain).blob_gets(image).unwrap()
     }
 
     /// Whether anything on `node` listens on the peer API's port.

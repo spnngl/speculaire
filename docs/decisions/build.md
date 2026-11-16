@@ -447,7 +447,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
 
 
-## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63)
+## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112)
 
 - **Decision:**
   - **Reflectors:** the agents of the control plane and of the first worker run `role = "reflector"` (D2 puts reflectors on control-plane nodes; kind's second control plane would add an etcd member and kind's own balancer for nothing the peer suites test). Both are in every agent's `reflector.members`, by node name and kind-network address, port 7483; the second worker is the client no reflector runs on.
@@ -524,3 +524,26 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - One agent's `/metrics` never holds every metric: the reflector's only on its role, the relay's only on CRI-O, a labelled counter only once counted, and histograms only in protobuf. Every metric is described once in code, so the described names are the complete list, in a test of milliseconds with no runtime.
 - **Cost:** a metric described but never set passes. A metric set but not described is caught by the tests of `/metrics` only when they emit it.
 - **Revisit when:** a metric is set without its `describe`, or the catalog is generated from the code.
+
+## D112: The e2e cluster has four upstreams and a signed test image; the proxy throttles and a node can lose an upstream (amends D94)
+
+- **Decision:**
+  - **Start:** after `kind create cluster`, `just e2e-up` runs `cargo run -p e2e --bin upstreams` (`e2e::upstream::start`). It starts the upstreams, pushes the test images to each, writes each node's runtime config for them and restarts the runtime, before the agents are installed. Each upstream is `<cluster>-<role>.e2e.test` (`e2e::upstream::Kind`), and `e2e-down` removes it by the cluster's label:
+    - **`upstream`:** D94's, `registry:3` on plain HTTP, which the runtime config names.
+    - **`referrers`:** zot (`zot-minimal` v2.1.23) on plain HTTP, port 80, which the runtime config names: the referrers API.
+    - **`private`:** `registry:2.8.3` on TLS behind `docker_auth` 1.14.0 at `<cluster>-token.e2e.test:5001`, M2's private registry (D88). Its CA and the login are only in the runtime config: on containerd, `registry.configs."<host>".auth` in `config.toml` and `ca` in the host's `hosts.toml`; on CRI-O, an entry in `registries.conf.d`, `/etc/containers/certs.d/<host>/ca.crt`, and `/etc/crio/e2e-auth.json`, which a drop-in names as `global_auth_file`.
+    - **`public`:** `registry:3` on TLS, its CA in each node's system trust store, with no `hosts.toml` and no `registries.conf` entry.
+  - **Test images:** `e2e/signed:1` and `e2e/unsigned:1` are the suites' busybox (`e2e::TEST_IMAGE`) for the node's platform, each with its own annotation, so its own digest. They are built once per cluster in zot: `cosign` v3.1.3, in its container with a key pair made for the run, signs and attests `e2e/signed:1` offline (`--key`, `--tlog-upload=false`, `--use-signing-config=false`). It writes a signature, a SLSA provenance (`e2e/fixtures/slsa.json`) and an SPDX document (`e2e/fixtures/spdx.json`) as Sigstore bundle referrers, then a legacy signature and SLSA attestation (`--new-bundle-format=false`) under the `.sig` and `.att` tags. `regctl image copy --referrers --digest-tags` copies both images to the three others, which list the referrers under the fallback tag `sha256-<hex>`. Each node holds the public key at `/etc/speculaire-e2e/cosign.pub`.
+  - **Access logs:** `Request` holds the user agent, from registry's combined format and from zot's JSON entries.
+  - **Proxy:** `Proxy::throttle(pattern, retry_after, times)` answers `429` with `Retry-After` to the next `times` requests whose path matches, or to all with `None`, until `unthrottle`. The proxy logs every request in the combined format, which `Proxy::requests` reads.
+  - **Reject:** `Cluster::reject(node, host)` resets the node's TCP connections to every address of the host's container, with `iptables` and `ip6tables`, until its guard drops, as `Balancer::stop` does.
+  - The relay suite writes its logins to CRI-O's `global_auth_file` and restores it after.
+- **Because:**
+  - Step 00 of M4 asks for the upstreams the verification suites pull from: one with the referrers API, one without (registry:2 and :3 answer `404` there, so clients fall back to the tag), one with a login and a CA only the runtime knows, and one the runtime config does not name.
+  - zot implements the referrers API of distribution spec 1.1, ships as one static binary in a multi-arch image, and logs each request with its user agent.
+  - Signing in zot puts the referrers where the API lists them; `regctl` then writes the fallback tag as a client must for a registry without the API.
+  - The cluster reaches nothing beyond kind's network, and cosign v3 fetches the public-good signing config through TUF by default (`cmd/cosign/cli/options/sign.go:164`, `attest.go:132` at v3.1.3).
+  - Rust rather than bash: the harness's `Certificates` and `TokenServer` already make the private registry, and a failure names the command that failed.
+  - **Measured:** on Docker Desktop arm64, `e2e/tests/upstreams.rs` and every other suite pass on containerd 2.4 and CRI-O 1.37. A node pulls both images from each upstream with its own config only. zot lists the three referrers; registry:2 and registry:3 answer `404` there and list the same three under the fallback tag; all four serve the `.sig` and `.att` tags. The proxy answers `429` with `Retry-After` and logs the client's user agent. A rejected upstream fails at once from its node and answers the others. Building and copying the test images took 9.7 to 16.4 s, and 64.8 s while other builds shared the machine. In CI, an e2e leg (both passes) took 9.0 to 10.9 min, from 8.2 to 9.5 min before (runs 43728506365 and 43717787646).
+- **Cost:** two more images from ghcr.io, and 10 to 20 s for the test images, in each `just e2e-up`.
+- **Revisit when:** registry:3 gains the referrers API, or cosign drops the legacy `.sig` and `.att` formats.

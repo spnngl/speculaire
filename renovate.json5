@@ -37,7 +37,7 @@
             "customType": "regex",
             "description": "Images of the e2e suites, pinned by tag and digest.",
             "managerFilePatterns": ["/(^|/)e2e/src/[^/]+\\.rs$/"],
-            "matchStrings": ["\"(?<depName>docker\\.io/[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[0-9a-f]{64})\""],
+            "matchStrings": ["\"(?<depName>(?:docker|ghcr)\\.io/[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[0-9a-f]{64})\""],
             "datasourceTemplate": "docker",
         },
     ],

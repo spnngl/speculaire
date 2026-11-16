@@ -1,25 +1,60 @@
-//! The cluster's upstream registry (D94). `just e2e-up` starts it as `<cluster>-upstream.e2e.test`, on port 80, and
-//! points every node's runtime at it over plain HTTP; the agents mirror it like any registry. Its access log is the
-//! oracle of the peer suites: a blob a node got from a peer is a blob it did not `GET` here.
+//! The cluster's upstream registries (D94, D112). `just e2e-up` starts each as `<cluster>-<role>.e2e.test`, on the
+//! default port of its scheme, pushes the test images to each, and points every node's runtime at them; the agents
+//! mirror them like any registry. Their access logs are the oracle of the suites: a blob a node got from a peer is a
+//! blob it did not `GET` here.
+
+mod start;
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::registry::{PLATFORM, docker, fail, regctl};
+pub use start::{COSIGN_PUBLIC_KEY, CRIO_AUTH_FILE, SIGNED, UNSIGNED, start};
+
+use crate::registry::{PASSWORD, PLATFORM, USER, docker, fail, regctl_after};
 use crate::{Cluster, Failure};
 
-/// The registry; `just e2e-up` starts it and `just e2e-down` removes it.
+/// Which of the cluster's upstream registries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// D94's `registry:3`, on plain HTTP, which each node's runtime config names.
+    Plain,
+    /// zot, on plain HTTP, which each node's runtime config names: the referrers API.
+    Referrers,
+    /// `registry:2` behind a token server, on TLS: the CA and the login are only in each node's runtime config.
+    Private,
+    /// `registry:3`, on TLS: the CA is in each node's system trust store, and no runtime config names it.
+    Public,
+}
+
+impl Kind {
+    /// Every kind, in the order `just e2e-up` starts them.
+    pub const ALL: [Self; 4] = [Self::Plain, Self::Referrers, Self::Private, Self::Public];
+
+    /// The word between the cluster's name and `.e2e.test`.
+    fn role(self) -> &'static str {
+        match self {
+            Self::Plain => "upstream",
+            Self::Referrers => "referrers",
+            Self::Private => "private",
+            Self::Public => "public",
+        }
+    }
+}
+
+/// A registry; `just e2e-up` starts it and `just e2e-down` removes it.
 pub struct Upstream {
     name: String,
+    kind: Kind,
 }
 
 impl Cluster {
-    /// The cluster's upstream registry.
+    /// The cluster's upstream registry of `kind`.
     #[must_use]
-    pub fn upstream(&self) -> Upstream {
+    pub fn upstream(&self, kind: Kind) -> Upstream {
         Upstream {
-            name: format!("{}-upstream.e2e.test", self.name),
+            name: format!("{}-{}.e2e.test", self.name, kind.role()),
+            kind,
         }
     }
 }
@@ -31,6 +66,44 @@ impl Upstream {
         &self.name
     }
 
+    /// The `regctl registry` commands that reach it from kind's network: plain HTTP, or TLS with any certificate, and
+    /// the login the private one asks for.
+    fn reach(&self) -> String {
+        let name = &self.name;
+        match self.kind {
+            Kind::Plain | Kind::Referrers => {
+                format!("regctl registry set --skip-check --tls disabled {name} >/dev/null")
+            }
+            Kind::Public => {
+                format!("regctl registry set --skip-check --tls insecure {name} >/dev/null")
+            }
+            Kind::Private => format!(
+                "regctl registry set --skip-check --tls insecure {name} >/dev/null \
+                 && regctl registry login -u {USER} -p {PASSWORD} {name} >/dev/null"
+            ),
+        }
+    }
+
+    /// Runs `script` in a `regctl` container that reaches this registry, with its login, and returns its stdout.
+    ///
+    /// # Errors
+    ///
+    /// When the container or `script` fails.
+    pub fn regctl(&self, script: &str) -> Result<String, Failure> {
+        regctl_after(&self.reach(), script)
+    }
+
+    /// The digest of `reference`, `<repository>:<tag>`, which [`SIGNED`] and [`UNSIGNED`] name.
+    ///
+    /// # Errors
+    ///
+    /// When `regctl` fails or prints no digest.
+    pub fn digest(&self, reference: &str) -> Result<Digest, Failure> {
+        self.regctl(&format!("regctl image digest {}/{reference}", self.name))?
+            .trim()
+            .parse()
+    }
+
     /// Pushes a new image, `<repository>:1`, of one layer of `size` random bytes: no node holds any of its blobs.
     ///
     /// # Errors
@@ -38,15 +111,12 @@ impl Upstream {
     /// When `regctl` fails or writes a manifest without its digests.
     pub fn push(&self, repository: &str, size: u64) -> Result<Image, Failure> {
         let reference = format!("{}/{repository}:1", self.name);
-        let manifest = regctl(
-            &self.name,
-            &format!(
-                "mkdir /tmp/layer && head -c {size} /dev/urandom >/tmp/layer/random \
+        let manifest = self.regctl(&format!(
+            "mkdir /tmp/layer && head -c {size} /dev/urandom >/tmp/layer/random \
                  && regctl image create --platform {PLATFORM} {reference} \
                  && regctl image mod --replace --layer-add dir=/tmp/layer {reference} >/dev/null \
                  && regctl manifest get --format raw-body {reference}"
-            ),
-        )?;
+        ))?;
         let blobs = blobs(&manifest).ok_or_else(|| fail("regctl manifest get", &manifest))?;
         Ok(Image { reference, blobs })
     }
@@ -57,7 +127,7 @@ impl Upstream {
     ///
     /// When `docker logs` fails.
     pub fn requests(&self) -> Result<Vec<Request>, Failure> {
-        // The access log goes to stdout, the other entries to stderr.
+        // registry's access log goes to stdout, its other entries to stderr; zot logs everything to stderr.
         Ok(docker(&["logs", &self.name])?
             .lines()
             .filter_map(Request::parse)
@@ -140,7 +210,7 @@ impl fmt::Display for Digest {
     }
 }
 
-/// A line of the registry's access log.
+/// An entry of a registry's access log.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request {
     /// Such as `GET` or `HEAD`.
@@ -149,20 +219,52 @@ pub struct Request {
     pub path: String,
     /// The response's status.
     pub status: u16,
+    /// The `User-Agent` header, which tells the agent's requests from the runtime's (D111); empty without one.
+    pub user_agent: String,
 }
 
 impl Request {
-    /// Parses a line of the combined log format, `<client> - - [<time>] "<method> <path> <protocol>" <status> ...`;
-    /// `None` for the registry's other entries.
-    fn parse(line: &str) -> Option<Self> {
+    /// Parses an access log entry, of `registry` or of zot; `None` for their other entries.
+    pub(crate) fn parse(line: &str) -> Option<Self> {
+        if line.starts_with('{') {
+            Self::parse_zot(line)
+        } else {
+            Self::parse_combined(line)
+        }
+    }
+
+    /// Parses a line of the combined log format,
+    /// `<client> - - [<time>] "<method> <path> <protocol>" <status> <size> "<referer>" "<user agent>"`.
+    fn parse_combined(line: &str) -> Option<Self> {
         let (_, rest) = line.split_once("] \"")?;
         let (request, rest) = rest.split_once("\" ")?;
         let mut request = request.split(' ');
         let (method, path, _protocol) = (request.next()?, request.next()?, request.next()?);
+        let (_, user_agent) = rest.strip_suffix('"')?.rsplit_once('"')?;
         Some(Self {
             method: method.to_owned(),
             path: path.to_owned(),
             status: rest.split(' ').next()?.parse().ok()?,
+            user_agent: user_agent.to_owned(),
+        })
+    }
+
+    /// Parses zot's JSON entry of a request, whose `message` is `HTTP API`.
+    fn parse_zot(line: &str) -> Option<Self> {
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        if entry.get("message")? != "HTTP API" {
+            return None;
+        }
+        let text = |key: &str| Some(entry.get(key)?.as_str()?.to_owned());
+        let user_agent = entry
+            .pointer("/headers/User-Agent/0")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Some(Self {
+            method: text("method")?,
+            path: text("path")?,
+            status: u16::try_from(entry.get("statusCode")?.as_u64()?).ok()?,
+            user_agent: user_agent.to_owned(),
         })
     }
 
@@ -195,6 +297,7 @@ mod tests {
                 method: "GET".to_owned(),
                 path: format!("/v2/peers/a/blobs/{DIGEST}"),
                 status: 200,
+                user_agent: "containerd/v2.4.2".to_owned(),
             }
         );
         assert_eq!(request.blob().unwrap().to_string(), DIGEST);
@@ -203,11 +306,33 @@ mod tests {
     }
 
     #[test]
+    fn a_zot_request_entry_parses_and_its_other_entries_do_not() {
+        let line = format!(
+            r#"{{"time":"2026-11-15T13:54:17Z","level":"info","message":"HTTP API","method":"GET","path":"/v2/e2e/signed/referrers/{DIGEST}","statusCode":200,"latency":"0s","bodySize":1302,"headers":{{"Accept":["*/*"],"User-Agent":["speculaire/0.1.0"]}}}}"#
+        );
+        assert_eq!(
+            Request::parse(&line).unwrap(),
+            Request {
+                method: "GET".to_owned(),
+                path: format!("/v2/e2e/signed/referrers/{DIGEST}"),
+                status: 200,
+                user_agent: "speculaire/0.1.0".to_owned(),
+            }
+        );
+        let anonymous =
+            r#"{"message":"HTTP API","method":"HEAD","path":"/v2/","statusCode":401,"headers":{}}"#;
+        assert_eq!(Request::parse(anonymous).unwrap().user_agent, "");
+        let other = r#"{"level":"info","message":"getting manifest","method":"GET","path":"/v2/","statusCode":200}"#;
+        assert_eq!(Request::parse(other), None);
+    }
+
+    #[test]
     fn only_a_blob_get_names_a_blob() {
         let request = |method: &str, path: &str| Request {
             method: method.to_owned(),
             path: path.to_owned(),
             status: 200,
+            user_agent: String::new(),
         };
         assert_eq!(
             request("HEAD", &format!("/v2/a/blobs/{DIGEST}")).blob(),

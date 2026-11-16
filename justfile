@@ -436,8 +436,12 @@ e2e-up runtime version kubernetes="": e2e-tools
         fi
     } >"$config"
     kind create cluster --name "$cluster" --image "$image" --config "$config" --wait 180s
-    # The peer harness (D94): an upstream registry, and a load balancer in front of the reflectors, the agents of the
-    # control plane and of the first worker. Every container of the cluster has its label, for `e2e-down`.
+    # The upstreams, the test images on each, and each node's runtime config for them (D94, D112).
+    SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' SPECULAIRE_E2E_RELEASE="$release" \
+        SPECULAIRE_E2E_KUBERNETES="$kubernetes" SPECULAIRE_E2E_IP_FAMILY="$family" \
+        cargo run -p e2e --locked --quiet --bin upstreams
+    # The peer harness (D94): a load balancer in front of the reflectors, the agents of the control plane and of the
+    # first worker. Every container of the cluster has its label, for `e2e-down`.
     labels=(--network kind --label speculaire-e2e --label "speculaire-e2e.cluster=$cluster")
     address() { # <container>: its address on kind's network, IPv6 on a dual-stack cluster
         local field=IPAddress
@@ -447,12 +451,7 @@ e2e-up runtime version kubernetes="": e2e-tools
     socket() { # <address> <port>
         [[ "$1" == *:* ]] && echo "[$1]:$2" || echo "$1:$2"
     }
-    upstream="$cluster-upstream.e2e.test"
-    registry_image="$(sed -n 's/^pub const REGISTRY_IMAGE: &str = "\(.*\)";$/\1/p' e2e/src/registry.rs)"
-    [[ -n "$registry_image" ]]
-    docker rm -f -v "$upstream" "$cluster-lb" >/dev/null 2>&1 || true
-    # On port 80: a name with a port is not mirrored on CRI-O (D88).
-    docker run -d --name "$upstream" "${labels[@]}" -e REGISTRY_HTTP_ADDR=:80 "$registry_image" >/dev/null
+    docker rm -f -v "$cluster-lb" >/dev/null 2>&1 || true
     members=''
     envoy_config="{{ e2e_dir }}/$cluster-envoy.yaml"
     listen='address: 0.0.0.0'
@@ -507,14 +506,6 @@ e2e-up runtime version kubernetes="": e2e-tools
         if [[ "$node" == "$cluster-control-plane" || "$node" == "$cluster-worker" ]]; then
             docker exec "$node" sed -i 's/^#role = "agent"$/role = "reflector"/' /etc/speculaire/config.toml
             docker exec "$node" grep -q '^role = "reflector"$' /etc/speculaire/config.toml
-        fi
-        # The upstream, over plain HTTP.
-        if [[ '{{ runtime }}' == crio ]]; then
-            printf '[[registry]]\nprefix = "%s"\nlocation = "%s"\ninsecure = true\n' "$upstream" "$upstream" |
-                docker exec -i "$node" sh -c 'mkdir -p /etc/containers/registries.conf.d && cat >/etc/containers/registries.conf.d/50-e2e-upstream.conf'
-        else
-            printf 'server = "http://%s"\n\n[host."http://%s"]\n  capabilities = ["pull", "resolve"]\n' "$upstream" \
-                "$upstream" | docker exec -i "$node" sh -c "mkdir -p /etc/containerd/certs.d/$upstream && cat >/etc/containerd/certs.d/$upstream/hosts.toml"
         fi
         # The admin's step of docs/operations.md § Install (D55): the mirror's certificates and the runtime's entries
         # come before the agent, whose preflight looks for them.

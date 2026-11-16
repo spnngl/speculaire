@@ -1,0 +1,25 @@
+{
+  "buildDefinition": {
+    "buildType": "https://speculaire.dev/e2e/test-image/v1",
+    "externalParameters": {
+      "source": "docker.io/library/busybox:1.37.0"
+    },
+    "internalParameters": {},
+    "resolvedDependencies": [
+      {
+        "uri": "pkg:docker/library/busybox@1.37.0",
+        "digest": {
+          "sha256": "a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
+        }
+      }
+    ]
+  },
+  "runDetails": {
+    "builder": {
+      "id": "https://speculaire.dev/e2e/upstream-start"
+    },
+    "metadata": {
+      "invocationId": "e2e"
+    }
+  }
+}

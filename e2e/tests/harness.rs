@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use e2e::balancer::PORT;
 use e2e::node::Metrics;
 use e2e::reflector::KUBELET;
+use e2e::upstream::Kind;
 use e2e::{Cluster, IpFamily};
 
 /// The tests share the node no reflector runs on: one at a time.
@@ -162,7 +163,7 @@ fn a_pull_gets_each_blob_of_a_new_image_from_the_upstream_once() {
     let _serial = serial();
     let cluster = Cluster::from_env();
     let client = client(&cluster);
-    let upstream = cluster.upstream();
+    let upstream = cluster.upstream(Kind::Plain);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

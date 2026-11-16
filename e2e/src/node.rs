@@ -1,12 +1,12 @@
-//! What the peer suites do to a node (D94): stop, start or kill its agent, slow its network, corrupt a blob it serves,
-//! and read its metrics.
+//! What the suites do to a node (D94): stop, start or kill its agent, slow its network, cut it off from a host, corrupt
+//! a blob it serves, and read its metrics.
 
 use std::time::{Duration, Instant};
 
 use prost::Message as _;
 
 use crate::reflector::unhex;
-use crate::registry::fail;
+use crate::registry::{docker, fail};
 use crate::upstream::Digest;
 use crate::{Cluster, Failure, Runtime};
 
@@ -24,8 +24,49 @@ impl Cluster {
         format!("{blobs}/{}", digest.hex())
     }
 
-    fn sh(&self, node: &str, script: &str) -> Result<String, Failure> {
+    pub(crate) fn sh(&self, node: &str, script: &str) -> Result<String, Failure> {
         self.exec(node, &["sh", "-c", script])
+    }
+
+    /// Writes `text` to the node's file `path`, and makes its directory.
+    pub(crate) fn write(&self, node: &str, path: &str, text: &str) -> Result<(), Failure> {
+        let dir = path.rsplit_once('/').map_or("/", |(dir, _)| dir);
+        self.sh(
+            node,
+            &format!(
+                "mkdir -p {dir} && cat >{path} <<'SPECULAIRE_E2E_EOF'\n{text}SPECULAIRE_E2E_EOF\n"
+            ),
+        )
+        .map(drop)
+    }
+
+    /// Resets every TCP connection the node opens to `host`, a container on kind's network, until the guard drops: a
+    /// pull from it fails at once.
+    ///
+    /// # Errors
+    ///
+    /// When `docker inspect` or `iptables` fails.
+    pub fn reject(&self, node: &str, host: &str) -> Result<Rules<'_>, Failure> {
+        // Both families: on a dual-stack cluster, the node may resolve the name to either.
+        let addresses = docker(&[
+            "inspect",
+            "-f",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}",
+            host,
+        ])?;
+        let rules = addresses
+            .split_whitespace()
+            .map(|address| {
+                let tables = if address.contains(':') {
+                    "ip6tables"
+                } else {
+                    "iptables"
+                };
+                let rule = format!("OUTPUT -d {address} -p tcp -j REJECT --reject-with tcp-reset");
+                (tables, rule)
+            })
+            .collect();
+        Rules::insert(self, node, rules)
     }
 
     /// Stops the node's agent, as an admin does.
@@ -221,6 +262,49 @@ struct LabelPair {
 struct Histogram {
     #[prost(uint64, tag = "1")]
     sample_count: u64,
+}
+
+/// `iptables` rules of a node, each with its command (`iptables` or `ip6tables`), deleted when this drops.
+pub struct Rules<'a> {
+    cluster: &'a Cluster,
+    node: String,
+    inserted: Vec<(&'static str, String)>,
+}
+
+impl<'a> Rules<'a> {
+    /// Inserts each rule the node does not have yet.
+    pub(crate) fn insert(
+        cluster: &'a Cluster,
+        node: &str,
+        rules: Vec<(&'static str, String)>,
+    ) -> Result<Self, Failure> {
+        let mut guard = Self {
+            cluster,
+            node: node.to_owned(),
+            inserted: Vec::new(),
+        };
+        for (tables, rule) in rules {
+            guard
+                .run(tables, "-C", &rule)
+                .or_else(|_| guard.run(tables, "-I", &rule))?;
+            guard.inserted.push((tables, rule));
+        }
+        Ok(guard)
+    }
+
+    /// Checks (`-C`), inserts (`-I`) or deletes (`-D`) `rule`.
+    fn run(&self, tables: &str, command: &str, rule: &str) -> Result<String, Failure> {
+        self.cluster
+            .sh(&self.node, &format!("{tables} -w {command} {rule}"))
+    }
+}
+
+impl Drop for Rules<'_> {
+    fn drop(&mut self) {
+        for (tables, rule) in &self.inserted {
+            let _ = self.run(tables, "-D", rule);
+        }
+    }
 }
 
 /// A `tc netem` qdisc on a node, removed when this drops.

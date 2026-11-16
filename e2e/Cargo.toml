@@ -13,7 +13,7 @@ publish.workspace = true
 prost.workspace = true
 # The certificates of the Bearer registry that the relay suite pulls from.
 rcgen.workspace = true
-# The manifests the peer harness pushes to its upstream.
+# The manifests the harness pushes to its upstreams, and zot'"'"'s access log.
 serde_json.workspace = true
 
 [lints]

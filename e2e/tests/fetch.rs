@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::balancer::PORT;
 use e2e::reflector::Holder;
-use e2e::upstream::{Digest, Image};
+use e2e::upstream::{Digest, Image, Kind};
 use e2e::{Cluster, IpFamily, Output, Runtime};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -72,7 +72,7 @@ impl Nodes {
             .unwrap()
             .as_nanos();
         self.cluster
-            .upstream()
+            .upstream(Kind::Plain)
             .push(&format!("fetch/{nanos}"), size)
             .unwrap()
     }
@@ -152,7 +152,7 @@ impl Nodes {
     }
 
     fn gets(&self, image: &Image) -> BTreeMap<Digest, usize> {
-        self.cluster.upstream().blob_gets(image).unwrap()
+        self.cluster.upstream(Kind::Plain).blob_gets(image).unwrap()
     }
 
     /// Removes `image` from each of `nodes`, which may not hold it.

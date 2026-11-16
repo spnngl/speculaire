@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use e2e::reflector::KUBELET;
-use e2e::upstream::{Digest, Image};
+use e2e::upstream::{Digest, Image, Kind};
 use e2e::{Cluster, Output};
 
 /// The peer API's port when `peer.address` is `"auto"` (D36).
@@ -36,7 +36,7 @@ fn pulled(cluster: &Cluster, holder: &str) -> Image {
         .unwrap()
         .as_nanos();
     let image = cluster
-        .upstream()
+        .upstream(Kind::Plain)
         .push(&format!("peer/{nanos}"), 1 << 20)
         .unwrap();
     cluster
