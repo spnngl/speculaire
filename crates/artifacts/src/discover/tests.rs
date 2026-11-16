@@ -461,12 +461,16 @@ async fn a_referrer_at_the_manifest_cap_is_fetched_and_one_listed_above_it_is_no
 }
 
 #[tokio::test]
-async fn a_blob_larger_than_the_cap_drops_its_artifact() {
+async fn a_blob_larger_than_the_cap_drops_its_artifact_and_one_at_the_cap_is_kept() {
     let test = Test::with(Limits::new(4), |registry| vec![registry.endpoint()]).await;
     let root = test.root();
-    let (_, listed) = test.bundle(&root, BUNDLE, b"a bundle of more than four bytes");
-    test.referrers(&format!("/app/referrers/{root}"), &[listed], None);
-    assert_eq!(test.discover(&root).await.unwrap(), Vec::new());
+    let (_, above) = test.bundle(&root, BUNDLE, b"a bundle of more than four bytes");
+    let (at, at_cap) = test.bundle(&root, BUNDLE, b"four");
+    test.referrers(&format!("/app/referrers/{root}"), &[above, at_cap], None);
+    assert_eq!(
+        kinds(&test.discover(&root).await.unwrap()),
+        [(Kind::Bundle, at)]
+    );
 }
 
 #[tokio::test]
