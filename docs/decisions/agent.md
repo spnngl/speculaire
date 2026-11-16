@@ -220,7 +220,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Reading the same keys everywhere keeps `check-config` honest: it checks the node the agent would run on.
 - **Revisit when:** a second thing needs a directory, such as the blob cache (D67) or the verdict cache (D31).
 
-## D90: A `Node` hands out four traits, and everything that differs between containerd and CRI-O sits behind them (amends D64, D84, D86; amended by D99, D114)
+## D90: A `Node` hands out four traits, and everything that differs between containerd and CRI-O sits behind them (amends D64, D84, D86; amended by D99, D115)
 
 - **Decision:**
   - **Traits** (`speculaire-runtime`): `Wiring` (`configure`, `unconfigure`, `check`: containerd's `hosts.toml` files; CRI-O's drop-in, `certs.d` and `systemctl reload crio`), `Settings` (`required_plugins`, which `unconfigure` reads (D84), and `preflight` (D86)), `Registries` (the sources of an image name, D89) and `Content` (a blob by digest). `Containerd` and `CriO` implement them and hold their socket and paths. `detect` still returns the `Runtime` enum; a `Node` is built from it once at startup, or by a command after `--runtime`, and hands out each trait. Nothing outside `speculaire-runtime` and the parsing of `--runtime` matches on `Runtime`.
@@ -303,7 +303,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Revisit when:** a watched filesystem moves the change time without a change, so polls read for nothing.
 
 
-## D99: What a node serves to peers is a fifth trait, `Inventory` (amends D90; amended by D114)
+## D99: What a node serves to peers is a fifth trait, `Inventory` (amends D90; amended by D115)
 
 - **Decision:**
   - **Trait:** `Inventory::follow` sends a listing, then each blob added or removed, until its receiver closes; a later listing replaces the earlier one. A `Node` hands it out, and the agent turns it into what it announces (D98). The M5 `Images` trait becomes the sixth.

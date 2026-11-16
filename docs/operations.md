@@ -63,7 +63,7 @@ On CRI-O every pull of a mirrored registry goes through the agent, which fetches
 | `mirror.address` is not loopback | The mirror would listen beyond the node (D56) | Use a loopback address |
 | `listening on mirror.address ...` (also `metrics.address`) | Another process holds the address | Free it or change the address (D56) |
 | `opening the blob cache <directory>` | On CRI-O, the agent cannot create or read `blob_cache.directory` (D67) | Fix the directory or `blob_cache.directory` |
-| `opening the artifact store <directory>` | The agent cannot create or read `artifacts.directory` (D114) | Fix the directory or `artifacts.directory` |
+| `opening the artifact store <directory>` | The agent cannot create or read `artifacts.directory` (D115) | Fix the directory or `artifacts.directory` |
 
 ## Break glass: containers do not start
 

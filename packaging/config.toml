@@ -59,7 +59,7 @@
 
 [artifacts]
 # Where the artifact store keeps the signatures and attestations discovery fetched upstream, laid out as the blob
-# cache is (D114). Restart.
+# cache is (D115). Restart.
 #directory = "/var/lib/speculaire/artifacts"
 
 [mirror]
