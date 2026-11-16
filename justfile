@@ -244,14 +244,47 @@ bench-micro *args:
 # build with symbols, in a volume of their own.
 in_profile := container + ' run --rm -i --privileged -v "$(pwd):/src" -v speculaire-registry:/usr/local/cargo/registry -v speculaire-profile-' + arch() + ':/target -e CARGO_TARGET_DIR=/target -e CARGO_PROFILE_RELEASE_DEBUG=line-tables-only -e CARGO_PROFILE_RELEASE_STRIP=none -e RUST_LOG --ulimit nofile=1048576:1048576 --sysctl "net.ipv4.ip_local_port_range=1024 65535" localhost/speculaire-profile'
 
+# Docker Hub's `image` (`docker.io/…`) from mirror.gcr.io, then from `public.ecr.aws/docker` for an official image
+# (`library/`), then from Docker Hub, as e2e's harness (`e2e::hub`, D120, D122): prints the reference it is here
+# under, pulling it unless one is.
 [private]
-profile-image:
-    {{ container }} build --quiet --target profile -t localhost/speculaire-profile -f build/Containerfile build >/dev/null
+hub-pull image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    path='{{ image }}'
+    path="${path#docker.io/}"
+    sources=("mirror.gcr.io/$path")
+    [[ "$path" == library/* ]] && sources+=("public.ecr.aws/docker/$path")
+    sources+=('{{ image }}')
+    for source in "${sources[@]}"; do
+        if {{ container }} image inspect "$source" >/dev/null 2>&1; then echo "$source"; exit 0; fi
+    done
+    for source in "${sources[@]}"; do
+        if {{ container }} pull --quiet "$source" >/dev/null; then echo "$source"; exit 0; fi
+    done
+    echo "hub-pull: no source serves {{ image }}" >&2
+    exit 1
+
+# The `stage` of build/Containerfile as localhost/speculaire-<stage> (D57, D116). The Docker Hub image its `FROM` lines
+# lead to, which Renovate moves, is a named context of the one `hub-pull` pulled (D122).
+[private]
+image stage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    from='{{ stage }}'
+    until [[ "$from" == docker.io/* ]]; do
+        from="$(sed -n "s/^FROM \([^ ]*\) AS $from\$/\1/p" build/Containerfile)"
+        [[ -n "$from" ]] || { echo 'image: no stage {{ stage }} on a Docker Hub image' >&2; exit 1; }
+    done
+    pulled="$({{ just_executable() }} hub-pull "$from")"
+    {{ container }} build --quiet --target '{{ stage }}' --build-arg NIGHTLY={{ nightly }} \
+        --build-context "$from=docker-image://$pulled" -t 'localhost/speculaire-{{ stage }}' -f build/Containerfile build \
+        >/dev/null
 
 # The reflector under a short load (D104), twice: Valgrind's memcheck, failing on a definite leak or a memory error, then
 # DHAT; then DHAT on the agents of a short peer pull (D116). The profiles go to target/valgrind/dhat, named after the
 # run, the node and the pid. Needs Docker; outside `just check`.
-valgrind: profile-image
+valgrind: (image "profile")
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/valgrind
@@ -278,7 +311,7 @@ valgrind: profile-image
 # target/profile/<target>/ gets the run's report, and per process a folded stack file and an SVG, named after its node
 # and pid. Needs Docker; outside `just check`.
 # Profile the peer pull: just profile peer
-profile target: profile-image
+profile target: (image "profile")
     #!/usr/bin/env bash
     set -euo pipefail
     case '{{ target }}' in
@@ -354,8 +387,9 @@ oracle: oracle-build
 # Build and check the Go test oracle into target/oracle/speculaire-oracle
 oracle-build:
     mkdir -p target/oracle
+    golang="$({{ just_executable() }} hub-pull 'docker.io/library/golang:{{ golang }}')"; \
     {{ container }} run --rm -v "$(pwd)/oracle:/src" -w /src -v "$(pwd)/target/oracle:/out" -v speculaire-go-mod:/go/pkg/mod \
-        -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" -e CGO_ENABLED=0 -e GOFLAGS=-tags={{ go_tags }} docker.io/library/golang:{{ golang }} sh -euc ' \
+        -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" -e CGO_ENABLED=0 -e GOFLAGS=-tags={{ go_tags }} "$golang" sh -euc ' \
             unformatted=$(gofmt -l .); [ -z "$unformatted" ] || { echo "gofmt: $unformatted" >&2; exit 1; }; \
             go mod verify; go vet ./...; go test ./...; \
             go build -trimpath -o /out/speculaire-oracle .; /out/speculaire-oracle version'
@@ -373,7 +407,7 @@ oracle-test:
 dev *recipe:
     #!/usr/bin/env bash
     set -euo pipefail
-    {{ container }} build --quiet --target dev --build-arg NIGHTLY={{ nightly }} -t localhost/speculaire-dev -f build/Containerfile build >/dev/null
+    {{ just_executable() }} image dev
     tree="$(pwd)"
     mounts=(-v "$tree:$tree")
     git="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
@@ -395,18 +429,18 @@ conformance:
     fi
     mkdir -p target/conformance target/musl-fake
     # The fake containerd of the agent's tests (D87): the node of this run has no runtime.
-    {{ container }} build --quiet --target build -t localhost/speculaire-build -f build/Containerfile build >/dev/null
+    {{ just_executable() }} image build
     {{ container }} run --rm -v "$(pwd):/src:ro" -v "$(pwd)/target/musl-fake:/out" \
         -v speculaire-registry:/usr/local/cargo/registry -v "speculaire-musl-{{ arch() }}:/target" \
         -e CARGO_TARGET_DIR=/target localhost/speculaire-build \
         sh -c 'cargo build --release --locked --target "$1" -p speculaire-fake-runtime \
             && cp "/target/$1/release/fake-runtime" /out/' sh '{{ arch() }}-unknown-linux-musl'
+    golang="$({{ just_executable() }} hub-pull 'docker.io/library/golang:{{ golang }}')"
     {{ container }} run --rm -e CONFORMANCE_REV='{{ conformance_rev }}' -v "$(pwd)/$bin:/usr/bin/speculaire:ro" \
         -v "$(pwd)/target/musl-fake/fake-runtime:/usr/bin/fake-runtime:ro" \
         -v "$(pwd)/conformance:/conformance:ro" -v "$(pwd)/packaging:/packaging:ro" \
         -v "$(pwd)/target/conformance:/results" -v speculaire-go-mod:/go/pkg/mod \
-        -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" docker.io/library/golang:{{ golang }} \
-        sh /conformance/run.sh
+        -v "speculaire-go-build-{{ arch() }}:/root/.cache/go-build" "$golang" sh /conformance/run.sh
 
 # The binary embeds its dependency list through cargo-auditable (D13, D46); the recipe fails unless it is static-pie
 # and carries that list. Volumes speculaire-registry and speculaire-musl-<arch> keep the registry and the build.
@@ -418,7 +452,7 @@ musl target:
         echo "musl: a container runs the host's architecture: use {{ arch() }}-unknown-linux-musl" >&2
         exit 1
     fi
-    {{ container }} build --quiet --target build -t localhost/speculaire-build -f build/Containerfile build >/dev/null
+    {{ just_executable() }} image build
     mkdir -p "target/musl/{{ target }}"
     {{ container }} run --rm -v "$(pwd):/src:ro" -v "$(pwd)/target/musl/{{ target }}:/out" \
         -v speculaire-registry:/usr/local/cargo/registry -v "speculaire-musl-{{ arch() }}:/target" \
@@ -444,7 +478,7 @@ load *args:
         exit 1
     fi
     mkdir -p target/musl-load
-    {{ container }} build --quiet --target build -t localhost/speculaire-build -f build/Containerfile build >/dev/null
+    {{ just_executable() }} image build
     {{ container }} run --rm -v "$(pwd):/src:ro" -v "$(pwd)/target/musl-load:/out" \
         -v speculaire-registry:/usr/local/cargo/registry -v "speculaire-musl-{{ arch() }}:/target" \
         -e CARGO_TARGET_DIR=/target localhost/speculaire-build \
@@ -478,9 +512,9 @@ e2e-up runtime version kubernetes="": e2e-tools
         echo "e2e: no $bin: run just musl {{ arch() }}-unknown-linux-musl" >&2
         exit 1
     fi
-    # Docker Hub's images through its mirrors (D120): `pull` prints the reference it pulled. The Containerfile's
-    # alpine, which Renovate moves, is a named context of the one pulled.
-    pull() { cargo run -p e2e --locked --quiet --bin pull -- "$1"; }
+    # Docker Hub's images through its mirrors (D120, D122). The Containerfile's alpine, which Renovate moves, is a named
+    # context of the one pulled.
+    pull() { {{ just_executable() }} hub-pull "$1"; }
     alpine="$(sed -n 's/^FROM \(docker\.io\/[^ ]*\) AS download$/\1/p' 'e2e/node/{{ runtime }}/Containerfile')"
     base="$(pull "docker.io/kindest/node:$node")"
     download="$(pull "$alpine")"

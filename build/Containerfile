@@ -4,6 +4,8 @@
 #   build    the toolchain, lld and cargo-auditable: just musl
 #   dev      plus just and the tools of `just check` and the dependency checks: just dev <recipe>
 #   profile  glibc, perf, Valgrind and inferno: just profile <target>, just valgrind (D116)
+#
+# `just image <stage>` builds them, each base pulled through Docker Hub's mirrors (D122).
 
 # The tag is rust-toolchain.toml's channel; Renovate keeps the digest.
 FROM docker.io/library/rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build

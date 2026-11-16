@@ -36,11 +36,12 @@ jobs:
       - env:
           TARGET: ${{ matrix.target }}
         run: just musl "$TARGET"
-      # The bench images are amd64 only: the arm64 nodes run them through QEMU.
+      # The bench images are amd64 only: the arm64 nodes run them through QEMU. binfmt through Docker Hub's mirrors
+      # (D122).
       - if: matrix.target == 'aarch64-unknown-linux-musl'
         run: >-
           docker run --rm --privileged
-          docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          "$(just hub-pull docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0)"
           --install amd64
       - run: just e2e-up containerd 2.4
       - shell: bash

@@ -1,7 +1,7 @@
 //! Docker Hub's images through its mirrors (D120): an image of Docker Hub comes from `mirror.gcr.io`, then, for an
 //! official image, from `public.ecr.aws/docker`, and from Docker Hub last, whose anonymous pulls a CI runner shares a
 //! rate limit for. Every image is pinned by digest, so each source serves the same bytes or none. The nodes' runtimes
-//! take the same mirrors from their node image (`e2e/node/`).
+//! take the same mirrors from their node image (`e2e/node/`), and the justfile's recipes from its `hub-pull` (D122).
 
 use crate::Failure;
 use crate::registry::{docker, fail};

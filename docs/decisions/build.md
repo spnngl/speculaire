@@ -613,7 +613,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** each worktree builds from scratch once, and its directory stays in the volume after the worktree is removed, until deleted (`docker run --rm -v speculaire-dev-<arch>:/target alpine rm -rf /target<path>`).
 - **Revisit when:** parallel worktrees run `just musl`, which then reuse each other's artifacts the same way.
 
-## D120: e2e pulls Docker Hub's images through mirror.gcr.io and the ECR Public Gallery (amends D63, D112)
+## D120: e2e pulls Docker Hub's images through mirror.gcr.io and the ECR Public Gallery (amends D63, D112; amended by D122)
 
 - **Decision:**
   - **Order:** an image of Docker Hub comes from mirror.gcr.io, then, for an official image (`library/`), from `public.ecr.aws/docker`, then from Docker Hub, as spnngl/images' builds do (`.github/actions/bake-build/action.yml:80-90`).
@@ -627,3 +627,16 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `public.ecr.aws/docker` mirrors the official images alone, under the path `docker/library/`: containerd reaches it with `override_path`.
 - **Cost:** the e2e nodes' runtimes run with mirrors that a default node lacks, and the `configure` suite edits that file as the admin's. mirror.gcr.io caches popular images only; any other falls through to Docker Hub. The build image (`rust`), `golang`, `debian` and `binfmt` of the other recipes still come from Docker Hub.
 - **Revisit when:** a mirror fails a leg, or Docker Hub lifts the limit for CI runners.
+
+## D122: The justfile's recipes pull Docker Hub's images through D120's mirrors (amends D120)
+
+- **Decision:**
+  - `just hub-pull <image>` tries D120's sources in order and prints the reference it is there under. It replaces the e2e crate's `pull` binary, so no recipe builds Rust to pull an image.
+  - `just image <stage>` builds `build`, `dev` and `profile` of `build/Containerfile`. It pulls the stage's base through `hub-pull` and passes it as the named build context of the `FROM` reference (`--build-context <reference>=docker-image://<pulled>`), as `just e2e-up` does for the node images' `alpine`.
+  - `oracle-build` and `conformance` run `golang`, and the bench workflow runs `binfmt`, under the reference `hub-pull` prints. The bench pods' `debian` comes through the nodes' mirrors (D120).
+  - The `FROM` lines and the justfile's variables keep `docker.io/…@sha256:…`, so Renovate's extraction is unchanged.
+- **Because:**
+  - CI's musl, conformance and oracle jobs, the mutants shards and the load, deep and bench workflows pull these images, under the same anonymous limit as e2e.
+  - Each source serves the digest's bytes or none: two clean builds of the musl binary on the base pulled from mirror.gcr.io have the same SHA-256 (D57).
+- **Cost:** `docker build` of `build/Containerfile` without `just image` still pulls its base from Docker Hub.
+- **Revisit when:** D120 is revisited.
