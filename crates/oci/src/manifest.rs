@@ -9,7 +9,7 @@ use crate::reference::{Digest, ReferenceError};
 
 /// The most descriptors a manifest may list. Registries limit a manifest to 4 MiB, which is under this at the
 /// shortest descriptor.
-const MAX_DESCRIPTORS: usize = 20_000;
+pub(crate) const MAX_DESCRIPTORS: usize = 20_000;
 
 /// The digests a manifest points to.
 #[derive(Clone, Debug, PartialEq, Eq)]
