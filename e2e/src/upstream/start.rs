@@ -8,7 +8,7 @@ use crate::registry::{
     self, Access, COPY_IMAGE, COSIGN_IMAGE, Certificates, Container, LABEL, NETWORK, PASSWORD,
     PLATFORM, REFERRERS_IMAGE, Registry, TokenServer, USER, docker, fail, regctl_after, scratch,
 };
-use crate::{Cluster, Failure, Runtime, TEST_IMAGE};
+use crate::{Cluster, Failure, Runtime, TEST_IMAGE, hub};
 
 /// The signed test image on every upstream: a Sigstore bundle signature, a SLSA provenance and an SPDX attestation as
 /// referrers, and a legacy `.sig` and `.att` tag (D112).
@@ -205,8 +205,11 @@ fn start_zot(name: &str) -> Result<Container, Failure> {
 fn build(cluster: &Cluster, zot: &Upstream) -> Result<String, Failure> {
     let host = zot.address();
     let push = |image: &str| {
+        let copy = hub::from_first(TEST_IMAGE, |source| {
+            format!("regctl image copy --platform {PLATFORM} {source} {host}/{image}")
+        });
         format!(
-            "regctl image copy --platform {PLATFORM} {TEST_IMAGE} {host}/{image} \
+            "{copy} \
              && regctl image mod --replace --annotation dev.speculaire.e2e.image={image} {host}/{image} >/dev/null"
         )
     };
@@ -308,7 +311,13 @@ impl Volume {
 
     /// Runs `script` in a shell.
     fn sh(&self, script: &str) -> Result<String, Failure> {
-        self.run(&["--entrypoint", "sh", COPY_IMAGE, "-c", script])
+        self.run(&[
+            "--entrypoint",
+            "sh",
+            &hub::pulled(COPY_IMAGE)?,
+            "-c",
+            script,
+        ])
     }
 }
 

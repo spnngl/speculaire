@@ -70,7 +70,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D60 [agent](agent.md): config values parse into types that print back as written; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47; amended by D87)
 - D61 [build](build.md): `speculaire_build_info` exists from startup with empty runtime versions; every build has `protoc` (amends D34; amended by D68)
 - D62 [build](build.md): binaries in `apps/`, libraries in `crates/` as `speculaire-<name>` (amends D57)
-- D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59; amended by D94, D113)
+- D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59; amended by D94, D113, D120)
 - D64 [gate](gate.md): the same NRI plugin gates CRI-O; the agent finds its runtime by probing both sockets, and reads CRI-O's NRI keys from `GET /config` on `crio.sock` (amends D9, D41, D54; amended by D84, D86, D90)
 - D65 [gate](gate.md): on CRI-O the image identity is the `ImageRef` annotation (the config digest), policies match every name of the image, and `images.json` changes trigger verification; no pinning (amends D11, D15, D20, D21, D22)
 - D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32; amended by D80, D83, D102)
@@ -119,7 +119,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34)
 - D110 [distribution](distribution.md): the content directory is `io.containerd.content.v1.content` below the `root` of containerd's config, `/var/lib/containerd` when it names none; an agent test serves a blob from a temporary root (amends D5, D85)
 - D111 [distribution](distribution.md): every request of the upstream client carries `User-Agent: speculaire/<version>` (amends D88)
-- D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94)
+- D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94; amended by D120)
 - D113 [build](build.md): pull requests run 4 e2e legs, the newest containerd and CRI-O on both architectures; `main` runs all 14 (amends D63, D94)
 - D114 [build](build.md): the bench samples the agent's cgroup `anon` and `file` every second; peak memory, and so the release bar, is the peak of `anon` (amends D35, D106)
 - D115 [distribution](distribution.md): a negative `dial_timeout` in a `hosts.toml` is parsed, and the host is left out of the registry's sources, as containerd cannot dial it (amends D78; amended by D119)
@@ -127,4 +127,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D117 [reflector](reflector.md): a frame reader keeps one buffer per connection, grown to the largest frame and freed after one over 1 KiB, such as a snapshot chunk (amends D105)
 - D118 [build](build.md): `just dev` mounts the tree at its host path and builds it in `/target<path>` of the shared volume; `just musl` keeps `/src` (amends D57)
 - D119 [distribution](distribution.md): the upstream client bounds the TCP connect to a host, and to the token endpoint it names, by the host's positive `dial_timeout`, one connection pool per trust and timeout; zero and CRI-O keep its own 15 s (amends D78, D88, D115)
-Next free number: D120.
+- D120 [build](build.md): e2e pulls Docker Hub's images from mirror.gcr.io, then `public.ecr.aws/docker` for official images, then Docker Hub, on the host and in the node images' runtime config (amends D63, D112)
+Next free number: D121.

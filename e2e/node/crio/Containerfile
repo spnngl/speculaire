@@ -22,3 +22,5 @@ COPY --from=download /download/cri-o /tmp/cri-o
 RUN cd /tmp/cri-o && bash ./install && rm -rf /tmp/cri-o ~/.crio-install \
     && systemctl disable containerd && systemctl enable crio
 COPY 20-runc.conf /etc/crio/crio.conf.d/20-runc.conf
+# Docker Hub through its mirrors (D120).
+COPY 10-docker-hub.conf /etc/containers/registries.conf.d/10-docker-hub.conf

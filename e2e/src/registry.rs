@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::upstream::Request;
-use crate::{Failure, run};
+use crate::{Failure, hub, run};
 
 /// The registry, which also serves as the upstream of every pull the suite makes.
 pub const REGISTRY_IMAGE: &str = "docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e";
@@ -57,8 +57,9 @@ pub struct Container {
 }
 
 impl Container {
-    /// Creates the container, copies `files` (host path, path in the container) into it, and starts it. It carries
-    /// the label of the cluster `SPECULAIRE_E2E_CLUSTER` names, for `just e2e-down` to remove.
+    /// Creates the container of `image`, pulled through [`hub`], copies `files` (host path, path in the container)
+    /// into it, and starts it. It carries the label of the cluster `SPECULAIRE_E2E_CLUSTER` names, for
+    /// `just e2e-down` to remove.
     pub(crate) fn start(
         name: &str,
         image: &str,
@@ -68,6 +69,7 @@ impl Container {
     ) -> Result<Self, Failure> {
         // What an earlier, killed run left.
         let _ = docker(&["rm", "-f", name]);
+        let image = hub::pulled(image)?;
         let mut args = vec![
             "create",
             "--name",
@@ -87,7 +89,7 @@ impl Container {
         for env in &envs {
             args.extend(["-e", env]);
         }
-        args.push(image);
+        args.push(&image);
         args.extend(command);
         docker(&args)?;
         let container = Self {
@@ -303,11 +305,14 @@ impl Registry {
     }
 }
 
-/// [`Registry::copy_in`], into the plain-HTTP registry at `address`.
+/// [`Registry::copy_in`], into the plain-HTTP registry at `address`, from the first of `source`'s [`hub::sources`]
+/// that serves it.
 pub(crate) fn copy_in(address: &str, source: &str, reference: &str) -> Result<(), Failure> {
     regctl(
         address,
-        &format!("regctl image copy --platform {PLATFORM} {source} {address}/{reference}"),
+        &hub::from_first(source, |source| {
+            format!("regctl image copy --platform {PLATFORM} {source} {address}/{reference}")
+        }),
     )
     .map(drop)
 }
@@ -339,7 +344,7 @@ pub(crate) fn regctl_after(setup: &str, script: &str) -> Result<String, Failure>
         LABEL,
         "--entrypoint",
         "sh",
-        COPY_IMAGE,
+        &hub::pulled(COPY_IMAGE)?,
         "-c",
         &format!("{setup} && {script}"),
     ])
@@ -356,7 +361,7 @@ pub fn htpasswd() -> Result<String, Failure> {
         "--rm",
         "--entrypoint",
         "htpasswd",
-        HTPASSWD_IMAGE,
+        &hub::pulled(HTPASSWD_IMAGE)?,
         "-nbB",
         USER,
         PASSWORD,

@@ -5,12 +5,14 @@
 //! kind names each node's container after the node.
 //!
 //! The peer harness (D94): `just e2e-up` also starts the cluster's [`upstream`] registry and its reflectors'
-//! [`balancer`]; [`node`] stops, slows and corrupts a node for the peer suites, and [`reflector`] calls a reflector.
+//! [`balancer`], pulling Docker Hub's images through its mirrors ([`hub`]); [`node`] stops, slows and corrupts a node
+//! for the peer suites, and [`reflector`] calls a reflector.
 
 use std::fmt;
 use std::process::Command;
 
 pub mod balancer;
+pub mod hub;
 pub mod node;
 pub mod reflector;
 pub mod registry;

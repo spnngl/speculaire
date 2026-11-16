@@ -251,17 +251,20 @@ fn unconfigure_removes_only_its_own_and_pulls_still_work() {
     let node = workers(&cluster).remove(1);
     let before = state(&cluster, &node);
 
-    // An admin's own file, edited after `configure`, survives; the certificates and our entries go; pulls work.
-    let (admin_file, admin_seed, edit) = match cluster.runtime() {
+    // An admin's own file, edited after `configure`, survives; the certificates and our entries go; pulls work. On
+    // containerd, the admin's file is the node image's Docker Hub mirrors (D120), which the edit leaves in place.
+    let (admin_file, admin_seed, edit, admin_restore) = match cluster.runtime() {
         Runtime::Containerd => (
             "/etc/containerd/certs.d/docker.io/hosts.toml",
-            "mkdir -p /etc/containerd/certs.d/docker.io && printf 'server = \"https://registry-1.docker.io\"\\n' > /etc/containerd/certs.d/docker.io/hosts.toml",
+            "true",
             "printf '# edited by the admin after configure\\n' >> /etc/containerd/certs.d/docker.io/hosts.toml",
+            "sed -i '/^# edited by the admin after configure$/d' /etc/containerd/certs.d/docker.io/hosts.toml",
         ),
         Runtime::Crio => (
             "/etc/containers/registries.conf.d/50-admin.conf",
             "printf '# the admin\\n' > /etc/containers/registries.conf.d/50-admin.conf",
             "printf '# edited by the admin after configure\\n' >> /etc/containers/registries.conf.d/50-admin.conf",
+            "rm -f /etc/containers/registries.conf.d/50-admin.conf",
         ),
     };
     sh(&cluster, &node, admin_seed);
@@ -285,9 +288,7 @@ fn unconfigure_removes_only_its_own_and_pulls_still_work() {
     sh(
         &cluster,
         &node,
-        &format!(
-            "crictl rmi {IMAGE}; rm -f {admin_file}; rmdir /etc/containerd/certs.d/docker.io 2>/dev/null; true"
-        ),
+        &format!("crictl rmi {IMAGE}; {admin_restore}; true"),
     );
     cluster.exec(&node, &["speculaire", "configure"]).unwrap();
     assert!(out.contains("removed"), "{out}");
