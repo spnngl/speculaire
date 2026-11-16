@@ -64,7 +64,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Cost:** a tightened policy takes effect after re-verification (normally seconds), not instantly.
 - **Revisit when:** —
 
-## D22: Verification starts at the manifest fetch (amended by D65, D66)
+## D22: Verification starts at the manifest fetch (amended by D65, D66, D113)
 
 - **Decision:** triggers, earliest first:
   1. the mirror serving or forwarding `GET /v2/<repo>/manifests/<digest>` (containerd fetches manifests by digest through the mirror, even when it resolved the tag upstream, D6);
@@ -136,3 +136,23 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - `docker buildx --sbom=true` images carry no other SBOM, and they are common.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
+
+## D113: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99)
+
+- **Decision:**
+  - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends. The CRI-O relay protects the listed images from eviction through it.
+  - **Trigger (M4):** each digest of the list is a root, discovered once: a root the artifact store has recorded is not asked again, and one no source served is asked again after 10 min. The manifest fetch (D22) becomes a trigger at M5, with verification.
+  - **Repositories:** the root is asked of each repository the list names it under, in list order, through each source `Registries::sources` gives, the node's own mirror removed. The first that answers `HEAD` of the root's manifest with `200` serves all its targets. When none does, discovery ends `artifacts unreachable` (D17). The root is fetched only when its media type is an index's.
+  - **Fetched:** referrers that are Sigstore bundles, by `artifactType` or else their layer's media type, whose manifest names the target as `subject`; the legacy `.sig` manifest; the BuildKit attestation manifests of the platform manifest (D49); and every blob each names. Nothing else.
+  - **Caps:** 64 referrers per target, 10 pages of the referrers API per target, 4 MiB per manifest or referrers index (D85), `sbom.max_size` per other blob (D12). A blob beyond its cap drops its artifact.
+  - **Store:** in `artifacts.directory` (default `/var/lib/speculaire/artifacts`, restart key): `blobs/<algorithm>/<hex>` as in the blob cache, each written to `tmp/`, hashed in flight (D7) and linked into place; `roots/<algorithm>/<hex>.json` records each root's artifacts: target, manifest, kind and blobs. Stored artifacts are untrusted until M5 verifies them.
+  - **`upstream` label on CRI-O (D50):** a host keeps its name when a `[[registry]]` table of `registries.conf` or a drop-in has the host, or a path below it, as prefix; any other host is `other`. The mirror's own drop-in does not count.
+- **Because:**
+  - containerd's image events carry the image name and no digest (v2.4.2 `api/events/image.proto:26-38`), so each is a hint to read the list again; its garbage collector publishes `/images/delete` too (`core/metadata/db.go:355-356`).
+  - CRI-O writes `images.json` by rename (`go.podman.io/storage` v1.63.0 `images.go:566-586`): watching its directory sees every write. `rustix`, already in the tree and trusted (D71), gives inotify without `unsafe`.
+  - Nothing verifies at M4, so the list is enough, and it covers images pulled before the agent started.
+  - CRI-O pairs each repository with each digest an image was pulled by (D65): some pairs were never served by that repository, so the first `200` in list order picks one that was.
+  - A registry may list referrers it did not filter, and ghcr.io lists `application/vnd.oci.empty.v1+json` as their `artifactType` (sigstore-rs `src/cosign/client.rs:240-244`): the referrers index is a hint, and only a referrer whose manifest names the target as `subject` counts.
+  - Docker Hub counts each `GET` of a manifest against its pull limit, and an image manifest names no target: `HEAD` suffices (D38).
+  - The caps bound what one image's publisher can make every node fetch and keep.
+- **Revisit when:** M5 adds the manifest-fetch trigger; a real image has more than 64 bundles; or the store grows enough to need eviction before the M4 garbage collector (step 05).
