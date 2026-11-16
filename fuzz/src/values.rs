@@ -106,6 +106,7 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
     ("runtime.crio_socket", PATHS),
     ("nri.socket", PATHS),
     ("blob_cache.directory", PATHS),
+    ("artifacts.directory", PATHS),
     ("verify.policy", PATHS),
     (
         "verify.trusted_root",
