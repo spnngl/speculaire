@@ -72,7 +72,7 @@ fn read_all(bencher: Bencher<'_, '_>, size: usize) {
         .build()
         .expect("a runtime");
     bencher.bench_local(|| {
-        let blob = Blob::from_file(path.clone(), length);
+        let blob = Blob::from_open(std::fs::File::open(&path).expect("the blob"), length);
         runtime.block_on(blob.read_all(length)).expect("the blob")
     });
 }

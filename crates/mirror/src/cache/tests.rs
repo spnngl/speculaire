@@ -149,6 +149,24 @@ async fn protected_blobs_go_last_and_only_when_nothing_else_is_left() {
 }
 
 #[tokio::test]
+async fn a_blob_evicted_once_opened_still_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::open(dir.path(), 1 << 20).unwrap();
+    keep(&cache, &digest(1), b"one").await;
+    let blob = cache.open(&digest(1)).await.unwrap().unwrap();
+    cache.set_max_size(0);
+    assert_eq!(cache.evict(&HashSet::new()), [digest(1)]);
+    let chunks: Vec<Bytes> = blob
+        .stream(0, 3)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(chunks.concat(), b"one");
+}
+
+#[tokio::test]
 async fn a_blob_deleted_behind_the_cache_is_forgotten_at_the_next_read() {
     let dir = tempfile::tempdir().unwrap();
     let cache = Cache::open(dir.path(), 1 << 20).unwrap();

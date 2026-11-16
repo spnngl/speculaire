@@ -7,7 +7,6 @@
 
 use std::future::Future;
 use std::io;
-use std::path::PathBuf;
 use std::pin::Pin;
 
 use bytes::Bytes;
@@ -64,9 +63,9 @@ pub struct Blob {
 }
 
 enum Source {
-    File(PathBuf),
-    /// A file already open, such as one with no name that goes when it is closed.
-    Open(std::fs::File),
+    /// An open file: deleted meanwhile, as by containerd's garbage collector or the cache's eviction, it still reads
+    /// until it is closed.
+    File(std::fs::File),
     Grpc {
         channel: Channel,
         digest: String,
@@ -77,8 +76,7 @@ enum Source {
 impl std::fmt::Debug for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::File(path) => write!(f, "File({})", path.display()),
-            Self::Open(_) => write!(f, "Open"),
+            Self::File(file) => f.debug_tuple("File").field(file).finish(),
             Self::Grpc { digest, .. } => write!(f, "Grpc({digest})"),
             Self::Memory(bytes) => write!(f, "Memory({} bytes)", bytes.len()),
         }
@@ -86,21 +84,12 @@ impl std::fmt::Debug for Source {
 }
 
 impl Blob {
-    /// A blob that is a file of `size` bytes.
-    #[must_use]
-    pub fn from_file(path: PathBuf, size: u64) -> Self {
-        Self {
-            size,
-            source: Source::File(path),
-        }
-    }
-
     /// A blob that is the first `size` bytes of an open file.
     #[must_use]
     pub fn from_open(file: std::fs::File, size: u64) -> Self {
         Self {
             size,
-            source: Source::Open(file),
+            source: Source::File(file),
         }
     }
 
@@ -131,7 +120,7 @@ impl Blob {
     ///
     /// # Errors
     ///
-    /// When the file cannot be opened or sought in, or containerd refuses the read.
+    /// When the file cannot be sought in, or containerd refuses the read.
     pub async fn stream(self, first: u64, length: u64) -> Result<Chunks, Error> {
         match self.source {
             Source::Memory(bytes) => {
@@ -142,15 +131,7 @@ impl Blob {
                     async move { Ok(part) },
                 )))
             }
-            Source::File(path) => {
-                let mut file = tokio::fs::File::open(path).await?;
-                file.seek(io::SeekFrom::Start(first)).await?;
-                Ok(Box::pin(
-                    ReaderStream::with_capacity(file.take(length), chunk(length))
-                        .map_err(Error::Io),
-                ))
-            }
-            Source::Open(file) => {
+            Source::File(file) => {
                 let mut file = tokio::fs::File::from_std(file);
                 file.seek(io::SeekFrom::Start(first)).await?;
                 Ok(Box::pin(
