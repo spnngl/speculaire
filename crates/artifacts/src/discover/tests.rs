@@ -429,6 +429,38 @@ async fn referrers_beyond_the_cap_and_pages_beyond_the_cap_are_not_fetched() {
 }
 
 #[tokio::test]
+async fn a_referrer_at_the_manifest_cap_is_fetched_and_one_listed_above_it_is_not() {
+    // The same root and bundle give the same bytes in any test: a first one measures the bundle.
+    let probe = Test::start().await;
+    let (_, listed) = probe.bundle(&probe.root(), BUNDLE, b"at the cap");
+    let cap = listed["size"].as_u64().unwrap();
+    let limits = Limits {
+        manifest: cap,
+        ..Limits::new(1024)
+    };
+    let test = Test::with(limits, |registry| vec![registry.endpoint()]).await;
+    let root = test.root();
+    let (at, at_cap) = test.bundle(&root, BUNDLE, b"at the cap");
+    assert_eq!(at_cap["size"].as_u64(), Some(cap));
+    let (above, mut above_cap) = test.bundle(&root, BUNDLE, b"above it");
+    above_cap["size"] = json!(cap + 1);
+    test.referrers(
+        &format!("/app/referrers/{root}"),
+        &[at_cap, above_cap],
+        None,
+    );
+
+    let artifacts = test.discover(&root).await.unwrap();
+
+    assert_eq!(kinds(&artifacts), [(Kind::Bundle, at)]);
+    let requests = test.registry.requests();
+    assert!(
+        !requests.contains(&format!("GET /app/manifests/{above}")),
+        "{requests:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_blob_larger_than_the_cap_drops_its_artifact() {
     let test = Test::with(Limits::new(4), |registry| vec![registry.endpoint()]).await;
     let root = test.root();
