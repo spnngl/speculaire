@@ -23,7 +23,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
-/// How long a connection may take to open, TLS included.
+/// How long a connection may take to open, TLS included, and its TCP connect when the endpoint sets no `dial_timeout`.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The key of a client per trust: a SHA-256 that differs when two `Tls` would build different configs.
@@ -150,12 +150,16 @@ impl ServerCertVerifier for Unverified {
 #[derive(Clone)]
 pub(crate) struct Connector {
     tls: TlsConnector,
+    /// The TCP connect's limit, name resolution included, as Go's `net.Dialer.Timeout` (D119).
+    dial: Duration,
 }
 
 impl Connector {
-    pub(crate) fn new(config: ClientConfig) -> Self {
+    /// A connector with the trust of `config`, whose TCP connect takes at most `dial`, or the client's own limit.
+    pub(crate) fn new(config: ClientConfig, dial: Option<Duration>) -> Self {
         Self {
             tls: TlsConnector::from(Arc::new(config)),
+            dial: dial.unwrap_or(CONNECT_TIMEOUT),
         }
     }
 }
@@ -170,9 +174,10 @@ impl tower::Service<Uri> for Connector {
     }
 
     fn call(&mut self, uri: Uri) -> Self::Future {
-        let tls = self.tls.clone();
+        let (tls, dial) = (self.tls.clone(), self.dial);
         Box::pin(async move {
-            tokio::time::timeout(CONNECT_TIMEOUT, open(&tls, &uri))
+            // The whole open takes at most the client's own limit, or a longer dial, whose remainder TLS then has.
+            tokio::time::timeout(CONNECT_TIMEOUT.max(dial), open(&tls, dial, &uri))
                 .await
                 .unwrap_or_else(|_| {
                     Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out"))
@@ -181,7 +186,7 @@ impl tower::Service<Uri> for Connector {
     }
 }
 
-async fn open(tls: &TlsConnector, uri: &Uri) -> io::Result<Conn> {
+async fn open(tls: &TlsConnector, dial: Duration, uri: &Uri) -> io::Result<Conn> {
     let host = uri
         .host()
         .ok_or_else(|| io::Error::other("a URL without a host"))?;
@@ -189,7 +194,9 @@ async fn open(tls: &TlsConnector, uri: &Uri) -> io::Result<Conn> {
     let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
     // A URI keeps the brackets of an IPv6 literal; neither the resolver nor a certificate name has them.
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    let tcp = TcpStream::connect((host, port)).await?;
+    let tcp = tokio::time::timeout(dial, TcpStream::connect((host, port)))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "dial timed out"))??;
     tcp.set_nodelay(true)?;
     let stream = if https {
         let name = ServerName::try_from(host.to_owned()).map_err(io::Error::other)?;

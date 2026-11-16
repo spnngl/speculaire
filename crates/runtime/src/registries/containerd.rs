@@ -4,7 +4,8 @@
 //! The endpoints of a registry are those of its host directory, the registry itself last (`ConfigureHosts`); the
 //! credentials of an endpoint are the `configs.<host>.auth` of `config.toml`, by the endpoint's host (containerd
 //! v2.4.2 `internal/cri/server/images/image_pull.go:108`). An endpoint whose `dial_timeout` is negative is left out, as
-//! containerd's dial to it fails at once (D115). The deprecated `mirrors` table is not followed.
+//! containerd's dial to it fails at once (D115); a positive one bounds the TCP connect to it (D119). The deprecated
+//! `mirrors` table is not followed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -200,11 +201,17 @@ fn source(snapshot: &Snapshot, host: &str, repository: &str, endpoint: &Registry
         .iter()
         .flat_map(|(name, values)| values.iter().map(|value| (name.clone(), value.clone())))
         .collect();
+    let dial_timeout = match endpoint.dial_timeout {
+        Some(DialTimeout::Within(timeout)) if !timeout.is_zero() => Some(timeout),
+        // Zero is Go's dialer without a limit: the client keeps its own. `sources` left out `Expired`.
+        Some(DialTimeout::Within(_) | DialTimeout::Expired) | None => None,
+    };
     let candidate = |https: bool, tls: Tls| Endpoint {
         root: endpoint.path.clone(),
         namespace: namespace.clone(),
         tls,
         headers: headers.clone(),
+        dial_timeout,
         ..Endpoint::new(https, endpoint.host.clone())
     };
     let candidates = if endpoint.http_fallback {
