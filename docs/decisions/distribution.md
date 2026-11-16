@@ -248,7 +248,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - `crictl pull docker.io/library/busybox:1.36.0` sent the mirror a manifest request that counted as `fall_through`, and the pull succeeded, on containerd 2.4 and CRI-O 1.37; a client without the certificate, and one that did not trust the CA, were refused.
 - **Revisit when:** a node needs a mirror on TLS 1.2, or the suite's `results.yaml` panic is fixed upstream: then `check` reads `junit.xml`.
 
-## D88: The upstream client is our own on hyper; the relay on CRI-O keeps a blob cache and tokens per host and scope (amends D17, D53, D67, D83)
+## D88: The upstream client is our own on hyper; the relay on CRI-O keeps a blob cache and tokens per host and scope (amends D17, D53, D67, D83; amended by D111)
 
 - **Decision:**
   - **Client:** crate `speculaire-registry`, our own on `hyper` 1 and `tokio-rustls`, not `oci-client`. It asks an *endpoint* (D89) for one `GET` or `HEAD` and returns the status, the headers and the body still to be read, so the relay streams a blob to CRI-O and to a temporary file while hashing it (D7, D67). TLS is built per endpoint from its own trust (the CA files, a client certificate, `insecure`), on the system's roots (`rustls-native-certs`) and aws-lc-rs; one connection pool per distinct trust. TLS 1.2 is enabled for the upstream client only: registries that a runtime reaches may speak nothing newer, and the mirror's server config still names 1.3 alone (D85).
@@ -344,3 +344,13 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Before, no agent test could serve a blob: the content directory was fixed below the host's `/var/lib/containerd`, which on the CI runner exists and cannot be read.
 - **Cost:** containerd's `--root` flag overrides the config and the agent cannot see it; such a node serves from its content service only, as when the directory is missing (D85).
 - **Revisit when:** a supported setup sets `--root`.
+
+## D111: The upstream client names itself `speculaire/<version>` in `User-Agent` (amends D88)
+
+- **Decision:** every request of `speculaire-registry`, token requests and followed redirects included, carries `User-Agent: speculaire/<version>`, the agent's crate version. The client sets it; no setting changes it.
+- **Because:**
+  - A registry's log then tells the agent's requests from the runtime's, which name themselves `containerd/<version>` and `cri-o/<version> go/<version> os/linux arch/<arch>`. The M4 suites read the upstreams' access logs so (D112).
+  - hyper sends no `User-Agent` of its own.
+  - **Measured (M4 step 00):** the e2e upstreams log `speculaire/0.1.0` for the CRI-O relay's requests; `crates/registry/tests/client.rs` checks the header on each request of a Bearer pull redirected to another host.
+- **Cost:** a registry learns the agent's version; the runtime already tells it its own.
+- **Revisit when:** an operator needs to hide the version, or a registry treats the header specially.

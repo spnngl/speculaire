@@ -580,6 +580,39 @@ async fn redirects_are_followed_and_the_password_stays_with_the_registry() {
 }
 
 #[tokio::test]
+async fn every_request_names_the_agent_and_its_version() {
+    let cdn = serve(None, Box::new(|_| respond(200, &[], ""))).await;
+    let cdn_url = format!("http://{}/blob", cdn.authority());
+    let registry_answer = token_registry("tok1", Arc::new(Mutex::new(vec!["tok1"])));
+    let fake = serve(
+        None,
+        Box::new(move |seen| {
+            if seen.authorization.is_some() && seen.path.contains("/blobs/") {
+                return respond(307, &[("location", &cdn_url)], "");
+            }
+            registry_answer(seen)
+        }),
+    )
+    .await;
+    Client::new()
+        .send(
+            &endpoint(&fake),
+            &alice(),
+            &get("/app/web/blobs/sha256:x", "app/web"),
+        )
+        .await
+        .unwrap();
+    // The 401, the token, the authorised request and the redirect's target.
+    let mut seen = fake.seen.lock().unwrap().clone();
+    seen.extend(cdn.seen.lock().unwrap().iter().cloned());
+    assert_eq!(seen.len(), 4, "{seen:?}");
+    let agent = format!("speculaire/{}", env!("CARGO_PKG_VERSION"));
+    for request in &seen {
+        assert_eq!(request.headers["user-agent"], agent, "{}", request.path);
+    }
+}
+
+#[tokio::test]
 async fn a_loop_of_redirects_is_an_error() {
     let fake = serve(
         None,
