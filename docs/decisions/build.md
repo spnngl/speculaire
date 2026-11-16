@@ -269,7 +269,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `e2e/` and `oracle/` stay at the top level.
 - **Because:** the user asked for libraries and binaries apart. A library holds code a fuzz target, a test or another binary can reuse; a binary-only crate cannot be linked by them.
 
-## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94)
+## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94, D113)
 
 - **Decision:**
   - **Runtimes:** containerd and CRI-O. cri-dockerd has no NRI, so the gate cannot run there.
@@ -447,7 +447,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
 
 
-## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112)
+## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113)
 
 - **Decision:**
   - **Reflectors:** the agents of the control plane and of the first worker run `role = "reflector"` (D2 puts reflectors on control-plane nodes; kind's second control plane would add an etcd member and kind's own balancer for nothing the peer suites test). Both are in every agent's `reflector.members`, by node name and kind-network address, port 7483; the second worker is the client no reflector runs on.
@@ -547,3 +547,16 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Measured:** on Docker Desktop arm64, `e2e/tests/upstreams.rs` and every other suite pass on containerd 2.4 and CRI-O 1.37. A node pulls both images from each upstream with its own config only. zot lists the three referrers; registry:2 and registry:3 answer `404` there and list the same three under the fallback tag; all four serve the `.sig` and `.att` tags. The proxy answers `429` with `Retry-After` and logs the client's user agent. A rejected upstream fails at once from its node and answers the others. Building and copying the test images took 9.7 to 16.4 s, and 64.8 s while other builds shared the machine. In CI, an e2e leg (both passes) took 9.0 to 10.9 min, from 8.2 to 9.5 min before (runs 43728506365 and 43717787646).
 - **Cost:** two more images from ghcr.io, and 10 to 20 s for the test images, in each `just e2e-up`.
 - **Revisit when:** registry:3 gains the referrers API, or cosign drops the legacy `.sig` and `.att` formats.
+
+## D113: Pull requests run the newest containerd and CRI-O legs; main runs all 14 (amends D63, D94)
+
+- **Decision:**
+  - On a pull request, `ci.yml`'s `e2e` runs 4 of D63's 14 legs: containerd 2.4 and CRI-O 1.37, both on Kubernetes 1.37, on both architectures, each with both of D94's passes. A push to `main` runs all 14.
+  - Every other leg carries `main-only: true`, and the matrix's `exclude` drops those legs on pull requests, so their jobs never start. Job names stay D63's, and `required` still needs `e2e` (D48).
+  - When D63's matrix changes, the newest containerd and the newest CRI-O stay unmarked.
+- **Because:**
+  - With about 15 pull requests open at once, 14 legs each left pull requests waiting hours for runners. A leg takes 9 to 11 minutes (D112): about 140 runner-minutes per push at 14 legs, 40 at 4.
+  - The newest pair runs every suite on both runtimes and both architectures. The other legs differ only in the runtime or Kubernetes minor, which few changes touch.
+  - A job's `if` cannot read matrix values, and a skipped step still starts its job on a runner.
+- **Cost:** a regression on an older runtime or Kubernetes minor shows on `main` after the merge. Whoever merges watches `main`'s run and fixes forward.
+- **Revisit when:** runners keep up with 14 legs per pull request, or `main` breaks on a `main-only` leg twice in a milestone.
