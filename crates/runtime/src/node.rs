@@ -147,7 +147,7 @@ impl Node {
         }
     }
 
-    /// The runtime's image list, followed: read over the CRI, again at each of the runtime's hints (D118).
+    /// The runtime's image list, followed: read over the CRI, again at each of the runtime's hints (D119).
     #[must_use]
     pub fn images(&self) -> Arc<dyn Images> {
         match &self.kind {
