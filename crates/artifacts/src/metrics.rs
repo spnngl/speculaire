@@ -61,3 +61,6 @@ pub(crate) fn store_bytes(bytes: u64) {
     )]
     gauge!(STORE_BYTES).set(bytes as f64);
 }
+
+#[cfg(test)]
+mod tests;

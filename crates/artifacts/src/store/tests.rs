@@ -1,5 +1,7 @@
 //! The artifact store on a temporary directory.
 
+use metrics_exporter_prometheus::PrometheusBuilder;
+
 use super::*;
 
 fn digest_of(bytes: &[u8]) -> Digest {
@@ -120,4 +122,49 @@ async fn a_record_that_is_no_record_is_an_error_naming_it() {
         error.to_string().contains(&path.display().to_string()),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn a_blob_or_record_that_is_there_but_unreadable_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let digest = digest_of(b"{}");
+    std::fs::create_dir_all(store.path(&digest)).unwrap();
+    std::fs::create_dir_all(store.record_path(&digest)).unwrap();
+    assert!(store.read(&digest).await.is_err());
+    assert!(store.recorded(&digest).await.is_err());
+}
+
+#[tokio::test]
+async fn a_commit_whose_part_is_gone_is_an_error_and_holds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let digest = digest_of(b"{}");
+    let mut writer = store.writer(&digest).await.unwrap();
+    writer.write(b"{}").await.unwrap();
+    std::fs::remove_file(&writer.path).unwrap();
+    assert!(writer.commit(&store).await.is_err());
+    assert!(!store.contains(&digest));
+    assert_eq!(store.bytes(), 0);
+}
+
+#[tokio::test]
+async fn the_store_bytes_gauge_follows_each_blob_kept() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _local = ::metrics::set_default_local_recorder(&recorder);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let gauge = || {
+        handle
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix("speculaire_artifact_store_bytes "))
+            .map(str::to_owned)
+    };
+    assert_eq!(gauge().as_deref(), Some("0"));
+    store.keep(&digest_of(b"{}"), b"{}").await.unwrap();
+    assert_eq!(gauge().as_deref(), Some("2"));
+    store.keep(&digest_of(b"abc"), b"abc").await.unwrap();
+    assert_eq!(gauge().as_deref(), Some("5"));
 }
