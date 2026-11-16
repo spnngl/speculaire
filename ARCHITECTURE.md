@@ -73,7 +73,7 @@ The verifier works asynchronously, so the gate never waits on the network.
 
 1. **Triggers** (D22), earliest first:
    - the mirror serving or forwarding a manifest by digest;
-   - a change of the runtime's image list, which containerd's `/images/*` events and CRI-O's `images.json` signal (D65, D117); at M4, discovery's only trigger;
+   - a change of the runtime's image list, which containerd's `/images/*` events and CRI-O's `images.json` signal (D65, D118); at M4, discovery's only trigger;
    - NRI `Synchronize`, which lists the containers already running;
    - a gate cache miss.
 2. **Discover** referrers for the index digest and the platform manifest digest. Try sources in this order:
@@ -116,14 +116,14 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/oracle-harness` | Test helper: runs `speculaire-oracle` and reads its answers; the differential tests of the parsers use it (D70, D79) |
 | `crates/mirror` | The local mirror: the pull half of the distribution API over TLS 1.3 with a client certificate, from the runtime's `Content`, or the relay and the *blob cache* where the runtime keeps none (D5, D66, D67, D85, D88, D90); the peer API, which serves the same to other nodes (D100) |
 | `crates/registry` | The upstream client the relay and discovery fetch with: HTTP/1.1 and TLS 1.2 or 1.3 on hyper, the Bearer challenge, Basic, identity token, redirects (D88); it takes its endpoints and credentials from the runtime's `Registries` (D89) |
-| `crates/oci` | Image references and platforms as containerd parses them (D81), the children of a manifest or index (D88), hashing against a digest (D7), referrers, BuildKit attestation manifests and the referrer tags (D43, D49, D117) |
-| `crates/runtime` | containerd and CRI-O behind four traits a `Node` hands out (D90): `Wiring` (certificates, `hosts.toml`, CRI-O's drop-in; D82, D83), `Settings` (required plugins, preflight; D84, D86), `Registries` (the registry config the relay fetches with, held as a snapshot that a reload swaps, D88, D89, D91), `Content` (containerd's directory + gRPC), a fifth, `Inventory` (what peers can fetch, D99), and a sixth, `Images` (the image list, then its changes, D117); which one runs on the node (D64), the CRI calls |
+| `crates/oci` | Image references and platforms as containerd parses them (D81), the children of a manifest or index (D88), hashing against a digest (D7), referrers, BuildKit attestation manifests and the referrer tags (D43, D49, D118) |
+| `crates/runtime` | containerd and CRI-O behind four traits a `Node` hands out (D90): `Wiring` (certificates, `hosts.toml`, CRI-O's drop-in; D82, D83), `Settings` (required plugins, preflight; D84, D86), `Registries` (the registry config the relay fetches with, held as a snapshot that a reload swaps, D88, D89, D91), `Content` (containerd's directory + gRPC), a fifth, `Inventory` (what peers can fetch, D99), and a sixth, `Images` (the image list, then its changes, D118); which one runs on the node (D64), the CRI calls |
 | `crates/configure` | `configure`, `unconfigure`, the preflight and the node half of `check-config`, as thin functions over the runtime's `Wiring` and `Settings` traits; it names no runtime (D82, D83, D86, D90) |
 | `crates/fake-runtime` | Test support: a fake containerd on a socket, answering the CRI `Version`, `ListImages` and introspection `Plugins` (D87), and CRI-O's `GET /config` (D89, D90) |
 | `crates/pki` | the mirror's local CA and certificates (D14, D82); later kubelet certificate loading and rotation, rustls verifiers (D16) |
 | `crates/load` | The load scenario `speculaire-loadgen` runs: simulated agents on `crates/reflect`'s client, the reflector's targets measured from `/proc` and `/metrics` (D33, D104) |
 | `crates/reflect` | Protobuf frames over TLS (D105), the reflector's server and index (D97), and the agent's client: `Members`, one `Announce` stream per member carrying its numbered `Lookup`s, hedged (D2, D98) |
-| `crates/artifacts` | Discovery of each listed image's artifacts upstream, through the runtime's `Registries`, into the *artifact store* (D17, D43, D117) |
+| `crates/artifacts` | Discovery of each listed image's artifacts upstream, through the runtime's `Registries`, into the *artifact store* (D17, D43, D118) |
 | `crates/verify` | Sigstore glue, policy, SBOM checks and verdict cache, over `crates/artifacts` (planned) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data, a workspace of its own, run by `just fuzz <target>` and nightly; `just check` replays their seeds on stable (D27). `config` takes raw bytes and `config_values` a config file written from the keys (D75) |

@@ -1,4 +1,4 @@
-//! The runtime's image list, and how it changes (D117).
+//! The runtime's image list, and how it changes (D118).
 //!
 //! Both runtimes answer CRI `ListImages`, and neither streams image changes over the CRI. Each follows a hint of its
 //! own that the list may have changed: containerd's image events, CRI-O's `images.json` directory. At each hint the
@@ -18,7 +18,7 @@ use tracing::warn;
 
 use crate::cri::{self, ListedImage};
 
-/// How often the image list is read again, whatever the hints said (D117).
+/// How often the image list is read again, whatever the hints said (D118).
 pub const RELIST: Duration = Duration::from_secs(60);
 
 /// How long to wait before following again, after the runtime went away.
@@ -119,7 +119,7 @@ impl List {
     }
 }
 
-/// The runtime's image list, followed (D117).
+/// The runtime's image list, followed (D118).
 pub trait Images: Send + Sync {
     /// Sends the image list, then each change, until `updates` closes. The list comes again every [`RELIST`] and when
     /// the runtime's hints stopped; while the runtime cannot be reached, nothing is sent.
