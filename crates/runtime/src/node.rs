@@ -1,7 +1,7 @@
 //! The runtime of this node, chosen once at startup, and what it hands out (D90).
 //!
 //! [`Node`] is built from the [`Runtime`] that [`detect`](crate::detect) found, and gives each concern as a trait:
-//! [`Wiring`], [`Settings`], [`Registries`], [`Content`] and [`Inventory`]. Nothing outside this crate matches on the runtime to do
+//! [`Wiring`], [`Settings`], [`Registries`], [`Content`], [`Inventory`] and [`Images`]. Nothing outside this crate matches on the runtime to do
 //! a runtime's job; the one thing a trait does not hide is [`Fallback`].
 
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use crate::containerd::Containerd;
 use crate::content::{self, Blob, Content};
 use crate::crio::CriO;
 use crate::detect::{Runtime, Sockets};
+use crate::images::Images;
 use crate::inventory::Inventory;
 use crate::paths::Paths;
 use crate::registries::{ContainerdRegistries, CrioRegistries, Registries};
@@ -140,6 +141,15 @@ impl Node {
     /// there the blob cache is what peers read (D67, D99).
     #[must_use]
     pub fn inventory(&self) -> Arc<dyn Inventory> {
+        match &self.kind {
+            Kind::Containerd(containerd) => Arc::new(containerd.clone()),
+            Kind::CriO(crio) => Arc::new(crio.clone()),
+        }
+    }
+
+    /// The runtime's image list, followed: read over the CRI, again at each of the runtime's hints (D113).
+    #[must_use]
+    pub fn images(&self) -> Arc<dyn Images> {
         match &self.kind {
             Kind::Containerd(containerd) => Arc::new(containerd.clone()),
             Kind::CriO(crio) => Arc::new(crio.clone()),

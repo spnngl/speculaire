@@ -3,10 +3,12 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 
+use futures_util::future::BoxFuture;
 use http_body_util::Full;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use secrecy::SecretString;
+use speculaire_runtime::images::{Image as RuntimeImage, RepoDigest, Update};
 use speculaire_runtime::registries::{Credentials, Endpoint, Error as ConfigError};
 use tokio::net::TcpListener;
 
@@ -277,11 +279,11 @@ impl Node {
         *self.config.0.lock().unwrap() = sources;
     }
 
-    fn relay(&self, max_size: u64) -> Relay<NoImages> {
-        self.relay_with(max_size, NoImages)
+    fn relay(&self, max_size: u64) -> Relay {
+        self.relay_with(max_size, Listed(Vec::new()))
     }
 
-    fn relay_with<I: Images>(&self, max_size: u64, images: I) -> Relay<I> {
+    fn relay_with(&self, max_size: u64, images: Listed) -> Relay {
         // Unlinked, the fetcher asks no peer.
         let fetcher = Fetcher::new(
             self.dir.path().join("staging"),
@@ -290,13 +292,13 @@ impl Node {
         self.relay_from(max_size, images, fetcher)
     }
 
-    fn relay_from<I: Images>(&self, max_size: u64, images: I, fetcher: Fetcher) -> Relay<I> {
+    fn relay_from(&self, max_size: u64, images: Listed, fetcher: Fetcher) -> Relay {
         let cache = Cache::open(self.dir.path().join("blobs"), max_size).unwrap();
         Relay::new(
             cache,
             fetcher,
             Arc::clone(&self.config) as Arc<dyn Registries>,
-            images,
+            Arc::new(images),
         )
     }
 }
@@ -704,7 +706,11 @@ async fn a_blob_a_peer_holds_is_relayed_from_it_before_upstream_and_kept() {
     let layer = sha(&image.layers[0]);
     let mut nodes = Nodes::new();
     let (a, _) = nodes.peer("node-a", &[(&layer, &image.layers[0])], 4).await;
-    let relay = node.relay_from(1 << 30, NoImages, nodes.fetcher(vec![a], SETTINGS));
+    let relay = node.relay_from(
+        1 << 30,
+        Listed(Vec::new()),
+        nodes.fetcher(vec![a], SETTINGS),
+    );
     read(
         relay
             .pull(pull(Kind::Manifest, &tag("1.0"), false, None))
@@ -734,7 +740,11 @@ async fn a_wrong_blob_from_a_peer_fails_the_pull_and_the_retry_goes_upstream() {
     let mut nodes = Nodes::new();
     let wrong = pattern(image.layers[0].len(), 1);
     let (a, _) = nodes.peer("node-a", &[(&layer, &wrong)], 4).await;
-    let relay = node.relay_from(1 << 30, NoImages, nodes.fetcher(vec![a], SETTINGS));
+    let relay = node.relay_from(
+        1 << 30,
+        Listed(Vec::new()),
+        nodes.fetcher(vec![a], SETTINGS),
+    );
     read(
         relay
             .pull(pull(Kind::Manifest, &tag("1.0"), false, None))
@@ -964,12 +974,27 @@ async fn a_name_with_no_registry_is_an_error_and_a_blocked_registry_a_fall_throu
     ));
 }
 
-/// A list of images that the runtime has.
+/// A list of images that the runtime has, by the digests they were pulled by.
 struct Listed(Vec<Digest>);
 
 impl Images for Listed {
-    fn listed(&self) -> impl std::future::Future<Output = Vec<Digest>> + Send {
-        std::future::ready(self.0.clone())
+    fn follow(self: Arc<Self>, updates: mpsc::Sender<Update>) -> BoxFuture<'static, ()> {
+        let images = self
+            .0
+            .iter()
+            .map(|digest| RuntimeImage {
+                id: digest.clone(),
+                repo_digests: vec![RepoDigest {
+                    repository: "app/web".to_owned(),
+                    digest: digest.clone(),
+                }],
+            })
+            .collect();
+        Box::pin(async move {
+            if updates.send(Update::Listing(images)).await.is_ok() {
+                updates.closed().await;
+            }
+        })
     }
 }
 
@@ -1053,6 +1078,7 @@ async fn above_the_bound_the_blobs_of_unlisted_images_go_before_those_of_listed_
     )
     .await
     .unwrap();
+    relay.read_list().await;
     relay.evict().await;
     // The unlisted image's oldest blob went; every blob of the listed image is still there.
     assert!(!relay.cache().contains(&sha(&other_manifest)));
@@ -1065,6 +1091,7 @@ async fn above_the_bound_the_blobs_of_unlisted_images_go_before_those_of_listed_
     assert!(!relay.cache().over());
     // A bound that leaves only room for the listed image's smallest blob evicts what it protects as a last resort.
     relay.cache().set_max_size(10);
+    relay.read_list().await;
     relay.evict().await;
     assert!(relay.cache().size() <= 10);
 }
@@ -1098,6 +1125,7 @@ async fn the_blobs_of_listed_images_go_least_recently_served_first() {
     }
     // One byte short of the two layers: the manifest, the config and the layer served first go.
     relay.cache().set_max_size(5999);
+    relay.read_list().await;
     relay.evict().await;
     assert!(!relay.cache().contains(&sha(&image.layers[0])));
     assert!(relay.cache().contains(&sha(&image.layers[1])));

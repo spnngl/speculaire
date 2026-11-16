@@ -20,8 +20,9 @@ use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::reference::Digest;
 use speculaire_registry::{Client, Request, Response as Upstreamed};
 use speculaire_runtime::content::Error;
+use speculaire_runtime::images::{Images, List};
 use speculaire_runtime::registries::{self, Registries, Source};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc, watch};
 use tracing::{debug, warn};
 
 use crate::cache::{Cache, Writer};
@@ -40,62 +41,6 @@ const DEFAULT_ACCEPT: &str = "application/vnd.oci.image.index.v1+json, applicati
 
 /// How many digests the relay remembers having served below a manifest.
 const KNOWN_LIMIT: usize = 200_000;
-
-/// The images the runtime lists, whose blobs the cache evicts last (D67).
-pub trait Images: Send + Sync + 'static {
-    /// The digests of the listed images: their IDs and the digests of their names.
-    fn listed(&self) -> impl std::future::Future<Output = Vec<Digest>> + Send;
-}
-
-/// No listed image: nothing is protected.
-pub struct NoImages;
-
-impl Images for NoImages {
-    fn listed(&self) -> impl std::future::Future<Output = Vec<Digest>> + Send {
-        std::future::ready(Vec::new())
-    }
-}
-
-/// The image list of a runtime that lists its images over the CRI (D65, D67).
-pub struct CriImages {
-    socket: std::path::PathBuf,
-    runtime: &'static str,
-}
-
-impl CriImages {
-    /// The list `ListImages` gives on `socket`, of the runtime named `runtime` in the log.
-    #[must_use]
-    pub fn new(socket: impl Into<std::path::PathBuf>, runtime: &'static str) -> Self {
-        Self {
-            socket: socket.into(),
-            runtime,
-        }
-    }
-}
-
-impl Images for CriImages {
-    async fn listed(&self) -> Vec<Digest> {
-        let images = match speculaire_runtime::cri::list_images(&self.socket).await {
-            Ok(images) => images,
-            Err(err) => {
-                warn!(error = %err, "the image list of {} cannot be read: the blob cache evicts without it", self.runtime);
-                return Vec::new();
-            }
-        };
-        let mut digests = Vec::new();
-        for image in images {
-            // CRI-O's image ID is the hex of the image's config digest.
-            digests.extend(Digest::parse(&format!("sha256:{}", image.id)).ok());
-            digests.extend(
-                image
-                    .repo_digests
-                    .iter()
-                    .filter_map(|name| Digest::parse(name.rsplit_once('@')?.1).ok()),
-            );
-        }
-        digests
-    }
-}
 
 /// The names under which each digest was served: a blob or a manifest is served only for a name that a manifest
 /// served earlier pointed it out for (D66).
@@ -130,28 +75,36 @@ impl Known {
 }
 
 /// The relay.
-pub struct Relay<I> {
+pub struct Relay {
     cache: Arc<Cache>,
     fetcher: Fetcher,
     client: Client,
     registries: Arc<dyn Registries>,
     known: Known,
-    images: I,
+    /// The runtime's image list, whose blobs the cache evicts last (D67); `None` until it is first read.
+    listed: watch::Receiver<Option<List>>,
     over: Arc<Notify>,
 }
 
-impl<I: Images> Relay<I> {
+impl Relay {
     /// A relay that keeps what it serves in `cache`, and fetches a blob from peers with `fetcher`, else where
-    /// `registries` say.
+    /// `registries` say. It follows `images` on a task of its own, which ends with the relay.
     #[must_use]
-    pub fn new(cache: Cache, fetcher: Fetcher, registries: Arc<dyn Registries>, images: I) -> Self {
+    pub fn new(
+        cache: Cache,
+        fetcher: Fetcher,
+        registries: Arc<dyn Registries>,
+        images: Arc<dyn Images>,
+    ) -> Self {
+        let (list, listed) = watch::channel(None);
+        tokio::spawn(follow(images, list));
         Self {
             cache: Arc::new(cache),
             fetcher,
             client: Client::new(),
             registries,
             known: Known::default(),
-            images,
+            listed,
             over: Arc::new(Notify::new()),
         }
     }
@@ -175,6 +128,16 @@ impl<I: Images> Relay<I> {
         }
     }
 
+    /// Waits until the image list is read.
+    #[cfg(test)]
+    async fn read_list(&self) {
+        let mut listed = self.listed.clone();
+        listed
+            .wait_for(Option::is_some)
+            .await
+            .expect("the list is followed while the relay lives");
+    }
+
     /// Evicts whenever a blob kept makes the cache exceed its bound; never returns.
     pub async fn evict_when_over(&self) {
         loop {
@@ -186,7 +149,19 @@ impl<I: Images> Relay<I> {
     /// The digests of the listed images and of everything below them, as far as the cache holds the manifests.
     async fn protected(&self) -> HashSet<Digest> {
         let mut protected = HashSet::new();
-        let mut pending = self.images.listed().await;
+        let listed: Option<Vec<Digest>> = self.listed.borrow().as_ref().map(|list| {
+            list.images()
+                .flat_map(|image| {
+                    std::iter::once(&image.id)
+                        .chain(image.repo_digests.iter().map(|repo| &repo.digest))
+                })
+                .cloned()
+                .collect()
+        });
+        let mut pending = listed.unwrap_or_else(|| {
+            warn!("the runtime's image list is not read yet: the blob cache evicts without it");
+            Vec::new()
+        });
         while let Some(digest) = pending.pop() {
             if !protected.insert(digest.clone()) {
                 continue;
@@ -469,7 +444,7 @@ impl<I: Images> Relay<I> {
     }
 }
 
-impl<I: Images> Pulls for Relay<I> {
+impl Pulls for Relay {
     async fn pull(&self, pull: Pull<'_>) -> Answer {
         let Some(reference) = pull.reference else {
             return Answer::Missing;
@@ -478,6 +453,23 @@ impl<I: Images> Pulls for Relay<I> {
             (Kind::Manifest, _) => self.manifest(&pull, reference).await,
             (Kind::Blob, Reference::Digest(digest)) => self.blob(&pull, digest).await,
             _ => Answer::Missing,
+        }
+    }
+}
+
+/// Keeps `list` as `images` says, until the relay that reads it is gone.
+async fn follow(images: Arc<dyn Images>, list: watch::Sender<Option<List>>) {
+    let (sender, mut updates) = mpsc::channel(16);
+    let mut following = images.follow(sender);
+    loop {
+        tokio::select! {
+            () = list.closed() => return,
+            // Polled here, since it is what sends the updates; it ends only once they close.
+            () = &mut following => return,
+            update = updates.recv() => match update {
+                Some(update) => list.send_modify(|list| list.get_or_insert_default().apply(update)),
+                None => return,
+            },
         }
     }
 }

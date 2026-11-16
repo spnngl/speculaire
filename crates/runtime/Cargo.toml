@@ -29,6 +29,9 @@ toml_edit.workspace = true
 tonic-prost.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 divan.workspace = true
 hyper = { workspace = true, features = ["client", "http2"] }
