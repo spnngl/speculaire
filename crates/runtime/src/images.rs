@@ -127,6 +127,7 @@ pub trait Images: Send + Sync {
 }
 
 /// Why a watch stopped.
+#[derive(Debug)]
 pub(crate) enum Lost {
     /// The runtime cannot be asked, or its hints cannot be followed; the reason is logged.
     Unreachable(String),
