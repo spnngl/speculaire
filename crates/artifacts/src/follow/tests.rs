@@ -70,7 +70,7 @@ impl Registries for Asked {
 }
 
 #[test]
-fn each_manifest_digest_is_a_root_with_its_names_in_order_once_each() {
+fn a_root_has_its_names_in_order_once_each_and_none_once_it_left_the_list() {
     let mut list = List::default();
     list.apply(Update::Listing(vec![image(
         1,
@@ -81,29 +81,19 @@ fn each_manifest_digest_is_a_root_with_its_names_in_order_once_each() {
             ("reg.test/a", 11),
         ],
     )]));
-    let mut roots = roots(&list);
-    roots.sort_by_key(|(root, _)| root.to_string());
-    assert_eq!(
-        roots,
-        [
-            (
-                digest(10),
-                vec!["reg.test/a".to_owned(), "reg.test/b".to_owned()]
-            ),
-            (digest(11), vec!["reg.test/a".to_owned()]),
-        ]
-    );
+    assert_eq!(names(&list, &digest(10)), ["reg.test/a", "reg.test/b"]);
+    assert_eq!(names(&list, &digest(11)), ["reg.test/a"]);
+    assert_eq!(names(&list, &digest(12)), Vec::<String>::new());
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_recorded_root_is_skipped_and_a_failed_one_waits_before_it_is_tried_again() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open(dir.path()).unwrap());
-    store.record(&digest(10), &[]).await.unwrap();
-    let asked = Arc::new(Asked::default());
+/// Follows the list the returned sender scripts, with `store`, logging in `asked` each name a root is asked under.
+fn start(
+    store: Arc<Store>,
+    asked: &Arc<Asked>,
+) -> (mpsc::Sender<Update>, tokio::task::JoinHandle<()>) {
     let discovery = Arc::new(Discovery::new(
         store,
-        Arc::clone(&asked) as Arc<dyn Registries>,
+        Arc::clone(asked) as Arc<dyn Registries>,
         "127.0.0.1:7480".to_owned(),
         Host::current(),
         Limits::new(1024),
@@ -113,6 +103,44 @@ async fn a_recorded_root_is_skipped_and_a_failed_one_waits_before_it_is_tried_ag
         discovery,
         Arc::new(Scripted(Mutex::new(Some(receiver)))),
     ));
+    (script, followed)
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_roots_of_an_image_just_listed_go_before_those_of_a_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let asked = Arc::new(Asked::default());
+    let (script, followed) = start(store, &asked);
+
+    script
+        .send(Update::Listing(vec![
+            image(1, &[("reg.test/a", 10)]),
+            image(2, &[("reg.test/b", 20)]),
+        ]))
+        .await
+        .unwrap();
+    script
+        .send(Update::Listed(image(3, &[("reg.test/pulled", 30)])))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        *asked.0.lock().unwrap(),
+        ["reg.test/pulled", "reg.test/a", "reg.test/b"]
+    );
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recorded_root_is_skipped_and_a_failed_one_waits_before_it_is_tried_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    store.record(&digest(10), &[]).await.unwrap();
+    let asked = Arc::new(Asked::default());
+    let (script, followed) = start(store, &asked);
     let listing = || {
         Update::Listing(vec![
             image(1, &[("reg.test/old", 10)]),
