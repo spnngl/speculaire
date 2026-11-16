@@ -7,12 +7,14 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
+use speculaire_artifacts::{Discovery, Limits, Store};
 use speculaire_mirror::Local;
 use speculaire_mirror::cache::Cache;
 use speculaire_mirror::fetch::{self, Fetcher, Holder};
 use speculaire_mirror::peer::Uploads;
 use speculaire_mirror::relay::Relay;
 use speculaire_mirror::tls::Tls;
+use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
 use speculaire_reflect::client::{self, Client, Holdings, LookupError, Lookups};
@@ -123,6 +125,7 @@ async fn serve(
     report_registries(registries.reload());
     let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
     status.mirror_listening();
+    start_discovery(&config, &node, Arc::clone(&registries))?;
     let mut reflector = None;
     open_reflector(&config, &identity, &mut reflector, &status).await;
     let mut sharing = None;
@@ -392,6 +395,30 @@ async fn start_mirror(
         uploads,
         fetcher,
     })
+}
+
+/// Opens the artifact store and discovers the artifacts of each image the runtime lists (D113).
+fn start_discovery(
+    config: &Config,
+    node: &RuntimeNode,
+    registries: Arc<dyn Registries>,
+) -> anyhow::Result<()> {
+    let directory = config.artifacts.directory.get().get();
+    let store = Store::open(directory)
+        .with_context(|| format!("opening the artifact store {}", directory.display()))?;
+    speculaire_artifacts::metrics::describe();
+    let discovery = Discovery::new(
+        Arc::new(store),
+        registries,
+        config.mirror.address.get().get().to_string(),
+        Host::current(),
+        Limits::new(config.sbom.max_size.get()),
+    );
+    tokio::spawn(speculaire_artifacts::follow(
+        Arc::new(discovery),
+        node.images(),
+    ));
+    Ok(())
 }
 
 /// The fetcher's live keys in `config`.
