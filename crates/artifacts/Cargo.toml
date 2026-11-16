@@ -1,0 +1,36 @@
+[package]
+name = "speculaire-artifacts"
+description = "The artifact store, and discovery of the artifacts of the images a node lists"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+metrics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+speculaire-oci.workspace = true
+speculaire-registry.workspace = true
+speculaire-runtime.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+futures-util.workspace = true
+hyper = { workspace = true, features = ["server"] }
+hyper-util.workspace = true
+metrics-exporter-prometheus.workspace = true
+secrecy.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

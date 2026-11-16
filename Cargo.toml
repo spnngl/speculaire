@@ -14,6 +14,7 @@ publish = false
 
 [workspace.dependencies]
 speculaire-agent = { path = "crates/agent" }
+speculaire-artifacts = { path = "crates/artifacts" }
 speculaire-fake-runtime = { path = "crates/fake-runtime" }
 speculaire-load = { path = "crates/load" }
 speculaire-mirror = { path = "crates/mirror" }
