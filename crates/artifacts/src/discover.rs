@@ -33,7 +33,7 @@ const INDEXES: [&str; 2] = [
     "application/vnd.docker.distribution.manifest.list.v2+json",
 ];
 
-/// How much discovery fetches (D113).
+/// How much discovery fetches (D114).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Referrers fetched per target; the rest are dropped.
@@ -47,7 +47,7 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// The limits of D113, with blobs up to `blob` bytes.
+    /// The limits of D114, with blobs up to `blob` bytes.
     #[must_use]
     pub const fn new(blob: u64) -> Self {
         Self {

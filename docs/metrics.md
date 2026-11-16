@@ -53,7 +53,7 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 | `speculaire_verifications_total` | counter | `result` = `allow`\|`rejected`\|`unverifiable`; `trigger` = `manifest`\|`event`\|`synchronize`\|`gate_miss`\|`reverify` | Completed verifications (D20, D22); `reverify` follows a policy or trust-root change (D21) | M5 |
 | `speculaire_verification_seconds` | histogram | — | Time from trigger to verdict | M5 |
 | `speculaire_verdicts` | gauge | `state` = `allow`\|`rejected`\|`unverifiable`\|`pending` | Verdicts in the cache | M5 |
-| `speculaire_artifact_fetches_total` | counter | `source` = `peer`\|`upstream`; `upstream`; `result` = `ok`\|`not_found`\|`digest_mismatch`\|`rate_limited`\|`error` | Artifact requests by outcome, one per request (D38, D113); `upstream` is a host with a `hosts.toml` directory, on CRI-O a `[[registry]]` table, else `other`, and empty for peer fetches (D50, D113) | M4 |
+| `speculaire_artifact_fetches_total` | counter | `source` = `peer`\|`upstream`; `upstream`; `result` = `ok`\|`not_found`\|`digest_mismatch`\|`rate_limited`\|`error` | Artifact requests by outcome, one per request (D38, D114); `upstream` is a host with a `hosts.toml` directory, on CRI-O a `[[registry]]` table, else `other`, and empty for peer fetches (D50, D114) | M4 |
 | `speculaire_artifact_store_bytes` | gauge | — | Size of the *artifact store* | M4 |
 | `speculaire_trust_root_expiry_timestamp_seconds` | gauge | — | When the current TUF metadata expires, as a Unix time | M5 |
 | `speculaire_cache_loads_total` | counter | `result` = `loaded`\|`discarded` | Loads of `/run/speculaire/cache.bin` at startup (D31) | M6 |
