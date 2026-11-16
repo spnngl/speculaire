@@ -120,6 +120,26 @@ impl Nodes {
             .collect()
     }
 
+    /// [`Self::lookups`], all at once, each with when its answer came on the nodes' clock.
+    fn stamped_lookups(&self, digest: &Digest) -> Vec<(Vec<Holder>, u64)> {
+        std::thread::scope(|scope| {
+            let lookups: Vec<_> = self
+                .cluster
+                .reflectors()
+                .iter()
+                .map(|r| {
+                    let address = SocketAddr::new(self.cluster.family_address(r).unwrap(), PORT);
+                    scope.spawn(move || {
+                        self.cluster
+                            .lookup_stamped(&self.c, address, digest)
+                            .unwrap()
+                    })
+                })
+                .collect();
+            lookups.into_iter().map(|l| l.join().unwrap()).collect()
+        })
+    }
+
     /// Waits up to `within` until every reflector returns `expected`, sorted, for each blob of `image`; returns how
     /// long it waited.
     fn wait_holders(&self, image: &Image, expected: &[Holder], within: Duration) -> Duration {
@@ -376,25 +396,36 @@ fn an_agent_stopped_while_it_serves_leaves_lookups_within_1_s_and_finishes_the_u
             assert!(Instant::now() < deadline, "A sent B no layer");
             std::thread::sleep(Duration::from_millis(50));
         }
+        // Both ends are read on the nodes' clock: `docker exec` takes a loaded host hundreds of milliseconds to start
+        // the stop and to return each lookup, which the bound is not about.
         let start = Instant::now();
         let stop = scope.spawn(move || {
-            nodes.cluster.stop_agent(&nodes.a).unwrap();
-            start.elapsed()
+            let began = nodes.sh(&nodes.a, "date +%s%N; systemctl stop speculaire");
+            (began.trim().parse::<u64>().unwrap(), start.elapsed())
         });
-        while nodes
-            .lookups(layer)
-            .iter()
-            .any(|holders| !holders.is_empty())
-        {
+        // Each reflector's first answer without A; A does not come back.
+        let mut left: Vec<Option<u64>> = vec![None; nodes.cluster.reflectors().len()];
+        while left.contains(&None) {
             assert!(
                 start.elapsed() < Duration::from_secs(10),
                 "A is still found"
             );
+            for (left, (holders, at)) in left.iter_mut().zip(nodes.stamped_lookups(layer)) {
+                if holders.is_empty() {
+                    left.get_or_insert(at);
+                }
+            }
         }
-        let gone = start.elapsed();
         let pull = pull.join().unwrap();
         assert!(pull.success, "{pull:?}");
-        (gone, stop.join().unwrap())
+        let (began, stopped) = stop.join().unwrap();
+        let gone = left
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap()
+            .saturating_sub(began);
+        (Duration::from_nanos(gone), stopped)
     });
     drop(slow);
     println!("lookups left A {gone:?} after its stop began; the stop took {stopped:?}");

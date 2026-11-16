@@ -75,6 +75,39 @@ impl Cluster {
         address: SocketAddr,
         digest: &Digest,
     ) -> Result<Vec<Holder>, Failure> {
+        self.lookup_then(node, address, digest, "")
+            .map(|(holders, _)| holders)
+    }
+
+    /// [`Self::lookup`], and when its answer came, in nanoseconds since the epoch on the nodes' clock: kind's nodes
+    /// are containers on one kernel, and `date +%s%N` on another node reads the same clock.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lookup`].
+    pub fn lookup_stamped(
+        &self,
+        node: &str,
+        address: SocketAddr,
+        digest: &Digest,
+    ) -> Result<(Vec<Holder>, u64), Failure> {
+        let (holders, out) = self.lookup_then(node, address, digest, "date +%s%N")?;
+        let stamp = out
+            .lines()
+            .nth(1)
+            .and_then(|line| line.trim().parse().ok())
+            .ok_or_else(|| fail("stamp a lookup", &format!("no time in {out}")))?;
+        Ok((holders, stamp))
+    }
+
+    /// [`Self::lookup`], running `after` once the answer came; returns the holders and the whole output.
+    fn lookup_then(
+        &self,
+        node: &str,
+        address: SocketAddr,
+        digest: &Digest,
+        after: &str,
+    ) -> Result<(Vec<Holder>, String), Failure> {
         let command = format!("Lookup {digest} from {node} at {address}");
         // The `AgentMessage` of field 4, a `LookupRequest` of the digest in field 1 and the number 0, unwritten.
         let request = length_delimited(1, digest.to_string().as_bytes())
@@ -86,11 +119,11 @@ impl Cluster {
             certificate: KUBELET,
             key: None,
         };
-        let out = self.call(&call, &request, "")?;
+        let out = self.call(&call, &request, after)?;
         let mut holders =
             holders(&out).ok_or_else(|| fail(&command, &format!("unparsable answer {out}")))?;
         holders.sort();
-        Ok(holders)
+        Ok((holders, out))
     }
 
     /// Calls `Members` from `node` on the reflector at `address`, presenting `certificate` and the key in `key`, or in

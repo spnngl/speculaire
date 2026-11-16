@@ -114,8 +114,19 @@ impl Nodes {
         (holder, uploads)
     }
 
-    /// A fetcher of [`CLIENT`] that asks `holders` in that order.
+    /// A fetcher of [`CLIENT`] that asks `holders` one after the other, the next only when one fails: it has seen
+    /// [`SAMPLES`] answers of an hour, so no hedge fires during a test. A fetcher that has seen none hedges at
+    /// [`HEDGE_FLOOR`], which a loaded host's first handshake outlasts, and the next holder would then win the race.
     pub(crate) fn fetcher(&self, holders: Vec<Holder>, settings: Settings) -> Fetcher {
+        let fetcher = self.hedging_fetcher(holders, settings);
+        for _ in 0..SAMPLES {
+            fetcher.0.answered(Duration::from_secs(3600));
+        }
+        fetcher
+    }
+
+    /// A fetcher of [`CLIENT`] that asks `holders` in that order, and hedges as a fresh one does.
+    fn hedging_fetcher(&self, holders: Vec<Holder>, settings: Settings) -> Fetcher {
         let fetcher = Fetcher::new(self.dir.path().join("staging"), settings);
         fetcher.link(Arc::new(Fixed(holders)), self.credentials(CLIENT));
         fetcher
@@ -417,13 +428,10 @@ async fn a_busy_peer_gives_its_turn_to_the_next_at_once() {
     let got = busy.whole(Kind::Manifest, &manifest_digest).await.unwrap();
     assert_eq!(read(got).await, manifest);
     drop((held, download));
-    // node-b was asked when node-a answered 503, not at the first hedge.
+    // node-b was asked when node-a answered 503: the fetcher does not hedge.
     assert_counted(
         &handle,
-        &[
-            r#"speculaire_peer_fetches_total{result="busy"} 1"#,
-            "speculaire_peer_hedges_total 0",
-        ],
+        &[r#"speculaire_peer_fetches_total{result="busy"} 1"#],
     );
 }
 
@@ -543,7 +551,7 @@ async fn a_peer_slow_to_answer_is_hedged_and_the_first_good_answer_wins() {
     let (a, _) = nodes.peer("node-a", &[(&digest, &blob)], 4).await;
     let (b, _) = nodes.peer("node-b", &[(&digest, &blob)], 4).await;
     let late = behind(&a, Fault::Late(Duration::from_secs(2))).await;
-    let fetcher = nodes.fetcher(vec![late, b], SETTINGS);
+    let fetcher = nodes.hedging_fetcher(vec![late, b], SETTINGS);
     let download = fetcher.download(Kind::Blob, &digest).await.unwrap();
     assert_eq!(
         download.current.as_ref().unwrap().attempt.holder().node,
@@ -564,14 +572,7 @@ async fn a_peer_that_sends_another_blob_is_denied_and_the_next_round_skips_it() 
         .peer("node-a", &[(&digest, &pattern(SIZE, 1))], 4)
         .await;
     let (b, _) = nodes.peer("node-b", &[(&digest, &blob)], 4).await;
-    let deny_ttl = Duration::from_millis(500);
-    let fetcher = nodes.fetcher(
-        vec![a, b],
-        Settings {
-            deny_ttl,
-            ..SETTINGS
-        },
-    );
+    let fetcher = nodes.fetcher(vec![a, b], SETTINGS);
     assert_eq!(
         read(fetcher.whole(Kind::Blob, &digest).await.unwrap()).await,
         blob
@@ -585,7 +586,9 @@ async fn a_peer_that_sends_another_blob_is_denied_and_the_next_round_skips_it() 
             r#"speculaire_peer_fetches_total{result="ok"} 1"#,
         ],
     );
-    tokio::time::sleep(deny_ttl).await;
+    // The fetch is over: the clock jumps the denial, which a loaded host's fetch of the next round could outlast.
+    tokio::time::pause();
+    tokio::time::advance(SETTINGS.deny_ttl).await;
     assert!(fetcher.0.allowed("node-a"));
 }
 
