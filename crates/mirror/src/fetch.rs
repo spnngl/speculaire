@@ -52,6 +52,9 @@ const HEDGE_PERCENTILES: [usize; WIDTH - 1] = [80, 85, 90];
 const SAMPLES: usize = 256;
 /// How many times a fetch starts over after a digest mismatch, each time without the peers it denied.
 const ROUNDS: usize = 3;
+/// The longest denial, 100 years: a longer `peer.deny_ttl` is cut to it, so its end stays within the clocks' range and
+/// prints as a date. It outlasts any agent.
+const DENY_MAX: Duration = Duration::from_hours(876_000);
 
 /// An agent that announced a digest: its node name, which its certificate must carry, and its peer address.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,11 +235,12 @@ impl Shared {
 
     /// Denies each of `holders` for `peer.deny_ttl`, logging each, and auditing each when the audit is on (D37, D52).
     fn deny(&self, holders: &[Holder], digest: &Digest) {
-        let ttl = lock(&self.settings).deny_ttl;
+        let ttl = lock(&self.settings).deny_ttl.min(DENY_MAX);
         let until = end_of_denial(ttl);
+        let end = Instant::now() + ttl;
         let mut denied = lock(&self.denied);
         for holder in holders {
-            denied.insert(holder.node.clone(), Instant::now() + ttl);
+            denied.insert(holder.node.clone(), end);
             warn!(node = %holder.node, peer = %holder.address, %digest, %until, "a peer sent content that is not its digest: it is skipped until then (D52)");
             info!(target: AUDIT_TARGET, event = "peer", node = %holder.node, peer = %holder.address, %digest, %until);
         }

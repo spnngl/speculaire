@@ -438,6 +438,26 @@ async fn a_denied_peer_is_allowed_again_once_deny_ttl_has_passed() {
 }
 
 #[test]
+fn a_deny_ttl_past_the_clocks_range_denies() {
+    // humantime reads up to `u64::MAX` seconds; `Instant` and `SystemTime` hold fewer.
+    let fetcher = Fetcher::new(
+        PathBuf::new(),
+        Settings {
+            deny_ttl: Duration::MAX,
+            ..SETTINGS
+        },
+    );
+    let holder = Holder {
+        node: "node-a".to_owned(),
+        address: SocketAddr::new(IP, 1),
+    };
+    fetcher.0.deny(&[holder], &sha(b"wrong"));
+    assert!(!fetcher.0.allowed("node-a"));
+    // humantime prints no date past year 9999.
+    humantime::parse_rfc3339(&end_of_denial(DENY_MAX).to_string()).unwrap();
+}
+
+#[test]
 fn a_denial_prints_its_end() {
     let end: SystemTime =
         humantime::parse_rfc3339(&end_of_denial(Duration::from_secs(600)).to_string()).unwrap();
