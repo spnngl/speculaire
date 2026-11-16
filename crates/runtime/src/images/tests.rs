@@ -200,6 +200,29 @@ async fn the_list_comes_whole_every_interval() {
     follower.abort();
 }
 
+/// An image made before the watch holds its subscription comes [`super::SETTLE`] after the start, without a hint.
+#[tokio::test]
+async fn a_change_before_the_first_hint_comes_once_the_watch_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("runtime.sock");
+    let fake = Fake::start(&socket, Answers::crio("1.37.0")).unwrap();
+    let (sender, mut updates) = mpsc::channel(16);
+    let follower = tokio::spawn(async move {
+        follow(
+            &socket,
+            &sender,
+            Duration::from_secs(3600),
+            "fake",
+            |_hint| std::future::pending(),
+        )
+        .await;
+    });
+    assert_eq!(next(&mut updates).await, Update::Listing(Vec::new()));
+    fake.update(|answers| answers.images = vec![listed(A, &[])]);
+    assert_eq!(next(&mut updates).await, Update::Listed(image(A, &[])));
+    follower.abort();
+}
+
 /// A runtime that cannot be asked sends nothing, and the follower tries again until it answers.
 #[tokio::test]
 async fn an_unreachable_runtime_is_asked_again() {

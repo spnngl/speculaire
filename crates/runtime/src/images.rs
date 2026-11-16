@@ -169,7 +169,12 @@ pub(crate) async fn follow<W, F>(
     }
 }
 
-/// Reads the list at the start, every `every` and at each hint, and sends it or what changed, until `watching` ends.
+/// How long after a watch starts the list is read once more. No answer tells when the runtime holds the subscription:
+/// containerd sends no header before its first event, and an image made between the first read and then has no hint.
+const SETTLE: Duration = Duration::from_secs(1);
+
+/// Reads the list at the start, [`SETTLE`] later, every `every` and at each hint, and sends it or what changed, until
+/// `watching` ends.
 async fn relist(
     socket: &Path,
     updates: &mpsc::Sender<Update>,
@@ -180,12 +185,18 @@ async fn relist(
     let mut watching = std::pin::pin!(watching);
     let mut tick = tokio::time::interval(every);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut settle = std::pin::pin!(tokio::time::sleep(SETTLE));
+    let mut settling = true;
     let mut known: HashMap<Digest, Image> = HashMap::new();
     loop {
         let whole = tokio::select! {
             lost = &mut watching => return lost,
             _ = tick.tick() => true,
             Some(()) = hints.recv() => false,
+            () = &mut settle, if settling => {
+                settling = false;
+                false
+            }
         };
         let listed = match cri::list_images(socket).await {
             Ok(listed) => listed,
