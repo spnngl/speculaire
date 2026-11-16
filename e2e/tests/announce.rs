@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::balancer::PORT;
 use e2e::reflector::Holder;
-use e2e::upstream::{Digest, Image};
+use e2e::upstream::{Digest, Image, Kind};
 use e2e::{Cluster, IpFamily, Runtime};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -120,7 +120,7 @@ impl Agent {
             .unwrap()
             .as_nanos();
         self.cluster
-            .upstream()
+            .upstream(Kind::Plain)
             .push(&format!("announce/{nanos}"), size)
             .unwrap()
     }

@@ -1,12 +1,13 @@
-//! The registries and the proxy that the relay suite pulls from (D66, D67, D88).
+//! The registries and the proxy that the suites pull from (D66, D67, D88, D112).
 //!
 //! Each is a container on kind's Docker network, which the nodes reach by name, and each is removed when its guard
-//! drops. `just e2e-down` removes what a killed run left, by label.
+//! drops, unless kept for the cluster's life. `just e2e-down` removes what a killed run left, by label.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::upstream::Request;
 use crate::{Failure, run};
 
 /// The registry, which also serves as the upstream of every pull the suite makes.
@@ -24,9 +25,13 @@ pub const HTPASSWD_IMAGE: &str = "docker.io/library/httpd:2.4.66-alpine@sha256:9
 pub const PROXY_IMAGE: &str = "docker.io/library/python:3.14-alpine@sha256:5862d971d1f0ae26b258cefa4e893556b1d3aba81bd2ff30888704ad378bab67";
 /// An image of about 25 MB in seven layers, for the pulls that need bytes.
 pub const LARGE_IMAGE: &str = "docker.io/library/nginx:alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11";
+/// The registry that serves the referrers API (D112).
+pub const REFERRERS_IMAGE: &str = "ghcr.io/project-zot/zot-minimal:v2.1.23@sha256:59cb5740832970818903c5ce104425762664c7880835ee566506aad397cd3458";
+/// The image that signs and attests the test image (D112).
+pub const COSIGN_IMAGE: &str = "ghcr.io/sigstore/cosign/cosign:v3.1.3@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8";
 
 /// The label of every container the suite starts.
-const LABEL: &str = "speculaire-e2e";
+pub(crate) const LABEL: &str = "speculaire-e2e";
 /// kind's Docker network.
 pub(crate) const NETWORK: &str = "kind";
 /// The user and the password of the registries that want a login.
@@ -45,14 +50,16 @@ pub(crate) fn fail(command: &str, detail: &dyn ToString) -> Failure {
     }
 }
 
-/// A container that is removed when this drops.
+/// A container that is removed when this drops, unless kept.
 pub struct Container {
     name: String,
+    kept: bool,
 }
 
 impl Container {
-    /// Creates the container, copies `files` (host path, path in the container) into it, and starts it.
-    fn start(
+    /// Creates the container, copies `files` (host path, path in the container) into it, and starts it. It carries
+    /// the label of the cluster `SPECULAIRE_E2E_CLUSTER` names, for `just e2e-down` to remove.
+    pub(crate) fn start(
         name: &str,
         image: &str,
         env: &[(&str, &str)],
@@ -70,6 +77,12 @@ impl Container {
             "--label",
             LABEL,
         ];
+        let cluster = std::env::var("SPECULAIRE_E2E_CLUSTER")
+            .map(|cluster| format!("{LABEL}.cluster={cluster}"))
+            .ok();
+        if let Some(cluster) = &cluster {
+            args.extend(["--label", cluster]);
+        }
         let envs: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
         for env in &envs {
             args.extend(["-e", env]);
@@ -79,6 +92,7 @@ impl Container {
         docker(&args)?;
         let container = Self {
             name: name.to_owned(),
+            kept: false,
         };
         for (host, inside) in files {
             docker(&[
@@ -108,7 +122,12 @@ impl Container {
         ))
     }
 
-    fn wait_for_log(&self, needle: &str) -> Result<(), Failure> {
+    /// Leaves the container running when this drops: it lives as long as the cluster.
+    pub(crate) fn keep(mut self) {
+        self.kept = true;
+    }
+
+    pub(crate) fn wait_for_log(&self, needle: &str) -> Result<(), Failure> {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if self.logs()?.contains(needle) {
@@ -127,7 +146,9 @@ impl Container {
 
 impl Drop for Container {
     fn drop(&mut self) {
-        let _ = docker(&["rm", "-f", "-v", &self.name]);
+        if !self.kept {
+            let _ = docker(&["rm", "-f", "-v", &self.name]);
+        }
     }
 }
 
@@ -137,6 +158,8 @@ pub enum Access<'a> {
     Open,
     /// HTTP Basic, with the [`USER`] of [`htpasswd`].
     Basic(&'a str),
+    /// None, over TLS with `certificates`.
+    Tls(&'a Certificates),
     /// TLS with `certificates`, and a Bearer challenge to the token server `realm`.
     Token {
         /// The certificates the registry serves with and whose key the token server signs with.
@@ -165,34 +188,43 @@ impl Registry {
     ) -> Result<Self, Failure> {
         let scratch = scratch(name)?;
         let htpasswd_path = scratch.join("htpasswd");
-        // On the default port of its scheme: a name with a port is not mirrored on CRI-O (D88).
-        let mut env: Vec<(&str, &str)> = Vec::new();
+        // registry:3 exports traces to localhost by default, and logs each failed export.
+        let mut env: Vec<(&str, &str)> = vec![("OTEL_TRACES_EXPORTER", "none")];
         let mut files: Vec<(&Path, &str)> = Vec::new();
-        let (crt, key, storage);
+        let crt;
+        let key;
+        let storage;
+        let tls = match access {
+            Access::Open | Access::Basic(_) => None,
+            Access::Tls(certificates) | Access::Token { certificates, .. } => Some(certificates),
+        };
+        // On the default port of its scheme: a name with a port is not mirrored on CRI-O (D88).
+        if let Some(certificates) = tls {
+            crt = certificates.dir.join("server.crt");
+            key = certificates.dir.join("server.key");
+            files.push((&crt, "/server.crt"));
+            files.push((&key, "/server.key"));
+            env.extend([
+                ("REGISTRY_HTTP_ADDR", ":443"),
+                ("REGISTRY_HTTP_TLS_CERTIFICATE", "/server.crt"),
+                ("REGISTRY_HTTP_TLS_KEY", "/server.key"),
+            ]);
+        } else {
+            env.push(("REGISTRY_HTTP_ADDR", ":80"));
+        }
         match access {
-            Access::Open => env.push(("REGISTRY_HTTP_ADDR", ":80")),
+            Access::Open | Access::Tls(_) => {}
             Access::Basic(line) => {
                 std::fs::write(&htpasswd_path, line).map_err(|e| fail("write htpasswd", &e))?;
                 files.push((&htpasswd_path, "/htpasswd"));
                 env.extend([
-                    ("REGISTRY_HTTP_ADDR", ":80"),
                     ("REGISTRY_AUTH_HTPASSWD_REALM", "e2e"),
                     ("REGISTRY_AUTH_HTPASSWD_PATH", "/htpasswd"),
                 ]);
             }
-            Access::Token {
-                certificates,
-                realm,
-            } => {
-                crt = certificates.dir.join("server.crt");
-                key = certificates.dir.join("server.key");
-                files.push((&crt, "/server.crt"));
-                files.push((&key, "/server.key"));
+            Access::Token { realm, .. } => {
                 env.extend([
-                    ("REGISTRY_HTTP_ADDR", ":443"),
-                    ("REGISTRY_HTTP_TLS_CERTIFICATE", "/server.crt"),
-                    ("REGISTRY_HTTP_TLS_KEY", "/server.key"),
-                    ("REGISTRY_AUTH_TOKEN_REALM", realm),
+                    ("REGISTRY_AUTH_TOKEN_REALM", *realm),
                     ("REGISTRY_AUTH_TOKEN_SERVICE", "e2e-registry"),
                     ("REGISTRY_AUTH_TOKEN_ISSUER", "e2e-auth"),
                     ("REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE", "/server.crt"),
@@ -227,6 +259,11 @@ impl Registry {
     #[must_use]
     pub fn address(&self) -> String {
         self.name.clone()
+    }
+
+    /// Leaves the registry running when this drops: it lives as long as the cluster.
+    pub(crate) fn keep(self) {
+        self.container.keep();
     }
 
     /// The registry's own log: one line per request.
@@ -285,6 +322,14 @@ pub(crate) const PLATFORM: &str = if cfg!(target_arch = "aarch64") {
 /// Runs `script` in a [`COPY_IMAGE`] container on kind's network, with `regctl` set to reach `address` over plain HTTP,
 /// and returns its stdout. A container does it: the Docker daemon cannot always reach a port it published.
 pub(crate) fn regctl(address: &str, script: &str) -> Result<String, Failure> {
+    regctl_after(
+        &format!("regctl registry set --tls disabled {address} >/dev/null"),
+        script,
+    )
+}
+
+/// Runs `setup`, the `regctl registry` commands that reach the registries, then `script`, as [`regctl`] does.
+pub(crate) fn regctl_after(setup: &str, script: &str) -> Result<String, Failure> {
     docker(&[
         "run",
         "--rm",
@@ -296,7 +341,7 @@ pub(crate) fn regctl(address: &str, script: &str) -> Result<String, Failure> {
         "sh",
         COPY_IMAGE,
         "-c",
-        &format!("regctl registry set --tls disabled {address} >/dev/null && {script}"),
+        &format!("{setup} && {script}"),
     ])
 }
 
@@ -318,7 +363,7 @@ pub fn htpasswd() -> Result<String, Failure> {
     ])
 }
 
-fn scratch(name: &str) -> Result<PathBuf, Failure> {
+pub(crate) fn scratch(name: &str) -> Result<PathBuf, Failure> {
     let dir = std::env::temp_dir().join(format!("speculaire-e2e-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| fail("create a scratch directory", &e))?;
@@ -378,7 +423,7 @@ impl Drop for Certificates {
 
 /// The token server of a Bearer registry, with [`USER`] and [`PASSWORD`] allowed everything.
 pub struct TokenServer {
-    _container: Container,
+    container: Container,
 }
 
 impl TokenServer {
@@ -420,24 +465,47 @@ impl TokenServer {
         )?;
         container.wait_for_log("Serving on")?;
         let _ = std::fs::remove_dir_all(&scratch);
-        Ok(Self {
-            _container: container,
-        })
+        Ok(Self { container })
+    }
+
+    /// Leaves the server running when this drops: it lives as long as the cluster.
+    pub(crate) fn keep(self) {
+        self.container.keep();
     }
 }
 
-/// A transparent proxy, on port 80, in front of a registry that can flip a byte of every blob, and slow every blob down.
+/// A transparent proxy, on port 80, in front of a registry: it can flip a byte of every blob, slow every blob down, and
+/// answer `429 Too Many Requests` instead of forwarding. It logs each request as the registry does.
 pub struct Proxy {
     container: Container,
     name: String,
 }
 
-const PROXY_SCRIPT: &str = r#"import http.client, http.server, os, socketserver, sys, time
+const PROXY_SCRIPT: &str = r#"import http.client, http.server, os, re, socketserver, threading, time
 
 HOST, _, PORT = os.environ["UPSTREAM"].partition(":")
 PORT = PORT or "80"
 FLIP = int(os.environ.get("FLIP", "-1"))
 RATE = int(os.environ.get("RATE", "0"))
+# `Proxy::throttle` writes `<times> <retry-after> <pattern>` here; -1 times is every match.
+THROTTLE = "/tmp/throttle"
+LOCK = threading.Lock()
+
+
+def throttled(path):
+    """The Retry-After to answer `path` with, or None to forward it."""
+    with LOCK:
+        try:
+            with open(THROTTLE) as f:
+                times, retry_after, pattern = f.read().split(" ", 2)
+        except FileNotFoundError:
+            return None
+        if times == "0" or not re.search(pattern, path):
+            return None
+        if times != "-1":
+            with open(THROTTLE, "w") as f:
+                f.write(f"{int(times) - 1} {retry_after} {pattern}")
+        return retry_after
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -446,7 +514,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    # The registry's combined log format, which `Request::parse` reads.
+    def log_request(self, code="-", size="-"):
+        print(
+            '%s - - [%s] "%s" %d - "" "%s"'
+            % (
+                self.client_address[0],
+                self.log_date_time_string(),
+                self.requestline,
+                int(code),
+                self.headers.get("User-Agent", ""),
+            ),
+            flush=True,
+        )
+
     def do_GET(self):
+        retry_after = throttled(self.path)
+        if retry_after is not None:
+            self.send_response(429)
+            self.send_header("Retry-After", retry_after)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         upstream = http.client.HTTPConnection(HOST, int(PORT))
         upstream.request(
             self.command,
@@ -462,8 +551,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.command == "HEAD":
             return
         blob = "/blobs/" in self.path
-        if blob:
-            print("blob " + self.path, flush=True)
         position = 0
         while True:
             chunk = response.read(65536)
@@ -529,17 +616,67 @@ impl Proxy {
         self.name.clone()
     }
 
-    /// How many blob requests went through.
+    /// Every request it has answered, in order, with what it answered.
     ///
     /// # Errors
     ///
-    /// When `docker` cannot start.
-    pub fn blob_requests(&self) -> Result<usize, Failure> {
+    /// When `docker logs` fails.
+    pub fn requests(&self) -> Result<Vec<Request>, Failure> {
         Ok(self
             .container
             .logs()?
             .lines()
-            .filter(|l| l.starts_with("blob "))
+            .filter_map(Request::parse)
+            .collect())
+    }
+
+    /// How many blob `GET`s it has answered.
+    ///
+    /// # Errors
+    ///
+    /// When `docker logs` fails.
+    pub fn blob_requests(&self) -> Result<usize, Failure> {
+        Ok(self
+            .requests()?
+            .iter()
+            .filter(|request| request.blob().is_some())
             .count())
+    }
+
+    /// Answers `429 Too Many Requests`, with `Retry-After` in whole seconds, instead of forwarding the next `times`
+    /// requests whose path the Python regular expression `pattern` matches; every such request when `times` is `None`.
+    /// It lasts until [`Proxy::unthrottle`], or a later call.
+    ///
+    /// # Errors
+    ///
+    /// When `docker exec` fails.
+    pub fn throttle(
+        &self,
+        pattern: &str,
+        retry_after: Duration,
+        times: Option<u32>,
+    ) -> Result<(), Failure> {
+        let times = times.map_or_else(|| "-1".to_owned(), |times| times.to_string());
+        let throttle = format!("{times} {} {pattern}", retry_after.as_secs());
+        // A rename: the proxy never reads half a file.
+        docker(&[
+            "exec",
+            &self.name,
+            "sh",
+            "-c",
+            "printf %s \"$1\" >/tmp/throttle.new && mv /tmp/throttle.new /tmp/throttle",
+            "sh",
+            &throttle,
+        ])
+        .map(drop)
+    }
+
+    /// Forwards every request again.
+    ///
+    /// # Errors
+    ///
+    /// When `docker exec` fails.
+    pub fn unthrottle(&self) -> Result<(), Failure> {
+        docker(&["exec", &self.name, "rm", "-f", "/tmp/throttle"]).map(drop)
     }
 }

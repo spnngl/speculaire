@@ -101,7 +101,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D91 [agent](agent.md): the registry config is parsed into a snapshot that a reload swaps (SIGHUP, or a poll that finds a watched file changed); a bad file keeps the previous one and is logged once and counted; `blob_cache.max_size` is live (amends D47, D89; amended by D92, D93)
 - D92 [agent](agent.md): a credential, certificate or key file that cannot be used leaves its hosts anonymous or without it, logged and counted once per reload, and the rest of the snapshot is built; certificate files are read at reload, never per request (amends D89, D91; amended by D93)
 - D93 [agent](agent.md): a poll reads a file again when its `stat` (modification time, length, device, inode) differs from the one taken before the previous read, or it appeared or went (amends D30, D91, D92; amended by D96, D108)
-- D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63)
+- D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63; amended by D112)
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
 - D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76; amended by D104, D105)
@@ -119,4 +119,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34)
 - D110 [distribution](distribution.md): the content directory is `io.containerd.content.v1.content` below the `root` of containerd's config, `/var/lib/containerd` when it names none; an agent test serves a blob from a temporary root (amends D5, D85)
 - D111 [distribution](distribution.md): every request of the upstream client carries `User-Agent: speculaire/<version>` (amends D88)
-Next free number: D112.
+- D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94)
+Next free number: D113.

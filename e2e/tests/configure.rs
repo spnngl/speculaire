@@ -10,6 +10,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use e2e::upstream::Kind;
 use e2e::{Cluster, Runtime};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -294,12 +295,13 @@ fn unconfigure_removes_only_its_own_and_pulls_still_work() {
         kept.contains("edited by the admin after configure") && !kept.contains("speculaire"),
         "{kept}"
     );
-    // The harness's entry for the upstream is named after the cluster, `speculaire-...` (D94).
-    let upstream = cluster.upstream();
+    // The harness's entries for its upstreams are named after the cluster, `speculaire-...` (D94, D112).
+    let upstreams = Kind::ALL.map(|kind| cluster.upstream(kind));
+    let harness = |file: &str| upstreams.iter().any(|u| file.contains(u.address()));
     assert!(
         !left
             .lines()
-            .any(|f| f.contains("speculaire") && !f.contains(upstream.address())),
+            .any(|f| f.contains("speculaire") && !harness(f)),
         "unconfigure left {left}"
     );
     assert!(!mirror_dir.contains("ca.crt"), "{mirror_dir}");

@@ -1,0 +1,30 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "speculaire-e2e-test-image",
+  "documentNamespace": "https://speculaire.dev/e2e/test-image",
+  "creationInfo": {
+    "created": "2026-11-15T00:00:00Z",
+    "creators": ["Tool: speculaire-e2e"]
+  },
+  "packages": [
+    {
+      "name": "busybox",
+      "SPDXID": "SPDXRef-Package-busybox",
+      "versionInfo": "1.37.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-2.0-only",
+      "licenseDeclared": "GPL-2.0-only",
+      "copyrightText": "NOASSERTION"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-busybox"
+    }
+  ]
+}

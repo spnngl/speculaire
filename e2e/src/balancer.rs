@@ -4,6 +4,7 @@
 
 use std::net::IpAddr;
 
+use crate::node::Rules;
 use crate::registry::{NETWORK, docker, fail};
 use crate::{Cluster, Failure, IpFamily};
 
@@ -63,7 +64,7 @@ impl Balancer<'_> {
     /// # Errors
     ///
     /// When `iptables` fails.
-    pub fn stop(&self, node: &str) -> Result<Stopped<'_>, Failure> {
+    pub fn stop(&self, node: &str) -> Result<Rules<'_>, Failure> {
         let address = self.address()?;
         let tables = if address.is_ipv6() {
             "ip6tables"
@@ -72,41 +73,6 @@ impl Balancer<'_> {
         };
         let rule =
             format!("INPUT -s {address} -p tcp --dport {PORT} -j REJECT --reject-with tcp-reset");
-        let stopped = Stopped {
-            cluster: self.cluster,
-            node: node.to_owned(),
-            iptables: format!("{tables} -w"),
-            rule,
-        };
-        stopped.iptables("-C").or_else(|_| stopped.iptables("-I"))?;
-        Ok(stopped)
-    }
-}
-
-/// A reflector the balancer cannot reach; it can again when this drops.
-pub struct Stopped<'a> {
-    cluster: &'a Cluster,
-    node: String,
-    iptables: String,
-    rule: String,
-}
-
-impl Stopped<'_> {
-    /// Checks (`-C`), inserts (`-I`) or deletes (`-D`) the rule.
-    fn iptables(&self, command: &str) -> Result<String, Failure> {
-        self.cluster.exec(
-            &self.node,
-            &[
-                "sh",
-                "-c",
-                &format!("{} {command} {}", self.iptables, self.rule),
-            ],
-        )
-    }
-}
-
-impl Drop for Stopped<'_> {
-    fn drop(&mut self) {
-        let _ = self.iptables("-D");
+        Rules::insert(self.cluster, node, vec![(tables, rule)])
     }
 }
