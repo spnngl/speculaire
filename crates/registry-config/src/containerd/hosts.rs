@@ -717,6 +717,16 @@ impl Tree {
             .find_map(|dirs| host_dir_names(host).find_map(|name| dirs.get(name.as_ref())));
         finish(found.cloned(), host, default_scheme)
     }
+
+    /// Whether `host` has a directory of its own in any root, `_default` aside.
+    #[must_use]
+    pub fn has_own_dir(&self, host: &str) -> bool {
+        self.dirs.iter().any(|dirs| {
+            host_dir_names(host)
+                .filter(|name| name != "_default")
+                .any(|name| dirs.contains_key(name.as_ref()))
+        })
+    }
 }
 
 fn apply_defaults(last: &mut HostConfig, host: &str, default_scheme: Option<&str>) {
@@ -948,6 +958,9 @@ mod tests {
                 "{host}"
             );
         }
+        assert!(tree.has_own_dir("docker.io"));
+        assert!(tree.has_own_dir("reg.test:5000"));
+        assert!(!tree.has_own_dir("other.test"));
         // The tree holds what it read: a later edit is not in it.
         std::fs::remove_dir_all(roots[0].join("docker.io")).expect("removed");
         assert_eq!(tree.resolve("docker.io", None).len(), 2);

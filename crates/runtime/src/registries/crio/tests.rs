@@ -517,3 +517,22 @@ fn a_crio_that_cannot_be_asked_is_a_config_error() {
         "{err}"
     );
 }
+
+#[test]
+fn a_host_is_configured_by_a_registry_of_the_host_or_below_it_not_by_speculaires_drop_in() {
+    let node = Node::new();
+    node.put(
+        OWN,
+        "[[registry]]\nprefix = \"own.test\"\nlocation = \"own.test\"\n",
+    );
+    node.put(
+        "/etc/containers/registries.conf",
+        "[[registry]]\nprefix = \"reg.test\"\nlocation = \"reg.test\"\n[[registry]]\nprefix = \"deep.test/org\"\nlocation = \"deep.test/org\"\n",
+    );
+    let registries = node.registries();
+    assert!(registries.configured("reg.test"));
+    assert!(registries.configured("deep.test"));
+    assert!(!registries.configured("reg"));
+    assert!(!registries.configured("own.test"));
+    assert!(!registries.configured("other.test"));
+}

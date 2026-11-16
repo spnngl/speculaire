@@ -539,3 +539,15 @@ fn a_name_without_a_registry_and_a_repository_is_an_error() {
         assert!(matches!(err, Error::Name(_)), "{name:?}: {err}");
     }
 }
+
+#[test]
+fn a_host_is_configured_by_a_directory_of_its_own_not_by_the_default() {
+    let node = Node::new("");
+    node.hosts("reg.test:5000", "server = \"https://reg.test:5000\"\n");
+    node.hosts("_default", "[host.\"https://fallback.test\"]\n");
+    let registries = node.registries();
+    assert!(registries.configured("reg.test:5000"));
+    assert!(!registries.configured("reg.test"));
+    assert!(!registries.configured("other.test"));
+    assert!(!node.unread().configured("reg.test:5000"));
+}

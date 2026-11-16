@@ -131,6 +131,17 @@ impl Registries for CrioRegistries {
         Ok(sources)
     }
 
+    fn configured(&self, host: &str) -> bool {
+        self.live.get().is_ok_and(|snapshot| {
+            snapshot.config.registries.iter().any(|registry| {
+                registry
+                    .prefix
+                    .strip_prefix(host)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            })
+        })
+    }
+
     fn poll(&self) -> Option<Result<Reloaded, Error>> {
         let problems = self.live.poll(|problems| self.read(problems))?;
         Some(problems.map(|problems| Reloaded { problems }))
