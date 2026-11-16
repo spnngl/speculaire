@@ -269,7 +269,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `e2e/` and `oracle/` stay at the top level.
 - **Because:** the user asked for libraries and binaries apart. A library holds code a fuzz target, a test or another binary can reuse; a binary-only crate cannot be linked by them.
 
-## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94, D113)
+## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94, D113, D120)
 
 - **Decision:**
   - **Runtimes:** containerd and CRI-O. cri-dockerd has no NRI, so the gate cannot run there.
@@ -526,7 +526,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** a metric described but never set passes. A metric set but not described is caught by the tests of `/metrics` only when they emit it.
 - **Revisit when:** a metric is set without its `describe`, or the catalog is generated from the code.
 
-## D112: The e2e cluster has four upstreams and a signed test image; the proxy throttles and a node can lose an upstream (amends D94)
+## D112: The e2e cluster has four upstreams and a signed test image; the proxy throttles and a node can lose an upstream (amends D94; amended by D120)
 
 - **Decision:**
   - **Start:** after `kind create cluster`, `just e2e-up` runs `cargo run -p e2e --bin upstreams` (`e2e::upstream::start`). It starts the upstreams, pushes the test images to each, writes each node's runtime config for them and restarts the runtime, before the agents are installed. Each upstream is `<cluster>-<role>.e2e.test` (`e2e::upstream::Kind`), and `e2e-down` removes it by the cluster's label:
@@ -602,6 +602,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Measured**, frame pointers, on the same host shared with other builds, without then with the flag, alternated: the arm64 musl binary grows 0.8% (10.57 to 10.66 MB). `just bench-micro`, 4 rounds each: the index lookup's median 1.7 to 4.2 µs without and 1.3 to 2.8 µs with, SHA-256 of 16 MiB at best 5.14 ms both. `just load --agents 2000 --measure-only`, 2 rounds each: peak RSS 181 and 181 MiB without, 182 and 185 MiB with; resync 16.8 and 9.0 s without, 12.0 and 10.8 s with; lookup p99 345 µs and 2.8 ms without, 205 µs and 2.8 ms with (the second round of each ran beside other builds). No difference stands out of the noise.
 - **Cost:** profiles need a privileged container. The `deep` job's Valgrind build starts cold each run. Frame pointers cost one register and a push per call, below what the measures above can show; a release still checks its pulls against Spegel with `just bench` (D35).
 - **Revisit when:** a diagnosis needs off-CPU time (perf's `--off-cpu`, or eBPF); or frame pointers cost more than 2% in `just load` or `just bench`.
+
 ## D118: `just dev` mounts the tree at its own path and builds it in its own directory of the volume (amends D57)
 
 - **Decision:**
@@ -611,3 +612,18 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Measured:** worktrees A (this change) and B (A plus a failing test) ran `just dev check` one after the other: B ran 573 tests and failed on its own, then A ran its 572 and passed, recompiling nothing: each built in its own directory of the volume, about 7 GB each.
 - **Cost:** each worktree builds from scratch once, and its directory stays in the volume after the worktree is removed, until deleted (`docker run --rm -v speculaire-dev-<arch>:/target alpine rm -rf /target<path>`).
 - **Revisit when:** parallel worktrees run `just musl`, which then reuse each other's artifacts the same way.
+
+## D120: e2e pulls Docker Hub's images through mirror.gcr.io and the ECR Public Gallery (amends D63, D112)
+
+- **Decision:**
+  - **Order:** an image of Docker Hub comes from mirror.gcr.io, then, for an official image (`library/`), from `public.ecr.aws/docker`, then from Docker Hub, as spnngl/images' builds do (`.github/actions/bake-build/action.yml:80-90`).
+  - **Host:** the harness pulls each image through `e2e::hub::pulled`, which tries the sources in that order and uses the first that serves it; `regctl image copy` from Docker Hub tries them the same way (`e2e::hub::from_first`). `just e2e-up` pulls `kindest/node`, the node images' `alpine` and Envoy through the `pull` binary of the same crate.
+  - **Nodes:** each node image carries the mirrors in its runtime config: `/etc/containerd/certs.d/docker.io/hosts.toml` (`e2e/node/containerd/docker-hub.toml`) and `/etc/containers/registries.conf.d/10-docker-hub.conf`. `speculaire configure` puts the mirror before them (D66, D82), and the agent takes them as the registry's sources, in order (D78).
+  - The references stay `docker.io/…@sha256:…`, which Renovate tracks.
+- **Because:**
+  - CI runners share Docker Hub's anonymous pull limit: legs failed on `429` from a node's pull of busybox (runs 43754605532, 43761469786).
+  - Every image is pinned by digest, so each source serves the same bytes or none. mirror.gcr.io and `public.ecr.aws/docker` served busybox 1.37.0 under the same digest.
+  - A login needs a secret that pull requests from forks do not get.
+  - `public.ecr.aws/docker` mirrors the official images alone, under the path `docker/library/`: containerd reaches it with `override_path`.
+- **Cost:** the e2e nodes' runtimes run with mirrors that a default node lacks, and the `configure` suite edits that file as the admin's. mirror.gcr.io caches popular images only; any other falls through to Docker Hub. The build image (`rust`), `golang`, `debian` and `binfmt` of the other recipes still come from Docker Hub.
+- **Revisit when:** a mirror fails a leg, or Docker Hub lifts the limit for CI runners.

@@ -478,8 +478,15 @@ e2e-up runtime version kubernetes="": e2e-tools
         echo "e2e: no $bin: run just musl {{ arch() }}-unknown-linux-musl" >&2
         exit 1
     fi
+    # Docker Hub's images through its mirrors (D120): `pull` prints the reference it pulled. The Containerfile's
+    # alpine, which Renovate moves, is a named context of the one pulled.
+    pull() { cargo run -p e2e --locked --quiet --bin pull -- "$1"; }
+    alpine="$(sed -n 's/^FROM \(docker\.io\/[^ ]*\) AS download$/\1/p' 'e2e/node/{{ runtime }}/Containerfile')"
+    base="$(pull "docker.io/kindest/node:$node")"
+    download="$(pull "$alpine")"
     image="localhost/speculaire-node:{{ runtime }}-$release-k$kubernetes"
-    docker build --quiet --build-arg "NODE=docker.io/kindest/node:$node" --build-arg "RELEASE=$release" -t "$image" \
+    docker build --quiet --build-arg "NODE=$base" --build-arg "RELEASE=$release" \
+        --build-context "$alpine=docker-image://$download" -t "$image" \
         -f 'e2e/node/{{ runtime }}/Containerfile' 'e2e/node/{{ runtime }}' >/dev/null
     mkdir -p '{{ e2e_dir }}'
     config="{{ e2e_dir }}/$cluster.yaml"
@@ -543,7 +550,8 @@ e2e-up runtime version kubernetes="": e2e-tools
         members+="${members:+, }{ node = \"$node\", address = \"$(socket "$a" 7483)\" }"
         echo "              - endpoint: { address: { socket_address: { address: \"$a\", port_value: 7483 } } }" >>"$envoy_config"
     done
-    docker create --name "$cluster-lb" "${labels[@]}" "docker.io/envoyproxy/envoy:{{ envoy }}" >/dev/null
+    envoy="$(pull 'docker.io/envoyproxy/envoy:{{ envoy }}')"
+    docker create --name "$cluster-lb" "${labels[@]}" "$envoy" >/dev/null
     docker cp "$envoy_config" "$cluster-lb:/etc/envoy/envoy.yaml"
     docker start "$cluster-lb" >/dev/null
     url="https://$(socket "$(address "$cluster-lb")" 7483)"
