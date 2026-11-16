@@ -1,4 +1,4 @@
-//! The artifact store and discovery (D120): the agent finds the artifacts of each image the runtime lists upstream,
+//! The artifact store and discovery (D121): the agent finds the artifacts of each image the runtime lists upstream,
 //! through the node's registry config, and keeps them in its own content-addressed store. The runtime never pulls
 //! them. What is kept is untrusted until verification (M5) checks it.
 //!

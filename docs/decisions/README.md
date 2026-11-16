@@ -24,12 +24,12 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
 - D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81, D86)
 - D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60, D95)
-- D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable` (amended by D66, D78, D88, D89)
+- D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable` (amended by D66, D78, D88, D89, D121)
 - D18 [gate](gate.md): `gate.exempt` is explicit and empty by default
 - D19 [build](build.md): the dev loop is Docker on macOS plus CI on native runners (amended by D57)
 - D20 [verification](verification.md): `Verdict` has four states; `Unverifiable` is retried, `Rejected` is final (amended by D31, D38, D65)
 - D21 [verification](verification.md): stale verdicts keep serving during re-verification, for up to `verify.stale_max` (amended by D31, D65)
-- D22 [verification](verification.md): verification starts at the manifest fetch (amended by D65, D66)
+- D22 [verification](verification.md): verification starts at the manifest fetch (amended by D65, D66, D121)
 - D23 [gate](gate.md): `gate.unmatched` (default `deny`) decides images that no policy matches
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100, D102)
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
@@ -57,7 +57,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60, D91)
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29; amended by D72)
 - D49 [verification](verification.md): a BuildKit SBOM inside a signed index is D43's one exception (amends D43)
-- D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34)
+- D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34; amended by D121)
 - D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2)
 - D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37; amended by D102)
 - D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69, D88)
@@ -97,7 +97,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D87 [agent](agent.md): `runtime.containerd_socket`, `runtime.containerd_config` and `runtime.crio_socket` are restart keys that every command reads, and the agent's tests run against a fake containerd; no switch skips preflight (amends D60)
 - D88 [distribution](distribution.md): the upstream client is our own on hyper, with Bearer tokens kept per host and scope; the CRI-O relay serves what its served manifests point to and keeps it in the blob cache (amends D17, D53, D67, D83; amended by D111, D119)
 - D89 [distribution](distribution.md): a `Registries` trait gives the client its sources from either runtime's registry config; CRI-O's auth file is the one its own config names, read from `crio.sock` (amends D17, D80; amended by D91, D92)
-- D90 [agent](agent.md): all runtime-specific code sits in `speculaire-runtime` behind four traits (`Wiring`, `Settings`, `Registries`, `Content`) that a `Node` hands out; only the relay-or-per-blob `Fallback` is visible to the agent (amends D64, D84, D86; amended by D99)
+- D90 [agent](agent.md): all runtime-specific code sits in `speculaire-runtime` behind four traits (`Wiring`, `Settings`, `Registries`, `Content`) that a `Node` hands out; only the relay-or-per-blob `Fallback` is visible to the agent (amends D64, D84, D86; amended by D99, D121)
 - D91 [agent](agent.md): the registry config is parsed into a snapshot that a reload swaps (SIGHUP, or a poll that finds a watched file changed); a bad file keeps the previous one and is logged once and counted; `blob_cache.max_size` is live (amends D47, D89; amended by D92, D93)
 - D92 [agent](agent.md): a credential, certificate or key file that cannot be used leaves its hosts anonymous or without it, logged and counted once per reload, and the rest of the snapshot is built; certificate files are read at reload, never per request (amends D89, D91; amended by D93)
 - D93 [agent](agent.md): a poll reads a file again when its `stat` (modification time, length, device, inode) differs from the one taken before the previous read, or it appeared or went (amends D30, D91, D92; amended by D96, D108)
@@ -106,7 +106,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
 - D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76; amended by D104, D105)
 - D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33; amended by D102, D103, D105)
-- D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90)
+- D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90; amended by D121)
 - D100 [distribution](distribution.md): the peer API routes `GET` and `HEAD` by digest through the mirror's parser, caps only blob bodies, answers `503` while the agent stops, and opens on the peer address the client fixes (amends D24, D36; amended by D103)
 - D101 [agent](agent.md): `configure` keeps the mirror's table only where containerd reads it first, and refuses a `hosts.toml` whose first host table is `[host.""]`, which containerd skips there and would read after the mirror's (amends D82)
 - D102 [distribution](distribution.md): the fetcher races and hedges a lookup's holders (4 at once, Spegel's 80th/85th/90th percentile delays, 50 ms floor), resumes with `Range`, checks a blob whole before serving it on containerd and streams it on CRI-O; `speculaire_lookup_seconds` gains `result`; every socket sets `TCP_NODELAY` (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103)
@@ -128,4 +128,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D118 [build](build.md): `just dev` mounts the tree at its host path and builds it in `/target<path>` of the shared volume; `just musl` keeps `/src` (amends D57)
 - D119 [distribution](distribution.md): the upstream client bounds the TCP connect to a host, and to the token endpoint it names, by the host's positive `dial_timeout`, one connection pool per trust and timeout; zero and CRI-O keep its own 15 s (amends D78, D88, D115)
 - D120 [build](build.md): e2e pulls Docker Hub's images from mirror.gcr.io, then `public.ecr.aws/docker` for official images, then Docker Hub, on the host and in the node images' runtime config (amends D63, D112)
-Next free number: D121.
+- D121 [verification](verification.md): an `Images` trait follows the runtime's image list, and each digest it lists is a discovery root, asked of its repositories in list order; only Sigstore bundle referrers and `.sig` are fetched, under caps, into the artifact store (amends D17, D22, D50, D90, D99)
+Next free number: D122.
