@@ -177,12 +177,15 @@ pub(crate) async fn follow<W, F>(
     }
 }
 
-/// How long after a watch starts the list is read once more. No answer tells when the runtime holds the subscription:
-/// containerd sends no header before its first event, and an image made between the first read and then has no hint.
+/// How long after a watch starts, and after each hint, the list is read once more (D127). No answer tells when the
+/// runtime holds the subscription: containerd sends no header before its first event, and an image made between the
+/// first read and then has no hint. containerd's CRI plugin publishes each reference's event before it lists the
+/// reference (v2.3.7 `internal/cri/server/images/image_pull.go:203-217`), so the read at the last hint of a pull may
+/// miss its repository digest.
 const SETTLE: Duration = Duration::from_secs(1);
 
-/// Reads the list at the start, [`SETTLE`] later, every `every` and at each hint, and sends it or what changed, until
-/// `watching` ends.
+/// Reads the list at the start, [`SETTLE`] after the start and after the last hint, every `every` and at each hint,
+/// and sends it or what changed, until `watching` ends.
 async fn relist(
     socket: &Path,
     updates: &mpsc::Sender<Update>,
@@ -200,7 +203,11 @@ async fn relist(
         let whole = tokio::select! {
             lost = &mut watching => return lost,
             _ = tick.tick() => true,
-            Some(()) = hints.recv() => false,
+            Some(()) = hints.recv() => {
+                settle.as_mut().reset(tokio::time::Instant::now() + SETTLE);
+                settling = true;
+                false
+            }
             () = &mut settle, if settling => {
                 settling = false;
                 false
