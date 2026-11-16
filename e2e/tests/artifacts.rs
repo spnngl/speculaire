@@ -87,7 +87,8 @@ impl Expected {
     }
 }
 
-/// A worker of the cluster, and its agent's config to put back when the test ends.
+/// The worker no reflector runs on (D94), and its agent's config to put back when the test ends: restarting its agent
+/// leaves the reflectors' holders as the other suites expect them.
 struct Worker {
     cluster: Cluster,
     name: String,
@@ -97,13 +98,14 @@ struct Worker {
 impl Worker {
     fn new() -> Self {
         let cluster = Cluster::from_env();
+        let reflectors = cluster.reflectors();
         let name = cluster
             .nodes()
             .unwrap()
             .into_iter()
             .map(|n| n.name)
-            .find(|name| name.ends_with("-worker"))
-            .expect("a worker");
+            .find(|name| !reflectors.contains(name))
+            .expect("a node no reflector runs on");
         Self {
             cluster,
             name,
