@@ -97,10 +97,17 @@ impl Registry {
             .insert(path.to_owned(), (status, headers, body.into()));
     }
 
-    /// Serves `bytes` as the manifest `digest` and returns the digest.
+    /// Serves `bytes` as the manifest `digest`, with its media type, and returns the digest.
     fn manifest(&self, bytes: &[u8]) -> Digest {
         let digest = digest_of(bytes);
-        self.put(&format!("/app/manifests/{digest}"), 200, bytes.to_vec());
+        let manifest: Value = serde_json::from_slice(bytes).unwrap();
+        let media_type = manifest["mediaType"].as_str().unwrap().to_owned();
+        self.put_with(
+            &format!("/app/manifests/{digest}"),
+            200,
+            vec![("content-type", media_type)],
+            bytes.to_vec(),
+        );
         digest
     }
 
@@ -291,6 +298,7 @@ async fn the_api_then_the_fallback_tag_then_the_sig_tag_and_each_tag_is_asked_by
     );
     let sig = format!("/app/manifests/{}", referrers::signature_tag(&root));
     let wanted = [
+        format!("HEAD /app/manifests/{root}"),
         format!("GET /app/referrers/{root}"),
         format!("HEAD {fallback}"),
         format!("GET {fallback}"),
@@ -309,6 +317,8 @@ async fn the_api_then_the_fallback_tag_then_the_sig_tag_and_each_tag_is_asked_by
         })
         .collect();
     assert!(order.is_sorted(), "{requests:?}");
+    // An image manifest is no index: it is never fetched.
+    assert!(!requests.contains(&format!("GET /app/manifests/{root}")));
     let store = test.discovery.store();
     for artifact in &artifacts {
         assert!(store.contains(&artifact.manifest));
@@ -330,7 +340,10 @@ async fn a_tag_that_is_not_there_is_never_fetched() {
         "{requests:?}"
     );
     assert_eq!(
-        requests.iter().filter(|r| r.starts_with("HEAD ")).count(),
+        requests
+            .iter()
+            .filter(|r| r.starts_with("HEAD /app/manifests/sha256-"))
+            .count(),
         2
     );
 }
@@ -504,7 +517,7 @@ async fn the_nodes_own_mirror_is_never_asked() {
     assert_eq!(mirror.requests(), Vec::<String>::new());
     assert_eq!(
         test.registry.requests()[0],
-        format!("GET /app/manifests/{root}")
+        format!("HEAD /app/manifests/{root}")
     );
 }
 

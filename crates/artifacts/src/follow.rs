@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::{info, warn};
 
-use crate::discover::Discovery;
+use crate::discover::{Discovery, Error};
 
 /// How long a root whose discovery failed waits before it is tried again.
 pub const RETRY: Duration = Duration::from_secs(600);
@@ -57,7 +57,12 @@ pub async fn follow(discovery: Arc<Discovery>, images: Arc<dyn Images>) {
                     info!(%root, artifacts = artifacts.len(), "artifacts discovered");
                     done.insert(root, Done::Discovered);
                 }
-                Err(e) => {
+                // An image pulled with a pull secret only is unreachable by design (D17): no warning.
+                Err(Error::Unreachable) => {
+                    info!(%root, "artifacts unreachable: no source served the root");
+                    done.insert(root, Done::Failed(Instant::now()));
+                }
+                Err(e @ Error::Store(_)) => {
                     warn!(%root, error = %e, "artifacts not discovered");
                     done.insert(root, Done::Failed(Instant::now()));
                 }
