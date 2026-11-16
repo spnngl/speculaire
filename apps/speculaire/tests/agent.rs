@@ -413,7 +413,7 @@ fn put(path: &Path, text: &str) {
 fn a_healthy_start_is_ready_and_logs_nothing_below_warn() {
     let agent = Agent::start("");
     assert_eq!(agent.get("/livez", "").status, 200);
-    // The artifact store opens before the agent is ready (D115).
+    // The artifact store opens before the agent is ready (D116).
     assert!(agent.node.dir.path().join("artifacts/tmp").is_dir());
     let (status, lines) = agent.stop();
     assert!(status.success(), "{status}");

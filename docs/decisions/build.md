@@ -198,7 +198,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:** dedens calls both "the gate", which in speculaire is the component that admits containers. One word with two meanings breaks the vocabulary rule in `AGENTS.md`.
 - **Revisit when:** —
 
-## D50: The `upstream` label names only configured registry hosts (amends D34; amended by D115)
+## D50: The `upstream` label names only configured registry hosts (amends D34; amended by D116)
 
 - **Decision:** a registry host with its own directory in the `hosts.toml` tree (D17) keeps its name as the `upstream` label value. Every other host is `upstream="other"`. Peer fetches leave the label empty.
 - **Because:** pod authors choose registry hosts, so "a host from the registry config" was not bounded: a pod naming a new host would add series on every node. The `hosts.toml` tree is written by the admin.
