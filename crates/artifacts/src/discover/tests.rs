@@ -169,7 +169,7 @@ fn platform() -> Host {
     }
 }
 
-/// A test: one registry, a store, and discovery through `Fixed` with the limits of D119.
+/// A test: one registry, a store, and discovery through `Fixed` with the limits of D120.
 struct Test {
     registry: Registry,
     discovery: Discovery,

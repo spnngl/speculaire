@@ -1,5 +1,5 @@
 //! containerd's images in `k8s.io`, the CRI's namespace, as [`Images`]: CRI `ListImages`, read again at each image
-//! event (D119).
+//! event (D120).
 //!
 //! containerd publishes `/images/create`, `/images/update` and `/images/delete` for every image name it stores
 //! (v2.4.2 `core/metadata/images.go:169,270,337`), with the name and no digest: the list itself says what changed. Its

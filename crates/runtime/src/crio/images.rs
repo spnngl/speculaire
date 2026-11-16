@@ -1,4 +1,4 @@
-//! CRI-O's images as [`Images`]: CRI `ListImages`, read again each time `images.json` is replaced (D65, D119).
+//! CRI-O's images as [`Images`]: CRI `ListImages`, read again each time `images.json` is replaced (D65, D120).
 //!
 //! CRI-O streams no image events. Its store rewrites `images.json` whole, by a rename, at each change (go.podman.io/storage
 //! v1.63.0, as CRI-O v1.37.0 vendors it, `images.go:566-586` through `ioutils.AtomicWriteFile`); the agent watches the

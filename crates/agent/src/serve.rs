@@ -397,7 +397,7 @@ async fn start_mirror(
     })
 }
 
-/// Opens the artifact store and discovers the artifacts of each image the runtime lists (D119).
+/// Opens the artifact store and discovers the artifacts of each image the runtime lists (D120).
 fn start_discovery(
     config: &Config,
     node: &RuntimeNode,
