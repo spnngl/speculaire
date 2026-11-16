@@ -134,6 +134,8 @@ struct Shared {
     links: Mutex<HashMap<String, mpsc::Sender<Ask>>>,
     /// The peer address, fixed by the first stream unless set (D36): `None` until then, and never changed after.
     peer: watch::Sender<Option<SocketAddr>>,
+    /// Whether a stream has been up, so that a lookup could be asked: set by the first and never cleared.
+    linked: watch::Sender<bool>,
     /// Woken when a stream drops, to ask for the members again (D2).
     dropped: tokio::sync::Notify,
     series: LookupSeries,
@@ -150,6 +152,7 @@ impl Client {
             holdings,
             links: Mutex::default(),
             peer,
+            linked: watch::Sender::new(false),
             dropped: tokio::sync::Notify::new(),
             series: LookupSeries::new(),
         });
@@ -167,6 +170,15 @@ impl Client {
                 .await
                 .ok()
                 .and_then(|peer| *peer)
+        }
+    }
+
+    /// Resolves once a stream is up, so that a lookup asks a member (D126).
+    pub fn linked(&self) -> impl Future<Output = ()> + Send + 'static {
+        let mut linked = self.shared.linked.subscribe();
+        async move {
+            // An error means the client is gone: nothing is left to wait for.
+            let _ = linked.wait_for(|linked| *linked).await;
         }
     }
 

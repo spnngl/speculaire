@@ -35,6 +35,7 @@ exclude_re = [
   'node\.rs:\d+:\d+: replace Agent::stop -> anyhow::Result<\(\)> with Ok\(\(\)\)$',
   # A target with exactly as many referrers as the cap: truncating to the cap keeps them all, only a warning differs.
   'discover\.rs:\d+:\d+: replace > with >= in Discovery::bundles$',
+  'peers\.rs:\d+:\d+: replace > with >= in Discovery::listed$',
   # inotify's flags are distinct bits: `^` sets the same ones as `|`.
   'crio/images\.rs:\d+:\d+: replace \| with \^ in watch_blocking$',
   # The stand-in `watch` off Linux: Linux, where mutants run, compiles it out, and elsewhere `Lost` has no `Default`.

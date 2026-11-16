@@ -1,6 +1,7 @@
 //! Artifact discovery (D121): a pull of the signed test image puts its Sigstore bundles and its `.sig` manifest, with
 //! their blobs, in the node's artifact store, fetched from the upstream it was pulled from with the node's own
-//! registry config only (D17). Another node reads them, and their referrers, from the node's peer API (D124).
+//! registry config only (D17). Another node reads them, and their referrers, from the node's peer API (D124), and a
+//! node cut off from upstream discovers them there (D126).
 #![expect(
     clippy::unwrap_used,
     reason = "the helpers of a test fail it by panicking"
@@ -180,36 +181,26 @@ impl Worker {
 
     /// Pulls the signed image from `upstream`, and waits until the store holds every artifact of `expected`: how
     /// long that took after the pull.
+    /// The peer APIs of the other nodes are cut off meanwhile: discovery asks upstream once peers list nothing (D126).
     fn pull(&self, upstream: &Upstream, expected: &Expected) -> Duration {
-        self.sh(&format!("crictl pull {}/{SIGNED}", upstream.address()));
-        let start = Instant::now();
-        let test = expected
-            .digests()
-            .map(|digest| {
-                format!(
-                    "test -f {STORE}/blobs/sha256/{}",
-                    digest.trim_start_matches("sha256:")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" && ");
-        while !self
+        let others: Vec<String> = self
             .cluster
-            .exec_output(&self.name, &["sh", "-c", &test])
+            .nodes()
             .unwrap()
-            .success
-        {
-            assert!(
-                start.elapsed() < WITHIN,
-                "the store lacks some of {:?}: {}",
-                expected.artifacts,
-                self.sh(&format!(
-                    "ls -R {STORE}; journalctl -u speculaire --no-pager -o cat | tail -n 30"
-                ))
-            );
-            sleep(Duration::from_millis(200));
-        }
-        start.elapsed()
+            .into_iter()
+            .map(|n| n.name)
+            .filter(|name| *name != self.name)
+            .collect();
+        let _rejected: Vec<_> = others
+            .iter()
+            .map(|other| {
+                self.cluster
+                    .reject_port(&self.name, other, PEER_PORT)
+                    .unwrap()
+            })
+            .collect();
+        self.sh(&format!("crictl pull {}/{SIGNED}", upstream.address()));
+        holds(&self.cluster, &self.name, expected, Instant::now())
     }
 
     /// The sum of `speculaire_artifact_fetches_total` over the series whose labels include each of `labels`.
@@ -242,6 +233,46 @@ impl Drop for Worker {
             self.cluster.wait_ready(&self.name).unwrap();
         }
     }
+}
+
+/// Waits until the store of `node` holds every artifact of `expected`, [`WITHIN`] after `start` at most: how long after
+/// `start` it did.
+fn holds(cluster: &Cluster, node: &str, expected: &Expected, start: Instant) -> Duration {
+    let test = expected
+        .digests()
+        .map(|digest| {
+            format!(
+                "test -f {STORE}/blobs/sha256/{}",
+                digest.trim_start_matches("sha256:")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    while !cluster
+        .exec_output(node, &["sh", "-c", &test])
+        .unwrap()
+        .success
+    {
+        assert!(
+            start.elapsed() < WITHIN,
+            "{node}'s store lacks some of {:?}: {}",
+            expected.artifacts,
+            cluster
+                .exec(
+                    node,
+                    &[
+                        "sh",
+                        "-c",
+                        &format!(
+                            "ls -R {STORE}; journalctl -u speculaire --no-pager -o cat | tail -n 30"
+                        ),
+                    ],
+                )
+                .unwrap()
+        );
+        sleep(Duration::from_millis(200));
+    }
+    start.elapsed()
 }
 
 /// The agent's requests to `upstream` since the `seen` first entries of its log, but the challenges.
@@ -554,4 +585,67 @@ fn another_node_reads_the_referrers_and_artifacts_a_node_discovered_from_its_pee
         "curl -s -o /dev/null -w '%{{http_code}}' --cacert {MIRROR_DIR}/ca.crt --cert {MIRROR_DIR}/client.pem {MIRROR}{path}"
     ));
     assert_eq!(mirror.trim(), "404");
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_node_cut_off_from_upstream_gets_every_artifact_from_the_node_that_discovered_them() {
+    let _serial = serial();
+    // B restarts its agent: the worker no reflector runs on. A is any other node.
+    let b = Worker::new();
+    let cluster = &b.cluster;
+    let expected = Expected::read(cluster);
+    let zot = cluster.upstream(Kind::Referrers);
+    let seen = zot.requests().unwrap().len();
+    let a = cluster
+        .nodes()
+        .unwrap()
+        .into_iter()
+        .map(|n| n.name)
+        .find(|name| *name != b.name)
+        .expect("a second node");
+    let reference = format!("{}/{SIGNED}", zot.address());
+    let pull = cluster
+        .exec_output(&a, &["crictl", "pull", &reference])
+        .unwrap();
+    assert!(pull.success, "{a}: {pull:?}");
+    holds(cluster, &a, &expected, Instant::now());
+    // B forgets the image and its artifacts, and pulls it straight from upstream while its agent is stopped.
+    b.forget(&expected);
+    cluster.stop_agent(&b.name).unwrap();
+    b.sh(&format!("crictl pull {reference}"));
+
+    let (took, peer, asked) = {
+        let _rejected = cluster.reject(&b.name, zot.address()).unwrap();
+        let before = zot.requests().unwrap().len();
+        let start = Instant::now();
+        cluster.start_agent(&b.name).unwrap();
+        let took = holds(cluster, &b.name, &expected, start);
+        let asked = agent_requests(&zot, before);
+        (
+            took,
+            b.fetches(&["source=\"peer\"", "result=\"ok\""]),
+            asked,
+        )
+    };
+    println!(
+        "B held every artifact {} ms after its agent started",
+        took.as_millis()
+    );
+
+    // The counters start with the agent: each artifact digest came from a peer. Other images B lists may count upstream.
+    let digests: BTreeSet<&String> = expected.digests().collect();
+    assert!(
+        peer >= f64::from(u32::try_from(digests.len()).unwrap()),
+        "{peer} from peers, {} digests",
+        digests.len()
+    );
+    assert!(asked.is_empty(), "{asked:?}");
+    // No node ever asks for the `.att` tag (D43).
+    let att = format!("sha256-{}.att", expected.root.hex());
+    let requests: Vec<Request> = zot.requests().unwrap().into_iter().skip(seen).collect();
+    assert!(
+        requests.iter().all(|r| !r.path.ends_with(&att)),
+        "{requests:?}"
+    );
 }

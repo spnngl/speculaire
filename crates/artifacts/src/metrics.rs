@@ -19,9 +19,9 @@ pub fn describe() {
 /// What one request for an artifact came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// The registry answered what was asked.
+    /// The registry, or a peer, gave what was asked.
     Ok,
-    /// The registry has no such thing.
+    /// The registry has no such thing; no peer gave it.
     NotFound,
     /// The content is not what its digest says.
     DigestMismatch,
@@ -49,6 +49,17 @@ pub(crate) fn fetched(upstream: &str, result: Outcome) {
         FETCHES,
         "source" => "upstream",
         "upstream" => upstream.to_owned(),
+        "result" => result.label(),
+    )
+    .increment(1);
+}
+
+/// Counts one manifest or blob asked of peers (D126).
+pub(crate) fn fetched_from_peers(result: Outcome) {
+    counter!(
+        FETCHES,
+        "source" => "peer",
+        "upstream" => "",
         "result" => result.label(),
     )
     .increment(1);

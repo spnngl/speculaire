@@ -48,6 +48,23 @@ impl Cluster {
     ///
     /// When `docker inspect` or `iptables` fails.
     pub fn reject(&self, node: &str, host: &str) -> Result<Rules<'_>, Failure> {
+        self.reject_to(node, host, None)
+    }
+
+    /// Resets every TCP connection the node opens to `port` of `host`, a container on kind's network, until the guard
+    /// drops.
+    ///
+    /// # Errors
+    ///
+    /// When `docker inspect` or `iptables` fails.
+    pub fn reject_port(&self, node: &str, host: &str, port: u16) -> Result<Rules<'_>, Failure> {
+        self.reject_to(node, host, Some(port))
+    }
+
+    fn reject_to(&self, node: &str, host: &str, port: Option<u16>) -> Result<Rules<'_>, Failure> {
+        let port = port
+            .map(|port| format!(" --dport {port}"))
+            .unwrap_or_default();
         let rules = addresses(host)?
             .into_iter()
             .map(|address| {
@@ -56,7 +73,8 @@ impl Cluster {
                 } else {
                     "iptables"
                 };
-                let rule = format!("OUTPUT -d {address} -p tcp -j REJECT --reject-with tcp-reset");
+                let rule =
+                    format!("OUTPUT -d {address} -p tcp{port} -j REJECT --reject-with tcp-reset");
                 (tables, rule)
             })
             .collect();

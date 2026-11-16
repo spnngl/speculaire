@@ -9,6 +9,6 @@ pub mod follow;
 pub mod metrics;
 pub mod store;
 
-pub use discover::{Discovery, Limits};
+pub use discover::{Discovery, Limits, Local};
 pub use follow::follow;
 pub use store::{Artifact, Kind, Store};

@@ -39,6 +39,7 @@ use tracing::{Instrument as _, Span, debug, debug_span, field, info, warn};
 use crate::metrics::{FetchSeries, Fetched};
 use crate::request::Kind;
 
+mod referrers;
 mod tag;
 
 pub use tag::Resolved;
@@ -149,8 +150,17 @@ impl Fetcher {
     /// `digest` whole, from peers, staged in an unnamed file and checked against its digest before anything is served.
     /// `None` when no peer has it, or none sent it right.
     pub async fn whole(&self, kind: Kind, digest: &Digest) -> Option<Blob> {
+        self.whole_up_to(kind, digest, u64::MAX).await
+    }
+
+    /// [`Self::whole`], but `None` without staging anything when a peer says it is larger than `max` bytes.
+    pub async fn whole_up_to(&self, kind: Kind, digest: &Digest, max: u64) -> Option<Blob> {
         for _ in 0..ROUNDS {
             let mut download = self.download(kind, digest).await?;
+            if download.size > max {
+                debug!(%digest, size = download.size, max, "content from peers is larger than wanted: it is not fetched");
+                return None;
+            }
             let mut hash = Hash::new(digest)?;
             let staged = self.stage(&mut download, &mut hash).await?;
             if hash.matches() {

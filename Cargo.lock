@@ -2093,6 +2093,7 @@ dependencies = [
  "serde_json",
  "speculaire-mirror",
  "speculaire-oci",
+ "speculaire-pki",
  "speculaire-registry",
  "speculaire-runtime",
  "tempfile",

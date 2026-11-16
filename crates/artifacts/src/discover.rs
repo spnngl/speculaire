@@ -1,7 +1,9 @@
-//! Discovery: the artifacts of a root, found upstream through the node's registry config (D17, D43, D49).
+//! Discovery: the artifacts of a root, found in the store and at peers, else upstream through the node's registry config
+//! (D17, D43, D49, D126).
 //!
-//! The root's manifest is asked of each source of each repository the image list names it in, in order, the node's
-//! own mirror skipped; the first source that serves it is the upstream of the root's artifacts. The targets are the
+//! The root's manifest comes from the node's content, else the store or peers, and an index is kept in the store. The
+//! artifacts come from peers first; upstream is asked only when they give none. There, the root's manifest is asked
+//! of each source of each repository the image list names it in, in order, the node's own mirror skipped; the first source that serves it is the upstream of the root's artifacts. The targets are the
 //! root and, when it is an index, its manifest of the node's platform and that manifest's attestation manifests. Per
 //! target, in order: the referrers API, the referrers fallback tag when the API answers 404, then the legacy `.sig`
 //! tag. A tag is asked by `HEAD` first and fetched only when it exists (D38).
@@ -12,6 +14,8 @@ use http::header::{ACCEPT, CONTENT_TYPE, LINK};
 use http::{HeaderValue, Method, StatusCode};
 use http_body_util::{BodyExt as _, Limited};
 use hyper::body::Incoming;
+use speculaire_mirror::fetch::Fetcher;
+use speculaire_mirror::request::Kind as Wanted;
 use speculaire_oci::index::Index;
 use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::platform::Host;
@@ -23,6 +27,10 @@ use tracing::{debug, warn};
 
 use crate::metrics::{self, OTHER, Outcome};
 use crate::store::{self, Artifact, Kind, Store};
+
+mod peers;
+
+pub use peers::Local;
 
 /// What a manifest request accepts.
 const MANIFESTS: &str = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json";
@@ -70,9 +78,11 @@ pub enum Error {
     Store(#[from] store::Error),
 }
 
-/// Discovers artifacts upstream and keeps them in the artifact store.
+/// Discovers artifacts at peers, else upstream, and keeps them in the artifact store.
 pub struct Discovery {
     store: Arc<Store>,
+    local: Arc<dyn Local>,
+    peers: Fetcher,
     client: Client,
     registries: Arc<dyn Registries>,
     mirror: String,
@@ -86,6 +96,13 @@ struct Upstream {
     label: String,
 }
 
+/// Where the blobs of an artifact come from.
+#[derive(Clone, Copy)]
+enum Origin<'a> {
+    Upstream(&'a Upstream),
+    Peers,
+}
+
 /// What one request came to.
 enum Fetched<T> {
     Got(T),
@@ -94,11 +111,13 @@ enum Fetched<T> {
 }
 
 impl Discovery {
-    /// Discovery into `store` through `registries`, which never asks the node's own mirror at `mirror`, the
-    /// authority of `mirror.address`.
+    /// Discovery into `store`, reading root manifests from `local`, from `peers`, and upstream through `registries`,
+    /// which never asks the node's own mirror at `mirror`, the authority of `mirror.address`.
     #[must_use]
     pub fn new(
         store: Arc<Store>,
+        local: Arc<dyn Local>,
+        peers: Fetcher,
         registries: Arc<dyn Registries>,
         mirror: String,
         platform: Host,
@@ -106,6 +125,8 @@ impl Discovery {
     ) -> Self {
         Self {
             store,
+            local,
+            peers,
             client: Client::new(),
             registries,
             mirror,
@@ -125,38 +146,73 @@ impl Discovery {
     ///
     /// # Errors
     ///
-    /// When no source serves the root's manifest, or the store fails.
+    /// When peers give no artifact and no source serves the root's manifest, or the store fails.
     pub async fn discover(&self, root: &Digest, names: &[String]) -> Result<Vec<Artifact>, Error> {
-        let (upstream, index) = self.root(root, names).await.ok_or(Error::Unreachable)?;
-        let mut targets = vec![root.clone()];
-        let mut artifacts = Vec::new();
-        if let Some(bytes) = index
-            && let Ok(index) = Index::parse(&bytes)
-            && let Some(platform) = index.platform_manifest(&self.platform)
-        {
-            targets.push(platform.clone());
-            for attestation in index.attestations(platform) {
-                if let Some(artifact) = self.attestation(&upstream, platform, attestation).await? {
-                    artifacts.push(artifact);
-                    targets.push(attestation.clone());
-                }
-            }
+        let mut index = self.held(root).await?;
+        let mut artifacts = self.nearby(root, index.as_deref()).await?;
+        if artifacts.is_empty() {
+            let (upstream, fetched) = self
+                .root(root, names, index.as_deref())
+                .await
+                .ok_or(Error::Unreachable)?;
+            index = fetched;
+            artifacts = self.upstream(&upstream, root, index.as_deref()).await?;
         }
-        for target in &targets {
-            self.bundles(&upstream, target, &mut artifacts).await?;
-            if let Some(artifact) = self.signature(&upstream, target).await? {
-                artifacts.push(artifact);
-            }
+        if let Some(bytes) = &index
+            && Index::parse(bytes).is_ok()
+        {
+            self.store.keep(root, bytes).await?;
         }
         self.store.record(root, &artifacts).await?;
         Ok(artifacts)
     }
 
-    /// The first source, of each name in order, that serves the root's manifest, and the manifest when it is an index.
+    /// The artifacts of `root` from `upstream`, `index` being its manifest when it is an index.
+    async fn upstream(
+        &self,
+        upstream: &Upstream,
+        root: &Digest,
+        index: Option<&[u8]>,
+    ) -> Result<Vec<Artifact>, Error> {
+        let mut targets = vec![root.clone()];
+        let mut artifacts = Vec::new();
+        if let Some((platform, attestations)) = self.platform(index) {
+            targets.push(platform.clone());
+            for attestation in attestations {
+                if let Some(artifact) = self.attestation(upstream, &platform, &attestation).await? {
+                    artifacts.push(artifact);
+                    targets.push(attestation);
+                }
+            }
+        }
+        for target in &targets {
+            self.bundles(upstream, target, &mut artifacts).await?;
+            if let Some(artifact) = self.signature(upstream, target).await? {
+                artifacts.push(artifact);
+            }
+        }
+        Ok(artifacts)
+    }
+
+    /// The manifest of the node's platform that `index` names, and that manifest's attestation manifests (D49).
+    fn platform(&self, index: Option<&[u8]>) -> Option<(Digest, Vec<Digest>)> {
+        let index = Index::parse(index?).ok()?;
+        let platform = index.platform_manifest(&self.platform)?;
+        let attestations = index.attestations(platform).into_iter().cloned().collect();
+        Some((platform.clone(), attestations))
+    }
+
+    /// The first source, of each name in order, that serves the root's manifest, and the manifest when it is an index:
+    /// `held` when given.
     ///
-    /// The root is asked by `HEAD`, and fetched only when its media type is an index's: Docker Hub counts each `GET` of
-    /// a manifest against its pull limit, and an image manifest names no target (D49).
-    async fn root(&self, root: &Digest, names: &[String]) -> Option<(Upstream, Option<Vec<u8>>)> {
+    /// The root is asked by `HEAD`, and fetched only when its media type is an index's and it is not held: Docker Hub
+    /// counts each `GET` of a manifest against its pull limit, and an image manifest names no target (D49).
+    async fn root(
+        &self,
+        root: &Digest,
+        names: &[String],
+        held: Option<&[u8]>,
+    ) -> Option<(Upstream, Option<Vec<u8>>)> {
         let text = root.to_string();
         for name in names {
             let sources = match self.registries.sources(name, Reference::Digest(&text)) {
@@ -202,6 +258,9 @@ impl Discovery {
                 if !index {
                     return Some((upstream, None));
                 }
+                if let Some(bytes) = held {
+                    return Some((upstream, Some(bytes.to_vec())));
+                }
                 if let Fetched::Got(bytes) = self.manifest(&upstream, path, Some(root)).await {
                     return Some((upstream, Some(bytes)));
                 }
@@ -226,8 +285,15 @@ impl Discovery {
             return Ok(None);
         };
         let blobs: Vec<Digest> = std::iter::once(config).chain(layers).collect();
-        self.keep(upstream, digest, &bytes, &blobs, Kind::Attestation, target)
-            .await
+        self.keep(
+            Origin::Upstream(upstream),
+            digest,
+            &bytes,
+            &blobs,
+            Kind::Attestation,
+            target,
+        )
+        .await
     }
 
     /// The Sigstore bundle referrers of `target`, kept with their blobs.
@@ -269,7 +335,7 @@ impl Discovery {
             let blobs: Vec<Digest> = referrer.blobs().map(|blob| blob.digest.clone()).collect();
             if let Some(artifact) = self
                 .keep(
-                    upstream,
+                    Origin::Upstream(upstream),
                     &descriptor.digest,
                     &bytes,
                     &blobs,
@@ -364,15 +430,22 @@ impl Discovery {
             return Ok(None);
         };
         let blobs: Vec<Digest> = manifest.blobs().map(|blob| blob.digest.clone()).collect();
-        self.keep(upstream, &digest, &bytes, &blobs, Kind::Signature, target)
-            .await
+        self.keep(
+            Origin::Upstream(upstream),
+            &digest,
+            &bytes,
+            &blobs,
+            Kind::Signature,
+            target,
+        )
+        .await
     }
 
     /// Keeps the manifest `bytes` and the `blobs` it names as an artifact of `target`: `None` when a blob cannot be
     /// had, which drops the artifact.
     async fn keep(
         &self,
-        upstream: &Upstream,
+        origin: Origin<'_>,
         digest: &Digest,
         bytes: &[u8],
         blobs: &[Digest],
@@ -380,7 +453,23 @@ impl Discovery {
         target: &Digest,
     ) -> Result<Option<Artifact>, Error> {
         for blob in blobs {
-            if !self.store.contains(blob) && !self.blob(upstream, blob).await? {
+            if self.store.contains(blob) {
+                continue;
+            }
+            let kept = match origin {
+                Origin::Upstream(upstream) => self.blob(upstream, blob).await?,
+                Origin::Peers => match self
+                    .nearby_bytes(Wanted::Blob, blob, self.limits.blob)
+                    .await?
+                {
+                    Some(content) => {
+                        self.store.keep(blob, &content).await?;
+                        true
+                    }
+                    None => false,
+                },
+            };
+            if !kept {
                 return Ok(None);
             }
         }
