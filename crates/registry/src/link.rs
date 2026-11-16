@@ -100,6 +100,8 @@ mod tests {
             next(r#"</a>; rel="prev"; rel="next", </b>; rel=next"#),
             Some("/b")
         );
+        // A backslash escapes only inside a quoted string.
+        assert_eq!(next(r"</a>; title=x\, </b>; rel=next"), Some("/b"));
     }
 
     #[test]
