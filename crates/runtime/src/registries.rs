@@ -136,6 +136,10 @@ pub trait Registries: Send + Sync {
     /// When the registry config cannot be read, or `name` has no registry and repository in it.
     fn sources(&self, name: &str, reference: Reference<'_>) -> Result<Vec<Source>, Error>;
 
+    /// Whether the registry config has an entry of the registry `host` itself, as the `upstream` label of a metric
+    /// asks (D50): a `hosts.toml` directory on containerd, a `[[registry]]` of the host or below it on CRI-O.
+    fn configured(&self, host: &str) -> bool;
+
     /// Reads the registry config again, as `reload` does, when a file or directory it was read from changed since the
     /// last read began (D93): `None` when none did.
     fn poll(&self) -> Option<Result<Reloaded, Error>>;

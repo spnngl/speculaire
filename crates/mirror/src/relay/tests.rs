@@ -236,6 +236,10 @@ impl Registries for Fixed {
         Ok(self.0.lock().unwrap().clone())
     }
 
+    fn configured(&self, host: &str) -> bool {
+        host == "reg.test"
+    }
+
     fn poll(&self) -> Option<Result<registries::Reloaded, ConfigError>> {
         None
     }

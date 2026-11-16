@@ -177,6 +177,15 @@ impl Registries for ContainerdRegistries {
             .collect())
     }
 
+    fn configured(&self, host: &str) -> bool {
+        self.live.get().is_ok_and(|snapshot| {
+            snapshot
+                .tree
+                .as_ref()
+                .is_some_and(|tree| tree.has_own_dir(host))
+        })
+    }
+
     fn poll(&self) -> Option<Result<Reloaded, Error>> {
         let problems = self.live.poll(|problems| read(&self.config, problems))?;
         Some(problems.map(|problems| Reloaded { problems }))
