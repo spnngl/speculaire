@@ -569,7 +569,7 @@ async fn the_metrics_count_requests_bytes_and_times() {
 #[tokio::test]
 async fn each_pull_is_a_span_naming_its_kind_digest_source_and_result_that_closes_with_the_body() {
     let capture = crate::fetch::tests::Capture::default();
-    let _default = tracing::subscriber::set_default(capture.subscriber());
+    let _installed = capture.install();
     let held = digest_of(1);
     let server = start(Fake(HashMap::from([(held.clone(), pattern(1000))]))).await;
     let mut sender = client(&server).await;

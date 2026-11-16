@@ -318,15 +318,24 @@ async fn nothing_is_fetched_before_the_fetcher_is_linked_or_from_no_holder() {
 pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
 
 impl Capture {
-    /// A subscriber that writes every event and span close at DEBUG and above here.
-    pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+    /// Makes a subscriber that writes every event and span close at DEBUG and above here this thread's default, until
+    /// the guard drops.
+    ///
+    /// A second dispatcher stays registered beside it. With one alone, a callsite that another test's thread hits
+    /// first takes its interest from that thread's default, none, and caches `never`: this thread then records
+    /// nothing there (tracing-core 0.1.36 `src/callsite.rs:319`, `:546`, `:565`).
+    pub(crate) fn install(&self) -> (tracing::subscriber::DefaultGuard, tracing::Dispatch) {
         let sink = self.clone();
-        tracing_subscriber::fmt()
+        let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
             .with_ansi(false)
             .with_writer(move || sink.clone())
-            .finish()
+            .finish();
+        (
+            tracing::subscriber::set_default(subscriber),
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+        )
     }
 
     /// What was written.
@@ -349,7 +358,7 @@ impl std::io::Write for Capture {
 #[tokio::test]
 async fn each_request_to_a_peer_is_a_span_naming_its_address_rank_and_result() {
     let capture = Capture::default();
-    let _default = tracing::subscriber::set_default(capture.subscriber());
+    let _installed = capture.install();
     let mut nodes = Nodes::new();
     let blob = pattern(1000, 0);
     let digest = sha(&blob);
