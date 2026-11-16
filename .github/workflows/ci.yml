@@ -178,7 +178,7 @@ jobs:
         run: just vet
 
   # The suites on a kind cluster per leg of D63's matrix, natively on each architecture, with the binary this run built
-  # (D27).
+  # (D27). Pull requests skip the `main-only` legs, keeping the newest containerd and the newest CRI-O (D113).
   e2e:
     name: e2e (${{ matrix.leg.runtime }} ${{ matrix.leg.version }}, kubernetes ${{ matrix.leg.kubernetes }}, ${{ matrix.platform.os }})
     needs: musl
@@ -186,18 +186,19 @@ jobs:
       fail-fast: false
       matrix:
         leg:
-          - { runtime: containerd, version: "2.3", kubernetes: "1.37" }
+          - { runtime: containerd, version: "2.3", kubernetes: "1.37", main-only: true }
           - { runtime: containerd, version: "2.4", kubernetes: "1.37" }
-          - { runtime: containerd, version: "2.4", kubernetes: "1.36" }
-          - { runtime: containerd, version: "2.4", kubernetes: "1.35" }
+          - { runtime: containerd, version: "2.4", kubernetes: "1.36", main-only: true }
+          - { runtime: containerd, version: "2.4", kubernetes: "1.35", main-only: true }
           - { runtime: crio, version: "1.37", kubernetes: "1.37" }
-          - { runtime: crio, version: "1.36", kubernetes: "1.36" }
-          - { runtime: crio, version: "1.35", kubernetes: "1.35" }
+          - { runtime: crio, version: "1.36", kubernetes: "1.36", main-only: true }
+          - { runtime: crio, version: "1.35", kubernetes: "1.35", main-only: true }
         platform:
           - os: ubuntu-26.04
             target: x86_64-unknown-linux-musl
           - os: ubuntu-26.04-arm
             target: aarch64-unknown-linux-musl
+        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"leg":{"main-only":true}}]') || fromJSON('[]') }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 30
     permissions:
