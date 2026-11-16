@@ -103,7 +103,6 @@ async fn images_json_written_in_place_hints_and_the_directory_removed_ends_the_w
     let images = dir.path().join("overlay-images");
     std::fs::create_dir(&images).unwrap();
     let (lost, hints) = watched(&images, || {
-        std::fs::write(images.join("other.json"), "[]").unwrap();
         std::fs::write(images.join("images.json"), "[]").unwrap();
         std::thread::sleep(Duration::from_millis(100));
         std::fs::remove_dir_all(&images).unwrap();
@@ -111,6 +110,43 @@ async fn images_json_written_in_place_hints_and_the_directory_removed_ends_the_w
     .await;
     assert!(matches!(lost, Some(Lost::Ended)), "{lost:?}");
     assert_eq!(hints, 1);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn another_file_written_does_not_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = dir.path().join("overlay-images");
+    std::fs::create_dir(&images).unwrap();
+    let (lost, hints) = watched(&images, || {
+        std::fs::write(images.join("other.json"), "[]").unwrap();
+        std::fs::remove_dir_all(&images).unwrap();
+    })
+    .await;
+    assert!(matches!(lost, Some(Lost::Ended)), "{lost:?}");
+    assert_eq!(hints, 0);
+}
+
+/// Its events read and none coming, the watch still sees its hints' reader go. A thread runs it: a watch that never
+/// ends would hold a runtime's shutdown.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_watch_with_no_event_coming_ends_with_its_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hint, mut hints) = mpsc::channel(1);
+    let (ended, end) = std::sync::mpsc::channel();
+    let directory = dir.path().to_owned();
+    std::thread::spawn(move || ended.send(super::watch_blocking(&directory, &hint)));
+    // The watch may start after a write: write until one hints.
+    let hinted = (0..50).any(|_| {
+        std::fs::write(dir.path().join("images.json"), "[]").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        hints.try_recv().is_ok()
+    });
+    assert!(hinted, "a write hints");
+    drop(hints);
+    let lost = end.recv_timeout(Duration::from_secs(5));
+    assert!(matches!(lost, Ok(Lost::Closed)), "{lost:?}");
 }
 
 #[cfg(target_os = "linux")]
