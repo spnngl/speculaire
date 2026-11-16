@@ -2,7 +2,7 @@
 # (D13), natively on the architecture of the machine running it.
 #
 #   build    the toolchain, lld and cargo-auditable: just musl
-#   dev      plus just and the tools of `just check` and the dependency checks: just dev <recipe>
+#   dev      plus just and the tools of `just check`, the dependency checks and `just mutants`: just dev <recipe>
 #   profile  glibc, perf, Valgrind and inferno: just profile <target>, just valgrind (D116)
 #
 # `just image <stage>` builds them, each base pulled through Docker Hub's mirrors (D122).
@@ -54,13 +54,15 @@ ARG CARGO_VET_VERSION=0.10.3
 ARG CARGO_NEXTEST_VERSION=0.9.151
 # renovate: datasource=crate depName=cargo-llvm-cov
 ARG CARGO_LLVM_COV_VERSION=0.9.1
+# renovate: datasource=crate depName=cargo-mutants
+ARG CARGO_MUTANTS_VERSION=27.1.0
 # cargo-vet links zlib statically through libz-sys.
 RUN apk add --no-cache zlib-static
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo install --locked just@"$JUST_VERSION" taplo-cli@"$TAPLO_VERSION" typos-cli@"$TYPOS_VERSION" \
         cargo-shear@"$CARGO_SHEAR_VERSION" cargo-hack@"$CARGO_HACK_VERSION" cargo-deny@"$CARGO_DENY_VERSION" \
         cargo-vet@"$CARGO_VET_VERSION" cargo-nextest@"$CARGO_NEXTEST_VERSION" \
-        cargo-llvm-cov@"$CARGO_LLVM_COV_VERSION"
+        cargo-llvm-cov@"$CARGO_LLVM_COV_VERSION" cargo-mutants@"$CARGO_MUTANTS_VERSION"
 
 
 # perf and Valgrind follow glibc's allocator and the frame pointers of a glibc build, where Valgrind does not follow the

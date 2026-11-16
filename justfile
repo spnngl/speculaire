@@ -151,13 +151,19 @@ cov *report:
 # catch. Tests the committed HEAD in its own worktree, target/mutants/tree, one run at a time: `--in-place` edits
 # files, and a killed run can leave a mutant applied, so the tree is reset first. A tree deleted by `cargo clean` stays
 # registered: `add --force` replaces that one registration, where `git worktree prune` would also drop every worktree
-# this filesystem cannot see, as in the dev container. Builds in target/mutants/target, results in
-# target/mutants/mutants.out.
+# this filesystem cannot see, as in the dev container. Builds in <target dir>/mutants/target, results in
+# target/mutants/mutants.out. Off Linux, runs in the dev image (`just dev`), where Linux-only code compiles (D125).
 [positional-arguments]
 mutants *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [[ "$(uname -s)" != Linux ]]; then
+        echo 'mutants: in the dev image, where Linux-only code compiles (D125)' >&2
+        exec {{ just_executable() }} dev mutants "$@"
+    fi
     out="$(pwd)/target/mutants"
+    # `just dev` points CARGO_TARGET_DIR at its volume: on the bind mount, every mutant misses crates just built (D125).
+    build="${CARGO_TARGET_DIR:-$(pwd)/target}/mutants/target"
     tree="$out/tree"
     mkdir -p "$out"
     if ! mkdir "$out/lock" 2>/dev/null; then
@@ -172,7 +178,7 @@ mutants *args:
         git worktree add --quiet --force --detach "$tree" "$head"
     fi
     cd "$tree"
-    CARGO_TARGET_DIR="$out/target" cargo mutants --in-place --timeout 240 --output "$out" "$@"
+    CARGO_TARGET_DIR="$build" cargo mutants --in-place --timeout 240 --output "$out" "$@"
 
 # Mutation testing of the code changed since the branch left `base` (`--in-diff`): minutes, where `just mutants`
 # takes longer. `args` as for `just mutants`: just mutants-diff origin/main --iterate

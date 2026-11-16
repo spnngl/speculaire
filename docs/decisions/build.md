@@ -204,7 +204,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:** pod authors choose registry hosts, so "a host from the registry config" was not bounded: a pod naming a new host would add series on every node. The `hosts.toml` tree is written by the admin.
 - **Revisit when:** admins need per-host numbers for hosts without a `hosts.toml` directory; the audit log (D37) already names them.
 
-## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58, D62, D116, D118)
+## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58, D62, D116, D118, D125)
 
 - **Decision:**
   - `rust-toolchain.toml` pins stable `1.99.1` with clippy and rustfmt; the justfile pins one nightly, for rustfmt (`rustfmt.toml` uses unstable options) and `-Z` flags. `rust-version` is `1.95`, which `just msrv` checks.
@@ -368,7 +368,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - In PR #22, the upload failed with `Coverage upload failed (HTTP 404): Not Found` on `PUT /repos/spnngl/speculaire/code-coverage/report`, with Code Quality enabled and no code coverage setting in the repository's settings.
 - **Revisit when:** the upload API accepts this repository's reports: make a failed upload fail the job again, and check that a pull request lowering coverage is blocked. Or when the first pull request from a fork arrives.
 
-## D74: cargo-mutants tests the diff of each pull request, in shards, outside `required` (amends D27)
+## D74: cargo-mutants tests the diff of each pull request, in shards, outside `required` (amends D27; amended by D125)
 
 - **Decision:**
   - `just mutants` runs cargo-mutants on a worktree of `HEAD`, with `.cargo/mutants.toml`: nextest as the test tool (D72), every feature, every package's tests for each mutant (`test_workspace`), `e2e/**` excluded. `fuzz/` is a workspace of its own, which cargo-mutants never lists, so it needs no glob (`just mutants-stale` reports one as matching no file). `just mutants-diff` limits the run to the mutants of a diff against `origin/main`; `just mutants-stale` fails on an exclusion that matches no mutant, naming it.
@@ -603,7 +603,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** profiles need a privileged container. The `deep` job's Valgrind build starts cold each run. Frame pointers cost one register and a push per call, below what the measures above can show; a release still checks its pulls against Spegel with `just bench` (D35).
 - **Revisit when:** a diagnosis needs off-CPU time (perf's `--off-cpu`, or eBPF); or frame pointers cost more than 2% in `just load` or `just bench`.
 
-## D118: `just dev` mounts the tree at its own path and builds it in its own directory of the volume (amends D57)
+## D118: `just dev` mounts the tree at its own path and builds it in its own directory of the volume (amends D57; amended by D125)
 
 - **Decision:**
   - `just dev <recipe>` mounts the tree at its host path, and the git directory of a linked worktree at its own, and sets `CARGO_TARGET_DIR` to `/target<host path>` in `speculaire-dev-<arch>`. The registry volume stays shared.
@@ -640,3 +640,19 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Each source serves the digest's bytes or none: two clean builds of the musl binary on the base pulled from mirror.gcr.io have the same SHA-256 (D57).
 - **Cost:** `docker build` of `build/Containerfile` without `just image` still pulls its base from Docker Hub.
 - **Revisit when:** D120 is revisited.
+
+## D125: Off Linux, `just mutants` runs in the dev image and builds in the volume (amends D57, D74, D118)
+
+- **Decision:**
+  - Off Linux, `just mutants`, and so `just mutants-diff`, runs itself through `just dev`, and says so on stderr.
+  - `just mutants` builds in `mutants/target` below `CARGO_TARGET_DIR` when set, else below `target/`: in `just dev`, the worktree's directory of `speculaire-dev-<arch>` (D118); on Linux and CI, `target/mutants/target` as before.
+  - The dev image has cargo-mutants, at `mutants.yml`'s version under the same `depName` (D58).
+- **Because:**
+  - macOS compiles `#[cfg(target_os = "linux")]` code out, so no test there can catch its mutants: #161 merged with 3 of `crio/images.rs`'s inotify watch that CI's shards found missed (#172). Run by itself, a macOS author's pre-push `just mutants-diff` now tests what the shards test.
+  - D57 kept recipes from re-running themselves in a container, which hides where they run; `just oracle` already does (D79), and the message names the place. A step that needs remembering is one a pre-push run skips.
+  - On the bind mount, cargo misses the rlibs it just built: every mutant fails with `E0463 can't find crate`, and cargo-mutants counts it unviable and exits 0.
+- **Measured** (Docker Desktop, arm64, from macOS):
+  - `just mutants-diff` of a throwaway commit adding an untested Linux-only `wake()` to `crio/images.rs`: 7 mutants in 5 min 24 s, 4 missed, 2 caught, 1 unviable, exit 2. Built on the bind mount (`CARGO_TARGET_DIR` below the tree): 7 unviable, each `can't find crate for oci_spec`, exit 0.
+  - `just mutants --file crates/runtime/src/crio/images.rs` on `main`: 15 mutants in 7 min 43 s, 9 caught, 6 unviable, none missed, exit 0.
+- **Cost:** a run off Linux needs a container engine; mutants of code built only off Linux, such as `crio/images.rs`'s stand-in `watch`, go untested, as on CI. Each worktree's mutants build stays in its directory of the volume (D118).
+- **Revisit when:** speculaire runs on an OS other than Linux, or a contributor builds without a container engine (D57).
