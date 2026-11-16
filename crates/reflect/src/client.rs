@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
 use futures_util::future::{self, BoxFuture};
-pub use holdings::Holdings;
+pub use holdings::{Holdings, Source};
 use rustls::ClientConfig;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::{Credentials, node_subject};

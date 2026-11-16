@@ -1,0 +1,2 @@
+/v2/e2e/signed/referrers/sha256:0000000000000000000000000000000000000000000000000000000000000000?n=1&artifactType=application%2Fvnd.dev.sigstore.bundle.v0.3%2Bjson
+bytes=0-

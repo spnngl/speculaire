@@ -303,7 +303,7 @@ mod tests {
     use speculaire_oci::reference::Digest;
 
     use super::*;
-    use crate::client::Holdings;
+    use crate::client::{Holdings, Source};
 
     fn digest(n: u8) -> Digest {
         Digest::parse(&format!("sha256:{}", format!("{n:02x}").repeat(32))).unwrap()
@@ -319,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn deltas_count_up_from_the_snapshot_and_the_next_snapshot_names_the_next_delta() {
         let holdings = Holdings::default();
-        holdings.add(&digest(1));
+        holdings.add(Source::Content, &digest(1));
         let pending = Pending::default();
         let mut announcer = Announcer {
             io: Vec::new(),
@@ -328,9 +328,9 @@ mod tests {
             pending: &pending,
         };
         let mut changes = announcer.snapshot(&holdings).await.unwrap();
-        holdings.remove(&digest(1));
-        holdings.add(&digest(2));
-        holdings.add(&digest(3));
+        holdings.remove(Source::Content, &digest(1));
+        holdings.add(Source::Content, &digest(2));
+        holdings.add(Source::Content, &digest(3));
         for _ in 0..3 {
             let batch = changes.recv().await.unwrap();
             announcer.delta(&batch).await.unwrap();

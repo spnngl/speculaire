@@ -32,6 +32,13 @@ impl Content for Held {
     }
 }
 
+/// Blobs that are about no manifest.
+impl crate::referrers::Referrers for Held {
+    fn referrers(&self, _: &Digest) -> Vec<Digest> {
+        Vec::new()
+    }
+}
+
 /// The same holders for every digest.
 struct Fixed(Vec<Holder>);
 
@@ -114,6 +121,7 @@ impl Nodes {
             self.credentials(node).server(),
             Arc::new(Held(held)),
             listed,
+            Arc::new(Held(HashMap::new())),
             Arc::clone(&uploads),
             async {
                 // An error means the sender went with the test: stop too.

@@ -18,7 +18,7 @@ use speculaire_mirror::tls::Tls;
 use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
-use speculaire_reflect::client::{self, Client, Holdings, LookupError, Lookups};
+use speculaire_reflect::client::{self, Client, Holdings, LookupError, Lookups, Source};
 use speculaire_reflect::{Member, Reflector, Settings};
 use speculaire_runtime::content::Content;
 use speculaire_runtime::inventory::{Change, Inventory, Update};
@@ -126,11 +126,11 @@ async fn serve(
     report_registries(registries.reload());
     let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
     status.mirror_listening();
-    start_discovery(&config, &node, Arc::clone(&registries))?;
+    let store = start_discovery(&config, &node, Arc::clone(&registries))?;
     let mut reflector = None;
     open_reflector(&config, &identity, &mut reflector, &status).await;
     let mut sharing = None;
-    open_sharing(&config, &identity, &mirror, &node, &mut sharing);
+    open_sharing(&config, &identity, &mirror, &node, &store, &mut sharing);
     systemd::watchdog();
     systemd::ready();
 
@@ -148,7 +148,7 @@ async fn serve(
                 report_registries(registries.reload());
                 identity.reload();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
-                open_sharing(&config, &identity, &mirror, &node, &mut sharing);
+                open_sharing(&config, &identity, &mirror, &node, &store, &mut sharing);
             }
             _ = poll.tick() => {
                 if let Some(now) = watch.changed() {
@@ -161,7 +161,7 @@ async fn serve(
                 }
                 identity.poll();
                 open_reflector(&config, &identity, &mut reflector, &status).await;
-                open_sharing(&config, &identity, &mirror, &node, &mut sharing);
+                open_sharing(&config, &identity, &mirror, &node, &store, &mut sharing);
             }
         }
         if config.config.poll_interval.get() != period {
@@ -294,10 +294,11 @@ impl Mirror {
         self.fetcher.set(fetch_settings(config));
     }
 
-    /// Opens the peer API on the address `fixed` gives, serving what [`Self::inventory`] announces.
+    /// Opens the peer API on the address `fixed` gives, serving what [`Self::inventory`] and `store` announce.
     fn open_peers(
         &self,
         node: &RuntimeNode,
+        store: Arc<Store>,
         fixed: impl Future<Output = Option<SocketAddr>> + Send + 'static,
         credentials: Arc<Credentials>,
     ) -> Peers {
@@ -307,6 +308,7 @@ impl Mirror {
             Some(relay) => Peers::open(
                 Arc::clone(relay.cache()),
                 listed,
+                store,
                 fixed,
                 credentials,
                 uploads,
@@ -314,6 +316,7 @@ impl Mirror {
             None => Peers::open(
                 Arc::new(node.content()),
                 listed,
+                store,
                 fixed,
                 credentials,
                 uploads,
@@ -416,18 +419,20 @@ async fn start_mirror(
     })
 }
 
-/// Opens the artifact store and discovers the artifacts of each image the runtime lists (D121).
+/// Opens the artifact store and discovers the artifacts of each image the runtime lists (D121); the store is what the
+/// node serves of them (D124).
 fn start_discovery(
     config: &Config,
     node: &RuntimeNode,
     registries: Arc<dyn Registries>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Arc<Store>> {
     let directory = config.artifacts.directory.get().get();
     let store = Store::open(directory)
         .with_context(|| format!("opening the artifact store {}", directory.display()))?;
     speculaire_artifacts::metrics::describe();
+    let store = Arc::new(store);
     let discovery = Discovery::new(
-        Arc::new(store),
+        Arc::clone(&store),
         registries,
         config.mirror.address.get().get().to_string(),
         Host::current(),
@@ -437,7 +442,7 @@ fn start_discovery(
         Arc::new(discovery),
         node.images(),
     ));
-    Ok(())
+    Ok(store)
 }
 
 /// The fetcher's live keys in `config`.
@@ -484,12 +489,13 @@ struct Peers {
 }
 
 impl Peers {
-    /// Serves `content` to other nodes on the peer address once `fixed` gives it, with the node identity of
-    /// `credentials` (D14, D16, D36); `fixed` gives `None` when the client stops first. An address that cannot be
-    /// listened on is logged: peers fall through to other nodes.
+    /// Serves `content`, the tags `listed` and the artifacts of `store` to other nodes on the peer address once `fixed`
+    /// gives it, with the node identity of `credentials` (D14, D16, D36, D124); `fixed` gives `None` when the client
+    /// stops first. An address that cannot be listened on is logged: peers fall through to other nodes.
     fn open<C: Content>(
         content: Arc<C>,
         listed: Listed,
+        store: Arc<Store>,
         fixed: impl Future<Output = Option<SocketAddr>> + Send + 'static,
         credentials: Arc<Credentials>,
         uploads: Arc<Uploads>,
@@ -522,6 +528,7 @@ impl Peers {
                 credentials.server(),
                 content,
                 listed,
+                store,
                 uploads,
                 stopped,
             )
@@ -581,28 +588,35 @@ async fn open_reflector(
     }
 }
 
-/// Follows `inventory` and the tags `listed` into the holdings the agent announces (D99, D123).
-fn follow(inventory: Arc<dyn Inventory>, listed: Listed) -> Arc<Holdings> {
+/// Follows `inventory`, the artifact `store` and the tags `listed` into the holdings the agent announces (D99, D123,
+/// D124).
+fn follow(inventory: Arc<dyn Inventory>, store: Arc<Store>, listed: Listed) -> Arc<Holdings> {
     let holdings = Arc::new(Holdings::default());
+    follow_inventory(&holdings, Source::Content, inventory);
+    follow_inventory(&holdings, Source::Artifacts, store);
+    tokio::spawn({
+        let holdings = Arc::clone(&holdings);
+        listed.tag_keys(move |keys| holdings.replace(Source::Tags, &keys))
+    });
+    holdings
+}
+
+/// Follows `inventory` into the keys of `source` in `holdings`.
+fn follow_inventory(holdings: &Arc<Holdings>, source: Source, inventory: Arc<dyn Inventory>) {
     let (updates, mut received) = tokio::sync::mpsc::channel(64);
     tokio::spawn(inventory.follow(updates));
     tokio::spawn({
-        let holdings = Arc::clone(&holdings);
+        let holdings = Arc::clone(holdings);
         async move {
             while let Some(update) = received.recv().await {
                 match update {
-                    Update::Listing(digests) => holdings.replace(&digests),
-                    Update::Change(Change::Added(digest)) => holdings.add(&digest),
-                    Update::Change(Change::Removed(digest)) => holdings.remove(&digest),
+                    Update::Listing(digests) => holdings.replace(source, &digests),
+                    Update::Change(Change::Added(digest)) => holdings.add(source, &digest),
+                    Update::Change(Change::Removed(digest)) => holdings.remove(source, &digest),
                 }
             }
         }
     });
-    tokio::spawn({
-        let holdings = Arc::clone(&holdings);
-        listed.tag_keys(move |keys| holdings.replace_tags(&keys))
-    });
-    holdings
 }
 
 /// The agent's part in P2P: announcing what the node holds, and serving it.
@@ -611,13 +625,14 @@ struct Sharing {
     peers: Peers,
 }
 
-/// Starts following `inventory` and announcing it to the reflectors of `reflector.url`, when one is set, once the
-/// identity allows peer links, then serves it on the peer address the client fixes (D2, D16, D36, D99).
+/// Starts following what the node holds and announcing it to the reflectors of `reflector.url`, when one is set, once
+/// the identity allows peer links, then serves it on the peer address the client fixes (D2, D16, D36, D99, D124).
 fn open_sharing(
     config: &Config,
     identity: &Identity,
     mirror: &Mirror,
     node: &RuntimeNode,
+    store: &Arc<Store>,
     sharing: &mut Option<Sharing>,
 ) {
     if sharing.is_some() || !identity.enabled(SystemTime::now()) {
@@ -628,13 +643,22 @@ fn open_sharing(
         let client = Client::spawn(
             settings,
             Arc::clone(&credentials),
-            follow(mirror.inventory(node), mirror.listed.clone()),
+            follow(
+                mirror.inventory(node),
+                Arc::clone(store),
+                mirror.listed.clone(),
+            ),
         );
         mirror.fetcher.link(
             Arc::new(Holders(client.lookups())),
             Arc::clone(&credentials),
         );
-        let peers = mirror.open_peers(node, client.fixed_peer_address(), credentials);
+        let peers = mirror.open_peers(
+            node,
+            Arc::clone(store),
+            client.fixed_peer_address(),
+            credentials,
+        );
         *sharing = Some(Sharing { client, peers });
     }
 }

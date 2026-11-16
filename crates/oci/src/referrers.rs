@@ -5,6 +5,8 @@
 //! in its `subject` (image-spec v1.1.1-38-g4feed4a `manifest.md:100-103`, `image-index.md:93-96`). A legacy cosign
 //! signature is a manifest of its own under the `.sig` tag, with no subject.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use crate::manifest::MAX_DESCRIPTORS;
@@ -114,11 +116,26 @@ struct RawManifest {
     artifact_type: Option<String>,
     config: Option<RawDescriptor>,
     layers: Option<Vec<RawDescriptor>>,
+    /// Any JSON: one that is no object of strings leaves the manifest a referrer, with fewer annotations.
+    annotations: Option<serde_json::Value>,
 }
 
 /// `text`, unless it is absent or empty: the spec treats both alike (`spec.md:633-634`).
 fn present(text: Option<String>) -> Option<String> {
     text.filter(|text| !text.is_empty())
+}
+
+/// The entries of `annotations` whose values are strings.
+fn strings(annotations: Option<serde_json::Value>) -> BTreeMap<String, String> {
+    let Some(serde_json::Value::Object(map)) = annotations else {
+        return BTreeMap::new();
+    };
+    map.into_iter()
+        .filter_map(|(key, value)| match value {
+            serde_json::Value::String(value) => Some((key, value)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn descriptors(list: Vec<RawDescriptor>) -> Result<Vec<Descriptor>, Error> {
@@ -150,6 +167,8 @@ pub struct Referrer {
     pub config: Descriptor,
     /// Its layer blobs, in order.
     pub layers: Vec<Descriptor>,
+    /// Its annotations whose values are strings, as the image-spec has them (`annotations.md`).
+    pub annotations: BTreeMap<String, String>,
 }
 
 impl Referrer {
@@ -176,7 +195,20 @@ impl Referrer {
             artifact_type: present(raw.artifact_type),
             config: config.parse()?,
             layers: descriptors(layers)?,
+            annotations: strings(raw.annotations),
         })
+    }
+
+    /// The type a referrers index lists it under: its `artifactType`, else its config's media type (`spec.md:632-634`).
+    /// One with neither `artifactType` nor subject, such as a legacy `.sig` manifest, is listed under its first layer's
+    /// media type: [`SIMPLE_SIGNING`] for a `.sig` (D124).
+    #[must_use]
+    pub fn listed_type(&self) -> &str {
+        match (&self.artifact_type, &self.subject, self.layers.first()) {
+            (Some(artifact_type), ..) => artifact_type,
+            (None, None, Some(layer)) => &layer.media_type,
+            (None, ..) => &self.config.media_type,
+        }
     }
 
     /// Whether it holds a Sigstore bundle.
@@ -352,6 +384,7 @@ mod tests {
                 artifact_type: Some(BUNDLE.to_owned()),
                 config: descriptor(EMPTY, 4, None),
                 layers: vec![descriptor(BUNDLE, 5, None)],
+                annotations: BTreeMap::new(),
             }
         );
         assert!(referrer.is_bundle());
@@ -395,6 +428,42 @@ mod tests {
         assert_eq!(referrer.subject, None);
         assert!(!referrer.is_bundle());
         assert_eq!(referrer.layers[0].media_type, SIMPLE_SIGNING);
+        assert_eq!(referrer.listed_type(), SIMPLE_SIGNING);
+    }
+
+    #[test]
+    fn a_referrer_is_listed_under_its_type_else_its_configs() {
+        let typed = Referrer::parse(bundle_manifest(Some(BUNDLE), "x").as_bytes()).unwrap();
+        assert_eq!(typed.listed_type(), BUNDLE);
+        // With a subject, the config's type, as the spec has it, though the layer is a bundle.
+        let untyped = Referrer::parse(bundle_manifest(None, BUNDLE).as_bytes()).unwrap();
+        assert_eq!(untyped.listed_type(), EMPTY);
+        let bare = format!(
+            r#"{{"config":{{"mediaType":"{EMPTY}","digest":"{}","size":2}},"layers":[]}}"#,
+            digest(1)
+        );
+        assert_eq!(
+            Referrer::parse(bare.as_bytes()).unwrap().listed_type(),
+            EMPTY
+        );
+    }
+
+    #[test]
+    fn only_annotations_that_are_strings_are_read() {
+        let with = |annotations: &str| {
+            let text = format!(
+                r#"{{"config":{{"mediaType":"{EMPTY}","digest":"{}","size":2}},"layers":[],
+                    "annotations":{annotations}}}"#,
+                digest(1)
+            );
+            Referrer::parse(text.as_bytes()).unwrap().annotations
+        };
+        assert_eq!(
+            with(r#"{"a":"b","n":1,"o":{}}"#),
+            BTreeMap::from([("a".to_owned(), "b".to_owned())])
+        );
+        assert!(with(r#"["a"]"#).is_empty());
+        assert!(with("null").is_empty());
     }
 
     #[test]

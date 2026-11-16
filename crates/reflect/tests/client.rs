@@ -13,7 +13,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle, Prometheu
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
 use speculaire_pki::testing::Cluster;
-use speculaire_reflect::client::{Client, Config, Holdings, LookupError, PEER_PORT};
+use speculaire_reflect::client::{Client, Config, Holdings, LookupError, PEER_PORT, Source};
 use speculaire_reflect::frame::{self, Reader};
 use speculaire_reflect::proto::{self, agent_message, reflector_message};
 use speculaire_reflect::{Member, Reflector, Settings, connect};
@@ -176,7 +176,7 @@ fn digest(n: u32) -> Digest {
 async fn an_agent_announces_to_every_member_and_keeps_both_maps_the_same() {
     let test = Test::start(&[]).await;
     let holdings = Arc::new(Holdings::default());
-    holdings.add(&digest(1));
+    holdings.add(Source::Content, &digest(1));
     let a = test.agent("node-a", &holdings, None);
     // The peer address is the local IP of the first stream, on 7481 (D36).
     let peer = SocketAddr::from(([127, 0, 0, 1], PEER_PORT));
@@ -189,10 +189,10 @@ async fn an_agent_announces_to_every_member_and_keeps_both_maps_the_same() {
         assert_eq!(test.metric(&reconnects).as_deref(), Some("0"));
     }
     // Changes follow, on both.
-    holdings.replace(&[digest(2), digest(3)]);
+    holdings.replace(Source::Content, &[digest(2), digest(3)]);
     test.wait(&digest(1), &[]).await;
     test.wait(&digest(2), &[("node-a", peer)]).await;
-    holdings.remove(&digest(3));
+    holdings.remove(Source::Content, &digest(3));
     test.wait(&digest(3), &[]).await;
     // Another agent's lookup finds node-a, and node-a's own lookup does not.
     let b = test.agent("node-b", &Arc::new(Holdings::default()), None);
@@ -229,7 +229,7 @@ async fn an_agent_announces_to_every_member_and_keeps_both_maps_the_same() {
 async fn peer_address_overrides_the_address_found() {
     let test = Test::start(&[]).await;
     let holdings = Arc::new(Holdings::default());
-    holdings.add(&digest(1));
+    holdings.add(Source::Content, &digest(1));
     let peer: SocketAddr = "[fd00::7]:9000".parse().unwrap();
     let a = test.agent("node-a", &holdings, Some(peer));
     assert_eq!(a.fixed_peer_address().await, Some(peer));
@@ -262,7 +262,7 @@ async fn a_load_balancer_answered_by_a_reflector_outside_the_members_is_not_trus
     // The reflector behind the load balancer, cp-2, lists only cp-1.
     let test = Test::start(&["cp-1"]).await;
     let holdings = Arc::new(Holdings::default());
-    holdings.add(&digest(1));
+    holdings.add(Source::Content, &digest(1));
     let a = test.agent("node-a", &holdings, None);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(test.lookups(&digest(1)).await, [vec![], vec![]]);
@@ -309,7 +309,7 @@ async fn a_client_stops_at_once_while_the_load_balancer_hangs() {
 async fn a_stopped_member_is_streamed_to_again_once_it_is_back() {
     let mut test = Test::start(&[]).await;
     let holdings = Arc::new(Holdings::default());
-    holdings.add(&digest(1));
+    holdings.add(Source::Content, &digest(1));
     let a = test.agent("node-a", &holdings, None);
     let peer = SocketAddr::from(([127, 0, 0, 1], PEER_PORT));
     test.wait(&digest(1), &[("node-a", peer)]).await;
@@ -321,7 +321,7 @@ async fn a_stopped_member_is_streamed_to_again_once_it_is_back() {
         assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    holdings.add(&digest(2));
+    holdings.add(Source::Content, &digest(2));
     for _ in 0..10 {
         a.lookup(&digest(2)).await.unwrap();
     }
@@ -346,7 +346,7 @@ async fn a_stopped_member_is_streamed_to_again_once_it_is_back() {
 async fn a_member_the_load_balancer_no_longer_lists_is_no_longer_streamed_to() {
     let mut test = Test::start(&[]).await;
     let holdings = Arc::new(Holdings::default());
-    holdings.add(&digest(1));
+    holdings.add(Source::Content, &digest(1));
     let a = test.agent("node-a", &holdings, None);
     let peer = SocketAddr::from(([127, 0, 0, 1], PEER_PORT));
     test.wait(&digest(1), &[("node-a", peer)]).await;
