@@ -234,6 +234,47 @@ async fn a_change_before_the_first_hint_comes_once_the_watch_settled() {
     follower.abort();
 }
 
+/// A change the runtime lists only after its last hint comes [`super::SETTLE`] after that hint: containerd's CRI plugin
+/// publishes a reference's event before it lists the reference.
+#[tokio::test]
+async fn a_change_listed_after_its_hint_comes_once_the_hint_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("runtime.sock");
+    let fake = Fake::start(&socket, Answers::crio("1.37.0")).unwrap();
+    let (hints, mut watching) = mpsc::channel::<mpsc::Sender<()>>(1);
+    let (sender, mut updates) = mpsc::channel(16);
+    let follower = tokio::spawn(async move {
+        follow(
+            &socket,
+            &sender,
+            Duration::from_secs(3600),
+            "fake",
+            |hint| {
+                let hints = hints.clone();
+                async move {
+                    hints.send(hint).await.unwrap();
+                    std::future::pending().await
+                }
+            },
+        )
+        .await;
+    });
+    assert_eq!(next(&mut updates).await, Update::Listing(Vec::new()));
+    let hint = watching.recv().await.unwrap();
+    // The read the watch's start owes is done.
+    tokio::time::sleep(super::SETTLE * 2).await;
+    fake.update(|answers| answers.images = vec![listed(A, &[])]);
+    hint.send(()).await.unwrap();
+    assert_eq!(next(&mut updates).await, Update::Listed(image(A, &[])));
+    // Listed after the hint was read, with no hint of its own.
+    fake.update(|answers| answers.images = vec![listed(A, &[&format!("r@{B}")])]);
+    assert_eq!(
+        next(&mut updates).await,
+        Update::Listed(image(A, &[("r", B)]))
+    );
+    follower.abort();
+}
+
 /// A runtime that cannot be asked sends nothing, and the follower tries again until it answers.
 #[tokio::test]
 async fn an_unreachable_runtime_is_asked_again() {

@@ -376,7 +376,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - The pool is hyper's, keyed by the URI alone, and its connector has no endpoint: the timeout must key the client.
 - **Revisit when:** containerd applies `dial_timeout` beyond the TCP connect, or hosts with many distinct timeouts make the pools per key costly.
 
-## D123: Peers that hold a tag resolve it, unless `mirror.resolve_tags` is off (amends D6, D66, D82, D85, D88, D99, D100, D102)
+## D123: Peers that hold a tag resolve it, unless `mirror.resolve_tags` is off (amends D6, D66, D82, D85, D88, D99, D100, D102; amended by D127)
 
 - **Decision:**
   - **Announcement:** each agent announces every tag the runtime lists (CRI `ListImages` `repoTags`, followed as D121 follows the image list), under the key `sha256("speculaire tag\0" + "<registry>/<repository>:<tag>")`, the name normalised as containerd names it (`speculaire_oci::tagged::Tagged`, D81): `busybox` is `docker.io/library/busybox`, and a name without a tag is no tag. The key sits beside the blob digests in the same holdings, on the same wire and index (D97, D99); a digest never collides with it, since no blob hashes to a domain-separated string.
@@ -414,3 +414,14 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Limit:** the referrers index is a hint, not content-addressed: any node with a node identity can list any manifest, so a reader fetches each by digest and checks its `subject` (`docs/security.md`). The store deletes nothing yet: a blob removed by hand stays announced until the agent restarts, and then answers a 404.
 - **Measured (M4 step 03, locally on Docker Desktop arm64, kind):** `e2e/tests/artifacts.rs` passes on containerd 2.4 and CRI-O 1.37: once a worker discovered the signed test image, the other node, with kubelet's certificate, lists its 3 bundles (signature, SLSA, SPDX) and its `.sig`; filtered on the bundle type it gets the 3 and the header; a manifest with no artifact gives an empty list; every listed manifest and every blob they name come back matching their digest; the loopback mirror still answers referrers 404. In `crates/reflect/src/client/holdings.rs`, a digest held by the content and the store stays announced until both drop it. Each full local leg, cluster up and down included, took 286 s on containerd and 362 s on CRI-O.
 - **Revisit when:** the store collects its blobs, which then announce their removal, or a reader needs referrers by repository.
+
+## D127: A tag is announced once its image lists a repository digest in the tag's repository; the image list is read again 1 s after each hint (amends D121, D123)
+
+- **Decision:**
+  - **Announcement (D123):** a tag the runtime lists is announced only while its image also lists a repository digest in the tag's repository: exactly the tags the peer API resolves. `speculaire_mirror::listed::Listed` keeps both on one predicate.
+  - **Image list (D121):** besides the read at each hint, the list is read once more 1 s after the last hint, as it already was 1 s after a watch starts.
+- **Because:**
+  - containerd's CRI plugin publishes each reference's `/images/create` event before its image store lists it (v2.3.7 `internal/cri/server/images/image_pull.go:203-217`), and a pull's tag comes before its repository digest. Hints that arrive during a read collapse into one read, so the last read of a pull could see the tag without the digest, and the list stayed so until the next full read, 60 s later. Meanwhile the node announced a tag its peer API answered 404, and a peer that could not reach upstream failed its pull: in CI run 43957679924, on containerd 2.3, the second worker's mirror answered the tag 404 in 5 ms, 0.86 s after the first worker's pull.
+  - An image imported without a repository digest, such as one `kind load` put there, has tags no peer API resolves: announcing them only spent the 2 holders a lookup asks.
+- **Measured (locally on Docker Desktop arm64, kind, containerd 2.3.7, Kubernetes 1.37):** right after every reflector listed the first worker for `e2e/signed:1`, the second worker asked the first's peer API for the tag. Before, 5 of 300 rounds answered 404, still 404 3 s later, all while a build loaded the host. After, 300 of 300 answered 200 under a constant load. An agent logging each read saw, in 16 of 272 pulls, the last read at a hint list the tag without the digest; the read 1 s later listed it. `e2e/tests/tags.rs` passed 10 times in a row.
+- **Revisit when:** containerd lists a reference before it publishes its event, or the peer API resolves a tag without a repository digest.

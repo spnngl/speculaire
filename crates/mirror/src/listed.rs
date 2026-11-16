@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use speculaire_oci::reference::Digest;
 use speculaire_oci::tagged::Tagged;
-use speculaire_runtime::images::{Images, List};
+use speculaire_runtime::images::{Image, Images, List};
 use tokio::sync::{mpsc, watch};
 
 /// The image list as last read; a handle, cheap to clone.
@@ -27,12 +27,20 @@ impl Listed {
         self.0.borrow()
     }
 
-    /// Gives `apply` the keys of the tags listed (D123), then again at each change, until the runtime's list ends.
+    /// Gives `apply` the keys of the tags listed with a repository digest in their repository, which the peer API
+    /// resolves (D123, D127), then again at each change, until the runtime's list ends.
     pub async fn tag_keys(mut self, mut apply: impl FnMut(HashSet<Digest>)) {
         loop {
             let keys = self.borrow().as_ref().map_or_else(HashSet::new, |list| {
                 list.images()
-                    .flat_map(|image| image.tags.iter().map(Tagged::key).cloned())
+                    .flat_map(|image| {
+                        image
+                            .tags
+                            .iter()
+                            .filter(|tagged| pulled_by(image, tagged).next().is_some())
+                            .map(Tagged::key)
+                            .cloned()
+                    })
                     .collect()
             });
             apply(keys);
@@ -45,17 +53,15 @@ impl Listed {
     /// The digests `tagged` was pulled by, in list order: the repository digests, in its repository, of the images
     /// listing it.
     pub(crate) fn digests(&self, tagged: &Tagged) -> Vec<Digest> {
-        let name = tagged.name();
         let mut digests = Vec::new();
         if let Some(list) = self.borrow().as_ref() {
-            let repo_digests = list
+            let pulled = list
                 .images()
                 .filter(|image| image.tags.contains(tagged))
-                .flat_map(|image| &image.repo_digests)
-                .filter(|repo| repo.repository == name);
-            for repo in repo_digests {
-                if !digests.contains(&repo.digest) {
-                    digests.push(repo.digest.clone());
+                .flat_map(|image| pulled_by(image, tagged));
+            for digest in pulled {
+                if !digests.contains(digest) {
+                    digests.push(digest.clone());
                 }
             }
         }
@@ -81,6 +87,15 @@ impl Listed {
     }
 }
 
+/// The digests `image` was pulled by in the repository of `tagged`, in list order.
+fn pulled_by<'a>(image: &'a Image, tagged: &'a Tagged) -> impl Iterator<Item = &'a Digest> {
+    image
+        .repo_digests
+        .iter()
+        .filter(move |repo| repo.repository == tagged.name())
+        .map(|repo| &repo.digest)
+}
+
 /// Keeps `list` as `images` says, until every handle on it is gone.
 async fn follow(images: Arc<dyn Images>, list: watch::Sender<Option<List>>) {
     let (sender, mut updates) = mpsc::channel(16);
@@ -101,26 +116,40 @@ async fn follow(images: Arc<dyn Images>, list: watch::Sender<Option<List>>) {
 #[cfg(test)]
 mod tests {
     use futures_util::future::BoxFuture;
-    use speculaire_runtime::images::{Image, Update};
+    use speculaire_runtime::images::{RepoDigest, Update};
     use tokio::sync::Notify;
 
     use super::*;
+
+    fn digest(byte: u8) -> Digest {
+        Digest::parse(&format!("sha256:{}", format!("{byte:02x}").repeat(32))).unwrap()
+    }
+
+    /// An image with ID `byte`, `tag` and repository digests in `repositories`.
+    fn image(byte: u8, tag: Option<&str>, repositories: &[&str]) -> Image {
+        Image {
+            id: digest(byte),
+            repo_digests: repositories
+                .iter()
+                .map(|repository| RepoDigest {
+                    repository: (*repository).to_owned(),
+                    digest: digest(0xff),
+                })
+                .collect(),
+            tags: tag.into_iter().filter_map(Tagged::parse).collect(),
+        }
+    }
 
     /// A runtime that lists an untagged image, then a tagged one once notified.
     struct Tagging(Arc<Notify>);
 
     impl Images for Tagging {
         fn follow(self: Arc<Self>, updates: mpsc::Sender<Update>) -> BoxFuture<'static, ()> {
-            let image = |byte: u8, tags: Vec<Tagged>| Image {
-                id: Digest::parse(&format!("sha256:{}", format!("{byte:02x}").repeat(32))).unwrap(),
-                repo_digests: Vec::new(),
-                tags,
-            };
             Box::pin(async move {
-                let untagged = image(1, Vec::new());
+                let untagged = image(1, None, &[]);
                 updates.send(Update::Listing(vec![untagged])).await.unwrap();
                 self.0.notified().await;
-                let tagged = image(2, vec![Tagged::parse("reg.test/app:1").unwrap()]);
+                let tagged = image(2, Some("reg.test/app:1"), &["reg.test/app"]);
                 updates.send(Update::Listed(tagged)).await.unwrap();
                 updates.closed().await;
             })
@@ -143,5 +172,20 @@ mod tests {
         };
         let key = Tagged::parse("reg.test/app:1").unwrap().key().clone();
         assert_eq!(keys, HashSet::from([key]));
+    }
+
+    /// containerd's CRI plugin lists a pulled image's tag before its repository digest: the tag is announced once the
+    /// peer API resolves it.
+    #[tokio::test]
+    async fn a_tag_is_announced_only_with_a_repo_digest_in_its_repository() {
+        let listed = Listed::of(vec![
+            image(1, Some("reg.test/app:1"), &["reg.test/app"]),
+            image(2, Some("reg.test/pulling:1"), &[]),
+            image(3, Some("reg.test/moved:1"), &["reg.test/elsewhere"]),
+        ]);
+        let mut keys = None;
+        listed.tag_keys(|applied| keys = Some(applied)).await;
+        let key = Tagged::parse("reg.test/app:1").unwrap().key().clone();
+        assert_eq!(keys, Some(HashSet::from([key])));
     }
 }
