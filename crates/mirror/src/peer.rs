@@ -1,9 +1,10 @@
 //! The peer API (D14, D24, D39): what this node holds, by digest, to the agents of other nodes, over mutual TLS with
 //! node identities (D16).
 //!
-//! It shares the mirror's request parser and answers: `GET` and `HEAD` of a manifest or a blob by digest, one `Range`
-//! at most, and of a manifest by a tag the runtime lists (D123). Anything else, and anything the node no longer holds, is
-//! a 404.
+//! It shares the mirror's request parser and answers: `GET` and `HEAD` of a manifest or a blob by digest, from the
+//! runtime's content then the artifact store, one `Range` at most; of a manifest by a tag the runtime lists (D123); and
+//! `GET` of the referrers of a manifest the artifact store holds artifacts about, in any repository (D124). Anything else,
+//! and anything the node no longer holds, is a 404.
 
 use std::future::Future;
 use std::io;
@@ -31,19 +32,22 @@ use tracing::warn;
 use crate::listed::Listed;
 use crate::metrics::{Metered, PeerSeries, Uploaded};
 use crate::pulls::{Answer, Body, from_content};
-use crate::request::{Kind, Reference, Route, route};
+use crate::referrers::{self, Referrers};
+use crate::request::{Kind, Reference, Route, artifact_type, route};
 use crate::serve::{Api, MAX_MANIFEST, listen, manifest_response, media_type, status};
 
-/// Serves the peer API on `listener`, from `content` and the tags `listed`, under `uploads`, until `stop` completes.
+/// Serves the peer API on `listener`, from `content`, the tags `listed` and the `artifacts` the node holds, under
+/// `uploads`, until `stop` completes.
 ///
 /// `tls` is the node identity's server side (`speculaire_pki::node::Credentials::server`). Once `stop` completes, it
 /// returns when every connection has closed: an idle one at once, one with a body in flight once it has sent the body
 /// (D39, D103).
-pub async fn serve<C: Content>(
+pub async fn serve<C: Content, A: Referrers>(
     listener: TcpListener,
     mut tls: ServerConfig,
     content: Arc<C>,
     listed: Listed,
+    artifacts: Arc<A>,
     uploads: Arc<Uploads>,
     stop: impl Future<Output = ()>,
 ) {
@@ -52,6 +56,7 @@ pub async fn serve<C: Content>(
     let peer = Arc::new(Peer {
         content,
         listed,
+        artifacts,
         uploads,
     });
     listen(listener, move || Arc::clone(&tls), peer, stop).await;
@@ -142,13 +147,14 @@ impl hyper::body::Body for Uploading {
 }
 
 /// The peer API's answers.
-struct Peer<C> {
+struct Peer<C, A> {
     content: Arc<C>,
     listed: Listed,
+    artifacts: Arc<A>,
     uploads: Arc<Uploads>,
 }
 
-impl<C: Content> Api for Peer<C> {
+impl<C: Content, A: Referrers> Api for Peer<C, A> {
     async fn answer(&self, request: &Request<Incoming>) -> Response<Body> {
         let started = Instant::now();
         if self.uploads.stopping.load(Ordering::Relaxed) {
@@ -167,6 +173,16 @@ impl<C: Content> Api for Peer<C> {
                 reference: Some(Reference::Tag(tag)),
                 head,
             }) => return self.tag(name, tag, head).await,
+            Some(Route::Pull {
+                kind: Kind::Referrers,
+                reference: Some(Reference::Digest(target)),
+                head: false,
+                ..
+            }) => {
+                self.uploads.series.upload(Uploaded::Served);
+                let wanted = artifact_type(request.uri().query());
+                return referrers::index(&*self.artifacts, &target, wanted.as_deref()).await;
+            }
             _ => return status(StatusCode::NOT_FOUND),
         };
         // Only a blob's body counts against the cap (D24): a manifest is at most 4 MiB, and a `HEAD` sends nothing.
@@ -181,7 +197,10 @@ impl<C: Content> Api for Peer<C> {
             .headers()
             .get(RANGE)
             .and_then(|value| value.to_str().ok());
-        let answered = from_content(&*self.content, kind, &digest, head, range).await;
+        let mut answered = from_content(&*self.content, kind, &digest, head, range).await;
+        if matches!(answered, Answer::Missing) {
+            answered = from_content(&*self.artifacts, kind, &digest, head, range).await;
+        }
         let series = &self.uploads.series;
         match answered {
             Answer::Served(_, response) => {
@@ -207,7 +226,7 @@ impl<C: Content> Api for Peer<C> {
     }
 }
 
-impl<C: Content> Peer<C> {
+impl<C: Content, A> Peer<C, A> {
     /// The manifest the runtime pulled the tag `name:tag` by, an index before a platform's manifest: the asking node
     /// picks its own platform from an index.
     async fn tag(&self, name: &str, tag: &str, head: bool) -> Response<Body> {
@@ -249,7 +268,7 @@ impl<C: Content> Peer<C> {
     }
 }
 
-impl<C> Peer<C> {
+impl<C, A> Peer<C, A> {
     fn busy(&self) -> Response<Body> {
         self.uploads.series.upload(Uploaded::Busy);
         status(StatusCode::SERVICE_UNAVAILABLE)

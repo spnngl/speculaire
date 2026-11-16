@@ -118,9 +118,21 @@ pub fn route<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
 /// registry (`core/remotes/docker/resolver.go:644-651` at v2.4.2). `None` without one, or one that does not decode.
 #[must_use]
 pub fn namespace(query: Option<&str>) -> Option<Cow<'_, str>> {
+    parameter(query, "ns=")
+}
+
+/// The `artifactType` query parameter of a referrers request, the filter it asks for (`spec.md:679-682`); `None`
+/// without one, or one that is empty or does not decode: no artifact type is empty.
+#[must_use]
+pub fn artifact_type(query: Option<&str>) -> Option<Cow<'_, str>> {
+    parameter(query, "artifactType=").filter(|value| !value.is_empty())
+}
+
+/// The first value of the query parameter whose `name=` is `prefix`, percent-decoded; a `+` stays a `+`.
+fn parameter<'a>(query: Option<&'a str>, prefix: &str) -> Option<Cow<'a, str>> {
     let value = query?
         .split('&')
-        .find_map(|pair| pair.strip_prefix("ns="))?;
+        .find_map(|pair| pair.strip_prefix(prefix))?;
     percent_encoding::percent_decode_str(value)
         .decode_utf8()
         .ok()
@@ -273,6 +285,25 @@ mod tests {
         );
         for query in [None, Some(""), Some("name=docker.io"), Some("ns=%FF")] {
             assert_eq!(namespace(query), None, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn the_artifact_type_is_the_decoded_parameter_and_a_plus_stays() {
+        let bundle = "application/vnd.dev.sigstore.bundle.v0.3+json";
+        for query in [
+            "artifactType=application/vnd.dev.sigstore.bundle.v0.3%2Bjson",
+            "n=1&artifactType=application%2Fvnd.dev.sigstore.bundle.v0.3+json",
+        ] {
+            assert_eq!(artifact_type(Some(query)).as_deref(), Some(bundle));
+        }
+        for query in [
+            None,
+            Some("artifacttype=x"),
+            Some("artifactType=%FF"),
+            Some("artifactType="),
+        ] {
+            assert_eq!(artifact_type(query), None, "{query:?}");
         }
     }
 

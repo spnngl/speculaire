@@ -4,7 +4,8 @@
 //! What this node does not hold, the mirror answers with a fast 404, so that the runtime falls through to the next
 //! host or to upstream; it never answers 401, 408 or 429 (ARCHITECTURE.md § Vocabulary, *fall through*).
 //!
-//! The peer API, [`peer`], serves the same content to the agents of other nodes.
+//! The peer API, [`peer`], serves the same content to the agents of other nodes, and the artifacts the node holds with
+//! their [`referrers`].
 
 #[cfg(feature = "bench")]
 pub mod bench;
@@ -14,6 +15,7 @@ pub mod listed;
 pub mod metrics;
 pub mod peer;
 mod pulls;
+pub mod referrers;
 pub mod relay;
 pub mod request;
 mod serve;

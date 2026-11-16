@@ -1700,6 +1700,7 @@ dependencies = [
  "metrics",
  "serde",
  "serde_json",
+ "speculaire-mirror",
  "speculaire-oci",
  "speculaire-registry",
  "speculaire-runtime",

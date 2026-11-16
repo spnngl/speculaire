@@ -11,7 +11,7 @@ use anyhow::Context as _;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
 use speculaire_pki::testing::Cluster;
-use speculaire_reflect::client::{Client, Config, Holdings, Lookups};
+use speculaire_reflect::client::{Client, Config, Holdings, Lookups, Source};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
@@ -67,7 +67,7 @@ impl Fleet {
                 held.insert(rng.usize(..pool.len()));
             }
             let holdings = Arc::new(Holdings::default());
-            holdings.replace(held.iter().map(|&i| &pool[i]));
+            holdings.replace(Source::Content, held.iter().map(|&i| &pool[i]));
             agents.push(Agent {
                 credentials,
                 holdings,
@@ -163,8 +163,8 @@ impl Connected {
                 return;
             };
             let old = std::mem::replace(&mut held[slot], new);
-            agent.holdings.remove(&fleet.pool[old]);
-            agent.holdings.add(&fleet.pool[new]);
+            agent.holdings.remove(Source::Content, &fleet.pool[old]);
+            agent.holdings.add(Source::Content, &fleet.pool[new]);
             counts.deltas.fetch_add(2, Ordering::Relaxed);
         }))
     }

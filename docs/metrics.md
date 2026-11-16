@@ -22,7 +22,7 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 | `speculaire_peer_hedges_total` | counter | — | Requests to a further peer started because the first were slow to answer (D102) |
 | `speculaire_tag_lookups_total` | counter | `result` = `peer`\|`miss` | Tags the mirror asked peers for: `peer` when a holder sent a manifest, `miss` when none did and the request fell through to upstream; not counted while `mirror.resolve_tags` is off (D123) |
 | `speculaire_tag_conflicts_total` | counter | — | Tags two peers resolved to different manifests; the first answer is served (D123) |
-| `speculaire_peer_uploads_total` | counter | `result` = `served`\|`busy` | Requests to the peer API that found what they named; `busy` answered `503`, at `peer.max_uploads` or while the agent stops (D24, D39, D100) |
+| `speculaire_peer_uploads_total` | counter | `result` = `served`\|`busy` | Requests to the peer API that found what they named, every referrers list included; `busy` answered `503`, at `peer.max_uploads` or while the agent stops (D24, D39, D100, D124) |
 | `speculaire_peer_uploads_in_flight` | gauge | — | Blob bodies now being sent, which `peer.max_uploads` caps (D24) |
 | `speculaire_peer_upload_bytes_total` | counter | — | Blob bytes sent to other agents |
 | `speculaire_peer_upload_seconds` | histogram | — | Time from a peer's request to the last byte of a blob body sent whole, ranges included |

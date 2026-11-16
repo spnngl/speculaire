@@ -283,7 +283,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Revisit when:** a CRI-O whose `crio.sock` does not serve `GET /config`, or M5 needs the trait to give a registry's whole host list rather than the sources of one image.
 
 
-## D100: The peer API shares the mirror's parser, caps blob bodies, and opens on the address the first stream fixes (amends D24, D36; amended by D103, D123)
+## D100: The peer API shares the mirror's parser, caps blob bodies, and opens on the address the first stream fixes (amends D24, D36; amended by D103, D123, D124)
 
 - **Decision:**
   - **Routes:** `speculaire_mirror::peer` answers `GET` and `HEAD` of `/v2/<name>/manifests/<digest>` and `/v2/<name>/blobs/<digest>`, with one `Range` at most, through the mirror's own request parser and responses (D85). The name is not read: content is keyed by digest. Everything else is a 404: `/v2/`, tags, referrers, other methods, and a digest the node no longer holds, as when containerd's garbage collector deleted it without an event (D99).
@@ -395,3 +395,22 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - `just bench`'s update phase, the second worker's pull from the first, in seconds, Spegel / speculaire: 10MB-1 0.046 / 0.064, 10MB-4 0.060 / 0.071, 100MB-1 0.263 / 0.350, 100MB-4 0.213 / 0.246, against up to 0.8 s more than Spegel before (D106). The benchmark gave speculaire's 100MB-4 update a third sample, a copy of a create sample, so its table's p50 there is the first worker's upstream pull.
   - `e2e/tests/tags.rs`: with upstream rejected, the first worker pulled `e2e/signed:1` by tag from the second in 98 ms, upstream logging none of its requests.
 - **Revisit when:** a tag must follow upstream within a bound; then add a max age, or a `HEAD` upstream that wins when it answers.
+
+
+## D124: The peer API serves the artifact store and its referrers, announced beside the content (amends D99, D100)
+
+- **Decision:**
+  - **Announcement (D99):** the agent's holdings keep one set of keys per source: the runtime's content (or the blob cache), the artifact store, and the tags (D123). A listing of one source replaces only its own set. A key is announced while any source holds it, withdrawn when none does, and a stream's snapshot is their union. The store is an `Inventory`: a listing of its blobs, then each blob it keeps.
+  - **Content (D100):** the peer API answers `GET` and `HEAD` of a manifest or a blob by digest from the runtime's content, then from the artifact store.
+  - **Referrers:** it answers `GET /v2/<name>/referrers/<digest>`, whatever the name, with an image index of every artifact the store recorded about that manifest (`spec.md:620-636`, distribution-spec v1.1.1-57-g9727462): each descriptor carries the manifest's `mediaType`, `digest`, `size`, `artifactType` and its string annotations. None is a `200` with an empty list. `?artifactType=` keeps the descriptors of that type and sets `OCI-Filters-Applied: artifactType` (`spec.md:679-682`); without it, no such header. A `HEAD` of referrers is a 404. Each list counts as `served` in `speculaire_peer_uploads_total`.
+  - **`artifactType`:** the manifest's own, else its config's media type (`spec.md:632-634`). The legacy `.sig` manifest, which names no subject, is listed under its layer's, `application/vnd.dev.cosign.simplesigning.v1+json`.
+  - **Crates:** `speculaire_mirror::referrers::Referrers`, a `Content` that names the manifests about a target, is what the peer API reads; the `Store` of `crates/artifacts` implements it, holding every root's record in memory from its start, and the agent wires it in. `crates/mirror` does not depend on `crates/artifacts`.
+  - **Loopback mirror (D85):** unchanged; referrers stay a 404 for the runtime.
+- **Because:**
+  - One blob can sit in both the content and the store, such as the empty config every Sigstore bundle names (`sha256:44136fa3…`): a single set would withdraw it when the first source drops it, while the other still serves it.
+  - The store is keyed by digest, as content is, so the repository in the path tells nothing (D100).
+  - The `.sig` manifest's config is the generic image config, which names no artifact; its single layer's media type is what it is.
+  - The mirror stays free of discovery and its registry access; `crates/artifacts` already sits above the runtime crates.
+- **Limit:** the referrers index is a hint, not content-addressed: any node with a node identity can list any manifest, so a reader fetches each by digest and checks its `subject` (`docs/security.md`). The store deletes nothing yet: a blob removed by hand stays announced until the agent restarts, and then answers a 404.
+- **Measured (M4 step 03, locally on Docker Desktop arm64, kind):** `e2e/tests/artifacts.rs` passes on containerd 2.4 and CRI-O 1.37: once a worker discovered the signed test image, the other node, with kubelet's certificate, lists its 3 bundles (signature, SLSA, SPDX) and its `.sig`; filtered on the bundle type it gets the 3 and the header; a manifest with no artifact gives an empty list; every listed manifest and every blob they name come back matching their digest; the loopback mirror still answers referrers 404. In `crates/reflect/src/client/holdings.rs`, a digest held by the content and the store stays announced until both drop it. Each full local leg, cluster up and down included, took 286 s on containerd and 362 s on CRI-O.
+- **Revisit when:** the store collects its blobs, which then announce their removal, or a reader needs referrers by repository.

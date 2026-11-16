@@ -12,6 +12,7 @@ use hyper_util::rt::TokioIo;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use speculaire_oci::reference::Digest;
+use speculaire_oci::referrers::{BUNDLE, EMPTY, INDEX, MANIFEST, SIMPLE_SIGNING};
 use speculaire_pki::node::Credentials;
 use speculaire_pki::testing::Cluster;
 use speculaire_runtime::content::{Blob, Error};
@@ -36,6 +37,31 @@ struct Held(HashMap<Digest, Bytes>);
 impl Content for Held {
     fn open(&self, digest: &Digest) -> impl Future<Output = Result<Option<Blob>, Error>> + Send {
         std::future::ready(Ok(self.0.get(digest).cloned().map(Blob::from_bytes)))
+    }
+}
+
+/// Artifacts held in memory: their manifests and blobs, and the manifests about each target.
+#[derive(Default)]
+struct Artifacts {
+    held: HashMap<Digest, Bytes>,
+    about: HashMap<Digest, Vec<Digest>>,
+    /// A blob that is there but cannot be read.
+    unreadable: Option<Digest>,
+}
+
+impl Content for Artifacts {
+    fn open(&self, digest: &Digest) -> impl Future<Output = Result<Option<Blob>, Error>> + Send {
+        std::future::ready(if self.unreadable.as_ref() == Some(digest) {
+            Err(Error::Io(std::io::Error::other("unreadable")))
+        } else {
+            Ok(self.held.get(digest).cloned().map(Blob::from_bytes))
+        })
+    }
+}
+
+impl Referrers for Artifacts {
+    fn referrers(&self, target: &Digest) -> Vec<Digest> {
+        self.about.get(target).cloned().unwrap_or_default()
     }
 }
 
@@ -82,6 +108,15 @@ impl Test {
     }
 
     async fn listing<C: Content>(content: Arc<C>, listed: Listed, max_uploads: usize) -> Self {
+        Self::serving(content, listed, Arc::new(Artifacts::default()), max_uploads).await
+    }
+
+    async fn serving<C: Content>(
+        content: Arc<C>,
+        listed: Listed,
+        artifacts: Arc<Artifacts>,
+        max_uploads: usize,
+    ) -> Self {
         let cluster = Cluster::new("kubernetes");
         let dir = tempfile::tempdir().unwrap();
         let tls = credentials(&cluster, &dir, SERVER).server();
@@ -94,6 +129,7 @@ impl Test {
             tls,
             content,
             listed,
+            artifacts,
             Arc::clone(&uploads),
             async {
                 // An error means the sender went with the test: stop too.
@@ -260,7 +296,7 @@ async fn another_node_reads_a_blob_whole_and_in_part_and_a_manifest_by_digest() 
 }
 
 #[tokio::test]
-async fn everything_but_a_manifest_or_a_blob_by_digest_or_a_listed_tag_answers_404() {
+async fn everything_but_a_manifest_or_a_blob_by_digest_a_listed_tag_or_referrers_answers_404() {
     let held = digest_of(1);
     let test = Test::start(
         Arc::new(Held(HashMap::from([(held.clone(), pattern(10))]))),
@@ -271,7 +307,7 @@ async fn everything_but_a_manifest_or_a_blob_by_digest_or_a_listed_tag_answers_4
     for path in [
         "/v2/".to_owned(),
         "/v2/library/busybox/manifests/latest".to_owned(),
-        format!("/v2/library/busybox/referrers/{held}"),
+        "/v2/library/busybox/referrers/latest".to_owned(),
         blob_path(&digest_of(2)),
         format!("/v3/library/busybox/blobs/{held}"),
     ] {
@@ -283,6 +319,163 @@ async fn everything_but_a_manifest_or_a_blob_by_digest_or_a_listed_tag_answers_4
     }
     let post = ask(&mut sender, Method::POST, &blob_path(&held), None).await;
     assert_eq!(post.status, StatusCode::NOT_FOUND);
+    let referrers = format!("/v2/library/busybox/referrers/{held}");
+    let referrers_head = ask(&mut sender, Method::HEAD, &referrers, None).await;
+    assert_eq!(referrers_head.status, StatusCode::NOT_FOUND);
+}
+
+/// An artifact manifest about `target`, of `artifact_type` when there is one, with `annotations`.
+fn artifact(target: Option<&Digest>, artifact_type: Option<&str>, annotations: &str) -> Bytes {
+    let subject = target.map_or(String::new(), |target| {
+        format!(r#""subject":{{"mediaType":"{MANIFEST}","digest":"{target}","size":1}},"#)
+    });
+    let artifact_type =
+        artifact_type.map_or(String::new(), |t| format!(r#""artifactType":"{t}","#));
+    Bytes::from(format!(
+        r#"{{"schemaVersion":2,"mediaType":"{}",{artifact_type}{subject}
+            "config":{{"mediaType":"{EMPTY}","digest":"{}","size":2}},
+            "layers":[{{"mediaType":"{SIMPLE_SIGNING}","digest":"{}","size":10}}],
+            "annotations":{annotations}}}"#,
+        MANIFEST,
+        digest_of(20),
+        digest_of(21),
+    ))
+}
+
+#[tokio::test]
+async fn the_referrers_of_a_manifest_list_the_artifacts_held_about_it_and_a_filter_keeps_one_type()
+{
+    let (target, bundle, sig, junk, gone, unreadable) = (
+        digest_of(1),
+        digest_of(2),
+        digest_of(3),
+        digest_of(4),
+        digest_of(5),
+        digest_of(6),
+    );
+    let held = HashMap::from([
+        (
+            bundle.clone(),
+            artifact(
+                Some(&target),
+                Some(BUNDLE),
+                r#"{"dev.sigstore.bundle.predicateType":"p","n":1}"#,
+            ),
+        ),
+        (sig.clone(), artifact(None, None, r#"{"a":"b"}"#)),
+        (junk.clone(), Bytes::from_static(b"not a manifest")),
+        (digest_of(21), pattern(10)),
+    ]);
+    let artifacts = Artifacts {
+        held: held.clone(),
+        about: HashMap::from([(
+            target.clone(),
+            vec![bundle.clone(), sig.clone(), junk, gone, unreadable.clone()],
+        )]),
+        unreadable: Some(unreadable),
+    };
+    let test = Test::serving(
+        Arc::new(Held(HashMap::new())),
+        Listed::of(Vec::new()),
+        Arc::new(artifacts),
+        4,
+    )
+    .await;
+    let mut sender = test.client("node-b").await;
+    let list =
+        |answer: &Answer| -> serde_json::Value { serde_json::from_slice(&answer.body).unwrap() };
+
+    // Any repository: the store is not by repository.
+    let all = get(&mut sender, &format!("/v2/any/where/referrers/{target}")).await;
+    assert_eq!(all.status, StatusCode::OK);
+    assert_eq!(header(&all, CONTENT_TYPE), INDEX);
+    assert_eq!(header(&all, CONTENT_LENGTH), all.body.len().to_string());
+    assert!(!all.headers.contains_key("oci-filters-applied"));
+    assert_eq!(
+        list(&all),
+        serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": INDEX,
+            "manifests": [
+                {
+                    "mediaType": MANIFEST,
+                    "digest": bundle.to_string(),
+                    "size": held[&bundle].len(),
+                    "artifactType": BUNDLE,
+                    "annotations": {"dev.sigstore.bundle.predicateType": "p"},
+                },
+                {
+                    "mediaType": MANIFEST,
+                    "digest": sig.to_string(),
+                    "size": held[&sig].len(),
+                    "artifactType": SIMPLE_SIGNING,
+                    "annotations": {"a": "b"},
+                },
+            ],
+        })
+    );
+
+    let path = format!(
+        "/v2/e2e/signed/referrers/{target}?artifactType=application%2Fvnd.dev.sigstore.bundle.v0.3%2Bjson"
+    );
+    let bundles = get(&mut sender, &path).await;
+    assert_eq!(header(&bundles, "oci-filters-applied"), "artifactType");
+    let digests = list(&bundles)["manifests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|listed| listed["digest"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(digests, [serde_json::json!(bundle.to_string())]);
+
+    let none = get(
+        &mut sender,
+        &format!("/v2/e2e/signed/referrers/{target}?artifactType=application/none"),
+    )
+    .await;
+    assert_eq!(none.status, StatusCode::OK);
+    assert_eq!(header(&none, "oci-filters-applied"), "artifactType");
+    assert_eq!(list(&none)["manifests"], serde_json::json!([]));
+
+    let unknown = get(
+        &mut sender,
+        &format!("/v2/e2e/signed/referrers/{}", digest_of(7)),
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::OK);
+    assert!(!unknown.headers.contains_key("oci-filters-applied"));
+    assert_eq!(list(&unknown)["manifests"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn a_manifest_or_blob_the_runtime_lacks_is_served_from_the_artifact_store() {
+    let (target, bundle, layer) = (digest_of(1), digest_of(2), digest_of(21));
+    let manifest = artifact(Some(&target), Some(BUNDLE), "{}");
+    let artifacts = Artifacts {
+        held: HashMap::from([
+            (bundle.clone(), manifest.clone()),
+            (layer.clone(), pattern(10)),
+        ]),
+        about: HashMap::new(),
+        unreadable: None,
+    };
+    // The runtime's content comes first.
+    let content = Held(HashMap::from([(layer.clone(), pattern(20))]));
+    let test = Test::serving(
+        Arc::new(content),
+        Listed::of(Vec::new()),
+        Arc::new(artifacts),
+        4,
+    )
+    .await;
+    let mut sender = test.client("node-b").await;
+    let served = get(&mut sender, &format!("/v2/e2e/signed/manifests/{bundle}")).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert_eq!(served.body, manifest);
+    assert_eq!(header(&served, CONTENT_TYPE), MANIFEST);
+    assert_eq!(get(&mut sender, &blob_path(&layer)).await.body, pattern(20));
+    let missing = get(&mut sender, &blob_path(&digest_of(22))).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
 }
 
 fn listed(tags: &[&str], repo_digests: &[(&str, &Digest)]) -> Listed {

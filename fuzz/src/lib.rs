@@ -286,16 +286,19 @@ pub fn hosts_edit(data: &[u8]) {
 }
 
 /// A request of the runtime to the mirror, or of another agent to the peer API, which shares its parser: its path
-/// and query, then a line with its `Range` header (D85, D100, D123).
+/// and query, then a line with its `Range` header (D85, D100, D123, D124).
 ///
-/// Routing and reading containerd's `ns` never panic. A range lies inside a body of any size: it starts at or before its end, and its end is the
+/// Routing and reading containerd's `ns` never panic, nor does reading a referrers request's `artifactType`, which is
+/// never empty. A range lies inside a body of any size: it starts at or before its end, and its end is the
 /// body's last byte at most; the whole of an empty body has no range.
 ///
 /// # Panics
 ///
 /// When routing or reading a range panics, or a range does not lie in the body.
 pub fn mirror_request(data: &[u8]) {
-    use speculaire_mirror::request::{Method, Ranged, Span, namespace, range, route};
+    use speculaire_mirror::request::{
+        Method, Ranged, Span, artifact_type, namespace, range, route,
+    };
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
@@ -307,6 +310,7 @@ pub fn mirror_request(data: &[u8]) {
         let _ = route(&method, path);
     }
     let _ = namespace(query);
+    assert_ne!(artifact_type(query).as_deref(), Some(""));
     for size in [0, 1, 2, 1000, u64::MAX] {
         if let Ranged::Part(span) = range(Some(header), size) {
             assert!(
@@ -620,6 +624,12 @@ pub fn referrers(data: &[u8]) {
         let blobs: Vec<&Descriptor> = referrer.blobs().collect();
         assert_eq!(blobs.len(), referrer.layers.len() + 1);
         assert_eq!(blobs.first(), Some(&&referrer.config));
+        let listed = referrer.listed_type();
+        assert!(
+            referrer.artifact_type.as_deref() == Some(listed)
+                || blobs.iter().any(|blob| blob.media_type == listed),
+            "{listed}"
+        );
         if referrer.is_bundle() {
             assert!(
                 matches!(

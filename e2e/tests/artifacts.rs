@@ -1,16 +1,19 @@
 //! Artifact discovery (D121): a pull of the signed test image puts its Sigstore bundles and its `.sig` manifest, with
 //! their blobs, in the node's artifact store, fetched from the upstream it was pulled from with the node's own
-//! registry config only (D17).
+//! registry config only (D17). Another node reads them, and their referrers, from the node's peer API (D124).
 #![expect(
     clippy::unwrap_used,
     reason = "the helpers of a test fail it by panicking"
 )]
 
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use e2e::Cluster;
+use e2e::reflector::KUBELET;
 use e2e::registry::PASSWORD;
 use e2e::upstream::{Digest, Kind, Request, SIGNED, Upstream};
 use serde_json::Value;
@@ -30,6 +33,20 @@ const REPOSITORY: &str = "e2e/signed";
 
 /// How long after a pull the store must hold the image's artifacts.
 const WITHIN: Duration = Duration::from_secs(10);
+
+/// The peer API's port when `peer.address` is `"auto"` (D36).
+const PEER_PORT: u16 = 7481;
+
+/// The predicate types of the bundles of [`SIGNED`]: its signature, its SLSA provenance and its SPDX document.
+const PREDICATES: [&str; 3] = [
+    "https://sigstore.dev/cosign/sign/v1",
+    "https://slsa.dev/provenance/v1",
+    "https://spdx.dev/Document",
+];
+
+/// The loopback mirror (D14), and the directory of its client certificate.
+const MIRROR: &str = "https://127.0.0.1:7480";
+const MIRROR_DIR: &str = "/var/lib/speculaire/mirror";
 
 /// What discovery must keep of [`SIGNED`]: its digest, and each artifact's manifest with the blobs it names.
 struct Expected {
@@ -376,4 +393,165 @@ fn with_the_referrers_api_no_fallback_tag_is_asked() {
     );
     let fallback = format!("/v2/{REPOSITORY}/manifests/sha256-{}", expected.root.hex());
     assert!(requests.iter().all(|r| r.path != fallback), "{requests:?}");
+}
+
+/// An answer of the peer API: its status, its `OCI-Filters-Applied` header, the SHA-256 of its body, and its body when
+/// asked for.
+struct Answer {
+    status: String,
+    filters: String,
+    sha256: String,
+    body: String,
+}
+
+/// A `GET` of `path` from `reader` on the peer API at `address`, with kubelet's certificate as another agent would:
+/// the peer API presents a kubelet client certificate, which has no name to check, hence `-k` (D16).
+fn peer_get(
+    cluster: &Cluster,
+    reader: &str,
+    address: SocketAddr,
+    path: &str,
+    body: bool,
+) -> Answer {
+    let cat = if body { r#"; cat "$dir/b""# } else { "" };
+    let script = format!(
+        r#"set -e; dir=$(mktemp -d); trap 'rm -rf "$dir"' EXIT
+code=$(curl -sSg -k --max-time 10 --cert {KUBELET} -D "$dir/h" -o "$dir/b" -w "%{{http_code}}" "https://{address}{path}")
+filters=$(tr -d "\r" < "$dir/h" | sed -n "s/^oci-filters-applied: //Ip")
+echo "$code|$filters|$(sha256sum < "$dir/b" | cut -d" " -f1)"{cat}"#
+    );
+    let output = cluster.exec_output(reader, &["sh", "-c", &script]).unwrap();
+    assert!(output.success, "{path}: {output:?}");
+    let (line, body) = output.stdout.split_once('\n').unwrap();
+    let fields: Vec<&str> = line.split('|').collect();
+    Answer {
+        status: fields[0].to_owned(),
+        filters: fields[1].to_owned(),
+        sha256: fields[2].to_owned(),
+        body: body.to_owned(),
+    }
+}
+
+/// The digest, `artifactType` and predicate type of each descriptor of the referrers index `answer` holds.
+fn referrers(answer: &Answer) -> BTreeSet<(String, String, String)> {
+    let index: Value = serde_json::from_str(&answer.body).unwrap();
+    index["manifests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|listed| {
+            let field = |pointer: &str| {
+                listed
+                    .pointer(pointer)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            (
+                field("/digest"),
+                field("/artifactType"),
+                field("/annotations/dev.sigstore.bundle.predicateType"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn another_node_reads_the_referrers_and_artifacts_a_node_discovered_from_its_peer_api() {
+    let _serial = serial();
+    let worker = Worker::new();
+    let cluster = &worker.cluster;
+    let expected = Expected::read(cluster);
+    let reader = cluster
+        .nodes()
+        .unwrap()
+        .into_iter()
+        .map(|n| n.name)
+        .find(|name| *name != worker.name)
+        .expect("a second node");
+    worker.forget(&expected);
+    worker.pull(&cluster.upstream(Kind::Plain), &expected);
+    let address = SocketAddr::new(cluster.family_address(&worker.name).unwrap(), PEER_PORT);
+    let path = format!("/v2/{REPOSITORY}/referrers/{}", expected.root);
+
+    // The root's record follows its blobs, and the peer API opens once the agent has announced.
+    let start = Instant::now();
+    let all = loop {
+        let answer = peer_get(cluster, &reader, address, &path, true);
+        if answer.status == "200" && referrers(&answer).len() == expected.artifacts.len() {
+            break answer;
+        }
+        assert!(
+            start.elapsed() < WITHIN,
+            "{} {}",
+            answer.status,
+            answer.body
+        );
+        sleep(Duration::from_millis(200));
+    };
+    assert_eq!(all.filters, "", "{}", all.body);
+    let listed = referrers(&all);
+    let (sig, _) = expected.artifacts.last().unwrap();
+    let bundle = "application/vnd.dev.sigstore.bundle.v0.3+json";
+    let mut bundles = BTreeSet::new();
+    for (digest, artifact_type, predicate) in &listed {
+        if digest == sig {
+            assert_eq!(
+                artifact_type,
+                "application/vnd.dev.cosign.simplesigning.v1+json"
+            );
+        } else {
+            assert_eq!(artifact_type, bundle, "{}", all.body);
+            bundles.insert(predicate.as_str());
+        }
+    }
+    assert_eq!(bundles, BTreeSet::from(PREDICATES), "{}", all.body);
+    let digests: BTreeSet<&String> = listed.iter().map(|(digest, ..)| digest).collect();
+    let manifests: BTreeSet<&String> = expected
+        .artifacts
+        .iter()
+        .map(|(manifest, _)| manifest)
+        .collect();
+    assert_eq!(digests, manifests);
+
+    let filtered = peer_get(
+        cluster,
+        &reader,
+        address,
+        &format!("{path}?artifactType=application/vnd.dev.sigstore.bundle.v0.3%2Bjson"),
+        true,
+    );
+    assert_eq!(
+        (filtered.status.as_str(), filtered.filters.as_str()),
+        ("200", "artifactType")
+    );
+    assert_eq!(referrers(&filtered).len(), 3, "{}", filtered.body);
+    // A manifest no artifact is about.
+    let none = peer_get(
+        cluster,
+        &reader,
+        address,
+        &format!("/v2/{REPOSITORY}/referrers/{sig}"),
+        true,
+    );
+    assert_eq!((none.status.as_str(), none.filters.as_str()), ("200", ""));
+    assert!(referrers(&none).is_empty(), "{}", none.body);
+
+    // Every artifact manifest and every blob it names, by digest from any repository.
+    for (manifest, blobs) in &expected.artifacts {
+        let paths = std::iter::once(format!("/v2/any/manifests/{manifest}"))
+            .chain(blobs.iter().map(|blob| format!("/v2/any/blobs/{blob}")));
+        for (path, digest) in paths.zip(std::iter::once(manifest).chain(blobs)) {
+            let answer = peer_get(cluster, &reader, address, &path, false);
+            assert_eq!(answer.status, "200", "{path}");
+            assert_eq!(format!("sha256:{}", answer.sha256), *digest, "{path}");
+        }
+    }
+
+    // The runtime still finds no referrers on its loopback mirror (D85).
+    let mirror = worker.sh(&format!(
+        "curl -s -o /dev/null -w '%{{http_code}}' --cacert {MIRROR_DIR}/ca.crt --cert {MIRROR_DIR}/client.pem {MIRROR}{path}"
+    ));
+    assert_eq!(mirror.trim(), "404");
 }

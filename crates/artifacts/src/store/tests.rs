@@ -168,3 +168,147 @@ async fn the_store_bytes_gauge_follows_each_blob_kept() {
     store.keep(&digest_of(b"abc"), b"abc").await.unwrap();
     assert_eq!(gauge().as_deref(), Some("5"));
 }
+
+#[tokio::test]
+async fn the_referrers_of_a_target_are_the_manifests_recorded_about_it_each_once_across_reopens() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let (index, platform) = (digest_of(b"index"), digest_of(b"platform"));
+    let artifact = |target: &Digest, manifest: &[u8]| Artifact {
+        target: target.clone(),
+        manifest: digest_of(manifest),
+        kind: Kind::Bundle,
+        blobs: Vec::new(),
+    };
+    // Two roots may share an artifact: an index and the platform manifest pulled by its own digest.
+    let shared = artifact(&platform, b"bundle");
+    store
+        .record(&index, &[artifact(&index, b"sbom"), shared.clone()])
+        .await
+        .unwrap();
+    store
+        .record(&platform, &[shared, artifact(&platform, b"sig")])
+        .await
+        .unwrap();
+    let mut about = store.referrers(&platform);
+    about.sort_by_key(ToString::to_string);
+    let mut expected = vec![digest_of(b"bundle"), digest_of(b"sig")];
+    expected.sort_by_key(ToString::to_string);
+    assert_eq!(about, expected);
+    assert_eq!(store.referrers(&index), [digest_of(b"sbom")]);
+    assert_eq!(store.referrers(&digest_of(b"other")), []);
+
+    // A record that is no record, and a file that names no root, are left out of a reopened store.
+    let roots = dir.path().join("roots/sha256");
+    std::fs::write(
+        roots.join(format!("{}.json", digest_of(b"bad").encoded())),
+        "[]",
+    )
+    .unwrap();
+    std::fs::write(roots.join("x.json"), "{\"artifacts\":[]}").unwrap();
+    std::fs::write(dir.path().join("roots/stray"), "").unwrap();
+    store.record(&platform, &[]).await.unwrap();
+    let reopened = Store::open(dir.path()).unwrap();
+    // The index still records the shared one.
+    assert_eq!(reopened.referrers(&platform), [digest_of(b"bundle")]);
+    assert_eq!(reopened.referrers(&index), [digest_of(b"sbom")]);
+}
+
+#[tokio::test]
+async fn the_store_serves_the_blobs_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let digest = digest_of(b"{}");
+    store.keep(&digest, b"{}").await.unwrap();
+    let blob = Content::open(&store, &digest).await.unwrap().unwrap();
+    assert_eq!(blob.read_all(10).await.unwrap(), &b"{}"[..]);
+    assert!(
+        Content::open(&store, &digest_of(b"x"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // A file where the directory of an algorithm should be: there, but unreadable.
+    std::fs::write(dir.path().join("blobs/sha512"), "").unwrap();
+    let sha512 = speculaire_oci::hash::of("sha512", b"{}").unwrap();
+    assert!(Content::open(&store, &sha512).await.is_err());
+}
+
+#[tokio::test]
+async fn a_follower_gets_the_blobs_held_then_each_blob_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let (first, second) = (digest_of(b"{}"), digest_of(b"abc"));
+    store.keep(&first, b"{}").await.unwrap();
+    // A file that is no digest is no blob.
+    std::fs::write(dir.path().join("blobs/sha256/x"), "").unwrap();
+    std::fs::write(dir.path().join("blobs/stray"), "").unwrap();
+    let (updates, mut received) = mpsc::channel(8);
+    let followed = tokio::spawn(Arc::clone(&store).follow(updates));
+    assert_eq!(
+        received.recv().await,
+        Some(Update::Listing([first.clone()].into()))
+    );
+    // A blob kept again is no change.
+    store.keep(&first, b"{}").await.unwrap();
+    store.keep(&second, b"abc").await.unwrap();
+    assert_eq!(
+        received.recv().await,
+        Some(Update::Change(Change::Added(second)))
+    );
+    drop(received);
+    followed.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_be_listed_announces_none_then_the_blobs_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    std::fs::remove_dir_all(dir.path().join("blobs")).unwrap();
+    let (updates, mut received) = mpsc::channel(8);
+    let followed = tokio::spawn(Arc::clone(&store).follow(updates));
+    assert_eq!(received.recv().await, Some(Update::Listing(HashSet::new())));
+    let digest = digest_of(b"{}");
+    store.keep(&digest, b"{}").await.unwrap();
+    assert_eq!(
+        received.recv().await,
+        Some(Update::Change(Change::Added(digest)))
+    );
+    drop(received);
+    followed.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_follower_that_missed_changes_gets_a_listing_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let (updates, mut received) = mpsc::channel(1);
+    let followed = tokio::spawn(Arc::clone(&store).follow(updates));
+    assert_eq!(received.recv().await, Some(Update::Listing(HashSet::new())));
+    // More blobs than the backlog holds while the follower waits on a full channel, which has taken two.
+    let mut kept = HashSet::new();
+    for i in 0..BACKLOG + 8 {
+        let bytes = i.to_string();
+        let digest = digest_of(bytes.as_bytes());
+        store.keep(&digest, bytes.as_bytes()).await.unwrap();
+        kept.insert(digest);
+    }
+    let listing = loop {
+        match received.recv().await.unwrap() {
+            Update::Listing(listing) => break listing,
+            Update::Change(_) => {}
+        }
+    };
+    assert_eq!(listing, kept);
+    drop(received);
+    followed.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_follower_whose_receiver_is_gone_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let (updates, received) = mpsc::channel(1);
+    drop(received);
+    store.follow(updates).await;
+}

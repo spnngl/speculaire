@@ -303,7 +303,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Revisit when:** a watched filesystem moves the change time without a change, so polls read for nothing.
 
 
-## D99: What a node serves to peers is a fifth trait, `Inventory` (amends D90; amended by D121, D123)
+## D99: What a node serves to peers is a fifth trait, `Inventory` (amends D90; amended by D121, D123, D124)
 
 - **Decision:**
   - **Trait:** `Inventory::follow` sends a listing, then each blob added or removed, until its receiver closes; a later listing replaces the earlier one. A `Node` hands it out, and the agent turns it into what it announces (D98). The M5 `Images` trait becomes the sixth.
