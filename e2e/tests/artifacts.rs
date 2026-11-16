@@ -213,10 +213,9 @@ impl Drop for Worker {
         } else {
             String::new()
         };
-        // `unit.rs` asserts the journal holds no warning: it starts again from the agent's start entries.
+        // The journal stays: `configure.rs` reads CRI-O's entries in it, and a graceful stop writes no warning.
         let script = format!(
-            "{restore}{}; journalctl --rotate && journalctl --vacuum-time=1s; \
-             systemctl reset-failed speculaire; systemctl restart speculaire",
+            "{restore}{}; systemctl reset-failed speculaire; systemctl restart speculaire",
             self.rmi()
         );
         let _ = self.cluster.exec_output(&self.name, &["sh", "-c", &script]);

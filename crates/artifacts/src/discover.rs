@@ -238,15 +238,12 @@ impl Discovery {
         artifacts: &mut Vec<Artifact>,
     ) -> Result<(), Error> {
         let mut descriptors = self.referrers(upstream, target).await;
-        descriptors.retain(Descriptor::may_be_bundle);
+        descriptors.retain(|d| d.may_be_bundle() && d.size <= self.limits.manifest);
         if descriptors.len() > self.limits.referrers {
             warn!(%target, referrers = descriptors.len(), kept = self.limits.referrers, "a target has too many referrers");
             descriptors.truncate(self.limits.referrers);
         }
         for descriptor in descriptors {
-            if descriptor.size > self.limits.manifest {
-                continue;
-            }
             let path = format!(
                 "/{}/manifests/{}",
                 upstream.source.repository, descriptor.digest

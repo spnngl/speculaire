@@ -53,11 +53,12 @@ impl Node {
         Self { dir, _fake: fake }
     }
 
-    /// The `[runtime]` table naming this node's files; CRI-O has none.
+    /// The `[runtime]` table naming this node's files, CRI-O having none, and the `[artifacts]` table keeping the
+    /// artifact store in the node's directory.
     fn table(&self) -> String {
         let dir = self.dir.path().display();
         format!(
-            "[runtime]\ncontainerd_socket = \"{dir}/containerd.sock\"\ncontainerd_config = \"{dir}/config.toml\"\ncrio_socket = \"{dir}/crio.sock\"\n"
+            "[runtime]\ncontainerd_socket = \"{dir}/containerd.sock\"\ncontainerd_config = \"{dir}/config.toml\"\ncrio_socket = \"{dir}/crio.sock\"\n[artifacts]\ndirectory = \"{dir}/artifacts\"\n"
         )
     }
 }
@@ -412,6 +413,8 @@ fn put(path: &Path, text: &str) {
 fn a_healthy_start_is_ready_and_logs_nothing_below_warn() {
     let agent = Agent::start("");
     assert_eq!(agent.get("/livez", "").status, 200);
+    // The artifact store opens before the agent is ready (D113).
+    assert!(agent.node.dir.path().join("artifacts/tmp").is_dir());
     let (status, lines) = agent.stop();
     assert!(status.success(), "{status}");
     let loud: Vec<_> = lines
