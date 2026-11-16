@@ -7,6 +7,7 @@ mod start;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 pub use start::{COSIGN_PUBLIC_KEY, CRIO_AUTH_FILE, SIGNED, UNSIGNED, start};
@@ -213,6 +214,8 @@ impl fmt::Display for Digest {
 /// An entry of a registry's access log.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request {
+    /// The address it came from: a node's tells its requests from the other nodes'.
+    pub client: IpAddr,
     /// Such as `GET` or `HEAD`.
     pub method: String,
     /// Such as `/v2/peers/a/blobs/sha256:...`.
@@ -236,12 +239,14 @@ impl Request {
     /// Parses a line of the combined log format,
     /// `<client> - - [<time>] "<method> <path> <protocol>" <status> <size> "<referer>" "<user agent>"`.
     fn parse_combined(line: &str) -> Option<Self> {
+        let (client, _) = line.split_once(' ')?;
         let (_, rest) = line.split_once("] \"")?;
         let (request, rest) = rest.split_once("\" ")?;
         let mut request = request.split(' ');
         let (method, path, _protocol) = (request.next()?, request.next()?, request.next()?);
         let (_, user_agent) = rest.strip_suffix('"')?.rsplit_once('"')?;
         Some(Self {
+            client: client.parse().ok()?,
             method: method.to_owned(),
             path: path.to_owned(),
             status: rest.split(' ').next()?.parse().ok()?,
@@ -249,7 +254,7 @@ impl Request {
         })
     }
 
-    /// Parses zot's JSON entry of a request, whose `message` is `HTTP API`.
+    /// Parses zot's JSON entry of a request, whose `message` is `HTTP API` and whose `clientIP` is `ip:port`.
     fn parse_zot(line: &str) -> Option<Self> {
         let entry: serde_json::Value = serde_json::from_str(line).ok()?;
         if entry.get("message")? != "HTTP API" {
@@ -261,6 +266,7 @@ impl Request {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         Some(Self {
+            client: text("clientIP")?.parse::<SocketAddr>().ok()?.ip(),
             method: text("method")?,
             path: text("path")?,
             status: u16::try_from(entry.get("statusCode")?.as_u64()?).ok()?,
@@ -294,6 +300,7 @@ mod tests {
         assert_eq!(
             request,
             Request {
+                client: IpAddr::from([172, 18, 0, 3]),
                 method: "GET".to_owned(),
                 path: format!("/v2/peers/a/blobs/{DIGEST}"),
                 status: 200,
@@ -301,6 +308,11 @@ mod tests {
             }
         );
         assert_eq!(request.blob().unwrap().to_string(), DIGEST);
+        let ipv6 = line.replacen("172.18.0.3", "fc00:f853:ccd:e793::3", 1);
+        assert_eq!(
+            Request::parse(&ipv6).unwrap().client,
+            "fc00:f853:ccd:e793::3".parse::<IpAddr>().unwrap()
+        );
         let entry = r#"time="2026-11-13T11:04:24Z" level=info msg="response completed" http.request.method=GET http.request.uri="/v2/""#;
         assert_eq!(Request::parse(entry), None);
     }
@@ -308,19 +320,19 @@ mod tests {
     #[test]
     fn a_zot_request_entry_parses_and_its_other_entries_do_not() {
         let line = format!(
-            r#"{{"time":"2026-11-15T13:54:17Z","level":"info","message":"HTTP API","method":"GET","path":"/v2/e2e/signed/referrers/{DIGEST}","statusCode":200,"latency":"0s","bodySize":1302,"headers":{{"Accept":["*/*"],"User-Agent":["speculaire/0.1.0"]}}}}"#
+            r#"{{"time":"2026-11-15T13:54:17Z","level":"info","message":"HTTP API","clientIP":"[fc00:f853:ccd:e793::3]:41234","method":"GET","path":"/v2/e2e/signed/referrers/{DIGEST}","statusCode":200,"latency":"0s","bodySize":1302,"headers":{{"Accept":["*/*"],"User-Agent":["speculaire/0.1.0"]}}}}"#
         );
         assert_eq!(
             Request::parse(&line).unwrap(),
             Request {
+                client: "fc00:f853:ccd:e793::3".parse().unwrap(),
                 method: "GET".to_owned(),
                 path: format!("/v2/e2e/signed/referrers/{DIGEST}"),
                 status: 200,
                 user_agent: "speculaire/0.1.0".to_owned(),
             }
         );
-        let anonymous =
-            r#"{"message":"HTTP API","method":"HEAD","path":"/v2/","statusCode":401,"headers":{}}"#;
+        let anonymous = r#"{"message":"HTTP API","clientIP":"172.18.0.3:41234","method":"HEAD","path":"/v2/","statusCode":401,"headers":{}}"#;
         assert_eq!(Request::parse(anonymous).unwrap().user_agent, "");
         let other = r#"{"level":"info","message":"getting manifest","method":"GET","path":"/v2/","statusCode":200}"#;
         assert_eq!(Request::parse(other), None);
@@ -329,6 +341,7 @@ mod tests {
     #[test]
     fn only_a_blob_get_names_a_blob() {
         let request = |method: &str, path: &str| Request {
+            client: IpAddr::from([172, 18, 0, 3]),
             method: method.to_owned(),
             path: path.to_owned(),
             status: 200,

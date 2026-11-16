@@ -2,7 +2,8 @@
 //!
 //! A, the first worker, holds [`SIGNED`]; B, the second worker, which runs no reflector, pulls it with upstream
 //! unreachable and restarts after; C, the control plane, pulls it with `mirror.resolve_tags` off. The upstream's access
-//! log is the oracle. The tests remove the image from every node, so they run one at a time.
+//! log, read by client, is the oracle: another node's discovery asks upstream for the image's artifacts whenever its
+//! image list changes (D121). The tests remove the image from every node, so they run one at a time.
 #![expect(
     clippy::unwrap_used,
     reason = "the helpers of a test fail it by panicking"
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::Cluster;
 use e2e::balancer::PORT;
+use e2e::node::addresses;
 use e2e::reflector::Holder;
 use e2e::upstream::{Digest, Kind, SIGNED, Upstream};
 
@@ -101,16 +103,18 @@ impl Nodes {
             .unwrap_or(0.0)
     }
 
-    /// How many requests upstream has answered for the manifest `<repository>:<tag>` by its tag, or for a blob of
-    /// `repository`.
-    fn upstream_pulls(&self, image: &str) -> usize {
+    /// How many requests of `node` upstream has answered for the manifest `<repository>:<tag>` by its tag, or for a
+    /// blob of `repository`.
+    fn upstream_pulls(&self, node: &str, image: &str) -> usize {
         let (repository, tag) = image.split_once(':').unwrap();
         let manifest = format!("/v2/{repository}/manifests/{tag}");
         let blobs = format!("/v2/{repository}/blobs/");
+        let clients = addresses(node).unwrap();
         self.upstream
             .requests()
             .unwrap()
             .iter()
+            .filter(|r| clients.contains(&r.client))
             .filter(|r| r.path == manifest || r.path.starts_with(&blobs))
             .count()
     }
@@ -210,7 +214,10 @@ fn a_tag_pulled_on_a_resolves_on_b_from_a_while_b_cannot_reach_upstream() {
     let _serial = serial();
     let nodes = Nodes::new();
     let reference = nodes.only_a_holds_signed();
-    let (pulls, peer) = (nodes.upstream_pulls(SIGNED), nodes.metric(&nodes.b, PEER));
+    let (pulls, peer) = (
+        nodes.upstream_pulls(&nodes.b, SIGNED),
+        nodes.metric(&nodes.b, PEER),
+    );
     {
         let _rejected = nodes
             .cluster
@@ -219,8 +226,13 @@ fn a_tag_pulled_on_a_resolves_on_b_from_a_while_b_cannot_reach_upstream() {
         let start = Instant::now();
         nodes.pulled(&nodes.b, &reference);
         println!("B pulled {SIGNED} by tag from A in {:?}", start.elapsed());
+        // Read before upstream is reachable again: then B's discovery may ask it for the image's artifacts (D121).
+        assert_eq!(
+            nodes.upstream_pulls(&nodes.b, SIGNED),
+            pulls,
+            "upstream answered B"
+        );
     }
-    assert_eq!(nodes.upstream_pulls(SIGNED), pulls, "upstream answered B");
     assert!(
         nodes.metric(&nodes.b, PEER) > peer,
         "B resolved no tag from peers"
@@ -237,7 +249,7 @@ fn with_resolve_tags_off_c_resolves_the_tag_a_holds_upstream() {
     let nodes = Nodes::new();
     let reference = nodes.only_a_holds_signed();
     let (pulls, peer, miss) = (
-        nodes.upstream_pulls(SIGNED),
+        nodes.upstream_pulls(&nodes.c, SIGNED),
         nodes.metric(&nodes.c, PEER),
         nodes.metric(&nodes.c, MISS),
     );
@@ -247,7 +259,7 @@ fn with_resolve_tags_off_c_resolves_the_tag_a_holds_upstream() {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             nodes.pulled(&nodes.c, &reference);
-            if nodes.upstream_pulls(SIGNED) > pulls {
+            if nodes.upstream_pulls(&nodes.c, SIGNED) > pulls {
                 break;
             }
             assert!(Instant::now() < deadline, "C never asked upstream");
@@ -278,7 +290,7 @@ fn a_tag_no_node_holds_resolves_upstream() {
     let miss = nodes.metric(&nodes.b, MISS);
     nodes.pulled(&nodes.b, &image.reference);
     assert!(
-        nodes.upstream_pulls(&format!("{repository}:1")) > 0,
+        nodes.upstream_pulls(&nodes.b, &format!("{repository}:1")) > 0,
         "B did not resolve the tag upstream"
     );
     assert!(nodes.metric(&nodes.b, MISS) > miss, "B asked no peer");
