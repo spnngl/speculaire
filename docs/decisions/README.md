@@ -64,7 +64,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64, D86)
 - D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32; amended by D82, D85)
 - D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47; amended by D82)
-- D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62, D116)
+- D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62, D116, D118)
 - D58 [build](build.md): CI runs the check on the runner with prebuilt tools, and the musl build in the build image; `ci` jobs land with their content (amends D27, D57)
 - D59 [build](build.md): e2e is a Rust test crate of `#[ignore]`d suites on a kind cluster managed by `just e2e <minor>`, with pinned containerd, kind and kubectl (amends D27; amended by D63)
 - D60 [agent](agent.md): config values parse into types that print back as written; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47; amended by D87)
@@ -125,4 +125,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D115 [distribution](distribution.md): a negative `dial_timeout` in a `hosts.toml` is parsed, and the host is left out of the registry's sources, as containerd cannot dial it (amends D78)
 - D116 [build](build.md): pull metrics by source, body, peer attempt, upload and reflector resync, plus tokio's task and queue gauges, handles kept; debug spans per request, attempt and connection, span timings off by default; a glibc `profile` image for `just profile load|peer` (perf flamegraphs) and `just valgrind`, with a peer pull in `speculaire-loadgen peer`; frame pointers in every Linux build (amends D13, D34, D37, D57, D104)
 - D117 [reflector](reflector.md): a frame reader keeps one buffer per connection, grown to the largest frame and freed after one over 1 KiB, such as a snapshot chunk (amends D105)
-Next free number: D118.
+- D118 [build](build.md): `just dev` mounts the tree at its host path and builds it in `/target<path>` of the shared volume; `just musl` keeps `/src` (amends D57)
+Next free number: D119.
