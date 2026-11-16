@@ -39,7 +39,7 @@ pub struct Config {
     pub verify: Verify,
     /// `[sbom]`: SBOM attestations (D12).
     pub sbom: Sbom,
-    /// `[artifacts]`: the *artifact store* of signatures and attestations found upstream (D120).
+    /// `[artifacts]`: the *artifact store* of signatures and attestations found upstream (D121).
     pub artifacts: Artifacts,
     /// `[mirror]`: the local registry mirror the runtime pulls through (D14, D66).
     pub mirror: Mirror,
@@ -419,7 +419,7 @@ impl Default for Sbom {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Artifacts {
-    /// Where the *artifact store* keeps what discovery fetched (D120).
+    /// Where the *artifact store* keeps what discovery fetched (D121).
     pub directory: Restart<Absolute>,
 }
 
