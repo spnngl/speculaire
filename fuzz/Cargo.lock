@@ -1675,6 +1675,7 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_path_to_error",
+ "speculaire-artifacts",
  "speculaire-configure",
  "speculaire-mirror",
  "speculaire-oci",
@@ -1687,6 +1688,24 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "speculaire-artifacts"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "http-body-util",
+ "hyper",
+ "metrics",
+ "serde",
+ "serde_json",
+ "speculaire-oci",
+ "speculaire-registry",
+ "speculaire-runtime",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1722,7 +1741,6 @@ dependencies = [
 name = "speculaire-mirror"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
  "bytes",
  "futures-util",
  "http",
@@ -1750,6 +1768,7 @@ dependencies = [
 name = "speculaire-oci"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "oci-spec",
  "serde",
  "serde_json",
@@ -1838,6 +1857,7 @@ dependencies = [
  "containerd-client",
  "futures-util",
  "prost",
+ "rustix",
  "rustls-pki-types",
  "secrecy",
  "serde",
