@@ -125,6 +125,7 @@ impl Node {
                  crio_socket = \"{d}/crio.sock\"\n\
                  [mirror]\naddress = \"{mirror}\"\ndirectory = \"{d}/mirror\"\n\
                  [blob_cache]\ndirectory = \"{d}/blobs\"\n\
+                 [artifacts]\ndirectory = \"{d}/artifacts\"\n\
                  [metrics]\naddress = \"{metrics}\"\n\
                  {tables}"
             ),
