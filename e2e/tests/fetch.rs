@@ -415,14 +415,16 @@ fn a_peer_that_serves_a_corrupted_blob_is_denied_with_a_warning_and_an_audit_eve
     // A is skipped: C serves the next image although it answers late.
     let next = nodes.image(1 << 20);
     both(&next);
-    let served = nodes.metric(&nodes.a, UPLOADED);
+    // A's blob bytes, not its served uploads: C discovers `next`'s artifacts and asks A for referrers lists (D124),
+    // which count as served, whenever its image list shows `next`.
+    let sent = nodes.metric(&nodes.a, UPLOAD_BYTES);
     {
         let _late = nodes.cluster.netem(&nodes.c, "delay 1s").unwrap();
         nodes.pulled(&nodes.b, &next);
     }
     assert_eq!(
-        nodes.metric(&nodes.a, UPLOADED),
-        served,
+        nodes.metric(&nodes.a, UPLOAD_BYTES),
+        sent,
         "A served a denied fetch"
     );
     nodes.rmi(&[&nodes.a, &nodes.b, &nodes.c], &image);
