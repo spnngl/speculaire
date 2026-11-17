@@ -141,7 +141,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Without the certificates the mirror cannot listen (D14). Without the entry, containerd never calls the mirror, so verification starts only at the gate (D22), and every first start waits.
 - **Revisit when:** a packaging runs `configure` for the admin, as the DaemonSet's init container would.
 
-## D60: Config values parse into types, and the remaining keys get names (amends D16, D47; amended by D87, D135)
+## D60: Config values parse into types, and the remaining keys get names (amends D16, D47; amended by D87, D135, D137)
 
 - **Decision:**
   - Keys the decisions left unnamed, with their defaults:
@@ -343,3 +343,13 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The agent, the mirror and `speculaire-loadgen` share no crate whose subject is time; a crate of its own adds no edge between the others.
   - A printer that cannot fail keeps a log line from panicking: humantime's returned `fmt::Error` after year 9999, which `DENY_MAX` (D52) had to avoid.
 - **Revisit when:** an admin needs a unit or spelling the grammar refuses, or a timestamp needs a fraction of a second.
+
+
+## D137: `log.filter` refuses whitespace around a directive (amends D60)
+
+- **Decision:** a `log.filter` with whitespace, as `str::trim` strips it, at the start or end of a directive between its commas is refused, before `EnvFilter` reads it: `" warn"`, `"warn "` and `"info, speculaire=debug"` do not read. `check-config` and a reload report it as any other bad value.
+- **Because:**
+  - tracing-subscriber 0.3.23, the latest release, walks the trimmed directive but slices the untrimmed one at its indices (`src/filter/env/directive.rs:143-155`). Leading whitespace shifts every slice: a slice that ends inside a multi-byte character panics, and one that does not reads another target or level than written. The fix, tokio-rs/tracing#3297, is open and unreleased.
+  - The `config_values` fuzz target found the panic, scheduled run 44074175851: `"\tq\u{feff}["`. A panic on a config value stops `check-config`, and the agent at startup or at a reload.
+  - `EnvFilter` means to ignore that whitespace, as its `trim` shows, so refusing it loses no filter; catching the panic would still accept the misread ones.
+- **Revisit when:** a tracing-subscriber release fixes the slicing; the check can then go.

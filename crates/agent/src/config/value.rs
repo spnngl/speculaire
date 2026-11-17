@@ -507,7 +507,7 @@ impl fmt::Display for NodeName {
     }
 }
 
-/// A log filter in `EnvFilter` syntax (D37), checked when read.
+/// A log filter in `EnvFilter` syntax (D37), checked when read, with no whitespace around a directive (D137).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct LogFilter(String);
@@ -546,6 +546,13 @@ fn env_filter(
 impl FromStr for LogFilter {
     type Err = InvalidValue;
     fn from_str(s: &str) -> Result<Self, InvalidValue> {
+        // tracing-subscriber 0.3.23 `filter/env/directive.rs:143-155` walks a directive trimmed but slices it as given:
+        // whitespace around one misreads it, or panics inside a character (tokio-rs/tracing#3297).
+        if s.split(',').any(|directive| directive.trim() != directive) {
+            return Err(InvalidValue(format!(
+                "expected EnvFilter directives with no whitespace around them, found {s:?}"
+            )));
+        }
         env_filter(s).map(|_| Self(s.to_owned())).map_err(|e| {
             InvalidValue(format!(
                 "expected an EnvFilter directive such as \"warn\", found {s:?}: {e}"
@@ -698,5 +705,14 @@ mod tests {
             assert!(s.parse::<PeerAddress>().is_err(), "{s}");
         }
         assert!("relative/root.json".parse::<TrustedRoot>().is_err());
+    }
+
+    #[test]
+    fn a_log_filter_with_whitespace_around_a_directive_is_refused() {
+        // The first panicked inside tracing-subscriber: scheduled fuzz run 44074175851 (D137).
+        for s in ["\tq\u{feff}[", " warn", "warn ", "info, x=debug", "info ,x"] {
+            assert!(s.parse::<LogFilter>().is_err(), "{s:?}");
+        }
+        assert!("info,,x=debug".parse::<LogFilter>().is_ok());
     }
 }

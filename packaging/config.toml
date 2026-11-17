@@ -109,7 +109,7 @@
 #seeds = 2
 
 [log]
-# Which diagnostic events reach the log, in EnvFilter syntax (D37).
+# Which diagnostic events reach the log, in EnvFilter syntax without spaces around a directive (D37, D137).
 #filter = "warn"
 # Whether each span log.filter lets through is logged as JSON on stderr as it closes, with its busy and idle times.
 #timings = false
