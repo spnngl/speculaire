@@ -1,0 +1,269 @@
+name: fixtures
+
+# Records the gate's Sigstore fixtures from public-good Sigstore (D139): one image per case, signed and attested by the
+# tools that make them in the wild, exported as OCI layouts with a TUF snapshot, and checked offline by cosign and gh.
+# By hand only: each run writes entries to the public Rekor log.
+on:
+  workflow_dispatch:
+
+# Each job grants only what it needs.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # Keyless signing, the GitHub attestations, and the images they sign.
+      id-token: write
+      attestations: write
+      packages: write
+    env:
+      REPOSITORY: ghcr.io/${{ github.repository }}-fixtures
+      ISSUER: https://token.actions.githubusercontent.com
+      # The e2e suites' cosign (D112) and regctl.
+      COSIGN_IMAGE: "ghcr.io/sigstore/cosign/cosign:v3.1.3@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8"
+      REGCTL_IMAGE: "ghcr.io/regclient/regctl:v0.8.3-alpine@sha256:e50f92394d7826dde8f6558511178988b4ce64267519b8b0a9c6c47fbeae6a16"
+      REGISTRY_IMAGE: "docker.io/library/registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e"
+      SYFT_IMAGE: "ghcr.io/anchore/syft:v1.57.2@sha256:e97e20b6e6d1699c60296b66ab337941724f9bd06ac279d893eda89601fc4b2a"
+      BUILDKIT_IMAGE: "docker.io/moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb"
+      SCANNER_IMAGE: "docker.io/docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      # In ~/.docker/config.json, where actions/attest reads it too.
+      - env:
+          TOKEN: ${{ github.token }}
+        run: docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$TOKEN"
+      # cosign, regctl and syft run in their containers as the runner's user, on the host network unless
+      # `TOOL_NETWORK` names another, and see the workspace and the runner's temporary directory at the same paths.
+      - name: Tools
+        run: |
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin" "$RUNNER_TEMP/home" "$RUNNER_TEMP/digests" "$RUNNER_TEMP/sboms"
+          tool() {
+            cat > "$bin/$1" <<EOF
+          #!/usr/bin/env bash
+          exec docker run --rm --network "\${TOOL_NETWORK:-host}" --user "$(id -u):$(id -g)" \\
+            -e HOME="$RUNNER_TEMP/home" -e TMPDIR="$RUNNER_TEMP" -e DOCKER_CONFIG="$HOME/.docker" -e TUF_ROOT \\
+            -e COSIGN_PASSWORD= -e COSIGN_YES=true -e ACTIONS_ID_TOKEN_REQUEST_URL -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \\
+            -v "$HOME/.docker:$HOME/.docker:ro" -v "$RUNNER_TEMP:$RUNNER_TEMP" -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \\
+            -w "\$PWD" $2 "\$@"
+          EOF
+            chmod +x "$bin/$1"
+          }
+          tool cosign "$COSIGN_IMAGE"
+          tool regctl "$REGCTL_IMAGE regctl"
+          tool syft "$SYFT_IMAGE"
+          echo "$bin" >> "$GITHUB_PATH"
+          # BuildKit pulls its SBOM scanner from Docker Hub's mirror (D122).
+          printf '[registry."docker.io"]\n  mirrors = ["mirror.gcr.io"]\n' > "$RUNNER_TEMP/buildkitd.toml"
+          docker buildx create --name fixtures --driver docker-container \
+            --driver-opt "image=$(just hub-pull "$BUILDKIT_IMAGE")" --buildkitd-config "$RUNNER_TEMP/buildkitd.toml"
+      # One `FROM scratch` image per case, each with one file of its own, so each has its own digest. The file is an
+      # npm `package.json`, a package for syft to find; spdx-empty's is a plain file, which gives no package.
+      - id: build
+        name: Build
+        run: |
+          build() {
+            local case=$1 context="$RUNNER_TEMP/contexts/$1"
+            shift
+            if [[ $case == spdx-empty ]]; then
+              mkdir -p "$context/fixture"
+              echo "$case" > "$context/fixture/$case"
+            else
+              mkdir -p "$context/fixture/node_modules/speculaire-fixture"
+              printf '{"name":"speculaire-fixture","version":"1.0.0","description":"%s"}\n' "$case" \
+                > "$context/fixture/node_modules/speculaire-fixture/package.json"
+            fi
+            printf 'FROM scratch\nCOPY fixture /\n' > "$context/Dockerfile"
+            docker buildx build --builder fixtures --platform linux/amd64 --provenance=false "$@" \
+              --output "type=image,name=$REPOSITORY:$case,push=true,oci-mediatypes=true" \
+              --metadata-file "$context/metadata.json" "$context"
+            jq -r '."containerimage.digest"' "$context/metadata.json" > "$RUNNER_TEMP/digests/$case"
+          }
+          for case in keyless key legacy-sig att-only provenance spdx cyclonedx spdx-empty attest-sbom sbom-tag unsigned; do
+            build "$case" --sbom=false
+          done
+          # An index of the image and BuildKit's SPDX attestation manifest.
+          for case in buildkit-signed buildkit-unsigned; do
+            build "$case" "--sbom=generator=$SCANNER_IMAGE"
+          done
+          if [[ $(sort -u "$RUNNER_TEMP"/digests/* | wc -l) -ne $(find "$RUNNER_TEMP/digests" -type f | wc -l) ]]; then
+            echo "::error::two cases share a digest"
+            exit 1
+          fi
+          echo "provenance=$(cat "$RUNNER_TEMP/digests/provenance")" >> "$GITHUB_OUTPUT"
+          echo "attest-sbom=$(cat "$RUNNER_TEMP/digests/attest-sbom")" >> "$GITHUB_OUTPUT"
+      - name: Sign
+        run: |
+          ref() { echo "$REPOSITORY@$(cat "$RUNNER_TEMP/digests/$1")"; }
+          cosign sign "$(ref keyless)"
+          cosign generate-key-pair --output-key-prefix "$RUNNER_TEMP/cosign"
+          cosign sign --key "$RUNNER_TEMP/cosign.key" "$(ref key)"
+          legacy=(--new-bundle-format=false --use-signing-config=false)
+          cosign sign "${legacy[@]}" "$(ref legacy-sig)"
+          cosign sign "$(ref att-only)"
+          cosign attest "${legacy[@]}" --type slsaprovenance1 --predicate "$GITHUB_WORKSPACE/e2e/fixtures/slsa.json" \
+            "$(ref att-only)"
+          for case in spdx spdx-empty sbom-tag attest-sbom; do
+            syft scan --quiet "registry:$(ref "$case")" --output "spdx-json=$RUNNER_TEMP/sboms/$case.json"
+          done
+          syft scan --quiet "registry:$(ref cyclonedx)" --output "cyclonedx-json=$RUNNER_TEMP/sboms/cyclonedx.json"
+          for case in spdx spdx-empty cyclonedx; do
+            cosign sign "$(ref "$case")"
+          done
+          cosign attest --type spdxjson --predicate "$RUNNER_TEMP/sboms/spdx.json" "$(ref spdx)"
+          cosign attest --type spdxjson --predicate "$RUNNER_TEMP/sboms/spdx-empty.json" "$(ref spdx-empty)"
+          cosign attest --type cyclonedx --predicate "$RUNNER_TEMP/sboms/cyclonedx.json" "$(ref cyclonedx)"
+          cosign sign "$(ref sbom-tag)"
+          cosign attach sbom --type spdx --input-format json --sbom "$RUNNER_TEMP/sboms/sbom-tag.json" "$(ref sbom-tag)"
+          cosign sign "$(ref buildkit-signed)"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REPOSITORY }}
+          subject-digest: ${{ steps.build.outputs.provenance }}
+          push-to-registry: true
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ env.REPOSITORY }}
+          subject-digest: ${{ steps.build.outputs.attest-sbom }}
+          sbom-path: ${{ runner.temp }}/sboms/attest-sbom.json
+          push-to-registry: true
+      # Each case with its tags and referrers, the public key, and the TUF repository as a client found it: the root
+      # chain, the top-level metadata and the trusted root, in the repository's layout. `cosign initialize` verifies
+      # the metadata; the chain comes from the same CDN and must end at the root it trusts.
+      - name: Export
+        run: |
+          out="$GITHUB_WORKSPACE/target/fixtures"
+          mkdir -p "$out/layouts" "$out/tuf/targets"
+          for file in "$RUNNER_TEMP"/digests/*; do
+            case=$(basename "$file")
+            regctl image copy --referrers --digest-tags "$REPOSITORY@$(cat "$file")" "ocidir://$out/layouts/$case:$case"
+          done
+          cp "$RUNNER_TEMP/cosign.pub" "$out/"
+          TUF_ROOT="$RUNNER_TEMP/tuf" cosign initialize
+          cdn=https://tuf-repo-cdn.sigstore.dev
+          metadata="$RUNNER_TEMP/tuf/${cdn#https://}"
+          version=1
+          while curl --fail --silent --output "$out/tuf/$version.root.json" "$cdn/$version.root.json"; do
+            version=$((version + 1))
+          done
+          rm -f "$out/tuf/$version.root.json"
+          cmp "$out/tuf/$((version - 1)).root.json" "$metadata/root.json"
+          cp "$metadata/timestamp.json" "$out/tuf/"
+          for role in snapshot targets; do
+            cp "$metadata/$role.json" "$out/tuf/$(jq .signed.version "$metadata/$role.json").$role.json"
+          done
+          hash=$(jq -r '.signed.targets["trusted_root.json"].hashes.sha256' "$metadata/targets.json")
+          echo "$hash  $metadata/targets/trusted_root.json" | sha256sum --check
+          cp "$metadata/targets/trusted_root.json" "$out/tuf/targets/$hash.trusted_root.json"
+          cp "$metadata/targets/trusted_root.json" "$out/trusted_root.json"
+      # The oracle, offline: cosign reads the layouts back from a registry on a network with no route out, and gh
+      # verifies a bundle file against the image manifest's bytes. Both trust only the exported trusted root.
+      - name: Oracle
+        run: |
+          out="$GITHUB_WORKSPACE/target/fixtures"
+          san="https://github.com/$GITHUB_WORKFLOW_REF"
+          docker network create --internal fixtures-offline
+          docker run --detach --rm --network fixtures-offline --network-alias registry.offline \
+            "$(just hub-pull "$REGISTRY_IMAGE")"
+          export TOOL_NETWORK=fixtures-offline
+          for file in "$RUNNER_TEMP"/digests/*; do
+            case=$(basename "$file")
+            regctl --host reg=registry.offline:5000,tls=disabled image copy --referrers --digest-tags "ocidir://$out/layouts/$case:$case" \
+              "registry.offline:5000/fixtures:$case"
+          done
+          # gh reads one trusted root per line.
+          jq -c . "$out/trusted_root.json" > "$RUNNER_TEMP/trusted_root.jsonl"
+
+          # verify CASE DIGEST CHECK: runs one check of CASE; its status is the verdict.
+          verify() {
+            local case=$1 digest=$2 check=$3
+            local image="registry.offline:5000/fixtures@$digest"
+            local cosign=(--trusted-root "$out/trusted_root.json" --allow-http-registry)
+            if [[ $case == key ]]; then
+              cosign+=(--key "$out/cosign.pub")
+            else
+              cosign+=(--certificate-identity "$san" --certificate-oidc-issuer "$ISSUER")
+            fi
+            case $check in
+              signature) cosign verify "${cosign[@]}" "$image" ;;
+              signature-legacy) cosign verify --new-bundle-format=false "${cosign[@]}" "$image" ;;
+              attestation:*) cosign verify-attestation --type "${check#*:}" "${cosign[@]}" "$image" ;;
+              attestation-legacy:*)
+                cosign verify-attestation --new-bundle-format=false --type "${check#*:}" "${cosign[@]}" "$image" ;;
+              github:*)
+                regctl artifact get --subject "ocidir://$out/layouts/$case@$digest" \
+                  --filter-artifact-type application/vnd.dev.sigstore.bundle.v0.3+json \
+                  --filter-annotation "dev.sigstore.bundle.predicateType=${check#github:}" > "$RUNNER_TEMP/$case.bundle.json" &&
+                  gh attestation verify "$out/layouts/$case/blobs/sha256/${digest#sha256:}" \
+                    --bundle "$RUNNER_TEMP/$case.bundle.json" --custom-trusted-root "$RUNNER_TEMP/trusted_root.jsonl" \
+                    --repo "$GITHUB_REPOSITORY" --cert-identity "$san" --predicate-type "${check#github:}" ;;
+            esac
+          }
+
+          spdx_version=$(jq -r .spdxVersion "$RUNNER_TEMP/sboms/attest-sbom.json")
+          attest_sbom="https://spdx.dev/Document/v${spdx_version#SPDX-}"
+          slsa=https://slsa.dev/provenance/v1
+          spdx=https://spdx.dev/Document
+          # case|signer|predicate types attached|checks|the outcome its name promises
+          cases=(
+            "keyless|keyless||signature|pass"
+            "key|key||signature|pass"
+            "legacy-sig|keyless||signature-legacy|pass"
+            "att-only|keyless|$slsa|signature attestation-legacy:slsaprovenance1|pass"
+            "provenance|keyless|$slsa|github:$slsa|pass"
+            "spdx|keyless|$spdx|signature attestation:spdxjson|pass"
+            "cyclonedx|keyless|https://cyclonedx.org/bom|signature attestation:cyclonedx|pass"
+            "spdx-empty|keyless|$spdx|signature attestation:spdxjson|pass"
+            "attest-sbom|keyless|$attest_sbom|github:$attest_sbom|pass"
+            "buildkit-signed|keyless|$spdx|signature|pass"
+            "buildkit-unsigned|none|$spdx|signature|fail"
+            "sbom-tag|keyless||signature attestation:spdxjson|fail"
+            "unsigned|none||signature|fail"
+          )
+          mismatch=0
+          for row in "${cases[@]}"; do
+            IFS='|' read -r case signer types checks promised <<< "$row"
+            digest=$(cat "$RUNNER_TEMP/digests/$case")
+            outcome=pass
+            results=()
+            for check in $checks; do
+              echo "::group::$case: $check"
+              if verify "$case" "$digest" "$check"; then ok=true; else ok=false; outcome=fail; fi
+              echo "::endgroup::"
+              results+=("$(jq -nc --arg check "$check" --argjson ok "$ok" '{$check, $ok}')")
+            done
+            case $signer in
+              keyless) signer=$(jq -nc --arg san "$san" --arg issuer "$ISSUER" '{$san, $issuer}') ;;
+              key) signer='{"key":"cosign.pub"}' ;;
+              none) signer=null ;;
+            esac
+            jq -nc --arg case "$case" --arg digest "$digest" --argjson signer "$signer" --arg types "$types" \
+              --arg outcome "$outcome" --argjson checks "$(printf '%s\n' "${results[@]}" | jq -sc .)" \
+              '{$case, $digest, $signer, predicateTypes: ($types | split(" ") | map(select(. != ""))), $checks, $outcome}' \
+              >> "$RUNNER_TEMP/expected.jsonl"
+            if [[ $outcome != "$promised" ]]; then
+              echo "::error::$case: the oracle says $outcome where its name promises $promised"
+              mismatch=1
+            fi
+          done
+          jq -s . "$RUNNER_TEMP/expected.jsonl" > "$out/expected.json"
+          exit "$mismatch"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fixtures
+          path: target/fixtures
+          if-no-files-found: error

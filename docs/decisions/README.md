@@ -15,7 +15,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85, D110)
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66, D123)
 - D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73, D102)
-- D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136)
+- D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136, D139)
 - D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136)
@@ -146,5 +146,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D136 [verification](verification.md): `subjectRegExp` and `issuerRegExp` match the whole SAN and issuer, the parsed pattern wrapped in `\A` and `\z`, where cosign, policy-controller and sigstore-go match a substring (amends D8, D11)
 - D137 [agent](agent.md): `log.filter` refuses whitespace around a directive, which tracing-subscriber 0.3.23 misreads or panics on (amends D60)
 - D138 [agent](agent.md): durations are numbers of seconds to the millisecond, TOML integers or floats, printed as the shortest decimal; strings are refused (amends D60, D135)
+- D139 [verification](verification.md): Sigstore fixtures are recorded from public-good Sigstore by the hand-run `fixtures.yml`, as OCI layouts with a TUF snapshot, checked offline by cosign and gh (amends D8)
 
-Next free number: D139.
+Next free number: D140.
