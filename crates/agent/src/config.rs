@@ -831,6 +831,16 @@ mod tests {
                 "loopback",
             ),
             (
+                "[gate]\nwait = \"300ms\"\n",
+                "gate.wait",
+                "a number of seconds",
+            ),
+            (
+                "[config]\npoll_interval = 0\n",
+                "config.poll_interval",
+                "longer than zero",
+            ),
+            (
                 "[peer]\nmax_uploads = 0\n",
                 "peer.max_uploads",
                 "integer from 1",

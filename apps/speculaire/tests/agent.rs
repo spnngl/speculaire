@@ -485,18 +485,18 @@ fn sighup_applies_log_filter() {
 
 #[test]
 fn a_poll_reloads_a_changed_file() {
-    let mut agent = Agent::start("[config]\npoll_interval = \"1s\"\n");
-    agent.rewrite("[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n");
+    let mut agent = Agent::start("[config]\npoll_interval = 1\n");
+    agent.rewrite("[config]\npoll_interval = 1\n[log]\nfilter = \"debug\"\n");
     agent.line(&[r#""level":"DEBUG""#, RELOADED]);
 }
 
 #[test]
 fn a_poll_reloads_a_file_changed_after_startup_read_it() {
-    let mut agent = Agent::start("[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"info\"\n");
+    let mut agent = Agent::start("[config]\npoll_interval = 1\n[log]\nfilter = \"info\"\n");
     // A write during preflight: after the config was read, before the listeners open.
     agent.line(&["preflight passed"]);
     backdated(&agent.config, || {
-        agent.rewrite("[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n");
+        agent.rewrite("[config]\npoll_interval = 1\n[log]\nfilter = \"debug\"\n");
     });
     agent.line(&[RELOADED]);
 }
@@ -620,8 +620,8 @@ fn the_watchdog_is_pinged_every_half_of_its_timeout() {
 
 #[test]
 fn a_new_poll_interval_applies_to_the_next_poll() {
-    let mut agent = Agent::start("[config]\npoll_interval = \"1h\"\n");
-    let fast = "[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n";
+    let mut agent = Agent::start("[config]\npoll_interval = 3600\n");
+    let fast = "[config]\npoll_interval = 1\n[log]\nfilter = \"debug\"\n";
     agent.rewrite(fast);
     agent.signal("HUP");
     agent.line(&[r#""level":"DEBUG""#, RELOADED]);
@@ -971,7 +971,7 @@ fn an_invalid_registry_config_keeps_the_previous_is_reported_once_and_a_fix_is_p
     let hosts = write_hosts(&node, "[host.\"https://one.corp\"]\n");
     let mut agent = Agent::spawn_on(
         node,
-        "[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n",
+        "[config]\npoll_interval = 1\n[log]\nfilter = \"debug\"\n",
         &[],
     );
     // The first read, at startup.
@@ -1012,7 +1012,7 @@ fn a_login_that_cannot_be_used_leaves_one_registry_anonymous_is_reported_once_an
     );
     let mut agent = Agent::spawn_on(
         node,
-        "[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n",
+        "[config]\npoll_interval = 1\n[log]\nfilter = \"debug\"\n",
         &[],
     );
     let line = agent.line(&[
@@ -1042,7 +1042,7 @@ fn sighup_reads_the_registry_config_again_whatever_the_modification_times_say() 
     let hosts = write_hosts(&node, "[host.\"https://one.corp\"]\n");
     let mut agent = Agent::spawn_on(
         node,
-        "[config]\npoll_interval = \"1h\"\n[log]\nfilter = \"debug\"\n",
+        "[config]\npoll_interval = 3600\n[log]\nfilter = \"debug\"\n",
         &[],
     );
     agent.line(&[r#""level":"DEBUG""#, "registry config reloaded"]);
@@ -1069,7 +1069,7 @@ fn a_reflector_opens_once_its_identity_is_loaded_and_readyz_waits_for_it() {
     put(&ca, cluster.ca());
     let mut agent = Agent::spawn(
         &format!(
-            "role = \"reflector\"\n[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[config]\npoll_interval = \"1s\"\n[reflector]\nlisten = \"127.0.0.1:0\"\n[log]\nfilter = \"debug\"\n",
+            "role = \"reflector\"\n[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[config]\npoll_interval = 1\n[reflector]\nlisten = \"127.0.0.1:0\"\n[log]\nfilter = \"debug\"\n",
             certificate.display(),
             ca.display()
         ),
@@ -1106,7 +1106,7 @@ fn p2p_waits_for_the_kubelet_certificate_and_a_bad_one_is_one_error_naming_it() 
     let ca = files.path().join("ca.crt");
     put(&ca, cluster.ca());
     let mut agent = Agent::start(&format!(
-        "[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n",
+        "[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[config]\npoll_interval = 1\n[log]\nfilter = \"debug\"\n",
         certificate.display(),
         ca.display()
     ));
@@ -1195,7 +1195,7 @@ fn an_agent_announces_what_containerd_holds_to_the_reflectors_of_its_url() {
     let mut agent = Agent::spawn_on(
         Node::new(answers, None),
         &format!(
-            "role = \"reflector\"\n[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[reflector]\nurl = \"https://{at}\"\nmembers = [{{ node = \"cp-1\", address = \"{at}\" }}]\nlisten = \"{ANY_PORT}\"\n[config]\npoll_interval = \"1s\"\n[log]\nfilter = \"debug\"\n",
+            "role = \"reflector\"\n[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[reflector]\nurl = \"https://{at}\"\nmembers = [{{ node = \"cp-1\", address = \"{at}\" }}]\nlisten = \"{ANY_PORT}\"\n[config]\npoll_interval = 1\n[log]\nfilter = \"debug\"\n",
             certificate.display(),
             ca.display()
         ),

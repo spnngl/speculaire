@@ -7,22 +7,28 @@
 
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
 
-/// Durations (D135); the zero, spaces, units out of order and the overflow are among the refusals.
+/// Numbers of seconds (D138); the zero, strings, signs, finer than a millisecond and the overflow are among the
+/// refusals.
 const SPANS: &[&str] = &[
-    r#""10s""#,
-    r#""300ms""#,
-    r#""1h30m""#,
-    r#""1d2h3m4s5ms6us7ns""#,
-    r#""90s""#,
-    r#""0s""#,
-    r#""-1s""#,
-    r#""10""#,
-    r#""1x""#,
-    r#""1h 30m""#,
-    r#""1m1h""#,
-    r#""18446744073709551615s""#,
-    r#""18446744073709551616s""#,
     "10",
+    "0.3",
+    "0.001",
+    "3600",
+    "1e3",
+    "2.5e-1",
+    "9223372036854775807",
+    "9.2e18",
+    "0",
+    "0.0",
+    "-1",
+    "-0.0",
+    "0.0001",
+    "0.0015",
+    "1e19",
+    "nan",
+    "inf",
+    r#""10s""#,
+    r#""10""#,
 ];
 
 /// Sizes, as `ByteSize` reads them.

@@ -33,8 +33,6 @@ macro_rules! string_conversions {
 }
 
 string_conversions!(
-    Span,
-    Interval,
     ByteSize,
     Loopback,
     RegistryName,
@@ -46,9 +44,8 @@ string_conversions!(
     LogFilter
 );
 
-/// A duration such as `"300ms"`, `"10m"` or `"1h30m"` (D135).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(try_from = "String", into = "String")]
+/// A duration: a TOML integer or float of seconds, to the millisecond, such as `10` or `0.3` (D138).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span(Duration);
 
 impl Span {
@@ -67,14 +64,51 @@ impl Span {
     }
 }
 
-impl FromStr for Span {
-    type Err = InvalidValue;
-    fn from_str(s: &str) -> Result<Self, InvalidValue> {
-        speculaire_time::duration::parse(s).map(Self).map_err(|e| {
-            InvalidValue(format!(
-                "expected a duration such as \"300ms\" or \"10m\", found {s:?}: {e}"
-            ))
-        })
+impl<'de> Deserialize<'de> for Span {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(Seconds)
+    }
+}
+
+/// Reads a [`Span`] from a TOML number; a string or any other type is refused as not a number of seconds.
+struct Seconds;
+
+impl Seconds {
+    /// Reads `number` printed in decimal: a float prints as the shortest decimal that reads back to it, which is
+    /// the one written for any float of up to 15 significant digits, so `0.3` is 300 ms, with no binary rounding.
+    fn read<E: serde::de::Error>(number: impl fmt::Display) -> Result<Span, E> {
+        let text = number.to_string();
+        speculaire_time::duration::parse(&text)
+            .map(Span)
+            .map_err(|e| E::custom(format_args!("{e}, found {text}")))
+    }
+}
+
+impl serde::de::Visitor<'_> for Seconds {
+    type Value = Span;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a number of seconds, such as 10 or 0.3")
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<Span, E> {
+        Self::read(n)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, n: f64) -> Result<Span, E> {
+        Self::read(n)
+    }
+}
+
+impl Serialize for Span {
+    /// Whole seconds as a TOML integer, which reading caps at `i64::MAX`, others as the float nearest their decimal,
+    /// which prints back as it.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let text = self.to_string();
+        match text.parse::<i64>() {
+            Ok(secs) => serializer.serialize_i64(secs),
+            Err(_) => serializer.serialize_f64(text.parse().map_err(serde::ser::Error::custom)?),
+        }
     }
 }
 
@@ -86,7 +120,7 @@ impl fmt::Display for Span {
 
 /// A [`Span`] longer than zero: the period of a timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(try_from = "Span", into = "Span")]
 pub struct Interval(Span);
 
 impl Interval {
@@ -102,22 +136,21 @@ impl Interval {
     }
 }
 
-impl FromStr for Interval {
-    type Err = InvalidValue;
-    fn from_str(s: &str) -> Result<Self, InvalidValue> {
-        let span: Span = s.parse()?;
+impl TryFrom<Span> for Interval {
+    type Error = InvalidValue;
+    fn try_from(span: Span) -> Result<Self, InvalidValue> {
         if span.get().is_zero() {
-            return Err(InvalidValue(format!(
-                "expected a duration longer than zero, found {s:?}"
-            )));
+            return Err(InvalidValue(
+                "expected a number of seconds longer than zero, found 0".to_owned(),
+            ));
         }
         Ok(Self(span))
     }
 }
 
-impl fmt::Display for Interval {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+impl From<Interval> for Span {
+    fn from(interval: Interval) -> Self {
+        interval.0
     }
 }
 
@@ -571,11 +604,67 @@ impl fmt::Display for LogFilter {
 mod tests {
     use super::*;
 
+    /// The value of `key = <literal>`, or TOML's error.
+    fn read<T: serde::de::DeserializeOwned>(literal: &str) -> Result<T, toml::de::Error> {
+        #[derive(Deserialize)]
+        struct Key<T> {
+            key: T,
+        }
+        toml::from_str::<Key<T>>(&format!("key = {literal}")).map(|k| k.key)
+    }
+
+    #[test]
+    fn spans_are_numbers_of_seconds_that_print_as_written() {
+        for (literal, duration) in [
+            ("0", Duration::ZERO),
+            ("10", Duration::from_secs(10)),
+            ("0.3", Duration::from_millis(300)),
+            ("0.001", Duration::from_millis(1)),
+            ("1.25", Duration::from_millis(1250)),
+            ("3600", Duration::from_hours(1)),
+            (
+                "9223372036854775807",
+                Duration::from_secs(i64::MAX.unsigned_abs()),
+            ),
+        ] {
+            let span: Span = read(literal).unwrap();
+            assert_eq!(span.get(), duration, "{literal}");
+            assert_eq!(span.to_string(), literal);
+            assert_eq!(toml::Value::try_from(span).unwrap().to_string(), literal);
+        }
+        for (literal, printed) in [
+            ("1e3", "1000"),
+            ("1.0", "1"),
+            ("0.300", "0.3"),
+            ("2.5e-1", "0.25"),
+        ] {
+            assert_eq!(
+                read::<Span>(literal).unwrap().to_string(),
+                printed,
+                "{literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn spans_refuse_strings_signs_and_finer_than_a_millisecond() {
+        for literal in [
+            r#""10s""#, r#""10""#, "-1", "-0.0", "0.0001", "0.0015", "1.5e-4", "nan", "inf",
+            "1e19", "true",
+        ] {
+            let err = read::<Span>(literal).unwrap_err().to_string();
+            assert!(err.contains("a number of seconds"), "{literal}: {err}");
+        }
+        assert!(read::<Interval>("0").is_err());
+        assert!(read::<Interval>("0.0").is_err());
+        assert_eq!(
+            read::<Interval>("0.001").unwrap().get(),
+            Duration::from_millis(1)
+        );
+    }
+
     #[test]
     fn values_print_as_written() {
-        for s in ["300ms", "10s", "10m", "1h", "1h30m", "1d"] {
-            assert_eq!(s.parse::<Span>().unwrap().to_string(), s);
-        }
         for s in [
             "0B", "1B", "1023B", "1KiB", "64MiB", "1536KiB", "2GiB", "1TiB",
         ] {
@@ -682,7 +771,6 @@ mod tests {
 
     #[test]
     fn invalid_values_are_refused() {
-        assert!("0s".parse::<Interval>().is_err());
         assert!("64MB".parse::<ByteSize>().is_err());
         assert!("MiB".parse::<ByteSize>().is_err());
         assert!("16777216TiB".parse::<ByteSize>().is_err(), "overflow");
