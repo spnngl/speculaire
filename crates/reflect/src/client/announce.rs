@@ -63,7 +63,7 @@ pub(super) async fn run(member: Member, shared: Arc<Shared>, stop: CancellationT
         if up_for.is_some() {
             outage.ended();
         }
-        let wait = if dropped(up_for) {
+        let wait = if dropped(up_for, &ended) {
             shared.dropped.notify_one();
             backoff.dropped()
         } else {
@@ -84,9 +84,17 @@ pub(super) async fn run(member: Member, shared: Arc<Shared>, stop: CancellationT
     connected.set(0.0);
 }
 
-/// Whether a connection that was up for `up_for`, `None` when it never opened, dropped rather than failed (D98).
-fn dropped(up_for: Option<Duration>) -> bool {
-    up_for.is_some_and(|up_for| up_for >= STEADY)
+/// Whether a connection that was up for `up_for`, `None` when it never opened, and `ended` so, dropped rather than
+/// failed: it ran [`STEADY`] (D98), or its reflector ended it to stop (D132).
+fn dropped(up_for: Option<Duration>, ended: &Ended) -> bool {
+    let stopping = matches!(
+        ended,
+        Ended::Call(CallError::Refused {
+            reason: proto::Reason::Stopping,
+            ..
+        })
+    );
+    up_for.is_some_and(|up_for| stopping || up_for >= STEADY)
 }
 
 /// One connection, until it ends: it sends `Hello`, a snapshot, then the changes of the holdings and the lookups, and
@@ -312,9 +320,28 @@ mod tests {
 
     #[test]
     fn a_connection_up_five_seconds_or_more_dropped_and_a_shorter_one_failed() {
-        assert!(!dropped(None));
-        assert!(!dropped(Some(Duration::from_millis(4999))));
-        assert!(dropped(Some(STEADY)));
+        let closed = Ended::Call(CallError::Closed);
+        assert!(!dropped(None, &closed));
+        assert!(!dropped(Some(Duration::from_millis(4999)), &closed));
+        assert!(dropped(Some(STEADY), &closed));
+    }
+
+    #[test]
+    fn a_connection_its_stopping_reflector_ended_dropped_however_short() {
+        let refused = |reason| {
+            Ended::Call(CallError::Refused {
+                reason,
+                message: String::new(),
+            })
+        };
+        let stopping = refused(proto::Reason::Stopping);
+        assert!(dropped(Some(Duration::ZERO), &stopping));
+        // A refusal before the stream opened is a failed attempt, so a reflector that stays stopping gets D33's backoff.
+        assert!(!dropped(None, &stopping));
+        assert!(!dropped(
+            Some(Duration::from_millis(4999)),
+            &refused(proto::Reason::Superseded)
+        ));
     }
 
     #[tokio::test]
