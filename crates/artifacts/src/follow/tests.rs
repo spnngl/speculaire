@@ -103,12 +103,13 @@ fn a_root_has_its_names_in_order_once_each_and_none_once_it_left_the_list() {
     assert_eq!(names(&list, &digest(12)), Vec::<String>::new());
 }
 
-/// Follows the list the returned sender scripts, with `store`, from `linked` on, logging in `asked` each name a root
-/// is asked under.
+/// Follows the list the returned sender scripts, with `store`, from `linked` on, the latest reflector stream up at
+/// `last_up`, logging in `asked` each name a root is asked under.
 fn start(
     store: Arc<Store>,
     asked: &Arc<Asked>,
     linked: impl Future<Output = ()> + Send + 'static,
+    last_up: Option<Instant>,
 ) -> (mpsc::Sender<Update>, tokio::task::JoinHandle<()>) {
     let unlinked = speculaire_mirror::fetch::Fetcher::new(
         std::path::PathBuf::new(),
@@ -132,6 +133,7 @@ fn start(
         discovery,
         Arc::new(Scripted(Mutex::new(Some(receiver)))),
         linked,
+        watch::channel(last_up).1,
     ));
     (script, followed)
 }
@@ -141,7 +143,7 @@ async fn the_roots_of_an_image_just_listed_go_before_those_of_a_listing() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
     let asked = Arc::new(Asked::default());
-    let (script, followed) = start(store, &asked, std::future::ready(()));
+    let (script, followed) = start(store, &asked, std::future::ready(()), None);
 
     script
         .send(Update::Listing(vec![
@@ -170,7 +172,7 @@ async fn a_recorded_root_is_skipped_and_a_failed_one_is_tried_again_at_its_retry
     let store = Arc::new(Store::open(dir.path()).unwrap());
     store.record(&digest(10), &[]).await.unwrap();
     let asked = Arc::new(Asked::default());
-    let (script, followed) = start(store, &asked, std::future::ready(()));
+    let (script, followed) = start(store, &asked, std::future::ready(()), None);
     let listing = || {
         Update::Listing(vec![
             image(1, &[("reg.test/old", 10)]),
@@ -201,6 +203,74 @@ async fn a_recorded_root_is_skipped_and_a_failed_one_is_tried_again_at_its_retry
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_root_found_nowhere_just_after_a_stream_came_up_is_tried_again_soon_three_times() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let asked = Arc::new(Asked::default());
+    let (script, followed) = start(store, &asked, std::future::ready(()), Some(Instant::now()));
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+    let asks = |name: &str| {
+        asked
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|n| *n == name)
+            .count()
+    };
+
+    // A discovery that starts FRESH after the stream came up is tried again soon; one that starts later waits RETRY.
+    tokio::time::advance(FRESH).await;
+    script
+        .send(Update::Listed(image(1, &[("reg.test/fresh", 10)])))
+        .await
+        .unwrap();
+    settle().await;
+    script
+        .send(Update::Listed(image(2, &[("reg.test/late", 20)])))
+        .await
+        .unwrap();
+    settle().await;
+    assert_eq!((asks("reg.test/fresh"), asks("reg.test/late")), (1, 1));
+
+    for tries in 1..=TRIES {
+        tokio::time::advance(SOON).await;
+        settle().await;
+        assert_eq!(asks("reg.test/fresh"), 1 + usize::from(tries));
+    }
+    tokio::time::advance(SOON).await;
+    settle().await;
+    assert_eq!(asks("reg.test/fresh"), 1 + usize::from(TRIES));
+    assert_eq!(asks("reg.test/late"), 1);
+
+    // Then the root waits RETRY, as the other did.
+    tokio::time::advance(RETRY).await;
+    settle().await;
+    assert_eq!(asks("reg.test/fresh"), 2 + usize::from(TRIES));
+    assert_eq!(asks("reg.test/late"), 2);
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+#[test]
+fn a_refusal_keeps_its_retry_time_even_just_after_a_stream_came_up() {
+    let now = Instant::now();
+    let mut soon = Soon {
+        last_up: watch::channel(Some(now)).1,
+        left: HashMap::from([(digest(10), TRIES)]),
+    };
+    let refused = Error::Unverifiable {
+        reason: Reason::RateLimited {
+            host: "reg.test".to_owned(),
+        },
+        retry_at: now + RETRY,
+    };
+    assert_eq!(soon.next(&digest(10), now, &refused), None);
+    assert!(soon.left.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_root_the_store_fails_is_tried_again_after_the_retry_time() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
@@ -208,7 +278,7 @@ async fn a_root_the_store_fails_is_tried_again_after_the_retry_time() {
     let root = digest(20);
     std::fs::create_dir_all(dir.path().join("blobs/sha256").join(root.encoded())).unwrap();
     let asked = Arc::new(Asked::default());
-    let (script, followed) = start(store, &asked, std::future::ready(()));
+    let (script, followed) = start(store, &asked, std::future::ready(()), None);
     let listing = || Update::Listing(vec![image(2, &[("reg.test/new", 20)])]);
     let settle = || tokio::time::sleep(Duration::from_millis(10));
     let discoveries = || asked.1.load(Ordering::Relaxed);
@@ -245,7 +315,7 @@ async fn a_root_that_leaves_the_list_is_collected_and_discovered_again_when_it_c
     store.record(&digest(10), &[artifact]).await.unwrap();
     store.record(&digest(20), &[]).await.unwrap();
     let asked = Arc::new(Asked::default());
-    let (script, followed) = start(Arc::clone(&store), &asked, std::future::ready(()));
+    let (script, followed) = start(Arc::clone(&store), &asked, std::future::ready(()), None);
     let settle = || tokio::time::sleep(Duration::from_millis(10));
 
     script
@@ -291,9 +361,14 @@ async fn the_store_is_collected_from_the_first_listing_and_discovery_waits_for_t
     store.keep(&orphan, b"orphan").await.unwrap();
     let asked = Arc::new(Asked::default());
     let (link, linked) = tokio::sync::oneshot::channel::<()>();
-    let (script, followed) = start(Arc::clone(&store), &asked, async move {
-        let _ = linked.await;
-    });
+    let (script, followed) = start(
+        Arc::clone(&store),
+        &asked,
+        async move {
+            let _ = linked.await;
+        },
+        None,
+    );
     let settle = || tokio::time::sleep(Duration::from_millis(10));
 
     settle().await;
@@ -322,7 +397,7 @@ async fn each_listing_collects_the_store_even_when_no_root_left() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
     let asked = Arc::new(Asked::default());
-    let (script, followed) = start(Arc::clone(&store), &asked, std::future::ready(()));
+    let (script, followed) = start(Arc::clone(&store), &asked, std::future::ready(()), None);
     let settle = || tokio::time::sleep(Duration::from_millis(10));
     script
         .send(Update::Listing(vec![image(1, &[("reg.test/a", 10)])]))

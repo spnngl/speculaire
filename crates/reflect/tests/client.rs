@@ -197,9 +197,13 @@ async fn an_agent_announces_to_every_member_and_keeps_both_maps_the_same() {
     // Another agent's lookup finds node-a, and node-a's own lookup does not.
     let b = test.agent("node-b", &Arc::new(Holdings::default()), None);
     // Once linked, a lookup asks a member.
-    tokio::time::timeout(Duration::from_secs(5), b.linked())
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        b.last_up().wait_for(Option::is_some),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let found = b.lookup(&digest(2)).await.unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!((found[0].node.as_str(), found[0].address), ("node-a", peer));
@@ -320,6 +324,8 @@ async fn a_stopped_member_is_streamed_to_again_once_it_is_back() {
     for _ in 0..10 {
         a.lookup(&digest(2)).await.unwrap();
     }
+    let mut last_up = a.last_up();
+    let before = *last_up.borrow_and_update();
     // cp-1 is back on its address: the stream opens again within D33's first window, with a snapshot.
     let listener = TcpListener::bind(test.members[0].address).await.unwrap();
     let credentials = credentials(&test.cluster, &test.dir, "cp-1");
@@ -334,6 +340,8 @@ async fn a_stopped_member_is_streamed_to_again_once_it_is_back() {
     test.wait(&digest(2), &[("node-a", peer)]).await;
     let reconnects = "speculaire_reflector_reconnects_total{member=\"cp-1\"}";
     assert_ne!(test.metric(reconnects).as_deref(), Some("0"));
+    // The stream back is the latest up (D134).
+    assert!(*last_up.borrow() > before);
     a.stop().await;
 }
 

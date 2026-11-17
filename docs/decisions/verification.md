@@ -137,7 +137,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
 
-## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133)
+## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134)
 
 - **Decision:**
   - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends, and read the list once more 1 s after a watch starts: no answer tells when containerd holds the subscription, and an image pulled in between waited 60 s in CI. Once the agent stops, a follower that loses the runtime ends without a warning: the agent's own teardown cut it. The CRI-O relay protects the listed images from eviction through it.
@@ -160,7 +160,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Revisit when:** M5 adds the manifest-fetch trigger; or a real image has more than 64 bundles.
 
 
-## D126: Discovery asks the artifact store, then peers, then upstream; peers list referrers from a target's first 4 holders (amends D102, D121)
+## D126: Discovery asks the artifact store, then peers, then upstream; peers list referrers from a target's first 4 holders (amends D102, D121; amended by D134)
 
 - **Decision:**
   - **Order:** for each root, each target's manifests and blobs come from the artifact store, else from peers, else not at all; upstream (D121) is asked only when the store and peers give no artifact of the root. The root's manifest comes from the node's content (containerd's, or the relay's blob cache), else the store, else peers; an index fetched so is kept in the store, so that the node serves it on (D49, D124).
@@ -218,3 +218,14 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - A missing `manifests` stays refused: an image manifest under the fallback tag, or an error body sent with `200`, is no list.
 - **Measured (CI journals of CRI-O 1.36 and 1.37 legs, runs 43988938171, 43999798418, 44013579419):** the warning named 40 targets, `not an image index` each, all of registry.k8s.io's pause, etcd, coredns and kube-* images, or `kindest/kindnetd` through mirror.gcr.io. Asked again with `curl`, both hosts answered the `null` above; Docker Hub answered `"manifests":[]` for the same kindnetd digests.
 - **Revisit when:** Artifact Registry answers `[]`.
+
+## D134: A root no source served just after a reflector stream came up is asked again 3 times, 20 s apart (amends D121, D126)
+
+- **Decision:**
+  - **Trigger:** a discovery that starts at most 10 s after the latest reflector stream came up, on any reflector, and ends `artifacts unreachable` is tried again 20 s later, up to 3 times, then waits D121's 10 min. A refusal keeps its `retry_at` (D128). A root that leaves the list forgets its tries.
+  - **Signal:** `speculaire_reflect::Client::last_up` gives the time the latest stream came up, replacing `Client::linked`; discovery starts once it holds a time, or after 10 s (D126).
+- **Because:**
+  - A reflector that restarted names no holder until each agent's stream to it is back: locally, the control plane's came back 4.5 s after the first worker's restart, and a node that started meanwhile, cut off from upstream, found no peer artifact for any root and would have waited 10 min.
+  - 3 tries, 20 s apart, cover a minute of streams coming back, and cost upstream 3 more rounds of `HEAD` per root the node truly cannot reach, only after a stream came up.
+  - A discovery's start, not its end, is when it asked the reflectors: an upstream timeout can end it long after.
+- **Revisit when:** reflectors keep their index across a restart, or nodes cut off from upstream still wait 10 min after a reflector restart.

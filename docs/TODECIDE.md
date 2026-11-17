@@ -8,7 +8,6 @@ Open questions, each with a proposed default. Once a question is answered, recor
 
 ## Before M5
 
-- **Is a root asked again sooner when it failed right after a reflector restarted?** D126 starts discovery once a reflector stream is up, and D121 asks a root no source served again 10 min later. A reflector that restarted names no holder until each agent's stream to it is back: locally, the control plane's came back 4.5 s after the first worker's restart, and a node that started meanwhile, cut off from upstream, found no peer artifact for any root and would have waited 10 min. [A root no source served within 10 s of a reflector stream coming up is asked again once, 10 s later. Amends D121, D126.]
 - **Do identity regexes match the whole string?** D8 makes regex identity matching ours, and no decision says whether a policy's `subjectRegExp` and `issuerRegExp` must cover the whole SAN and issuer. Rust's `Regex::is_match`, like Go's `MatchString` in policy-controller and cosign, matches a substring, so `https://github.com/myorg/` also matches `https://github.com/myorg-evil/`. [Each regex is compiled as `^(?:…)$`, so it matches the whole string. A policy ported from policy-controller can only become stricter, and `docs/operations.md` says so. Amends D11.]
 
 ## Before M7
