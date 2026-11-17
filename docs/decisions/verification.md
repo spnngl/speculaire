@@ -2,7 +2,7 @@
 
 How artifacts become verdicts. Index: `docs/decisions/README.md`.
 
-## D8: Crypto comes from sigstore-rust (amended by D43)
+## D8: Crypto comes from sigstore-rust (amended by D43, D136)
 
 - **Decision:** use `sigstore-verify` and `sigstore-trust-root` (sigstore-rust, crates 0.16). We write OCI discovery, regex identity matching and the legacy `.sig` → v0.1-bundle conversion ourselves. The conversion also checks that the SimpleSigning payload's `critical.image.docker-manifest-digest` equals the image digest, since the bundle verifier only binds the signature to the payload. Attestations are verified only as bundles (D43).
 - **Because:**
@@ -12,7 +12,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The GitHub *release* attestation (`in-toto.io/attestation/release/v0.2`, a v0.3 bundle with an RFC 3161 timestamp and no log entry) is rejected: `bundle must have an inclusion proof`. We don't use it.
 - **Revisit when:** —
 
-## D11: Policy shape and image matching (amended by D65, D81)
+## D11: Policy shape and image matching (amended by D65, D81, D136)
 
 - **Decision:**
   - The policy is a file shaped like `ClusterImagePolicy`. *authorities* pass if any one passes; *attestations* pass only if all do. v1 conditions are predicateType presence plus the SBOM checks in D12; CEL comes later.
@@ -229,3 +229,17 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - 3 tries, 20 s apart, cover a minute of streams coming back, and cost upstream 3 more rounds of `HEAD` per root the node truly cannot reach, only after a stream came up.
   - A discovery's start, not its end, is when it asked the reflectors: an upstream timeout can end it long after.
 - **Revisit when:** reflectors keep their index across a restart, or nodes cut off from upstream still wait 10 min after a reflector restart.
+
+## D136: Identity regexes match the whole SAN and issuer (amends D8, D11)
+
+- **Decision:**
+  - A policy's `subjectRegExp` matches only when it matches the certificate's whole SAN, and `issuerRegExp` the whole issuer: `https://github.com/myorg/.*` matches `https://github.com/myorg/app/...`, and `https://github.com/myorg/` matches nothing longer.
+  - **How:** the policy loader parses each pattern alone with `regex-syntax`, puts the parsed expression between `Look::Start` and `Look::End` (`\A` and `\z`), and builds it with `regex-automata`'s `meta::Builder::build_from_hir`. A pattern that does not parse alone refuses the policy file.
+  - `docs/operations.md` tells the admin porting a policy: a pattern that relied on a partial match now rejects in `audit`.
+- **Because:**
+  - Go's `MatchString` and Rust's `Regex::is_match` both match a substring. cosign and policy-controller match so: cosign v3.1.4 compiles `IssuerRegExp` and `SubjectRegExp` as written and calls `MatchString` on the issuer and on each SAN (`pkg/cosign/verify.go:483-485,501-506`); policy-controller v0.15.1 passes a `ClusterImagePolicy`'s identities to those `CheckOpts` (`pkg/webhook/validator.go:1364-1370`, cosign v3.0.5, the same code at `verify.go:457,478`); sigstore-go v1.4.0's `NewSANMatcher` and `NewIssuerMatcher` do the same (`pkg/verify/certificate_identity.go:97,130,137,165`).
+  - A substring match lets a pattern written without anchors pass a SAN that only contains it: `https://github.com/myorg/` passes `https://github.com/myorg-evil/app/.github/workflows/release.yml@refs/heads/main`, and anyone can create the organisation `myorg-evil` and get a Fulcio certificate for a workflow in it. The safe reading should not depend on the admin writing `^…$`.
+  - A policy ported from policy-controller can only get stricter: a pattern already anchored matches the same strings, and one that was not now rejects, which `audit` shows before `enforce`.
+  - Parsing the pattern alone, then wrapping the parsed expression, keeps a pattern from closing the wrapper: spliced into `^(?:…)$` as text, `a)|(.*` would read as `^(?:a)|(.*)$`, and a `#` comment under `(?x)` would swallow the closing `)$`.
+  - Rust's `\d`, `\w` and `\s` take Unicode classes where Go's take ASCII; on a SAN, which X.509 encodes as ASCII (`IA5String`), they match the same.
+- **Revisit when:** sigstore-rust gains regex identity matching (D8), or admins need partial matches, then as an explicit setting.

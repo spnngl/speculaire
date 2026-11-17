@@ -15,10 +15,10 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85, D110)
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66, D123)
 - D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73, D102)
-- D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43)
+- D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136)
 - D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
-- D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81)
+- D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57, D105, D107, D116)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
@@ -143,5 +143,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D133 [verification](verification.md): a referrers index whose `manifests` is `null`, as Google's Artifact Registry answers for none, lists none; one without `manifests` is still no index (amends D121)
 - D134 [verification](verification.md): a discovery that starts within 10 s of the latest reflector stream coming up and finds no source is tried again 3 times, 20 s apart, before D121's 10 min (amends D121, D126)
 - D135 [agent](agent.md): durations are our own grammar, decreasing `<integer><unit>` groups from `d` to `ns` without spaces, printed largest unit first; RFC 3339 timestamps are our own, at most year 9999 (amends D60)
+- D136 [verification](verification.md): `subjectRegExp` and `issuerRegExp` match the whole SAN and issuer, the parsed pattern wrapped in `\A` and `\z`, where cosign, policy-controller and sigstore-go match a substring (amends D8, D11)
 
-Next free number: D136.
+Next free number: D137.

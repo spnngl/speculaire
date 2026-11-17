@@ -30,7 +30,7 @@ On CRI-O every pull of a mirrored registry goes through the agent, which fetches
 
 ## Before turning on `enforce`
 
-1. Run `gate.mode = "audit"` until `speculaire_gate_total{mode="audit"}` shows no `rejected`, `unverifiable` or `unmatched` results you did not expect.
+1. Run `gate.mode = "audit"` until `speculaire_gate_total{mode="audit"}` shows no `rejected`, `unverifiable` or `unmatched` results you did not expect. A `subjectRegExp` or `issuerRegExp` must match the whole SAN or issuer, where cosign and policy-controller accept a part of it (D136): in a policy ported from them, write `https://github.com/myorg/.*`, not `https://github.com/myorg/`.
 2. Exempt images that must run without a signature with `gate.exempt` (D18). An exemption needs a running agent; while the agent is stopped, only the toleration annotation of step 3 lets a pod start.
 3. Pick a toleration annotation for the static control-plane pods. Set it in the runtime's validator section, and add that annotation, set to `"true"`, to each static pod manifest. Without it, a stopped agent keeps the control plane from restarting (`containerd/nri` `plugins/default-validator/default-validator.go:53-65`).
    - containerd: `tolerate_missing_plugins_annotation` under `[plugins.'io.containerd.nri.v1.nri'.default_validator]`.
