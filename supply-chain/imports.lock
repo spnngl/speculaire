@@ -1229,12 +1229,6 @@ criteria = "safe-to-deploy"
 delta = "0.17.0 -> 0.17.1"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
-[[audits.mozilla.audits.humantime]]
-who = "Max Inden <mail@max-inden.de>"
-criteria = "safe-to-deploy"
-version = "2.4.0"
-aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
 [[audits.mozilla.audits.num-conv]]
 who = "Alex Franchuk <afranchuk@mozilla.com>"
 criteria = "safe-to-deploy"

@@ -1,0 +1,15 @@
+[package]
+name = "speculaire-time"
+description = "Durations and instants as text: the config's durations and the logs' timestamps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

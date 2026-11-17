@@ -46,7 +46,7 @@ string_conversions!(
     LogFilter
 );
 
-/// A duration written as `humantime` reads it: `"300ms"`, `"10m"`, `"1h"`.
+/// A duration such as `"300ms"`, `"10m"` or `"1h30m"` (D135).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Span(Duration);
@@ -70,7 +70,7 @@ impl Span {
 impl FromStr for Span {
     type Err = InvalidValue;
     fn from_str(s: &str) -> Result<Self, InvalidValue> {
-        humantime::parse_duration(s).map(Self).map_err(|e| {
+        speculaire_time::duration::parse(s).map(Self).map_err(|e| {
             InvalidValue(format!(
                 "expected a duration such as \"300ms\" or \"10m\", found {s:?}: {e}"
             ))
@@ -80,7 +80,7 @@ impl FromStr for Span {
 
 impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        humantime::format_duration(self.0).fmt(f)
+        speculaire_time::duration::display(self.0).fmt(f)
     }
 }
 
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn values_print_as_written() {
-        for s in ["300ms", "10s", "10m", "1h", "1h 30m"] {
+        for s in ["300ms", "10s", "10m", "1h", "1h30m", "1d"] {
             assert_eq!(s.parse::<Span>().unwrap().to_string(), s);
         }
         for s in [

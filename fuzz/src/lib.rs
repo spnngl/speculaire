@@ -52,6 +52,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("referrers", referrers),
     ("link", link),
     ("retry_after", retry_after),
+    ("duration", duration),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -731,4 +732,26 @@ pub fn retry_after(data: &[u8]) {
         let last = SystemTime::UNIX_EPOCH + Duration::from_secs(253_402_300_799);
         assert!(now + delay <= last, "{text:?}");
     }
+}
+
+/// A duration, as the config and `speculaire-loadgen` read it (D135).
+///
+/// Reading never panics, and a duration read prints as text that reads back to the same duration.
+///
+/// # Panics
+///
+/// When reading panics, or the printed text breaks that.
+pub fn duration(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let Ok(read) = speculaire_time::duration::parse(text) else {
+        return;
+    };
+    let printed = speculaire_time::duration::display(read).to_string();
+    assert_eq!(
+        speculaire_time::duration::parse(&printed),
+        Ok(read),
+        "{text:?} printed {printed:?}"
+    );
 }

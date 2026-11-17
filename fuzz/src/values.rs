@@ -7,17 +7,21 @@
 
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
 
-/// Durations, as `humantime` reads them; the zero and the overflow are the refusals.
+/// Durations (D135); the zero, spaces, units out of order and the overflow are among the refusals.
 const SPANS: &[&str] = &[
     r#""10s""#,
     r#""300ms""#,
     r#""1h30m""#,
-    r#""1ms""#,
+    r#""1d2h3m4s5ms6us7ns""#,
+    r#""90s""#,
     r#""0s""#,
     r#""-1s""#,
     r#""10""#,
     r#""1x""#,
+    r#""1h 30m""#,
+    r#""1m1h""#,
     r#""18446744073709551615s""#,
+    r#""18446744073709551616s""#,
     "10",
 ];
 

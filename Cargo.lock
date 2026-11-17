@@ -909,12 +909,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
-name = "humantime"
-version = "2.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
-
-[[package]]
 name = "hyper"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2053,7 +2047,6 @@ dependencies = [
  "anyhow",
  "axum",
  "http",
- "humantime",
  "metrics",
  "metrics-exporter-prometheus",
  "mime",
@@ -2067,6 +2060,7 @@ dependencies = [
  "speculaire-pki",
  "speculaire-reflect",
  "speculaire-runtime",
+ "speculaire-time",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2156,9 +2150,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "humantime",
  "mimalloc",
  "speculaire-load",
+ "speculaire-time",
  "tokio",
  "tracing-subscriber",
 ]
@@ -2172,7 +2166,6 @@ dependencies = [
  "futures-util",
  "http",
  "http-body-util",
- "humantime",
  "hyper",
  "hyper-util",
  "metrics",
@@ -2186,6 +2179,7 @@ dependencies = [
  "speculaire-pki",
  "speculaire-registry",
  "speculaire-runtime",
+ "speculaire-time",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2330,6 +2324,13 @@ dependencies = [
  "tonic-prost",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "speculaire-time"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

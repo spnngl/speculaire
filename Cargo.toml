@@ -25,6 +25,7 @@ speculaire-reflect = { path = "crates/reflect" }
 speculaire-registry = { path = "crates/registry" }
 speculaire-registry-config = { path = "crates/registry-config" }
 speculaire-runtime = { path = "crates/runtime" }
+speculaire-time = { path = "crates/time" }
 speculaire-configure = { path = "crates/configure" }
 anyhow = "1.0.104"
 # D88: the digests of the relay, on the provider that rustls uses (D13).
@@ -53,7 +54,6 @@ hyper = { version = "1.12.0", default-features = false, features = [
   "server",
 ] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
-humantime = "2.4.0"
 insta = "1.49.0"
 metrics = "0.24.6"
 # D34: no HTTP listener or push gateway of its own; `protobuf` for native histograms.

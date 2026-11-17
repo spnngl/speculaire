@@ -11,8 +11,8 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-humantime.workspace = true
 speculaire-load.workspace = true
+speculaire-time.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
 

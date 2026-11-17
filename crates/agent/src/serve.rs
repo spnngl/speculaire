@@ -772,8 +772,8 @@ mod tests {
 
     #[test]
     fn a_poll_interval_past_the_clocks_range_starts_the_polls() {
-        // humantime reads up to `u64::MAX` seconds; `Instant` holds fewer.
-        let config = config::parse("[config]\npoll_interval = \"500000000000y\"\n").unwrap();
+        // A duration reads up to `u64::MAX` seconds (D135); `Instant` holds fewer.
+        let config = config::parse("[config]\npoll_interval = \"213503982334601d\"\n").unwrap();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             polls(config.config.poll_interval.get());
         });
