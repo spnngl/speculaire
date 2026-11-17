@@ -162,30 +162,6 @@ impl Worker {
         output.stdout
     }
 
-    /// The manifests and blobs that the store's records of other roots than `expected`'s name.
-    fn named_by_others(&self, expected: &Expected) -> BTreeSet<String> {
-        let own = format!("{}.json", expected.root.hex());
-        let records = self.sh(&format!(
-            "cd {STORE}/roots/sha256 && for f in *.json; do [ \"$f\" = {own} ] || {{ cat \"$f\"; echo; }}; done"
-        ));
-        let mut named = BTreeSet::new();
-        for record in records
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        {
-            for artifact in record["artifacts"].as_array().into_iter().flatten() {
-                let blobs = artifact["blobs"].as_array().into_iter().flatten();
-                named.extend(
-                    std::iter::once(&artifact["manifest"])
-                        .chain(blobs)
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned),
-                );
-            }
-        }
-        named
-    }
-
     /// Sets the agent's `log.filter`; the agent restarts at the next [`Self::forget`].
     fn log_filter(&mut self, filter: &str) {
         if !self.config_changed {
@@ -813,38 +789,28 @@ fn a_node_cut_off_from_upstream_gets_every_artifact_from_the_node_that_discovere
     // B discovers once, right after its agent starts (D126): every reflector must name A by then.
     wait_held(cluster, &b.name, &a, &expected);
 
-    let (took, peer, asked) = {
-        let _rejected = cluster.reject(&b.name, zot.address()).unwrap();
-        let before = zot.requests().unwrap().len();
+    // B is cut off from every upstream, not only zot: another image's discovery, such as kindnetd's from mirror.gcr.io,
+    // would otherwise keep a blob these artifacts share, the empty config, uncounted.
+    let (took, peer) = {
+        let _rejected = cluster.reject_upstreams(&b.name).unwrap();
         let start = Instant::now();
         cluster.start_agent(&b.name).unwrap();
         let took = holds(cluster, &b.name, &expected, start);
-        let asked = agent_requests(&zot, before);
-        (
-            took,
-            b.fetches(&["source=\"peer\"", "result=\"ok\""]),
-            asked,
-        )
+        (took, b.fetches(&["source=\"peer\"", "result=\"ok\""]))
     };
     println!(
         "B held every artifact {} ms after its agent started",
         took.as_millis()
     );
 
-    // The counters start with the agent: each artifact digest came from a peer. Other images B lists may count upstream,
-    // and a blob their artifacts also name may have come with them: the empty config of kindnetd's attestation and of
-    // these bundles, when kindnetd is discovered first, from its own upstream (D131).
-    let others = b.named_by_others(&expected);
-    let digests: BTreeSet<&String> = expected
-        .digests()
-        .filter(|digest| !others.contains(*digest))
-        .collect();
+    // B held none of them: `forget` deleted them, and the agent's first collection what another discovery kept since
+    // (D131). The counters start with the agent: each digest came from a peer.
+    let digests: BTreeSet<&String> = expected.digests().collect();
     assert!(
         peer >= f64::from(u32::try_from(digests.len()).unwrap()),
-        "{peer} from peers, {} digests no other root names: {digests:?}",
+        "{peer} from peers, {} digests: {digests:?}",
         digests.len()
     );
-    assert!(asked.is_empty(), "{asked:?}");
     // No node ever asks for the `.att` tag (D43).
     let att = format!("sha256-{}.att", expected.root.hex());
     let requests: Vec<Request> = zot.requests().unwrap().into_iter().skip(seen).collect();
