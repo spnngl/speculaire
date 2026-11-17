@@ -101,7 +101,7 @@ pub fn containerd_config(data: &[u8]) {
 /// A CRI-O `registries.conf` or drop-in (D66).
 ///
 /// A file that parses has one registry per prefix, sorted by prefix; every registry that is not a wildcard is the
-/// registry of its own prefix, and its pull sources end with its own endpoint.
+/// registry of its own prefix, unless a wildcard comes first there, and its pull sources end with its own endpoint.
 ///
 /// # Panics
 ///
@@ -127,9 +127,17 @@ pub fn registries_conf(data: &[u8]) {
         if registry.prefix.starts_with("*.") {
             continue;
         }
-        assert_eq!(
-            config.find_registry(&registry.prefix),
-            Some(registry),
+        // go.podman.io/image v5.40.0 `pkg/sysregistriesv2/system_registries_v2.go:845-856` keeps the first matching
+        // registry, in prefix order (`:508`), of the longest prefix; `*.com` matches `.com` and `*.a.io` `x.a.io`
+        // (`:775-793`), and either wins there.
+        let first = |found: &registries::Registry| {
+            let (theirs, ours) = (found.prefix.len(), registry.prefix.len());
+            found.prefix.starts_with("*.")
+                && (theirs > ours || theirs == ours && found.prefix < registry.prefix)
+        };
+        let found = config.find_registry(&registry.prefix);
+        assert!(
+            found == Some(registry) || found.is_some_and(first),
             "{text}"
         );
         if let Ok(sources) = registry.pull_sources(&format!("{}/app:1", registry.prefix)) {
