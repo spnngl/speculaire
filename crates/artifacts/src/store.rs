@@ -5,7 +5,8 @@
 //! roots, such as the empty config every Sigstore bundle names, so it is kept once.
 //!
 //! The node serves the store to peers: its blobs as [`Content`], announced as an [`Inventory`], and the artifacts about
-//! each manifest as [`Referrers`] (D124).
+//! each manifest as [`Referrers`] (D124). `Store::collect` deletes what no listed root names, and the inventory opens
+//! only after the first collection, so a root removed while the agent was stopped is never announced (D131).
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -22,8 +23,8 @@ use speculaire_oci::reference::Digest;
 use speculaire_runtime::content::{self, Blob, Content};
 use speculaire_runtime::inventory::{Change, Inventory, Update};
 use tokio::io::AsyncWriteExt as _;
-use tokio::sync::{broadcast, mpsc};
-use tracing::warn;
+use tokio::sync::{broadcast, mpsc, watch};
+use tracing::{debug, info, warn};
 
 use crate::metrics;
 
@@ -87,8 +88,10 @@ pub struct Store {
     bytes: AtomicU64,
     /// The record of each root, as on disk: what [`Referrers`] reads.
     roots: Mutex<HashMap<Digest, Vec<Artifact>>>,
-    /// The blobs kept, as they are kept.
+    /// The blobs kept and deleted, as they are.
     changes: broadcast::Sender<Change>,
+    /// Whether a collection ran, which the inventory waits for.
+    collected: watch::Sender<bool>,
 }
 
 impl Store {
@@ -116,6 +119,7 @@ impl Store {
             bytes: AtomicU64::new(bytes),
             roots: Mutex::new(roots),
             changes: broadcast::channel(BACKLOG).0,
+            collected: watch::channel(false).0,
         })
     }
 
@@ -227,6 +231,67 @@ impl Store {
             Err(e) => return Err(io_error(&path, e)),
         };
         parse_record(&path, &text).map(Some)
+    }
+
+    /// Deletes what no root of `listed` names, and withdraws each blob deleted.
+    ///
+    /// The record of each root not in `listed` goes first, then each blob that is neither a listed root nor named by a
+    /// listed root's record. The first collection, done or failed, opens the [`Inventory`].
+    ///
+    /// Discovery keeps a root's blobs before its record, so it must not run meanwhile: [`crate::follow()`] does both in
+    /// turn.
+    ///
+    /// # Errors
+    ///
+    /// When a record or a blob cannot be listed or deleted; the next collection tries again.
+    pub(crate) async fn collect(self: &Arc<Self>, listed: HashSet<Digest>) -> Result<(), Error> {
+        let store = Arc::clone(self);
+        let collected = tokio::task::spawn_blocking(move || store.collect_blocking(&listed))
+            .await
+            .unwrap_or_else(|err| Err(io_error(&self.directory, io::Error::other(err))));
+        // Here rather than in the blocking task, whose thread may record to another recorder.
+        metrics::store_bytes(self.bytes());
+        self.collected.send_replace(true);
+        collected
+    }
+
+    fn collect_blocking(&self, listed: &HashSet<Digest>) -> Result<(), Error> {
+        // Records go first: a crash in between leaves blobs that no record names, which the next collection deletes,
+        // and never a record naming a blob gone.
+        for (root, path) in named(&self.directory.join("roots"), ".json")? {
+            let Some(root) = root.filter(|root| !listed.contains(root)) else {
+                continue;
+            };
+            std::fs::remove_file(&path).map_err(|e| io_error(&path, e))?;
+            self.roots().remove(&root);
+            info!(%root, "the artifacts of a root no longer listed are deleted");
+        }
+        // A listed root is a blob too: discovery keeps its index (D126).
+        let mut named_by_listed = listed.clone();
+        for artifact in self.roots().values().flatten() {
+            named_by_listed.insert(artifact.manifest.clone());
+            named_by_listed.extend(artifact.blobs.iter().cloned());
+        }
+        for (digest, path) in named(&self.directory.join("blobs"), "")? {
+            let Some(digest) = digest.filter(|digest| !named_by_listed.contains(digest)) else {
+                continue;
+            };
+            let meta = std::fs::metadata(&path).map_err(|e| io_error(&path, e))?;
+            // The store writes only files there: anything else came by hand, and stays.
+            if !meta.is_file() {
+                continue;
+            }
+            let size = meta.len();
+            std::fs::remove_file(&path).map_err(|e| io_error(&path, e))?;
+            // Saturating: a blob replaced by hand may be larger than counted.
+            self.bytes
+                .update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
+                    bytes.saturating_sub(size)
+                });
+            debug!(%digest, size, "a blob no listed root names is deleted");
+            let _ = self.changes.send(Change::Removed(digest));
+        }
+        Ok(())
     }
 
     /// Every blob held.
@@ -354,6 +419,12 @@ impl Inventory for Store {
 impl Store {
     /// [`Inventory::follow`], until the receiver closes: `None`.
     async fn send_updates(self: Arc<Self>, updates: &mpsc::Sender<Update>) -> Option<()> {
+        let mut collected = self.collected.subscribe();
+        tokio::select! {
+            () = updates.closed() => return None,
+            // The store holds the sender, so the wait ends only once a collection ran.
+            _ = collected.wait_for(|collected| *collected) => {}
+        }
         // Subscribed before the listing: a blob kept meanwhile comes again after it, which changes nothing.
         let mut changes = self.changes.subscribe();
         loop {

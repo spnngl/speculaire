@@ -149,12 +149,12 @@ async fn a_commit_whose_part_is_gone_is_an_error_and_holds_nothing() {
 }
 
 #[tokio::test]
-async fn the_store_bytes_gauge_follows_each_blob_kept() {
+async fn the_store_bytes_gauge_follows_each_blob_kept_and_deleted() {
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let _local = ::metrics::set_default_local_recorder(&recorder);
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
     let gauge = || {
         handle
             .render()
@@ -167,6 +167,9 @@ async fn the_store_bytes_gauge_follows_each_blob_kept() {
     assert_eq!(gauge().as_deref(), Some("2"));
     store.keep(&digest_of(b"abc"), b"abc").await.unwrap();
     assert_eq!(gauge().as_deref(), Some("5"));
+    store.collect([digest_of(b"abc")].into()).await.unwrap();
+    assert_eq!(gauge().as_deref(), Some("3"));
+    assert_eq!(store.bytes(), 3);
 }
 
 #[tokio::test]
@@ -238,6 +241,7 @@ async fn the_store_serves_the_blobs_it_holds() {
 async fn a_follower_gets_the_blobs_held_then_each_blob_kept() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
+    store.collect(HashSet::new()).await.unwrap();
     let (first, second) = (digest_of(b"{}"), digest_of(b"abc"));
     store.keep(&first, b"{}").await.unwrap();
     // A file that is no digest is no blob.
@@ -265,6 +269,8 @@ async fn a_store_that_cannot_be_listed_announces_none_then_the_blobs_kept() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
     std::fs::remove_dir_all(dir.path().join("blobs")).unwrap();
+    // A collection that fails opens the inventory too.
+    assert!(store.collect(HashSet::new()).await.is_err());
     let (updates, mut received) = mpsc::channel(8);
     let followed = tokio::spawn(Arc::clone(&store).follow(updates));
     assert_eq!(received.recv().await, Some(Update::Listing(HashSet::new())));
@@ -282,6 +288,7 @@ async fn a_store_that_cannot_be_listed_announces_none_then_the_blobs_kept() {
 async fn a_follower_that_missed_changes_gets_a_listing_again() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
+    store.collect(HashSet::new()).await.unwrap();
     let (updates, mut received) = mpsc::channel(1);
     let followed = tokio::spawn(Arc::clone(&store).follow(updates));
     assert_eq!(received.recv().await, Some(Update::Listing(HashSet::new())));
@@ -311,4 +318,131 @@ async fn a_follower_whose_receiver_is_gone_stops() {
     let (updates, received) = mpsc::channel(1);
     drop(received);
     store.follow(updates).await;
+}
+
+/// Root `name`'s index, recorded with one bundle naming the empty config and a blob of its own; what it holds.
+async fn signed(store: &Store, name: &str) -> (Digest, Vec<Digest>) {
+    let root = digest_of(name.as_bytes());
+    let (manifest, own) = (format!("{name} bundle"), format!("{name} blob"));
+    let artifact = Artifact {
+        target: root.clone(),
+        manifest: digest_of(manifest.as_bytes()),
+        kind: Kind::Bundle,
+        blobs: vec![digest_of(b"{}"), digest_of(own.as_bytes())],
+    };
+    for bytes in [name, &manifest, "{}", &own] {
+        store
+            .keep(&digest_of(bytes.as_bytes()), bytes.as_bytes())
+            .await
+            .unwrap();
+    }
+    store
+        .record(&root, std::slice::from_ref(&artifact))
+        .await
+        .unwrap();
+    let mut held = vec![root.clone(), artifact.manifest];
+    held.extend(artifact.blobs);
+    (root, held)
+}
+
+fn held_bytes(dir: &Path) -> u64 {
+    size_below(&dir.join("blobs")).unwrap()
+}
+
+fn held(dir: &Path) -> HashSet<Digest> {
+    named(&dir.join("blobs"), "")
+        .unwrap()
+        .into_iter()
+        .filter(|(_, path)| path.is_file())
+        .filter_map(|(digest, _)| digest)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_collection_deletes_what_no_listed_root_names_and_keeps_a_blob_another_still_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let (a, a_held) = signed(&store, "a").await;
+    let (b, b_held) = signed(&store, "b").await;
+    let orphan = digest_of(b"orphan");
+    store.keep(&orphan, b"orphan").await.unwrap();
+    // A file that names no root, or no blob, is left alone.
+    std::fs::write(dir.path().join("roots/sha256/x.json"), "").unwrap();
+    std::fs::write(dir.path().join("blobs/sha256/x"), "").unwrap();
+
+    store.collect([a.clone(), b.clone()].into()).await.unwrap();
+    assert!(!store.contains(&orphan));
+    assert_eq!(store.bytes(), held_bytes(dir.path()));
+    let (updates, mut received) = mpsc::channel(8);
+    let followed = tokio::spawn(Arc::clone(&store).follow(updates));
+    let both: HashSet<Digest> = a_held.iter().chain(&b_held).cloned().collect();
+    assert_eq!(received.recv().await, Some(Update::Listing(both.clone())));
+    // So is a directory named as a blob.
+    let directory = dir
+        .path()
+        .join(format!("blobs/sha256/{}", digest_of(b"dir").encoded()));
+    std::fs::create_dir(&directory).unwrap();
+
+    store.collect([a.clone()].into()).await.unwrap();
+    // b, its bundle and its own blob; not the empty config a names too.
+    let mut removed = HashSet::new();
+    for _ in 0..3 {
+        let Some(Update::Change(Change::Removed(digest))) = received.recv().await else {
+            panic!("each blob deleted is withdrawn");
+        };
+        removed.insert(digest);
+    }
+    let a_held: HashSet<Digest> = a_held.into_iter().collect();
+    assert_eq!(removed, &both - &a_held);
+    assert_eq!(held(dir.path()), a_held);
+    assert_eq!(store.bytes(), held_bytes(dir.path()));
+    assert!(store.contains(&digest_of(b"{}")));
+    assert_eq!(store.recorded(&b).await.unwrap(), None);
+    assert_eq!(store.referrers(&b), []);
+    assert_eq!(store.referrers(&a), [digest_of(b"a bundle")]);
+    assert!(dir.path().join("roots/sha256/x.json").is_file());
+    assert!(dir.path().join("blobs/sha256/x").is_file());
+    assert!(directory.is_dir());
+    drop(received);
+    followed.await.unwrap();
+}
+
+/// A crash after a record went and before its blobs did, or after a blob went and before its withdrawal: the next
+/// agent announces only what its store holds once collected.
+#[tokio::test]
+async fn after_a_crash_between_deletion_and_withdrawal_the_first_listing_is_what_the_store_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, a_held, b) = {
+        let store = Store::open(dir.path()).unwrap();
+        let (a, a_held) = signed(&store, "a").await;
+        let (b, _) = signed(&store, "b").await;
+        (a, a_held, b)
+    };
+    std::fs::remove_file(
+        dir.path()
+            .join("roots/sha256")
+            .join(format!("{}.json", b.encoded())),
+    )
+    .unwrap();
+    let gone = digest_of(b"a blob");
+    std::fs::remove_file(dir.path().join("blobs/sha256").join(gone.encoded())).unwrap();
+
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let (updates, mut received) = mpsc::channel(8);
+    let followed = tokio::spawn(Arc::clone(&store).follow(updates));
+    tokio::task::yield_now().await;
+    assert!(
+        received.try_recv().is_err(),
+        "nothing is announced before a collection"
+    );
+    store.collect([a].into()).await.unwrap();
+    let mut expected: HashSet<Digest> = a_held.into_iter().collect();
+    expected.remove(&gone);
+    assert_eq!(
+        received.recv().await,
+        Some(Update::Listing(expected.clone()))
+    );
+    assert_eq!(held(dir.path()), expected);
+    drop(received);
+    followed.await.unwrap();
 }

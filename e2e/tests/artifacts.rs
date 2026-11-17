@@ -1,7 +1,7 @@
 //! Artifact discovery (D121): a pull of the signed test image puts its Sigstore bundles and its `.sig` manifest, with
 //! their blobs, in the node's artifact store, fetched from the upstream it was pulled from with the node's own
 //! registry config only (D17). Another node reads them, and their referrers, from the node's peer API (D124), and a
-//! node cut off from upstream discovers them there (D126).
+//! node cut off from upstream discovers them there (D126). The store keeps only what the images listed name (D131).
 #![expect(
     clippy::unwrap_used,
     reason = "the helpers of a test fail it by panicking"
@@ -33,6 +33,15 @@ const STORE: &str = "/var/lib/speculaire/artifacts";
 
 /// The repository of [`SIGNED`].
 const REPOSITORY: &str = "e2e/signed";
+
+/// A second signed image on zot, made by [`push_collected`]: an image of its own with one Sigstore bundle.
+const COLLECTED: &str = "e2e/collected:1";
+
+/// The empty config every Sigstore bundle names (D124), so both signed images.
+const EMPTY: &str = "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+
+/// How long after a blob is stored or deleted every reflector must tell it (D131).
+const ANNOUNCED_WITHIN: Duration = Duration::from_secs(2);
 
 /// How long after a pull the store must hold the image's artifacts.
 const WITHIN: Duration = Duration::from_secs(10);
@@ -133,6 +142,17 @@ impl Worker {
         }
     }
 
+    /// A node other than the worker: a reflector names no node to itself.
+    fn other(&self) -> String {
+        self.cluster
+            .nodes()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .find(|name| *name != self.name)
+            .expect("a second node")
+    }
+
     fn sh(&self, script: &str) -> String {
         let output = self
             .cluster
@@ -179,6 +199,24 @@ impl Worker {
             "for image in {}; do crictl rmi $image >/dev/null 2>&1; done; true",
             names.join(" ")
         )
+    }
+
+    /// The script that removes [`COLLECTED`] from the runtime.
+    fn rmi_collected(&self) -> String {
+        let zot = self.cluster.upstream(Kind::Referrers);
+        format!(
+            "crictl rmi {}/{COLLECTED} >/dev/null 2>&1; true",
+            zot.address()
+        )
+    }
+
+    /// The time on the nodes' clock, in nanoseconds since the epoch, after `script` ran.
+    fn stamped(&self, script: &str) -> u64 {
+        self.sh(&format!("{script}; date +%s%N"))
+            .lines()
+            .last()
+            .and_then(|line| line.trim().parse().ok())
+            .unwrap()
     }
 
     /// Pulls the signed image from `upstream`, and waits until the store holds every artifact of `expected`: how
@@ -228,8 +266,9 @@ impl Drop for Worker {
         };
         // The journal stays: `configure.rs` reads CRI-O's entries in it, and a graceful stop writes no warning.
         let script = format!(
-            "{restore}{}; systemctl reset-failed speculaire; systemctl restart speculaire",
-            self.rmi()
+            "{restore}{}; {}; systemctl reset-failed speculaire; systemctl restart speculaire",
+            self.rmi(),
+            self.rmi_collected()
         );
         let _ = self.cluster.exec_output(&self.name, &["sh", "-c", &script]);
         if !std::thread::panicking() {
@@ -278,42 +317,102 @@ fn holds(cluster: &Cluster, node: &str, expected: &Expected, start: Instant) -> 
     start.elapsed()
 }
 
-/// The agent's requests to `upstream` since the `seen` first entries of its log, but the challenges.
 /// Waits until every reflector names `holder` to `asker` for the root of `expected` and each of its artifacts' manifests,
 /// which `holder`'s store announces with their blobs (D124). A reflector that restarted learns them again only once
 /// `holder`'s stream to it is back.
 fn wait_held(cluster: &Cluster, asker: &str, holder: &str, expected: &Expected) {
-    let reflectors: Vec<SocketAddr> = cluster
-        .reflectors()
-        .iter()
-        .map(|r| SocketAddr::new(cluster.family_address(r).unwrap(), PORT))
-        .collect();
     let manifests = expected
         .artifacts
         .iter()
         .map(|(manifest, _)| manifest.parse().unwrap());
-    let deadline = Instant::now() + Duration::from_secs(30);
     for digest in std::iter::once(expected.root.clone()).chain(manifests) {
-        loop {
-            let missing: Vec<&SocketAddr> = reflectors
-                .iter()
-                .filter(|reflector| {
-                    let holders = cluster.lookup(asker, **reflector, &digest).unwrap();
-                    !holders.iter().any(|h| h.node == holder)
-                })
-                .collect();
-            if missing.is_empty() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "{digest}: reflectors {missing:?} do not name {holder}"
-            );
-            sleep(Duration::from_millis(250));
-        }
+        told(
+            cluster,
+            asker,
+            holder,
+            &digest,
+            true,
+            Duration::from_secs(30),
+        );
     }
 }
 
+/// Waits until every reflector tells `asker` whether `holder` holds `digest`, as `held` says.
+///
+/// Fails after `within`. Returns when the last reflector told, in nanoseconds since the epoch on the nodes' clock.
+fn told(
+    cluster: &Cluster,
+    asker: &str,
+    holder: &str,
+    digest: &Digest,
+    held: bool,
+    within: Duration,
+) -> u64 {
+    let deadline = Instant::now() + within;
+    let mut last = 0;
+    for reflector in cluster.reflectors() {
+        let address = SocketAddr::new(cluster.family_address(&reflector).unwrap(), PORT);
+        let stamp = loop {
+            let (holders, stamp) = cluster.lookup_stamped(asker, address, digest).unwrap();
+            if holders.iter().any(|h| h.node == holder) == held {
+                break stamp;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{digest}: reflector {reflector} does not tell that {holder} holds it: {held}"
+            );
+            sleep(Duration::from_millis(100));
+        };
+        last = last.max(stamp);
+    }
+    last
+}
+
+/// Waits until `node`'s store has recorded `root`: the manifest and blobs of each artifact recorded.
+fn recorded(cluster: &Cluster, node: &str, root: &Digest) -> Vec<(Digest, Vec<Digest>)> {
+    let start = Instant::now();
+    let path = format!("{STORE}/roots/sha256/{}.json", root.hex());
+    let text = loop {
+        let output = cluster.exec_output(node, &["cat", &path]).unwrap();
+        if output.success {
+            break output.stdout;
+        }
+        assert!(start.elapsed() < WITHIN, "{node} has not recorded {root}");
+        sleep(Duration::from_millis(200));
+    };
+    let record: Value = serde_json::from_str(&text).unwrap();
+    let digest = |value: &Value| -> Digest { value.as_str().unwrap().parse().unwrap() };
+    record["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|artifact| {
+            let blobs = artifact["blobs"].as_array().unwrap();
+            (
+                digest(&artifact["manifest"]),
+                blobs.iter().map(digest).collect(),
+            )
+        })
+        .collect()
+}
+
+/// Pushes [`COLLECTED`] to `zot`, new, with a Sigstore bundle as referrer: its root. It is [`UNSIGNED`] with a label of
+/// its own, so another config: CRI-O names an image by its config, and would merge two that share one.
+fn push_collected(zot: &Upstream) -> Digest {
+    let name = zot.address();
+    let bundle = "application/vnd.dev.sigstore.bundle.v0.3+json";
+    zot.regctl(&format!(
+        "regctl image copy {name}/{UNSIGNED} {name}/{COLLECTED} >/dev/null \
+         && regctl image mod --replace --label dev.speculaire.e2e.run=$(date +%s%N) {name}/{COLLECTED} >/dev/null \
+         && printf '{{\"e2e\":\"collected\"}}' >/tmp/bundle.json \
+         && regctl artifact put --subject {name}/{COLLECTED} --artifact-type {bundle} \
+            --file /tmp/bundle.json --file-media-type {bundle} >/dev/null"
+    ))
+    .unwrap();
+    zot.digest(COLLECTED).unwrap()
+}
+
+/// The agent's requests to `upstream` since the `seen` first entries of its log, but the challenges.
 fn agent_requests(upstream: &Upstream, seen: usize) -> Vec<Request> {
     upstream
         .requests()
@@ -579,13 +678,7 @@ fn another_node_reads_the_referrers_and_artifacts_a_node_discovered_from_its_pee
     let worker = Worker::new();
     let cluster = &worker.cluster;
     let expected = Expected::read(cluster);
-    let reader = cluster
-        .nodes()
-        .unwrap()
-        .into_iter()
-        .map(|n| n.name)
-        .find(|name| *name != worker.name)
-        .expect("a second node");
+    let reader = worker.other();
     worker.forget(&expected);
     worker.pull(&cluster.upstream(Kind::Plain), &expected);
     let address = SocketAddr::new(cluster.family_address(&worker.name).unwrap(), PEER_PORT);
@@ -682,13 +775,7 @@ fn a_node_cut_off_from_upstream_gets_every_artifact_from_the_node_that_discovere
     let expected = Expected::read(cluster);
     let zot = cluster.upstream(Kind::Referrers);
     let seen = zot.requests().unwrap().len();
-    let a = cluster
-        .nodes()
-        .unwrap()
-        .into_iter()
-        .map(|n| n.name)
-        .find(|name| *name != b.name)
-        .expect("a second node");
+    let a = b.other();
     let reference = format!("{}/{SIGNED}", zot.address());
     let pull = cluster
         .exec_output(&a, &["crictl", "pull", &reference])
@@ -735,4 +822,150 @@ fn a_node_cut_off_from_upstream_gets_every_artifact_from_the_node_that_discovere
         requests.iter().all(|r| !r.path.ends_with(&att)),
         "{requests:?}"
     );
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_stored_artifact_is_announced_and_withdrawn_with_its_image_within_2_s() {
+    let _serial = serial();
+    let worker = Worker::new();
+    let cluster = &worker.cluster;
+    let reader = worker.other();
+    let expected = Expected::read(cluster);
+    worker.forget(&expected);
+    worker.pull(&cluster.upstream(Kind::Referrers), &expected);
+    let manifest: Digest = expected.artifacts[0].0.parse().unwrap();
+
+    // A blob is linked into place once written: its time is when the store kept it.
+    let stored = worker.stamped(&format!(
+        "date -r {STORE}/blobs/sha256/{} +%s%N",
+        manifest.hex()
+    ));
+    let announced = told(cluster, &reader, &worker.name, &manifest, true, WITHIN);
+    let removed = worker.stamped(&worker.rmi());
+    let withdrawn = told(cluster, &reader, &worker.name, &manifest, false, WITHIN);
+    let ms = |from: u64, to: u64| to.saturating_sub(from) / 1_000_000;
+    println!(
+        "every reflector named the worker {} ms after it stored an artifact, and no longer {} ms after the image's removal",
+        ms(stored, announced),
+        ms(removed, withdrawn)
+    );
+    let within = u64::try_from(ANNOUNCED_WITHIN.as_millis()).unwrap();
+    assert!(ms(stored, announced) <= within);
+    assert!(ms(removed, withdrawn) <= within);
+
+    // Deleted before withdrawn. The empty config may stay: another image the worker lists may name it.
+    let left: Vec<&String> = expected
+        .digests()
+        .filter(|digest| *digest != EMPTY)
+        .filter(|digest| {
+            let hex = digest.trim_start_matches("sha256:");
+            worker
+                .cluster
+                .exec_output(
+                    &worker.name,
+                    &["test", "-e", &format!("{STORE}/blobs/sha256/{hex}")],
+                )
+                .unwrap()
+                .success
+        })
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    let record = format!("{STORE}/roots/sha256/{}.json", expected.root.hex());
+    worker.sh(&format!("test ! -e {record}"));
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_blob_two_images_name_stays_and_a_restart_collects_the_image_removed_meanwhile() {
+    let _serial = serial();
+    let worker = Worker::new();
+    let cluster = &worker.cluster;
+    let name = worker.name.as_str();
+    let reader = worker.other();
+    let expected = Expected::read(cluster);
+    let zot = cluster.upstream(Kind::Referrers);
+    worker.forget(&expected);
+    let root = push_collected(&zot);
+    worker.pull(&zot, &expected);
+    worker.sh(&format!("crictl pull {}/{COLLECTED}", zot.address()));
+    let artifacts = recorded(cluster, name, &root);
+    let empty: Digest = EMPTY.parse().unwrap();
+    assert!(expected.digests().any(|digest| digest == EMPTY));
+    assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+    assert!(artifacts[0].1.contains(&empty), "{artifacts:?}");
+    let own: Vec<Digest> = std::iter::once(artifacts[0].0.clone())
+        .chain(
+            artifacts[0]
+                .1
+                .iter()
+                .filter(|blob| **blob != empty)
+                .cloned(),
+        )
+        .collect();
+    let signed: Vec<Digest> = expected
+        .artifacts
+        .iter()
+        .map(|(manifest, _)| manifest.parse().unwrap())
+        .collect();
+    for digest in own.iter().chain(&signed).chain([&empty]) {
+        told(cluster, &reader, name, digest, true, WITHIN);
+    }
+
+    // Removing the signed image keeps the empty config, which the other still names.
+    worker.sh(&worker.rmi());
+    for digest in &signed {
+        told(cluster, &reader, name, digest, false, WITHIN);
+    }
+    worker.sh(&format!("test -f {STORE}/blobs/sha256/{}", empty.hex()));
+    told(cluster, &reader, name, &empty, true, Duration::ZERO);
+
+    // The signed image comes back; the other leaves while the agent is stopped.
+    worker.pull(&zot, &expected);
+    recorded(cluster, name, &expected.root);
+    cluster.stop_agent(name).unwrap();
+    worker.sh(&worker.rmi_collected());
+    let start = Instant::now();
+    cluster.start_agent(name).unwrap();
+    let kept: Vec<&Digest> = signed.iter().chain([&empty]).collect();
+    let reflectors: Vec<SocketAddr> = cluster
+        .reflectors()
+        .iter()
+        .map(|r| SocketAddr::new(cluster.family_address(r).unwrap(), PORT))
+        .collect();
+    loop {
+        let mut all_kept = true;
+        for reflector in &reflectors {
+            for digest in &own {
+                let holders = cluster.lookup(&reader, *reflector, digest).unwrap();
+                assert!(
+                    holders.iter().all(|h| h.node != name),
+                    "{reflector} names {name} for {digest}, of an image removed while its agent was stopped"
+                );
+            }
+            for digest in &kept {
+                let holders = cluster.lookup(&reader, *reflector, digest).unwrap();
+                all_kept &= holders.iter().any(|h| h.node == name);
+            }
+        }
+        if all_kept {
+            break;
+        }
+        assert!(
+            start.elapsed() < WITHIN,
+            "the store's artifacts are not announced"
+        );
+        sleep(Duration::from_millis(100));
+    }
+    println!(
+        "every reflector named the worker for its stored artifacts {} ms after its agent started",
+        start.elapsed().as_millis()
+    );
+    for digest in &own {
+        worker.sh(&format!("test ! -e {STORE}/blobs/sha256/{}", digest.hex()));
+    }
+    worker.sh(&format!(
+        "test ! -e {STORE}/roots/sha256/{}.json",
+        root.hex()
+    ));
 }

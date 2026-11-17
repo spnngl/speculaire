@@ -137,7 +137,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
 
-## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128)
+## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131)
 
 - **Decision:**
   - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends, and read the list once more 1 s after a watch starts: no answer tells when containerd holds the subscription, and an image pulled in between waited 60 s in CI. Once the agent stops, a follower that loses the runtime ends without a warning: the agent's own teardown cut it. The CRI-O relay protects the listed images from eviction through it.
@@ -157,7 +157,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Docker Hub counts each `GET` of a manifest against its pull limit, and an image manifest names no target: `HEAD` suffices (D38).
   - The caps bound what one image's publisher can make every node fetch and keep.
 - **Measured (M4 step 01, arm64, Docker, `just e2e containerd 2.4` and `just e2e crio 1.37`):** after `crictl pull` of `e2e/signed:1` from the private upstream, with only the runtime's registry config for login and CA, the store held its three bundles, the `.sig` manifest and their blobs 1.5 s later on containerd and 0.46 s later on CRI-O (8.1 s before new images went first). registry:2's access log showed `GET` of the referrers API answered 404, then `HEAD` and `GET` of the fallback tag, then of `.sig`, and no `.att`; zot's showed the API and no fallback tag. At `log.filter = "trace"` the journal held no password, no `Basic ` and no `eyJ`.
-- **Revisit when:** M5 adds the manifest-fetch trigger; a real image has more than 64 bundles; or the store grows enough to need eviction before the M4 garbage collector (step 05).
+- **Revisit when:** M5 adds the manifest-fetch trigger; or a real image has more than 64 bundles.
 
 
 ## D126: Discovery asks the artifact store, then peers, then upstream; peers list referrers from a target's first 4 holders (amends D102, D121)
@@ -191,3 +191,19 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - A root waiting for the next full listing after its `retry_at` would wait up to 60 s more.
   - The verdict, and the reason in it, come at M5; a journal line in its words lets an operator see the limit today.
 - **Revisit when:** M5 produces verdicts, or a registry limits per image rather than per client.
+
+## D131: The artifact store keeps only what the listed roots name, collected at each listing and each removal (amends D121, D124)
+
+- **Decision:**
+  - **Kept:** a listed root's index blob (D126), and every artifact manifest and blob of a listed root's record. A blob two roots name stays while either is listed, such as the empty config every Sigstore bundle names (D124).
+  - **Collected:** the follower of the image list (D121) collects the store at each full listing, so at its first and every 60 s, and whenever a root leaves the list. It deletes each record of a root no longer listed, then each blob nothing kept names, a blob a failed discovery left included. Collection and discovery take turns in one task, and a root collected is discovered again once listed again.
+  - **Announced:** each deleted blob is withdrawn through the holdings (D124), and `speculaire_artifact_store_bytes` drops by its size. The store lists what it holds to the holdings only after its first collection, so an image removed while the agent was stopped never has its artifacts announced. The first collection runs on the first listing, before discovery waits for a reflector stream (D126).
+  - **Grace:** none. M4 discovers only listed images, so a root not yet listed has nothing in the store.
+- **Because:**
+  - The store holds what the node's images need checked (D22); an artifact of an image gone is weight on the disk and an answer for no reader.
+  - A record goes before its blobs, and blobs before their withdrawal: a crash in between leaves blobs no record names, which the next collection deletes, and no record naming a blob the store lacks. A reflector forgets what a node announced once its stream ends, so what a crash left announced goes with it, and the restarted agent announces only what its first listing finds.
+  - Discovery keeps a root's blobs before it records them (D121): a collection running beside it would delete them as named by nothing.
+  - The kubelet's image garbage collection and `crictl rmi` remove images on either runtime without telling the agent: the image list does.
+- **Limit:** a blob removed by hand stays announced until the agent restarts, and answers a 404 meanwhile. A root removed while its discovery runs is collected once that ends. A stream that connects before the store's first listing announces the store's blobs just after its snapshot.
+- **Measured (M4 step 05, locally on Docker Desktop arm64, kind, `just e2e containerd 2.4` and `just e2e crio 1.37`):** with zot as upstream, every reflector named the worker for a bundle manifest 193 ms after its store kept it on containerd and 181 ms on CRI-O, and no longer 523 ms and 166 ms after `crictl rmi`, which deleted every artifact and the record. With a second signed image listed, the empty config both name stayed in the store and announced. After a restart, every reflector named the worker for the store's artifacts 851 ms and 887 ms after the agent started, and never for those of an image removed while it was stopped, whose files were gone. Each full local leg, cluster up and down included, took 441 s on containerd and 501 s on CRI-O.
+- **Revisit when:** M5's manifest-fetch trigger (D22) stores artifacts of an image not yet listed, which then needs a grace; or the store must hold less than what the listed images name.
