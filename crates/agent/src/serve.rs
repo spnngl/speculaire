@@ -447,7 +447,7 @@ const LINK_WAIT: Duration = Duration::from_secs(10);
 /// through the mirror's fetcher, then upstream (D121, D126); the store is what the node serves of them (D124).
 ///
 /// Discovery starts once `peers` turns true, or after [`LINK_WAIT`]: a root it found unreachable waits
-/// [`speculaire_artifacts::follow::RETRY`], so its first pass asks peers when the node has any.
+/// [`speculaire_artifacts::discover::RETRY`], so its first pass asks peers when the node has any.
 fn start_discovery(
     config: &Config,
     node: &RuntimeNode,

@@ -21,5 +21,5 @@ pub mod request;
 mod serve;
 pub mod tls;
 
-pub use pulls::{Answer, Body, Local, Pull, Pulls};
+pub use pulls::{Answer, Body, Local, Pull, Pulls, Refusal};
 pub use serve::serve;

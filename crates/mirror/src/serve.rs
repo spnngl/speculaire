@@ -230,6 +230,7 @@ async fn handle<P: Pulls>(
             span.in_scope(|| warn!(error = %err, kind = kind.label(), "the mirror could not read content it may hold"));
             Outcome::Error
         }
+        Answer::Refused(_) => Outcome::Refused,
     };
     span.record("source", outcome.source());
     span.record("result", outcome.result());
@@ -237,6 +238,7 @@ async fn handle<P: Pulls>(
     match answered {
         Answer::Served(source, response) => series.measure(kind, source, started, span, response),
         Answer::Missing | Answer::Failed(_) => status(StatusCode::NOT_FOUND),
+        Answer::Refused(refusal) => refusal.response(),
     }
 }
 

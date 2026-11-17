@@ -571,9 +571,17 @@ async fn a_401_from_every_source_leaves_the_artifacts_unreachable() {
     test.registry
         .put(&format!("/other/manifests/{root}"), 401, "");
     let names = [NAME.to_owned(), "reg.test/other".to_owned()];
+    let before = Instant::now();
     let refused = test.discovery.discover(&root, &names).await;
-    assert!(matches!(refused, Err(Error::Unreachable)), "{refused:?}");
-    assert_eq!(refused.unwrap_err().to_string(), "artifacts unreachable");
+    let Err(Error::Unverifiable { reason, retry_at }) = &refused else {
+        panic!("{refused:?}");
+    };
+    assert_eq!(*reason, Reason::Unreachable);
+    assert!(*retry_at >= before + RETRY && *retry_at <= Instant::now() + RETRY);
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "unverifiable: artifacts unreachable"
+    );
     assert_eq!(test.registry.requests().len(), 2);
     assert_eq!(test.discovery.store().recorded(&root).await.unwrap(), None);
 }
@@ -627,6 +635,17 @@ async fn a_manifest_that_does_not_match_its_digest_is_dropped_and_counted() {
     assert_eq!(count("not_found").as_deref(), Some("1"), "{rendered}");
 }
 
+/// The host `discovered` came to rate limited, and when it may be asked again.
+fn limited(discovered: &Result<Vec<Artifact>, Error>) -> (&str, Instant) {
+    match discovered {
+        Err(Error::Unverifiable {
+            reason: Reason::RateLimited { host },
+            retry_at,
+        }) => (host, *retry_at),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn a_429_is_counted_as_rate_limited() {
     let recorder = PrometheusBuilder::new().build_recorder();
@@ -637,16 +656,124 @@ async fn a_429_is_counted_as_rate_limited() {
     test.registry
         .put(&format!("/app/manifests/{root}"), 429, "");
 
-    assert!(matches!(
-        test.discover(&root).await,
-        Err(Error::Unreachable)
-    ));
+    let discovered = test.discover(&root).await;
 
+    let host = test.registry.endpoint().authority;
+    assert_eq!(limited(&discovered).0, host);
+    assert_eq!(
+        discovered.unwrap_err().to_string(),
+        format!("unverifiable: upstream rate limited: {host}")
+    );
     let rendered = handle.render();
     assert!(
         rendered.contains(r#"upstream="other",result="rate_limited"} 1"#),
         "{rendered}"
     );
+}
+
+#[tokio::test]
+async fn a_refusal_mid_discovery_pauses_its_host_for_every_root_and_records_nothing() {
+    let test = Test::start().await;
+    let root = test.root();
+    test.registry.put_with(
+        &format!("/app/referrers/{root}"),
+        429,
+        vec![("retry-after", "120".to_owned())],
+        "",
+    );
+    let before = Instant::now();
+
+    let discovered = test.discover(&root).await;
+
+    let (host, retry_at) = limited(&discovered);
+    assert_eq!(host, test.registry.endpoint().authority);
+    let window = Duration::from_secs(120);
+    assert!(retry_at >= before + window && retry_at <= Instant::now() + window);
+    assert_eq!(test.discovery.store().recorded(&root).await.unwrap(), None);
+    let asked = test.registry.requests();
+    assert_eq!(
+        asked,
+        [
+            format!("HEAD /app/manifests/{root}"),
+            format!("GET /app/referrers/{root}"),
+        ]
+    );
+    // Another root, and the same one again, ask nothing until the pause ends.
+    let other = digest_of(b"other");
+    assert_eq!(limited(&test.discover(&other).await), (host, retry_at));
+    assert_eq!(limited(&test.discover(&root).await), (host, retry_at));
+    assert_eq!(test.registry.requests(), asked);
+}
+
+#[tokio::test]
+async fn a_503_limits_only_with_retry_after() {
+    let test = Test::start().await;
+    let root = test.root();
+    let referrers = format!("/app/referrers/{root}");
+    test.registry.put(&referrers, 503, "");
+
+    // An outage of the referrers API: discovery goes on to the `.sig` tag, and ends.
+    assert_eq!(test.discover(&root).await.unwrap(), Vec::new());
+
+    test.registry.put_with(
+        &referrers,
+        503,
+        vec![("retry-after", "Fri, 31 Dec 9999 23:59:59 GMT".to_owned())],
+        "",
+    );
+    let before = Instant::now();
+    let (_, retry_at) = limited(&test.discover(&root).await);
+    // A day's date asked, an hour's pause given (D38).
+    let longest = Duration::from_secs(3600);
+    assert!(retry_at >= before + longest && retry_at <= Instant::now() + longest);
+}
+
+#[tokio::test]
+async fn a_paused_host_does_not_stop_another_candidate() {
+    let limiting = Registry::start().await;
+    let test = Test::with(Limits::new(1024), |registry| {
+        vec![limiting.endpoint(), registry.endpoint()]
+    })
+    .await;
+    let root = test.root();
+    let (bundle, listed) = test.bundle(&root, BUNDLE, b"bundle");
+    test.referrers(&format!("/app/referrers/{root}"), &[listed], None);
+    limiting.put(&format!("/app/manifests/{root}"), 429, "");
+
+    let artifacts = test.discover(&root).await.unwrap();
+
+    assert_eq!(kinds(&artifacts), [(Kind::Bundle, bundle)]);
+    // Paused after its refusal, the first candidate is passed for every later request.
+    assert_eq!(limiting.requests(), [format!("HEAD /app/manifests/{root}")]);
+}
+
+#[tokio::test]
+async fn when_every_candidate_refuses_the_pause_that_ends_first_is_the_outcome() {
+    for first_ends_first in [true, false] {
+        let first = Registry::start().await;
+        let second = Registry::start().await;
+        let test = Test::with(Limits::new(1024), |_| {
+            vec![first.endpoint(), second.endpoint()]
+        })
+        .await;
+        let root = test.root();
+        let (sooner, later) = if first_ends_first {
+            (&first, &second)
+        } else {
+            (&second, &first)
+        };
+        let path = format!("/app/manifests/{root}");
+        sooner.put_with(&path, 429, vec![("retry-after", "120".to_owned())], "");
+        later.put_with(&path, 429, vec![("retry-after", "600".to_owned())], "");
+        let before = Instant::now();
+
+        let discovered = test.discover(&root).await;
+
+        let (host, retry_at) = limited(&discovered);
+        assert_eq!(host, sooner.endpoint().authority);
+        let window = Duration::from_secs(120);
+        assert!(retry_at >= before + window && retry_at <= Instant::now() + window);
+    }
 }
 
 #[test]

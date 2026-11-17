@@ -14,6 +14,7 @@ mod smoke;
 mod values;
 
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use speculaire_agent::config;
 use speculaire_oci::platform::{self as oci_platform, Host, Matcher};
@@ -50,6 +51,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("containerd_event", containerd_event),
     ("referrers", referrers),
     ("link", link),
+    ("retry_after", retry_after),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -433,10 +435,7 @@ pub fn token_answer(data: &[u8]) {
     use secrecy::ExposeSecret as _;
     if let Some((token, lifetime)) = speculaire_registry::token::parse_answer(data) {
         assert_ne!(token.expose_secret(), "");
-        assert!(
-            lifetime >= std::time::Duration::from_secs(60),
-            "{lifetime:?}"
-        );
+        assert!(lifetime >= Duration::from_secs(60), "{lifetime:?}");
     }
 }
 
@@ -706,5 +705,30 @@ pub fn link(data: &[u8]) {
         assert_eq!(value.get(at..at + uri.len()), Some(uri));
         assert_eq!(value.as_bytes().get(at.wrapping_sub(1)), Some(&b'<'));
         assert_eq!(value.as_bytes().get(at + uri.len()), Some(&b'>'));
+    }
+}
+
+/// A registry's `Retry-After`, as discovery reads it to know when to ask that host again (D38).
+///
+/// Reading never panics. Whole seconds are the delay they say, saturating; a date is never more than year 9999 away.
+///
+/// # Panics
+///
+/// When reading panics, or a delay breaks that.
+pub fn retry_after(data: &[u8]) {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let Some(delay) = speculaire_registry::retry_after::parse(data, now) else {
+        return;
+    };
+    let text = std::str::from_utf8(data)
+        .expect("a delay comes from text")
+        .trim();
+    if text.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = text.parse().unwrap_or(u64::MAX);
+        assert_eq!(delay.as_secs(), seconds, "{text:?}");
+    } else {
+        // 9999-12-31T23:59:59Z, the last time an HTTP date names.
+        let last = SystemTime::UNIX_EPOCH + Duration::from_secs(253_402_300_799);
+        assert!(now + delay <= last, "{text:?}");
     }
 }

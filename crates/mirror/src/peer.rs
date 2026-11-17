@@ -223,8 +223,9 @@ impl<C: Content, A: Referrers> Api for Peer<C, A> {
                     None => response,
                 }
             }
-            // Announced, then deleted or collected without an event: the fetching agent goes to the next peer.
-            Answer::Missing => status(StatusCode::NOT_FOUND),
+            // Announced, then deleted or collected without an event: the fetching agent goes to the next peer. The
+            // node's own content refuses nothing: only the relay does.
+            Answer::Missing | Answer::Refused(_) => status(StatusCode::NOT_FOUND),
             Answer::Failed(err) => {
                 warn!(error = %err, kind = kind.label(), "the peer API could not read content the node may hold");
                 status(StatusCode::NOT_FOUND)

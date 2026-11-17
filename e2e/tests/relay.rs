@@ -687,6 +687,67 @@ fn on_crio_a_corrupt_upstream_leaves_nothing_in_the_cache_and_the_client_never_g
     assert!(worker.cached().len() <= 2, "{:?}", worker.cached());
 }
 
+/// Upstream's `429` reaches CRI-O with its `Retry-After`, rather than a 404 that ends the pull for good (D129): CRI-O
+/// gets the platform manifest only from the source that gave it the index. The tag's is the one the relay is sure to
+/// ask upstream for: a peer may serve a manifest by digest.
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn on_crio_upstreams_429_to_a_relayed_manifest_reaches_crio_and_the_pull_succeeds_after_it() {
+    let _serial = serial();
+    let Some(mut worker) = Worker::on(Runtime::Crio) else {
+        return;
+    };
+    let upstream = seeded("open.e2e.test", TEST_IMAGE);
+    let proxy = Proxy::start("limit.e2e.test", &upstream.address(), None, None).unwrap();
+    let image = format!("{}/app/web:1", proxy.address());
+    worker.registry_conf("limit", &proxy.address(), false);
+    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
+    let refused = worker.manifests("refused");
+    let window = Duration::from_secs(5);
+    proxy.throttle("/manifests/", window, Some(1)).unwrap();
+
+    let start = Instant::now();
+    assert_pulled(&worker.pull(&image, None));
+    assert!(start.elapsed() >= window, "{:?}", start.elapsed());
+    let limited: Vec<_> = proxy
+        .requests()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.status == 429)
+        .collect();
+    assert_eq!(limited.len(), 1, "{limited:?}");
+    assert!((worker.manifests("refused") - refused - 1.0).abs() < f64::EPSILON);
+    let warnings = worker.sh(&format!(
+        "journalctl -u speculaire -p warning --no-pager -o verbose --since '{}'",
+        since.trim()
+    ));
+    // `-o verbose` starts each entry with an unindented line, then a field per indented line.
+    let mut entries: Vec<Vec<&str>> = Vec::new();
+    for line in warnings.lines() {
+        match (line.strip_prefix("    "), entries.last_mut()) {
+            (Some(field), Some(entry)) => entry.push(field),
+            _ => entries.push(Vec::new()),
+        }
+    }
+    let entry = entries
+        .iter()
+        .find(|entry| entry.contains(&"MESSAGE=upstream limits the relay: CRI-O gets a 429"))
+        .unwrap_or_else(|| panic!("no warning of the limit:\n{warnings}"));
+    for (field, value) in [
+        ("F_STATUS=", "429"),
+        ("F_HOST=", "limit.e2e.test"),
+        ("F_NAME=", "app/web"),
+        ("F_REFERENCE=", "1"),
+    ] {
+        assert!(
+            entry
+                .iter()
+                .any(|f| f.strip_prefix(field).is_some_and(|v| v.contains(value))),
+            "{field}{value} lacks in {entry:?}"
+        );
+    }
+}
+
 struct Layer {
     digest: String,
     size: u64,

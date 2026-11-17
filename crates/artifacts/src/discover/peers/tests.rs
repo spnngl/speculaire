@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 
 use super::super::tests::{NAME, SETTINGS, Test};
 use super::*;
-use crate::discover::Limits;
+use crate::discover::{Error, Limits, Reason};
 use crate::store::Store;
 
 /// The node that discovers.
@@ -279,14 +279,29 @@ async fn peers_give_every_artifact_and_a_rate_limited_upstream_is_not_asked() {
     a.record(&root, &held).await.unwrap();
     let holder = nodes.peer("node-a", Held::default(), a).await;
     let test = nodes.test(local, everyone(&[&holder])).await;
-    // Upstream limits this node (D38): peers come first, so it is never asked.
+    // Upstream limits this node (D38), which pauses its host: peers are still asked, and upstream is not.
+    let limited = digest_of(b"limited");
     test.registry
-        .put(&format!("/app/manifests/{root}"), 429, "");
+        .put(&format!("/app/manifests/{limited}"), 429, "");
+    let paused = test.discover(&limited).await;
+    assert!(
+        matches!(
+            &paused,
+            Err(Error::Unverifiable {
+                reason: Reason::RateLimited { .. },
+                ..
+            })
+        ),
+        "{paused:?}"
+    );
 
     let artifacts = test.discover(&root).await.unwrap();
 
     assert_eq!(sorted(artifacts.clone()), sorted(held));
-    assert_eq!(test.registry.requests(), Vec::<String>::new());
+    assert_eq!(
+        test.registry.requests(),
+        [format!("HEAD /app/manifests/{limited}")]
+    );
     let store = test.discovery.store();
     for artifact in &artifacts {
         assert!(store.contains(&artifact.manifest));

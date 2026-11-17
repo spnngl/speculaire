@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 
 use e2e::Cluster;
 use e2e::balancer::PORT;
+use e2e::node::Rules;
 use e2e::reflector::KUBELET;
 use e2e::registry::PASSWORD;
-use e2e::upstream::{Digest, Kind, Request, SIGNED, Upstream};
+use e2e::upstream::{Digest, Kind, Request, SIGNED, UNSIGNED, Upstream};
 use serde_json::Value;
 
 /// The tests share the worker's agent and image list: one at a time.
@@ -182,26 +183,27 @@ impl Worker {
 
     /// Pulls the signed image from `upstream`, and waits until the store holds every artifact of `expected`: how
     /// long that took after the pull.
-    /// The peer APIs of the other nodes are cut off meanwhile: discovery asks upstream once peers list nothing (D126).
     fn pull(&self, upstream: &Upstream, expected: &Expected) -> Duration {
-        let others: Vec<String> = self
-            .cluster
+        let _alone = self.alone();
+        self.sh(&format!("crictl pull {}/{SIGNED}", upstream.address()));
+        holds(&self.cluster, &self.name, expected, Instant::now())
+    }
+
+    /// Cuts the worker off from the other nodes' peer APIs while the rules live: discovery asks upstream once peers
+    /// list nothing (D126).
+    fn alone(&self) -> Vec<Rules<'_>> {
+        self.cluster
             .nodes()
             .unwrap()
             .into_iter()
             .map(|n| n.name)
             .filter(|name| *name != self.name)
-            .collect();
-        let _rejected: Vec<_> = others
-            .iter()
             .map(|other| {
                 self.cluster
-                    .reject_port(&self.name, other, PEER_PORT)
+                    .reject_port(&self.name, &other, PEER_PORT)
                     .unwrap()
             })
-            .collect();
-        self.sh(&format!("crictl pull {}/{SIGNED}", upstream.address()));
-        holds(&self.cluster, &self.name, expected, Instant::now())
+            .collect()
     }
 
     /// The sum of `speculaire_artifact_fetches_total` over the series whose labels include each of `labels`.
@@ -460,6 +462,53 @@ fn with_the_referrers_api_no_fallback_tag_is_asked() {
     );
     let fallback = format!("/v2/{REPOSITORY}/manifests/sha256-{}", expected.root.hex());
     assert!(requests.iter().all(|r| r.path != fallback), "{requests:?}");
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn the_tags_of_an_unsigned_image_get_a_head_and_never_a_get() {
+    let _serial = serial();
+    let worker = Worker::new();
+    let plain = worker.cluster.upstream(Kind::Plain);
+    let root = plain.digest(UNSIGNED).unwrap();
+    let image = format!("{}/{UNSIGNED}", plain.address());
+    // Forgotten, so that it is discovered again once listed.
+    worker.cluster.stop_agent(&worker.name).unwrap();
+    worker.sh(&format!(
+        "crictl rmi {image} >/dev/null 2>&1; rm -f {STORE}/roots/sha256/{}.json",
+        root.hex()
+    ));
+    worker.cluster.start_agent(&worker.name).unwrap();
+    let seen = plain.requests().unwrap().len();
+
+    let alone = worker.alone();
+    worker.sh(&format!("crictl pull {image}"));
+    let fallback = format!("/v2/e2e/unsigned/manifests/sha256-{}", root.hex());
+    let sig = format!("{fallback}.sig");
+    let start = Instant::now();
+    let requests = loop {
+        let requests = agent_requests(&plain, seen);
+        if requests.iter().any(|r| r.path == sig) {
+            break requests;
+        }
+        assert!(
+            start.elapsed() < WITHIN,
+            "no request for {sig}: {requests:?}"
+        );
+        sleep(Duration::from_millis(200));
+    };
+    drop(alone);
+    worker.sh(&format!("crictl rmi {image}"));
+
+    // Docker Hub counts a `GET` of a manifest against the pull limit, not a `HEAD` (D38).
+    position(&requests, "HEAD", &fallback, 404);
+    position(&requests, "HEAD", &sig, 404);
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.method == "HEAD" || (r.path != fallback && r.path != sig)),
+        "{requests:?}"
+    );
 }
 
 /// An answer of the peer API: its status, its `OCI-Filters-Applied` header, the SHA-256 of its body, and its body when

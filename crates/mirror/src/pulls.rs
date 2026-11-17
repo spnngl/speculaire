@@ -4,6 +4,8 @@ use std::future::Future;
 use std::io;
 
 use bytes::Bytes;
+use http::header::RETRY_AFTER;
+use http::{HeaderValue, StatusCode};
 use http_body_util::combinators::UnsyncBoxBody;
 use hyper::Response;
 use speculaire_oci::reference::Digest;
@@ -13,6 +15,7 @@ use speculaire_runtime::content::{Blob, Content, Error};
 use crate::fetch::Fetcher;
 use crate::metrics::Source;
 use crate::request::{Kind, Reference};
+use crate::serve::status;
 
 /// The body of an answer.
 pub type Body = UnsyncBoxBody<Bytes, io::Error>;
@@ -58,6 +61,33 @@ pub enum Answer {
     Missing,
     /// Looking or fetching failed: a 404 too, and the error is logged and counted.
     Failed(Error),
+    /// Upstream refused the relay, or failed it: the runtime gets the refusal rather than a 404 (D129).
+    Refused(Refusal),
+}
+
+/// Upstream's refusal of a relayed pull, which the runtime gets (D129).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Upstream limits the node: a `429`, with upstream's `Retry-After` when it gave one.
+    Limited(Option<HeaderValue>),
+    /// Upstream failed, or answered a status that serves nothing and denies nothing: a `502`.
+    Failed,
+}
+
+impl Refusal {
+    /// The response the runtime gets.
+    pub(crate) fn response(self) -> Response<Body> {
+        match self {
+            Self::Limited(retry_after) => {
+                let mut response = status(StatusCode::TOO_MANY_REQUESTS);
+                if let Some(retry_after) = retry_after {
+                    response.headers_mut().insert(RETRY_AFTER, retry_after);
+                }
+                response
+            }
+            Self::Failed => status(StatusCode::BAD_GATEWAY),
+        }
+    }
 }
 
 /// Something that answers pulls.

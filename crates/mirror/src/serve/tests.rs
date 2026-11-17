@@ -22,7 +22,7 @@ use tokio::sync::oneshot;
 use tokio_rustls::TlsConnector;
 
 use super::*;
-use crate::pulls::{Answer as Answer_, Local, Pull, Pulls};
+use crate::pulls::{Answer as Answer_, Local, Pull, Pulls, Refusal};
 use crate::request::Kind;
 
 const IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -697,4 +697,43 @@ async fn what_answers_is_told_the_name_the_reference_the_range_and_the_accept() 
             r#"manifest docker.io/library/busybox Some(Tag("1.37")) head=false range=None accept=Some("application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json")"#.to_owned(),
         ]
     );
+}
+
+/// Answers every pull with upstream's refusal: a limit on manifests, a failure on blobs.
+struct Refusing;
+
+impl Pulls for Refusing {
+    fn pull(&self, pull: Pull<'_>) -> impl std::future::Future<Output = Answer_> + Send {
+        std::future::ready(Answer_::Refused(if pull.kind == Kind::Manifest {
+            Refusal::Limited(Some(HeaderValue::from_static("120")))
+        } else {
+            Refusal::Failed
+        }))
+    }
+}
+
+#[tokio::test]
+async fn upstreams_refusal_is_a_429_with_its_retry_after_or_a_502_and_counted_as_refused() {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _local = ::metrics::set_default_local_recorder(&recorder);
+    crate::metrics::describe();
+    let server = start_pulls(Refusing).await;
+    let mut sender = client(&server).await;
+    let limited = get(&mut sender, "/v2/x/manifests/latest").await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(header(&limited, "retry-after"), "120");
+    assert_eq!(
+        get(&mut sender, &blob_path(&digest_of(1))).await.status,
+        StatusCode::BAD_GATEWAY
+    );
+    let text = handle.render();
+    for line in [
+        r#"speculaire_mirror_requests_total{kind="manifest",result="refused"} 1"#,
+        r#"speculaire_mirror_requests_total{kind="blob",result="refused"} 1"#,
+        r#"speculaire_mirror_first_byte_seconds_count{kind="blob",source="fall_through"} 1"#,
+    ] {
+        assert!(text.lines().any(|l| l == line), "no `{line}` in\n{text}");
+    }
 }

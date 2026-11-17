@@ -47,6 +47,7 @@ futures-util = { version = "0.3.34", default-features = false, features = [
 ] }
 http = "1.5.0"
 http-body-util = "0.1.5"
+httpdate = "1.0.3"
 hyper = { version = "1.12.0", default-features = false, features = [
   "http1",
   "server",
