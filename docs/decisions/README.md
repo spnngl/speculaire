@@ -105,7 +105,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
 - D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76; amended by D104, D105)
-- D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33; amended by D102, D103, D105)
+- D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33; amended by D102, D103, D105, D132)
 - D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90; amended by D121, D123, D124)
 - D100 [distribution](distribution.md): the peer API routes `GET` and `HEAD` by digest through the mirror's parser, caps only blob bodies, answers `503` while the agent stops, and opens on the peer address the client fixes (amends D24, D36; amended by D103, D123, D124)
 - D101 [agent](agent.md): `configure` keeps the mirror's table only where containerd reads it first, and refuses a `hosts.toml` whose first host table is `[host.""]`, which containerd skips there and would read after the mirror's (amends D82)
@@ -139,5 +139,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D129 [distribution](distribution.md): the CRI-O relay passes upstream's refusal on: a `429` with its `Retry-After`, a `502` when upstream failed, a `404` only for upstream's `404`, `401` or `403`; each refusal is a `warn` line (amends D85, D88)
 - D130 [build](build.md): the rate-limit e2e suite runs in the IPv4 pass only (amends D63, D94)
 - D131 [verification](verification.md): the artifact store keeps what the listed roots' records name, a shared blob while any does; it is collected at each full listing and each removal, between discoveries, each deletion withdrawn; it announces only after its first collection; no grace for roots not yet listed (amends D121, D124)
+- D132 [reflector](reflector.md): a stream its reflector ends because it stops is a drop however short, so a reflector restarted often does not push the agent's retries to 60 s apart (amends D98)
 
-Next free number: D132.
+Next free number: D133.

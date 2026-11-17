@@ -73,13 +73,13 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 - **Revisit when:** D33's load test misses a target, or a node legitimately holds more than 100k digests.
 
 
-## D98: The agent's reflector client (amends D2, D33; amended by D102, D103, D105)
+## D98: The agent's reflector client (amends D2, D33; amended by D102, D103, D105, D132)
 
 - **Decision:**
   - **Members:** the agent dials `reflector.url` itself, accepting any node of the cluster (`Credentials::client_any`), and reads the node of the certificate that answered. A `Members` answer whose node is not in its own list is ignored, like a failed call: the agent keeps the last list and retries with D33's backoff. The channel is never dialled again behind the agent's back, so every answer comes from the checked connection.
   - **Streams:** one per member, dialled at the member's address and expecting the member's node. Each stream starts with `Hello` and a whole `Snapshot`; so does the answer to a `Resync`, and so does a stream that fell more than 1024 changes behind. Changes made while no stream is up are dropped: the next stream's snapshot carries them. Deltas send removals before additions.
   - **Peer address:** `peer.address`, else the local IP of the first stream that opens, on port 7481 (D36). It stays the same for the agent's life.
-  - **Reconnects:** a stream that ran 5 s or more and ended is a drop: the agent refreshes `Members` and waits D33's 0 to 5 s, and its backoff starts again. A stream that ended sooner, or never opened, is a failed attempt: D33's backoff, 1 s doubling to 60 s with full jitter. `speculaire_reflector_reconnects_total{member}` counts every retry. A failure logs at `info` until the member, or the load balancer, has failed for 60 s, then at `warn`.
+  - **Reconnects:** a stream that ran 5 s or more and ended is a drop: the agent refreshes `Members` and waits D33's 0 to 5 s, and its backoff starts again. So is a stream its reflector ended because it stops, however short (D132). A stream that ended sooner, or never opened, is a failed attempt: D33's backoff, 1 s doubling to 60 s with full jitter. `speculaire_reflector_reconnects_total{member}` counts every retry. A failure logs at `info` until the member, or the load balancer, has failed for 60 s, then at `warn`.
   - **Lookup:** to a random member whose stream is up, hedged to a second after 20 ms; the first answer wins, and a failed first call goes to the second at once. Each call gives up after 5 s. With no stream up, the lookup fails and the fetcher goes upstream.
   - **Stop:** the agent closes every stream at shutdown, D39's step 3, so each reflector withdraws it at once.
 - **Because:**
@@ -171,3 +171,13 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - `just bench-micro`, `speculaire-reflect`'s `read` (100 lookups through one reader): 101 allocations and 7.2 KB, against 200 and 14.8 KB; median 3.2 µs, against 4.5 µs.
   - `just load` (D104), locally, 10 CPUs, two runs each: peak RSS 466 and 464 MiB, against 464 and 465 MiB; lookup p99 145 and 56 µs, against 188 and 158 µs. A 4 KiB `KEEP` that kept snapshot chunks peaked at 484 and 485 MiB.
 - **Revisit when:** a steady frame grows past 1 KiB, or snapshot chunks grow.
+
+## D132: A stream its reflector ends because it stops is a drop, however short (amends D98)
+
+- **Decision:** a stream that opened and ended with `Refused` and reason `STOPPING` (D105) is a drop whatever it ran: the agent refreshes `Members`, waits D33''s 0 to 5 s, and its backoff starts again. A `STOPPING` refusal of a stream that never opened stays a failed attempt.
+- **Because:**
+  - A reflector sends `STOPPING` only at its own stop (`server.rs` `stopping()`), and a restart is what D33''s 0 to 5 s is for (D98).
+  - Counted as failed attempts, the short streams of a reflector restarted every few seconds doubled the backoff towards 60 s, and only a stream that ran 5 s reset it. The sparse retries then fell into restarts: on PR #181''s run 44007778956 (CRI-O 1.37), the control plane retried the worker''s reflector after 9, 18 and 55 s and warned "no stream to the reflector", though that reflector was up most of the time.
+  - A reflector that refuses every new stream while it stops still gets D33''s backoff, so the drop cannot spin.
+- **Measured:** the relay suite, which restarts the worker''s agent several times a test, 4 runs each on a local CRI-O 1.36 cluster. Before: the control plane''s retries towards the worker reached 58 s, its stream was up 4 to 38 % of each run, and the longest stretch without one was 19 to 66 s. After: retries stayed within 5.3 s except while that reflector was down for 21 s or more, the stream was up 34 to 60 %, and the longest stretch without one was 5 to 41 s.
+- **Revisit when:** a reflector sends `STOPPING` for anything other than its own stop.
