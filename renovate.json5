@@ -1,7 +1,7 @@
 // Ported from dedens `renovate.json5` at v0.1.0-131-gfd00747. The shared preset brings cargo, GitHub Actions,
 // Dockerfile digests, rust-toolchain.toml and the `# renovate:` comments of workflows; this file adds the
-// `# renovate:` comments of Containerfiles and of the justfile, the images of the e2e suites, and the oracle's Go
-// modules.
+// `# renovate:` comments of Containerfiles and of the justfile, the images of the e2e suites and of the fixture
+// recorder, and the oracle's Go modules.
 {
     "$schema": "https://docs.renovatebot.com/renovate-schema.json",
     // The shared preset at HEAD of main.
@@ -35,8 +35,8 @@
         },
         {
             "customType": "regex",
-            "description": "Images of the e2e suites, pinned by tag and digest.",
-            "managerFilePatterns": ["/(^|/)e2e/src/[^/]+\\.rs$/"],
+            "description": "Images of the e2e suites and of the fixture recorder (D139), pinned by tag and digest.",
+            "managerFilePatterns": ["/(^|/)e2e/src/[^/]+\\.rs$/", "/(^|/)\\.github/workflows/fixtures\\.yml$/"],
             "matchStrings": ["\"(?<depName>(?:docker|ghcr)\\.io/[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[0-9a-f]{64})\""],
             "datasourceTemplate": "docker",
         },

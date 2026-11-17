@@ -2,7 +2,7 @@
 
 How artifacts become verdicts. Index: `docs/decisions/README.md`.
 
-## D8: Crypto comes from sigstore-rust (amended by D43, D136)
+## D8: Crypto comes from sigstore-rust (amended by D43, D136, D139)
 
 - **Decision:** use `sigstore-verify` and `sigstore-trust-root` (sigstore-rust, crates 0.16). We write OCI discovery, regex identity matching and the legacy `.sig` → v0.1-bundle conversion ourselves. The conversion also checks that the SimpleSigning payload's `critical.image.docker-manifest-digest` equals the image digest, since the bundle verifier only binds the signature to the payload. Attestations are verified only as bundles (D43).
 - **Because:**
@@ -243,3 +243,16 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Parsing the pattern alone, then wrapping the parsed expression, keeps a pattern from closing the wrapper: spliced into `^(?:…)$` as text, `a)|(.*` would read as `^(?:a)|(.*)$`, and a `#` comment under `(?x)` would swallow the closing `)$`.
   - Rust's `\d`, `\w` and `\s` take Unicode classes where Go's take ASCII; on a SAN, which X.509 encodes as ASCII (`IA5String`), they match the same.
 - **Revisit when:** sigstore-rust gains regex identity matching (D8), or admins need partial matches, then as an explicit setting.
+
+## D139: Sigstore fixtures are recorded from public-good Sigstore (amends D8)
+
+- **Decision:**
+  - The gate's Sigstore fixtures come from public-good Sigstore. `.github/workflows/fixtures.yml` builds one `FROM scratch` image per case into `ghcr.io/spnngl/speculaire-fixtures:<case>`, signs and attests it the way the case names (cosign v3.1.3, `actions/attest-build-provenance`, `actions/attest-sbom`, syft, BuildKit's SBOM scanner), and exports each with its tags and referrers as an OCI layout. Beside them: the public key of the `key` case, the `trusted_root.json`, and a TUF snapshot of `tuf-repo-cdn.sigstore.dev` (the root chain, the top-level metadata and the trusted root target) in the repository's layout.
+  - An oracle checks the export offline before the upload: cosign reads the layouts back from a registry on an internal Docker network, and `gh attestation verify` checks a bundle file against the manifest's bytes, both trusting only the exported trusted root. `expected.json` records each case's digest, signer, attached predicate types, checks and outcome. The run fails when an outcome is not the one the case's name promises: `unsigned`, `buildkit-unsigned` and `sbom-tag` fail, the others pass.
+  - `spdx-empty` is syft's SPDX for an image with no package: it lists only the document root, the image itself, which the SBOM checks must not count as a package.
+  - The workflow runs only by hand (`workflow_dispatch`): each run writes to the public Rekor log, and a new recording changes every digest and certificate the tests pin.
+- **Because:**
+  - sigstore-rust checks the SCT of a Fulcio certificate by default (`sigstore-verify` 0.16.0, `crates/sigstore-verify/src/verify.rs:262`). sigstore-go v1.4.0's `VirtualSigstore` (`pkg/testing/ca/ca.go:136`) issues leaf certificates whose only extension is the OIDC issuer (`ca.go:896-912`), so tests on it would turn off a check the gate makes.
+  - A private Fulcio, Rekor and TUF repository (sigstore/scaffolding) costs a Kubernetes cluster per CI run, and tests our setup of them rather than what the gate meets.
+  - A recording carries real certificates, SCTs, inclusion proofs and checkpoints, the artifacts' real shapes (GitHub's referrer bundles, BuildKit's attestation manifests, cosign's legacy tags), and the TUF metadata the agent fetches, all usable offline.
+- **Revisit when:** a fixture's expired certificate or TUF metadata breaks a test that cannot pin the verification time, or sigstore-go's testing CA embeds SCTs.
