@@ -249,6 +249,7 @@ async fn a_change_listed_after_its_hint_comes_once_the_hint_settled() {
             &sender,
             Duration::from_secs(3600),
             "fake",
+            &Stopping::default(),
             |hint| {
                 let hints = hints.clone();
                 async move {
