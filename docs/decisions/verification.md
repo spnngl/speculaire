@@ -137,7 +137,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
 
-## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131)
+## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133)
 
 - **Decision:**
   - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends, and read the list once more 1 s after a watch starts: no answer tells when containerd holds the subscription, and an image pulled in between waited 60 s in CI. Once the agent stops, a follower that loses the runtime ends without a warning: the agent's own teardown cut it. The CRI-O relay protects the listed images from eviction through it.
@@ -207,3 +207,14 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Limit:** a blob removed by hand stays announced until the agent restarts, and answers a 404 meanwhile. A root removed while its discovery runs is collected once that ends. A stream that connects before the store's first listing announces the store's blobs just after its snapshot.
 - **Measured (M4 step 05, locally on Docker Desktop arm64, kind, `just e2e containerd 2.4` and `just e2e crio 1.37`):** with zot as upstream, every reflector named the worker for a bundle manifest 193 ms after its store kept it on containerd and 181 ms on CRI-O, and no longer 523 ms and 166 ms after `crictl rmi`, which deleted every artifact and the record. With a second signed image listed, the empty config both name stayed in the store and announced. After a restart, every reflector named the worker for the store's artifacts 851 ms and 887 ms after the agent started, and never for those of an image removed while it was stopped, whose files were gone. Each full local leg, cluster up and down included, took 441 s on containerd and 501 s on CRI-O.
 - **Revisit when:** M5's manifest-fetch trigger (D22) stores artifacts of an image not yet listed, which then needs a grace; or the store must hold less than what the listed images name.
+
+## D133: A referrers index whose `manifests` is `null` lists none (amends D121)
+
+- **Decision:** a referrers index whose `manifests` is `null` lists no referrer, as `[]` does: the referrers API's answer, the fallback tag's index, and a peer's list (D126) alike. One without `manifests`, or with any other value, is still no index, dropped with a `warn` line.
+- **Because:**
+  - Google's Artifact Registry answers `200` with `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":null}` for a manifest without referrers, behind registry.k8s.io (a redirect to `us-central1-docker.pkg.dev`) and mirror.gcr.io (D120). The spec wants an empty list (distribution-spec v1.1.1-57-g9727462 `spec.md:636`); `null` is how Go writes an empty slice.
+  - containerd and regclient decode the answer into a Go slice, which reads `null` as empty (containerd v2.3.7 `core/remotes/docker/referrers.go:54-65`; regclient v0.8.3 `scheme/reg/referrer.go:157-170`, `types/oci/v1/index.go:25`).
+  - Dropped, the answer logged a `warn` line per target: each image of registry.k8s.io a CRI-O e2e node lists did at each agent start, and `the_journal_holds_structured_entries_and_nothing_at_warning` failed unless the journal was emptied first.
+  - A missing `manifests` stays refused: an image manifest under the fallback tag, or an error body sent with `200`, is no list.
+- **Measured (CI journals of CRI-O 1.36 and 1.37 legs, runs 43988938171, 43999798418, 44013579419):** the warning named 40 targets, `not an image index` each, all of registry.k8s.io's pause, etcd, coredns and kube-* images, or `kindest/kindnetd` through mirror.gcr.io. Asked again with `curl`, both hosts answered the `null` above; Docker Hub answered `"manifests":[]` for the same kindnetd digests.
+- **Revisit when:** Artifact Registry answers `[]`.
