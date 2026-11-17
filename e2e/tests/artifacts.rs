@@ -14,6 +14,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use e2e::Cluster;
+use e2e::balancer::PORT;
 use e2e::reflector::KUBELET;
 use e2e::registry::PASSWORD;
 use e2e::upstream::{Digest, Kind, Request, SIGNED, Upstream};
@@ -276,6 +277,41 @@ fn holds(cluster: &Cluster, node: &str, expected: &Expected, start: Instant) -> 
 }
 
 /// The agent's requests to `upstream` since the `seen` first entries of its log, but the challenges.
+/// Waits until every reflector names `holder` to `asker` for the root of `expected` and each of its artifacts' manifests,
+/// which `holder`'s store announces with their blobs (D124). A reflector that restarted learns them again only once
+/// `holder`'s stream to it is back.
+fn wait_held(cluster: &Cluster, asker: &str, holder: &str, expected: &Expected) {
+    let reflectors: Vec<SocketAddr> = cluster
+        .reflectors()
+        .iter()
+        .map(|r| SocketAddr::new(cluster.family_address(r).unwrap(), PORT))
+        .collect();
+    let manifests = expected
+        .artifacts
+        .iter()
+        .map(|(manifest, _)| manifest.parse().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    for digest in std::iter::once(expected.root.clone()).chain(manifests) {
+        loop {
+            let missing: Vec<&SocketAddr> = reflectors
+                .iter()
+                .filter(|reflector| {
+                    let holders = cluster.lookup(asker, **reflector, &digest).unwrap();
+                    !holders.iter().any(|h| h.node == holder)
+                })
+                .collect();
+            if missing.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{digest}: reflectors {missing:?} do not name {holder}"
+            );
+            sleep(Duration::from_millis(250));
+        }
+    }
+}
+
 fn agent_requests(upstream: &Upstream, seen: usize) -> Vec<Request> {
     upstream
         .requests()
@@ -614,6 +650,8 @@ fn a_node_cut_off_from_upstream_gets_every_artifact_from_the_node_that_discovere
     b.forget(&expected);
     cluster.stop_agent(&b.name).unwrap();
     b.sh(&format!("crictl pull {reference}"));
+    // B discovers once, right after its agent starts (D126): every reflector must name A by then.
+    wait_held(cluster, &b.name, &a, &expected);
 
     let (took, peer, asked) = {
         let _rejected = cluster.reject(&b.name, zot.address()).unwrap();
