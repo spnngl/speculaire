@@ -1,4 +1,4 @@
-//! Durations and instants as text: the config's durations (D135) and the logs' timestamps (D52).
+//! Durations and instants as text: the config's durations in seconds (D138) and the logs' timestamps (D52, D135).
 
 pub mod duration;
 

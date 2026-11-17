@@ -99,7 +99,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The config test (D30) uncomments every key, then checks that the file parses to `Config::default()`.
   - Keys named here, with their defaults:
     - `gate.mode = "audit"`, or `"enforce"` (ARCHITECTURE.md § Gate);
-    - `gate.wait = "300ms"` (D41);
+    - `gate.wait = 0.3` (D41);
     - `nri.socket = "/var/run/nri/nri.sock"` (D9);
     - `verify.policy = "/etc/speculaire/policy.yaml"` (D26);
     - `verify.trusted_root = ""`: empty follows the Sigstore public-good root through TUF; a path pins a `trusted_root.json` (D26);
@@ -141,7 +141,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Without the certificates the mirror cannot listen (D14). Without the entry, containerd never calls the mirror, so verification starts only at the gate (D22), and every first start waits.
 - **Revisit when:** a packaging runs `configure` for the admin, as the DaemonSet's init container would.
 
-## D60: Config values parse into types, and the remaining keys get names (amends D16, D47; amended by D87, D135, D137)
+## D60: Config values parse into types, and the remaining keys get names (amends D16, D47; amended by D87, D135, D137, D138)
 
 - **Decision:**
   - Keys the decisions left unnamed, with their defaults:
@@ -149,7 +149,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
     - `identity.certificate = "/var/lib/kubelet/pki/kubelet-client-current.pem"` and `identity.ca = "/etc/kubernetes/pki/ca.crt"`, D16's paths;
     - `reflector.url = ""`, meaning no reflector and no peers, or an `https://host[:port]` URL with no path;
     - `reflector.members = []`, a list of `{ node = "<node name>", address = "<ip:port>" }`.
-  - **Value syntax:** durations are strings such as `"300ms"`, `"10m"` or `"1h30m"` (D135); sizes are strings with a binary unit (`"64MiB"`; `B`, `KiB`, `MiB`, `GiB`, `TiB`); paths are absolute; `config.poll_interval` is longer than zero; `peer.max_uploads` and `prewarm.seeds` are at least 1; `log.filter` must parse as an `EnvFilter`. Each value parses once into a type that prints back as written. `gate.exempt.images` and `prewarm.images` stay strings until the gate compiles its globs and the reflector resolves its references.
+  - **Value syntax:** durations are numbers of seconds to the millisecond, such as `10` or `0.3` (D138); sizes are strings with a binary unit (`"64MiB"`; `B`, `KiB`, `MiB`, `GiB`, `TiB`); paths are absolute; `config.poll_interval` is longer than zero; `peer.max_uploads` and `prewarm.seeds` are at least 1; `log.filter` must parse as an `EnvFilter`. Each value parses once into a type that prints back as written. `gate.exempt.images` and `prewarm.images` stay strings until the gate compiles its globs and the reflector resolves its references.
   - The reload class lives in the type: each restart key (D47) is a `Restart<T>`.
   - `check-config` reports the file, line, column and dotted key, such as `line 22, column 1: gate.unmached: unknown field`.
   - Two tests hold `packaging/config.toml` to the code: the uncommented file parses to `Config::default()` (D47), and its TOML equals `Config::default()` serialized, so a key missing from the file fails. A third fails when ARCHITECTURE.md, `docs/*.md` or `docs/decisions/*.md` names a dotted key in backticks that the file lacks; `docs/TODECIDE.md` is skipped, because its keys are not decided.
@@ -329,7 +329,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Putting the mirror after a leading `[host.""]` keeps the file's meaning but breaks "first in the file", and a table that containerd ignores is the admin's mistake to remove.
 - **Revisit when:** containerd lists a `[host.""]` that opens the file, or refuses it.
 
-## D135: Durations and timestamps are printed and read by our own code (amends D60)
+## D135: Durations and timestamps are printed and read by our own code (amends D60; amended by D138)
 
 - **Decision:**
   - **Durations:** one or more groups of a whole number in ASCII digits and a unit, with nothing between or around them. The units are `d` (24 h), `h`, `m`, `s`, `ms`, `us` and `ns`, and decrease from group to group, so each comes at most once: `1h30m` and `90s` read; `1m1h`, `1s1s`, `1h 30m`, `1.5h`, `-1s`, `10`, `1min` and `1µs` do not. A total longer than `Duration::MAX` (`u64::MAX` s) is refused. Zero reads; the keys of type `Interval` (`config.poll_interval`, `peer.stall_timeout`) still refuse it.
@@ -344,7 +344,6 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A printer that cannot fail keeps a log line from panicking: humantime's returned `fmt::Error` after year 9999, which `DENY_MAX` (D52) had to avoid.
 - **Revisit when:** an admin needs a unit or spelling the grammar refuses, or a timestamp needs a fraction of a second.
 
-
 ## D137: `log.filter` refuses whitespace around a directive (amends D60)
 
 - **Decision:** a `log.filter` with whitespace, as `str::trim` strips it, at the start or end of a directive between its commas is refused, before `EnvFilter` reads it: `" warn"`, `"warn "` and `"info, speculaire=debug"` do not read. `check-config` and a reload report it as any other bad value.
@@ -353,3 +352,20 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The `config_values` fuzz target found the panic, scheduled run 44074175851: `"\tq\u{feff}["`. A panic on a config value stops `check-config`, and the agent at startup or at a reload.
   - `EnvFilter` means to ignore that whitespace, as its `trim` shows, so refusing it loses no filter; catching the panic would still accept the misread ones.
 - **Revisit when:** a tracing-subscriber release fixes the slicing; the check can then go.
+
+## D138: Durations are numbers of seconds (amends D60, D135)
+
+- **Decision:**
+  - Every duration is a number of seconds: a TOML integer or float in the config (`verify.stale_max = 3600`, `gate.wait = 0.3`), and digits with an optional `.` and decimals in `speculaire-loadgen`'s flags (`--steady 60`, `--join 0.5`). A string, `"10s"` included, is refused with "expected a number of seconds" and the key.
+  - **Resolution:** the millisecond. A value with more than 3 decimals is refused (`0.0001`, `0.0015`), as are a sign, `nan`, `inf` and more whole seconds than `i64::MAX`, TOML's largest integer. Zero reads; the keys of type `Interval` (`config.poll_interval`, `peer.stall_timeout`) still refuse it.
+  - **Floats:** a TOML float is read through its shortest decimal, Rust's `f64` `Display`, by the digit parser the flags use: `0.3` is exactly 300 ms, `1e3` 1000 s and `2.5e-1` 250 ms.
+  - **Printing:** whole seconds, then a `.` and the milliseconds without trailing zeros: `600`, `0.3`, `1.25`. `check-config` and the effective config write whole seconds as a TOML integer and the others as a float, so a value prints as written (D60). Logs and `speculaire-loadgen`'s reports keep Rust's `Debug` durations (`300ms`), because their measures go below the millisecond.
+  - **Place:** `crates/time` keeps `parse` and `display` beside D135's timestamps: `speculaire-loadgen` reads its flags with them and does not depend on the agent. D135's unit grammar is deleted. The fuzz target `duration` checks that a text and a float read print back as the same value.
+- **Because:**
+  - The user chose one obvious way: a plain number has no units to learn, order or spell.
+  - Only `gate.wait` needs less than a second, and containerd's NRI `plugin_request_timeout` of 2 s bounds it (D41): no key needs finer than a millisecond.
+  - The shortest decimal of a float is the literal written, for any of up to 15 significant digits; multiplying by 1000 rounds in binary, as `1.005 * 1000` gives `1004.9999999999999`.
+- **Cost:**
+  - Every config written for D135 is refused. No release has shipped, so none is installed.
+  - `speculaire-loadgen --lookup-p99` cannot be given D33's 500 µs; it stays the default.
+- **Revisit when:** a key needs less than a millisecond, or admins ask for units.

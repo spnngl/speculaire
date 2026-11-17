@@ -202,7 +202,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 ## D73: A stalled peer fetch moves to the next peer (amends D7; amended by D102)
 
 - **Decision:**
-  - A peer fetch that receives no bytes for `peer.stall_timeout` (default `"5s"`, live) is aborted and counts `speculaire_peer_fetches_total{result="timeout"}`. The timer restarts with every chunk received, and covers the wait for the response's headers.
+  - A peer fetch that receives no bytes for `peer.stall_timeout` (default `5`, live) is aborted and counts `speculaire_peer_fetches_total{result="timeout"}`. The timer restarts with every chunk received, and covers the wait for the response's headers.
   - The agent then resumes from the next peer with `Range`, as for a peer that dies mid-copy, or falls through when no peer is left.
   - The stalled peer is not denied: D52 denies only a wrong digest, and a slow node may be busy rather than bad.
 - **Because:**

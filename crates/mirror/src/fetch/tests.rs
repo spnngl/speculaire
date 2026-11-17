@@ -522,7 +522,7 @@ async fn a_denied_peer_is_allowed_again_once_deny_ttl_has_passed() {
 
 #[test]
 fn a_deny_ttl_past_the_clocks_range_denies() {
-    // A duration reads up to `u64::MAX` seconds (D135); `Instant` and `SystemTime` hold fewer.
+    // A duration reads up to `i64::MAX` seconds (D138); `Instant` and `SystemTime` hold fewer.
     let fetcher = Fetcher::new(
         PathBuf::new(),
         Settings {

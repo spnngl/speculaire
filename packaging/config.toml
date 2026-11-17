@@ -4,7 +4,7 @@
 # `speculaire check-config [path]` checks a file without starting the agent.
 # The agent reloads this file on SIGHUP and when it changes, except the keys marked "Restart" (D47). It reads the
 # node's registry config again the same way (D91).
-# Durations read like "300ms", "10m" or "1h30m": units d, h, m, s, ms, us, ns, largest first, no spaces (D135).
+# Durations are numbers of seconds, to the millisecond: 10 or 0.3 (D138).
 # Sizes read like "64MiB".
 
 # "agent", or "reflector" on control-plane nodes (D2). Restart.
@@ -12,7 +12,7 @@
 
 [config]
 # How often the agent checks its files, and the node's registry config, for changes (D30, D91).
-#poll_interval = "10s"
+#poll_interval = 10
 
 [identity]
 # The kubelet client certificate and its key, in one PEM file (D16). Restart.
@@ -24,7 +24,7 @@
 # "audit" allows every container and logs what "enforce" would reject (ARCHITECTURE.md § Gate, D54).
 #mode = "audit"
 # How long container creation waits for a pending verdict (D41).
-#wait = "300ms"
+#wait = 0.3
 # "deny", or "allow" to start images that no policy matches without a check (D23).
 #unmatched = "deny"
 
@@ -52,7 +52,7 @@
 # "" follows the Sigstore public-good root through TUF; a path pins a trusted_root.json (D26).
 #trusted_root = ""
 # How long a stale verdict keeps serving during re-verification (D21).
-#stale_max = "1h"
+#stale_max = 3600
 
 [sbom]
 # The largest SBOM the agent reads (D12).
@@ -79,9 +79,9 @@
 # Blob bodies the peer API sends at once; a HEAD or a manifest does not count. "auto" is 4 per CPU (D24, D100).
 #max_uploads = "auto"
 # How long a fetch from another peer may receive nothing, head or body, before it moves to the next peer (D73, D102).
-#stall_timeout = "5s"
+#stall_timeout = 5
 # How long a peer that sent a wrong digest is skipped (D52).
-#deny_ttl = "10m"
+#deny_ttl = 600
 
 [blob_cache]
 # On CRI-O, the size above which the least recently served blobs are evicted (D67).
@@ -120,4 +120,4 @@
 
 [shutdown]
 # How long in-flight transfers may finish after SIGTERM (D39).
-#drain_timeout = "10s"
+#drain_timeout = 10

@@ -299,8 +299,8 @@ valgrind: (image "profile")
     bin=/target/release dhat=/src/target/valgrind/dhat
     rm -rf "$dhat" && mkdir -p "$dhat"
     # Small enough for Valgrind's pace; the measures mean nothing under it, so no target fails the run.
-    load=("$bin/speculaire-loadgen" --agents 100 --blobs 500 --pool 10000 --lookups 100 --deltas 50 --join 10s
-        --warmup 5s --steady 20s --measure-only --)
+    load=("$bin/speculaire-loadgen" --agents 100 --blobs 500 --pool 10000 --lookups 100 --deltas 50 --join 10
+        --warmup 5 --steady 20 --measure-only --)
     # No undefined-value check: it flags a branch in hyper's HTTP/1 head parsing (hyper 1.12.0 src/proto/h1/io.rs:205)
     # that the optimiser reads early, and leaks are what this run is for.
     "${load[@]}" valgrind --leak-check=full --show-leak-kinds=definite --errors-for-leak-kinds=definite \
@@ -321,7 +321,7 @@ profile target: (image "profile")
     #!/usr/bin/env bash
     set -euo pipefail
     case '{{ target }}' in
-        load) run=(--steady 30s --measure-only --) ;;
+        load) run=(--steady 30 --measure-only --) ;;
         peer) run=(peer --size-mib 64 --pulls 30 --) ;;
         *) echo "profile: no target '{{ target }}': load or peer" >&2; exit 1 ;;
     esac

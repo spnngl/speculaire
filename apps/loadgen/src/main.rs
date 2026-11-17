@@ -62,13 +62,13 @@ struct Load {
     /// Deltas a second, each a digest added or removed.
     #[arg(long)]
     deltas: Option<u32>,
-    /// Time over which the agents connect.
+    /// Time over which the agents connect, in seconds (D138).
     #[arg(long, value_parser = speculaire_time::duration::parse)]
     join: Option<Duration>,
-    /// Load before the measures.
+    /// Load before the measures, in seconds.
     #[arg(long, value_parser = speculaire_time::duration::parse)]
     warmup: Option<Duration>,
-    /// Load over which the measures are taken.
+    /// Load over which the measures are taken, in seconds.
     #[arg(long, value_parser = speculaire_time::duration::parse)]
     steady: Option<Duration>,
     /// Seed of every random choice.
@@ -77,10 +77,10 @@ struct Load {
     /// Target of the reflector's peak RSS, in MiB.
     #[arg(long)]
     rss_mib: Option<u64>,
-    /// Target of the server-side lookup p99.
+    /// Target of the server-side lookup p99, in seconds.
     #[arg(long, value_parser = speculaire_time::duration::parse)]
     lookup_p99: Option<Duration>,
-    /// Target of the resync after a reflector restart.
+    /// Target of the resync after a reflector restart, in seconds.
     #[arg(long, value_parser = speculaire_time::duration::parse)]
     resync: Option<Duration>,
     /// Report the measures, and exit 0 even when a target is missed: for runs under Valgrind.

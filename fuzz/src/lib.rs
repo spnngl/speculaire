@@ -742,24 +742,27 @@ pub fn retry_after(data: &[u8]) {
     }
 }
 
-/// A duration, as the config and `speculaire-loadgen` read it (D135).
+/// A number of seconds, as the config and `speculaire-loadgen` read it (D138).
 ///
-/// Reading never panics, and a duration read prints as text that reads back to the same duration.
+/// Reading never panics, and a duration read prints as text that reads back to the same duration. A float, which the
+/// config reads through its shortest decimal, prints as the decimal of that same float, as the config writes it.
 ///
 /// # Panics
 ///
 /// When reading panics, or the printed text breaks that.
 pub fn duration(data: &[u8]) {
+    use speculaire_time::duration::{display, parse};
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
-    let Ok(read) = speculaire_time::duration::parse(text) else {
-        return;
-    };
-    let printed = speculaire_time::duration::display(read).to_string();
-    assert_eq!(
-        speculaire_time::duration::parse(&printed),
-        Ok(read),
-        "{text:?} printed {printed:?}"
-    );
+    if let Ok(read) = parse(text) {
+        let printed = display(read).to_string();
+        assert_eq!(parse(&printed), Ok(read), "{text:?} printed {printed:?}");
+    }
+    if let Ok(float) = text.parse::<f64>()
+        && let Ok(read) = parse(&float.to_string())
+    {
+        let printed = display(read).to_string();
+        assert_eq!(printed.parse(), Ok(float), "{text:?} printed {printed:?}");
+    }
 }
