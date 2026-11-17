@@ -4,15 +4,26 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::images::{Images, List, Update};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
 use tracing::{info, warn};
 
-use crate::discover::{Discovery, Error, RETRY};
+use crate::discover::{Discovery, Error, RETRY, Reason};
 use crate::store::Store;
+
+/// How long after a reflector stream comes up a discovery that starts is asked again soon when no source serves its
+/// root (D134).
+const FRESH: Duration = Duration::from_secs(10);
+
+/// How long a root asked again soon waits before each of its tries (D134).
+const SOON: Duration = Duration::from_secs(20);
+
+/// How many times a root is asked again soon, before it waits [`RETRY`] (D134).
+const TRIES: u8 = 3;
 
 /// What discovery came to for a root this run.
 enum Done {
@@ -21,14 +32,46 @@ enum Done {
     Retry(Instant),
 }
 
+/// The roots asked again soon after a reflector stream came up (D134).
+struct Soon {
+    /// When the latest reflector stream came up.
+    last_up: watch::Receiver<Option<Instant>>,
+    /// The tries left of each root asked again soon.
+    left: HashMap<Digest, u8>,
+}
+
+impl Soon {
+    /// When `root`, whose discovery started at `started` and ended in `error`, is asked again soon, if it is: when no
+    /// source served it, [`SOON`] from now while its tries last, which a discovery started at most [`FRESH`] after the
+    /// latest stream came up begins.
+    fn next(&mut self, root: &Digest, started: Instant, error: &Error) -> Option<Instant> {
+        let left = self.left.remove(root);
+        let Error::Unverifiable {
+            reason: Reason::Unreachable,
+            ..
+        } = error
+        else {
+            return None;
+        };
+        let fresh = self
+            .last_up
+            .borrow()
+            .is_some_and(|up| started <= up + FRESH);
+        let after = left.or(fresh.then_some(TRIES))?.checked_sub(1)?;
+        self.left.insert(root.clone(), after);
+        Some(Instant::now() + SOON)
+    }
+}
+
 /// Discovers the artifacts of each root the image list of `images` names, once per run, until the list ends.
 ///
 /// Discovery starts once `linked` completes. The store is collected at each listing and whenever a root leaves the
 /// list, from the first listing on: it announces nothing until then.
 ///
 /// A root recorded by an earlier run is not discovered again; one whose discovery failed is tried again at the time
-/// its error gives, or after [`RETRY`] when the store failed. A root that leaves the list loses its artifacts, and is
-/// discovered again if it comes back.
+/// its error gives, or after [`RETRY`] when the store failed. A root no source served, in a discovery that started at
+/// most 10 s after `last_up`, the time the latest reflector stream came up, is tried again 3 times 20 s apart first
+/// (D134): a reflector that just restarted names no holder until each agent's stream to it is back. A root that leaves the list loses its artifacts, and is discovered again if it comes back.
 ///
 /// The roots of an image just listed go before those a listing queued: a pull waits for one discovery at most, not
 /// for every root a restart finds unrecorded.
@@ -36,6 +79,7 @@ pub async fn follow(
     discovery: Arc<Discovery>,
     images: Arc<dyn Images>,
     linked: impl Future<Output = ()> + Send,
+    last_up: watch::Receiver<Option<Instant>>,
 ) {
     let (sender, mut updates) = mpsc::channel(16);
     let following = tokio::spawn(images.follow(sender));
@@ -44,6 +88,10 @@ pub async fn follow(
     let mut list = List::default();
     let mut queue = VecDeque::new();
     let mut done: HashMap<Digest, Done> = HashMap::new();
+    let mut soon = Soon {
+        last_up,
+        left: HashMap::new(),
+    };
     // The roots listed, and whether a listing came since the last collection.
     let mut listed = HashSet::new();
     let mut relisted = false;
@@ -55,6 +103,7 @@ pub async fn follow(
             collect(discovery.store(), &listed).await;
             // A root collected is discovered again when it comes back.
             done.retain(|root, _| listed.contains(root));
+            soon.left.retain(|root, _| listed.contains(root));
             relisted = false;
         }
         let next = if is_linked { queue.pop_front() } else { None };
@@ -112,6 +161,7 @@ pub async fn follow(
             done.insert(root, Done::Discovered);
             continue;
         }
+        let started = Instant::now();
         match discovery.discover(&root, &names).await {
             Ok(artifacts) => {
                 info!(%root, artifacts = artifacts.len(), "artifacts discovered");
@@ -121,7 +171,8 @@ pub async fn follow(
             // to set (D38): no warning.
             Err(e @ Error::Unverifiable { retry_at, .. }) => {
                 info!("discovery of {root}: {e}");
-                done.insert(root, Done::Retry(retry_at));
+                let at = soon.next(&root, started, &e).unwrap_or(retry_at);
+                done.insert(root, Done::Retry(at));
             }
             Err(e @ Error::Store(_)) => {
                 warn!(%root, error = %e, "artifacts not discovered");

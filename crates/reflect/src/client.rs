@@ -134,8 +134,8 @@ struct Shared {
     links: Mutex<HashMap<String, mpsc::Sender<Ask>>>,
     /// The peer address, fixed by the first stream unless set (D36): `None` until then, and never changed after.
     peer: watch::Sender<Option<SocketAddr>>,
-    /// Whether a stream has been up, so that a lookup could be asked: set by the first and never cleared.
-    linked: watch::Sender<bool>,
+    /// When the latest stream came up: `None` before the first.
+    last_up: watch::Sender<Option<tokio::time::Instant>>,
     /// Woken when a stream drops, to ask for the members again (D2).
     dropped: tokio::sync::Notify,
     series: LookupSeries,
@@ -152,7 +152,7 @@ impl Client {
             holdings,
             links: Mutex::default(),
             peer,
-            linked: watch::Sender::new(false),
+            last_up: watch::Sender::new(None),
             dropped: tokio::sync::Notify::new(),
             series: LookupSeries::new(),
         });
@@ -173,13 +173,11 @@ impl Client {
         }
     }
 
-    /// Resolves once a stream is up, so that a lookup asks a member (D126).
-    pub fn linked(&self) -> impl Future<Output = ()> + Send + 'static {
-        let mut linked = self.shared.linked.subscribe();
-        async move {
-            // An error means the client is gone: nothing is left to wait for.
-            let _ = linked.wait_for(|linked| *linked).await;
-        }
+    /// When the latest stream came up, `None` before the first: from then on a lookup asks a member, which may have
+    /// just restarted and not heard from every agent yet (D126, D134).
+    #[must_use]
+    pub fn last_up(&self) -> watch::Receiver<Option<tokio::time::Instant>> {
+        self.shared.last_up.subscribe()
     }
 
     /// Up to `LOOKUP_PEERS` agents that announced `digest`, from a member the agent streams to, hedged to a second
