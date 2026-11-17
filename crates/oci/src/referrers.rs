@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::manifest::MAX_DESCRIPTORS;
 use crate::reference::{Digest, ReferenceError};
@@ -106,6 +106,8 @@ struct RawSubject {
 
 #[derive(Deserialize)]
 struct RawIndex {
+    /// Absent when it is no index.
+    #[serde(default, deserialize_with = "listed")]
     manifests: Option<Vec<RawDescriptor>>,
 }
 
@@ -118,6 +120,14 @@ struct RawManifest {
     layers: Option<Vec<RawDescriptor>>,
     /// Any JSON: one that is no object of strings leaves the manifest a referrer, with fewer annotations.
     annotations: Option<serde_json::Value>,
+}
+
+/// A list that is present, `null` as empty: Go writes an empty list so, and Google's Artifact Registry answers so for
+/// a manifest without referrers (D133).
+fn listed<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    field: D,
+) -> Result<Option<Vec<T>>, D::Error> {
+    Ok(Some(Option::deserialize(field)?.unwrap_or_default()))
 }
 
 /// `text`, unless it is absent or empty: the spec treats both alike (`spec.md:633-634`).
@@ -149,8 +159,8 @@ fn descriptors(list: Vec<RawDescriptor>) -> Result<Vec<Descriptor>, Error> {
 ///
 /// # Errors
 ///
-/// When the bytes are no JSON object with a `manifests` array, it lists too many, or a descriptor lacks its media
-/// type, digest or size, or has a bad digest.
+/// When the bytes are no JSON object with a `manifests` array or `null`, it lists too many, or a descriptor lacks its
+/// media type, digest or size, or has a bad digest.
 pub fn index(bytes: &[u8]) -> Result<Vec<Descriptor>, Error> {
     let raw: RawIndex = serde_json::from_slice(bytes)?;
     descriptors(raw.manifests.ok_or(Error::NotAnIndex)?)
@@ -289,6 +299,14 @@ mod tests {
             ]
         );
         assert_eq!(index(br#"{"manifests":[]}"#).unwrap(), []);
+    }
+
+    #[test]
+    fn a_null_list_of_manifests_lists_none() {
+        // Google's Artifact Registry answers so for a manifest without referrers, behind registry.k8s.io and
+        // mirror.gcr.io.
+        let text = format!(r#"{{"schemaVersion":2,"mediaType":"{INDEX}","manifests":null}}"#);
+        assert_eq!(index(text.as_bytes()).unwrap(), []);
     }
 
     #[test]

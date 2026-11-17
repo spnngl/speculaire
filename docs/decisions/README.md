@@ -128,7 +128,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D118 [build](build.md): `just dev` mounts the tree at its host path and builds it in `/target<path>` of the shared volume; `just musl` keeps `/src` (amends D57; amended by D125)
 - D119 [distribution](distribution.md): the upstream client bounds the TCP connect to a host, and to the token endpoint it names, by the host's positive `dial_timeout`, one connection pool per trust and timeout; zero and CRI-O keep its own 15 s (amends D78, D88, D115)
 - D120 [build](build.md): e2e pulls Docker Hub's images from mirror.gcr.io, then `public.ecr.aws/docker` for official images, then Docker Hub, on the host and in the node images' runtime config (amends D63, D112; amended by D122)
-- D121 [verification](verification.md): an `Images` trait follows the runtime's image list, and each digest it lists is a discovery root, asked of its repositories in list order; only Sigstore bundle referrers and `.sig` are fetched, under caps, into the artifact store (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131)
+- D121 [verification](verification.md): an `Images` trait follows the runtime's image list, and each digest it lists is a discovery root, asked of its repositories in list order; only Sigstore bundle referrers and `.sig` are fetched, under caps, into the artifact store (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133)
 - D122 [build](build.md): the justfile's recipes and the bench workflow pull Docker Hub's images through D120's mirrors with `just hub-pull`; build/Containerfile's base is a named build context of the one pulled (amends D120)
 - D123 [distribution](distribution.md): peers that hold a tag resolve it: agents announce tags under a domain-separated key, the mirror asks 2 holders and serves the first manifest, `hosts.toml` gets `resolve`, and `mirror.resolve_tags = false` turns it off live (amends D6, D66, D82, D85, D88, D99, D100, D102; amended by D127)
 - D124 [distribution](distribution.md): the peer API serves the artifact store: its blobs by digest after the runtime's content, and the referrers of a manifest in any repository, filtered by `artifactType`; the store is announced beside the content, each source of keys listed apart (amends D99, D100; amended by D131)
@@ -140,5 +140,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D130 [build](build.md): the rate-limit e2e suite runs in the IPv4 pass only (amends D63, D94)
 - D131 [verification](verification.md): the artifact store keeps what the listed roots' records name, a shared blob while any does; it is collected at each full listing and each removal, between discoveries, each deletion withdrawn; it announces only after its first collection; no grace for roots not yet listed (amends D121, D124)
 - D132 [reflector](reflector.md): a stream its reflector ends because it stops is a drop however short, so a reflector restarted often does not push the agent's retries to 60 s apart (amends D98)
+- D133 [verification](verification.md): a referrers index whose `manifests` is `null`, as Google's Artifact Registry answers for none, lists none; one without `manifests` is still no index (amends D121)
 
-Next free number: D133.
+Next free number: D134.
