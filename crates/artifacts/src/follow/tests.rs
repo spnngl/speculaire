@@ -1,6 +1,10 @@
 //! The image list as the trigger of discovery, with registry config that names no source of anything.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use speculaire_oci::platform::Host;
@@ -10,7 +14,7 @@ use speculaire_runtime::registries::{
 };
 
 use super::*;
-use crate::discover::Limits;
+use crate::discover::{Limits, Local};
 use crate::store::Store;
 
 fn digest(n: u8) -> Digest {
@@ -47,9 +51,21 @@ impl Images for Scripted {
     }
 }
 
-/// Registry config that has no source of any name, and logs each name asked.
+/// Registry config that has no source of any name, and logs each name asked; as the node's content, it holds nothing
+/// and counts the manifests asked, one per discovery.
 #[derive(Default)]
-struct Asked(Mutex<Vec<String>>);
+struct Asked(Mutex<Vec<String>>, AtomicUsize);
+
+impl Local for Asked {
+    fn manifest<'a>(
+        &'a self,
+        _: &'a Digest,
+        _: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send + 'a>> {
+        self.1.fetch_add(1, Ordering::Relaxed);
+        Box::pin(std::future::ready(None))
+    }
+}
 
 impl Registries for Asked {
     fn sources(&self, name: &str, _: Reference<'_>) -> Result<Vec<Source>, ConfigError> {
@@ -101,8 +117,8 @@ fn start(
         },
     );
     let discovery = Arc::new(Discovery::new(
-        Arc::clone(&store),
         store,
+        Arc::clone(asked) as Arc<dyn Local>,
         unlinked,
         Arc::clone(asked) as Arc<dyn Registries>,
         "127.0.0.1:7480".to_owned(),
@@ -146,7 +162,7 @@ async fn the_roots_of_an_image_just_listed_go_before_those_of_a_listing() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_recorded_root_is_skipped_and_a_failed_one_waits_before_it_is_tried_again() {
+async fn a_recorded_root_is_skipped_and_a_failed_one_is_tried_again_at_its_retry_time() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
     store.record(&digest(10), &[]).await.unwrap();
@@ -168,10 +184,44 @@ async fn a_recorded_root_is_skipped_and_a_failed_one_waits_before_it_is_tried_ag
     settle().await;
     assert_eq!(asked.0.lock().unwrap().len(), 1);
 
+    // No listing is needed: the retry time wakes the root.
     tokio::time::advance(RETRY).await;
-    script.send(listing()).await.unwrap();
     settle().await;
     assert_eq!(*asked.0.lock().unwrap(), ["reg.test/new", "reg.test/new"]);
+
+    script.send(listing()).await.unwrap();
+    settle().await;
+    assert_eq!(asked.0.lock().unwrap().len(), 2);
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_root_the_store_fails_is_tried_again_after_the_retry_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    // A directory where the root's blob would be: reading it fails.
+    let root = digest(20);
+    std::fs::create_dir_all(dir.path().join("blobs/sha256").join(root.encoded())).unwrap();
+    let asked = Arc::new(Asked::default());
+    let (script, followed) = start(store, &asked);
+    let listing = || Update::Listing(vec![image(2, &[("reg.test/new", 20)])]);
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+    let discoveries = || asked.1.load(Ordering::Relaxed);
+
+    script.send(listing()).await.unwrap();
+    settle().await;
+    assert_eq!(discoveries(), 1);
+    script.send(listing()).await.unwrap();
+    settle().await;
+    assert_eq!(discoveries(), 1);
+
+    tokio::time::advance(RETRY).await;
+    settle().await;
+    assert_eq!(discoveries(), 2);
+    // The store failed before any source was asked.
+    assert!(asked.0.lock().unwrap().is_empty());
 
     drop(script);
     followed.await.unwrap();

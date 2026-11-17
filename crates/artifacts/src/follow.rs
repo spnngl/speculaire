@@ -2,29 +2,26 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
 
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::images::{Images, List, Update};
 use tokio::sync::mpsc;
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep_until};
 use tracing::{info, warn};
 
-use crate::discover::{Discovery, Error};
-
-/// How long a root whose discovery failed waits before it is tried again.
-pub const RETRY: Duration = Duration::from_secs(600);
+use crate::discover::{Discovery, Error, RETRY};
 
 /// What discovery came to for a root this run.
 enum Done {
     Discovered,
-    Failed(Instant),
+    /// Discovered again from this time on.
+    Retry(Instant),
 }
 
 /// Discovers the artifacts of each root the image list of `images` names, once per run, until the list ends.
 ///
-/// A root recorded by an earlier run is not discovered again; one whose discovery failed is tried again after
-/// [`RETRY`], at a later listing. A root that leaves the list keeps its artifacts.
+/// A root recorded by an earlier run is not discovered again; one whose discovery failed is tried again at the time
+/// its error gives, or after [`RETRY`] when the store failed. A root that leaves the list keeps its artifacts.
 ///
 /// The roots of an image just listed go before those a listing queued: a pull waits for one discovery at most, not
 /// for every root a restart finds unrecorded.
@@ -39,18 +36,42 @@ pub async fn follow(discovery: Arc<Discovery>, images: Arc<dyn Images>) {
             enqueue(&mut list, &mut queue, update);
         }
         let Some(root) = queue.pop_front() else {
-            match updates.recv().await {
-                Some(update) => {
-                    enqueue(&mut list, &mut queue, update);
-                    continue;
+            let next = done
+                .values()
+                .filter_map(|done| match done {
+                    Done::Retry(at) => Some(*at),
+                    Done::Discovered => None,
+                })
+                .min();
+            let wake = async {
+                match next {
+                    Some(at) => sleep_until(at).await,
+                    None => std::future::pending().await,
                 }
-                None => break,
+            };
+            tokio::select! {
+                update = updates.recv() => match update {
+                    Some(update) => enqueue(&mut list, &mut queue, update),
+                    None => break,
+                },
+                () = wake => {
+                    // Due roots are forgotten, so that one which left the list is not woken for again.
+                    let now = Instant::now();
+                    done.retain(|root, done| match done {
+                        Done::Retry(at) if *at <= now => {
+                            queue.push_back(root.clone());
+                            false
+                        }
+                        Done::Retry(_) | Done::Discovered => true,
+                    });
+                }
             }
+            continue;
         };
         let due = match done.get(&root) {
             None => true,
             Some(Done::Discovered) => false,
-            Some(Done::Failed(at)) => at.elapsed() >= RETRY,
+            Some(Done::Retry(at)) => *at <= Instant::now(),
         };
         let names = names(&list, &root);
         if !due || names.is_empty() {
@@ -72,14 +93,15 @@ pub async fn follow(discovery: Arc<Discovery>, images: Arc<dyn Images>) {
                 info!(%root, artifacts = artifacts.len(), "artifacts discovered");
                 done.insert(root, Done::Discovered);
             }
-            // An image pulled with a pull secret only is unreachable by design (D17): no warning.
-            Err(Error::Unreachable) => {
-                info!(%root, "artifacts unreachable: no source served the root");
-                done.insert(root, Done::Failed(Instant::now()));
+            // An image pulled with a pull secret only is unreachable by design (D17), and a rate limit is upstream's
+            // to set (D38): no warning.
+            Err(e @ Error::Unverifiable { retry_at, .. }) => {
+                info!("discovery of {root}: {e}");
+                done.insert(root, Done::Retry(retry_at));
             }
             Err(e @ Error::Store(_)) => {
                 warn!(%root, error = %e, "artifacts not discovered");
-                done.insert(root, Done::Failed(Instant::now()));
+                done.insert(root, Done::Retry(Instant::now() + RETRY));
             }
         }
     }

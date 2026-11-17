@@ -87,6 +87,8 @@ pub enum Outcome {
     FallThrough,
     /// The mirror holds it, or may, and failed: also a 404.
     Error,
+    /// Upstream refused the relay, or failed it: a 429 or a 502 (D129).
+    Refused,
 }
 
 impl Outcome {
@@ -97,15 +99,16 @@ impl Outcome {
             Self::Served(_) => "served",
             Self::FallThrough => "fall_through",
             Self::Error => "error",
+            Self::Refused => "refused",
         }
     }
 
-    /// The `source` label of the first byte: a 404's is `fall_through`.
+    /// The `source` label of the first byte: a 404's, and a refusal's, is `fall_through`.
     #[must_use]
     pub const fn source(self) -> &'static str {
         match self {
             Self::Served(source) => source.label(),
-            Self::FallThrough | Self::Error => "fall_through",
+            Self::FallThrough | Self::Error | Self::Refused => "fall_through",
         }
     }
 }
@@ -179,8 +182,9 @@ struct KindSeries {
     served: Counter,
     fall_through: Counter,
     error: Counter,
+    refused: Counter,
     first_byte: BySource<Histogram>,
-    /// The first byte of a 404, whether a *fall through* or an error.
+    /// The first byte of a 404, whether a *fall through* or an error, or of a refusal.
     first_404: Histogram,
     body: BySource<Histogram>,
 }
@@ -202,6 +206,7 @@ impl PullSeries {
                 served: requests(Outcome::Served(Source::Local)),
                 fall_through: requests(Outcome::FallThrough),
                 error: requests(Outcome::Error),
+                refused: requests(Outcome::Refused),
                 first_byte: BySource::new(
                     |source| histogram!(FIRST_BYTE, "kind" => kind, "source" => source.label()),
                 ),
@@ -222,6 +227,7 @@ impl PullSeries {
             Outcome::Served(source) => (&series.served, series.first_byte.get(source)),
             Outcome::FallThrough => (&series.fall_through, &series.first_404),
             Outcome::Error => (&series.error, &series.first_404),
+            Outcome::Refused => (&series.refused, &series.first_404),
         };
         requests.increment(1);
         first_byte.record(started.elapsed());

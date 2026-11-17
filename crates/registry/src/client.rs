@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, CONTENT_TYPE, LOCATION, USER_AGENT, WWW_AUTHENTICATE};
@@ -17,6 +17,7 @@ use tracing::debug;
 
 use crate::challenge::{self, Challenge};
 use crate::connect::{self, Connector};
+use crate::retry_after::Refusal;
 use crate::token::{self, Key, Tokens};
 
 /// How many redirects a request follows.
@@ -66,6 +67,14 @@ pub struct Response {
     pub headers: HeaderMap,
     /// The body.
     pub body: Incoming,
+}
+
+impl Response {
+    /// The registry's refusal to serve more for now, a `429` or a `503` with `Retry-After` (D38); `None` otherwise.
+    #[must_use]
+    pub fn refusal(&self) -> Option<Refusal> {
+        Refusal::of(self.status, &self.headers, SystemTime::now())
+    }
 }
 
 /// Why a request could not be answered.

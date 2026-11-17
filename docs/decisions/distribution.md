@@ -228,7 +228,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M2 step 03, arm64, Docker):** on CRI-O 1.37.2 `speculaire configure` wrote the drop-in and the three certificate files, the journal logged `Applied new registry configuration`, and `crictl pull docker.io/library/busybox:1.36.1` sent `GET /v2/` to a TLS server on `127.0.0.1:7480` with the client certificate; with that server killed the pull went on to Docker Hub and succeeded. `unconfigure` kept an admin's `50-admin.conf` with an edit made after `configure`, and a pull after it succeeded; the same on the three CRI-O legs of each architecture in CI run 43182634661.
 - **Revisit when:** CRI-O gains a per-blob fallback across sources (D66), or a node's CRI-O sets `registries_conf` (D80).
 
-## D85: The mirror is hyper over TLS 1.3, finds a held blob by its digest in the content directory, and is checked by the distribution-spec suite (amends D5, D14, D55, D82; amended by D102, D108, D110, D123)
+## D85: The mirror is hyper over TLS 1.3, finds a held blob by its digest in the content directory, and is checked by the distribution-spec suite (amends D5, D14, D55, D82; amended by D102, D108, D110, D123, D129)
 
 - **Decision:**
   - **Stack:** crate `speculaire-mirror`. `hyper` 1 (HTTP/1 only) serves each connection that `tokio-rustls` accepts, with rustls on aws-lc-rs and no `tls12` feature, so TLS 1.3 is the only version the binary has. `WebPkiClientVerifier` requires a client certificate that the local CA signed (D14). A client has 10 s for the handshake and for its request headers. The router is a `match` on the path, not axum's: a name has any number of segments, which axum's routes cannot match before `/blobs/<digest>`.
@@ -248,7 +248,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - `crictl pull docker.io/library/busybox:1.36.0` sent the mirror a manifest request that counted as `fall_through`, and the pull succeeded, on containerd 2.4 and CRI-O 1.37; a client without the certificate, and one that did not trust the CA, were refused.
 - **Revisit when:** a node needs a mirror on TLS 1.2, or the suite's `results.yaml` panic is fixed upstream: then `check` reads `junit.xml`.
 
-## D88: The upstream client is our own on hyper; the relay on CRI-O keeps a blob cache and tokens per host and scope (amends D17, D53, D67, D83; amended by D111, D119, D123)
+## D88: The upstream client is our own on hyper; the relay on CRI-O keeps a blob cache and tokens per host and scope (amends D17, D53, D67, D83; amended by D111, D119, D123, D129)
 
 - **Decision:**
   - **Client:** crate `speculaire-registry`, our own on `hyper` 1 and `tokio-rustls`, not `oci-client`. It asks an *endpoint* (D89) for one `GET` or `HEAD` and returns the status, the headers and the body still to be read, so the relay streams a blob to CRI-O and to a temporary file while hashing it (D7, D67). TLS is built per endpoint from its own trust (the CA files, a client certificate, `insecure`), on the system's roots (`rustls-native-certs`) and aws-lc-rs; one connection pool per distinct trust. TLS 1.2 is enabled for the upstream client only: registries that a runtime reaches may speak nothing newer, and the mirror's server config still names 1.3 alone (D85).
@@ -426,3 +426,17 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - An image imported without a repository digest, such as one `kind load` put there, has tags no peer API resolves: announcing them only spent the 2 holders a lookup asks.
 - **Measured (locally on Docker Desktop arm64, kind, containerd 2.3.7, Kubernetes 1.37):** right after every reflector listed the first worker for `e2e/signed:1`, the second worker asked the first's peer API for the tag. Before, 5 of 300 rounds answered 404, still 404 3 s later, all while a build loaded the host. After, 300 of 300 answered 200 under a constant load. An agent logging each read saw, in 16 of 272 pulls, the last read at a hint list the tag without the digest; the read 1 s later listed it. `e2e/tests/tags.rs` passed 10 times in a row.
 - **Revisit when:** containerd lists a reference before it publishes its event, or the peer API resolves a tag without a repository digest.
+
+## D129: The CRI-O relay passes upstream's refusal on: a 429 with its `Retry-After`, a 502 when upstream failed (amends D85, D88)
+
+- **Decision:**
+  - **Statuses:** when no source serves a relayed manifest or blob, CRI-O gets the worst of the sources' answers: a `429` with upstream's `Retry-After`, as upstream wrote it, when one refused (D128's refusal: a `429`, or a `503` with `Retry-After`); else a `502` when one failed: no connection, a `5xx` or another unexpected status, a body that broke off, a manifest that is not the digest asked for, a `HEAD` without `Content-Length`; else a `404`. A `404`, `401` or `403` from upstream is a `404`: upstream has no such content, or denies it to the node, and CRI-O pulls it itself with the pod's secret (D66, D88). So is a manifest the relay does not read, of an unknown media type.
+  - **Log:** each `429` or `502` is one `warn` line with the host, the status or the failure, the name and the reference (the digest, or the tag); a `404` stays at `debug`.
+  - **Metrics:** `speculaire_mirror_requests_total{result="refused"}` counts them; its first byte counts as `fall_through`.
+  - **Scope:** only the relay. containerd's mirror sends no upstream request, and the mirror's other misses stay `404` (D85).
+- **Because:**
+  - CRI-O asks for the platform manifest only from the source that gave it the index, with no fallback (container-libs common/v0.70.0-87 `image/docker/docker_image_src.go:286-291`). A `404` there fails the pull for good: run 43761469786's CRI-O 1.36 leg failed after the relay turned Docker Hub's `429` into one.
+  - containers/image retries a `429` up to 5 times, waiting `Retry-After`, at most 60 s, or a backoff from 2 s (`image/docker/docker_client.go:59-61,541-623`): passed on, the limit delays the pull rather than failing it. For the first manifest, CRI-O moves to its next source after a `502` as after a `404` (`docker_image_src.go:115-140`), and kubelet retries a pull that failed.
+  - D85's "no status of the mirror's can start a retry on the same host" held for a mirror that has no upstream; the relay is CRI-O's upstream, and the retry is what the registry asked for.
+- **Measured (M4 step 02, locally on Docker Desktop arm64, kind, CRI-O 1.37):** behind a proxy that answers `429` with `Retry-After: 5` to the first manifest request, `crictl pull` of a tag succeeds on CRI-O's retry, after at least 5 s; the proxy saw one `429`, `speculaire_mirror_requests_total{kind="manifest",result="refused"}` rose by 1, and the `warn` line named the proxy's host, the status, the name and the tag. The test took 11.2 s.
+- **Revisit when:** containers/image falls back to another source for the platform manifest, or CRI-O pulls by itself on a `502`.

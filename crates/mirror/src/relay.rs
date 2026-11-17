@@ -4,6 +4,9 @@
 //! blobs below a manifest the relay served come from the *blob cache*, else from peers, else, once, from upstream,
 //! streamed to CRI-O and to a temporary file while they are hashed, with the last chunk held back until the digest
 //! matches (D7, D67, D102).
+//!
+//! When no source serves, CRI-O gets upstream's refusal: a 429 with its `Retry-After`, or a 502 when upstream failed. A
+//! 404 means upstream has no such content, or denies it to the node, and CRI-O pulls it itself (D129).
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -12,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use futures_util::TryStreamExt as _;
-use http::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, RANGE};
+use http::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, RANGE, RETRY_AFTER};
 use http::{HeaderName, HeaderValue, Method, StatusCode};
 use http_body_util::{BodyExt as _, Limited, StreamBody};
 use hyper::Response;
@@ -31,7 +34,7 @@ use crate::cache::{Cache, Writer};
 use crate::fetch::{Download, Fetcher};
 use crate::listed::Listed;
 use crate::metrics;
-use crate::pulls::{Answer, Body, Pull, Pulls, from_content};
+use crate::pulls::{Answer, Body, Pull, Pulls, Refusal, from_content};
 use crate::request::{Kind, Reference};
 use crate::serve::{insert_digest, manifest_response, media_type};
 
@@ -217,41 +220,42 @@ impl Relay {
         {
             return answer;
         }
+        let mut miss = Miss::Absent;
         for source in &sources {
-            if let Some(answer) = self.relay_manifest(source, pull, reference, &text).await {
-                return answer;
+            match self.relay_manifest(source, pull, reference, &text).await {
+                Ok(answer) => return answer,
+                Err(met) => miss = miss.or(met),
             }
         }
-        Answer::Missing
+        miss.answer()
     }
 
-    /// The manifest from one source, or `None` when it does not give one: the next source is tried. `text` is
-    /// `reference` as the path names it.
+    /// The manifest from one source, or why it gives none: the next source is tried. `text` is `reference` as the path
+    /// names it.
     async fn relay_manifest(
         &self,
         source: &Source,
         pull: &Pull<'_>,
         reference: &Reference<'_>,
         text: &str,
-    ) -> Option<Answer> {
+    ) -> Result<Answer, Miss> {
         // The head of a tag is asked as a head: it costs no pull, and the body is not read.
         let head = pull.head && matches!(reference, Reference::Tag(_));
+        let accept = header_value(pull.accept.unwrap_or(DEFAULT_ACCEPT)).ok_or(Miss::Absent)?;
         let request = Request {
             method: if head { Method::HEAD } else { Method::GET },
             path: format!("/{}/manifests/{text}", source.repository),
             repository: source.repository.clone(),
-            headers: vec![(ACCEPT, header_value(pull.accept.unwrap_or(DEFAULT_ACCEPT))?)],
+            headers: vec![(ACCEPT, accept)],
         };
-        let response = self.send(source, &request).await?;
+        let (response, host) = self.send(source, &request).await?;
         if response.status != StatusCode::OK {
-            debug!(status = %response.status, name = pull.name, "upstream has no such manifest for the relay");
-            return None;
+            return Err(missed(&response, host, pull.name, text));
         }
+        let failed = |why: &str| failed(host, pull.name, text, why);
         if head {
-            return Some(Answer::Served(
-                metrics::Source::Upstream,
-                head_response(&response)?,
-            ));
+            let head = head_response(&response).ok_or_else(|| failed("a head without a length"))?;
+            return Ok(Answer::Served(metrics::Source::Upstream, head));
         }
         let content_type = response
             .headers
@@ -261,31 +265,33 @@ impl Relay {
         let bytes = Limited::new(response.body, MAX_MANIFEST)
             .collect()
             .await
-            .map_err(|err| debug!(error = %err, "reading a manifest from upstream failed"))
-            .ok()?
+            .map_err(|err| failed(&format!("the manifest cannot be read: {err}")))?
             .to_bytes();
         // A manifest by tag is named by its sha256; one by digest has to hash to it.
         let digest = match reference {
-            Reference::Tag(_) => hash::of("sha256", &bytes)?,
+            Reference::Tag(_) => {
+                hash::of("sha256", &bytes).expect("sha256 is an algorithm the relay hashes")
+            }
             Reference::Digest(digest) => {
                 if hash::of(digest.algorithm(), &bytes).as_ref() != Some(digest) {
-                    warn!(name = pull.name, digest = %digest, "upstream sent a manifest that is not the digest asked for");
-                    return None;
+                    return Err(failed("a manifest that is not the digest asked for"));
                 }
-                digest.clone()
+                (*digest).clone()
             }
         };
+        // A kind the relay does not read is CRI-O's to pull itself.
         let children = manifest::children(&bytes)
             .map_err(|err| debug!(error = %err, name = pull.name, "the manifest is of a kind the relay does not read"))
-            .ok()?;
+            .map_err(|()| Miss::Absent)?;
         let media_type = content_type
             .as_deref()
             .and_then(|text| text.split(';').next())
             .map(str::trim)
             .and_then(header_value)
-            .or_else(|| media_type(&bytes))?;
+            .or_else(|| media_type(&bytes))
+            .ok_or(Miss::Absent)?;
         self.hold(pull.name, &digest, &bytes, &children).await;
-        Some(Answer::Served(
+        Ok(Answer::Served(
             metrics::Source::Upstream,
             manifest_response(&bytes, &digest, media_type, false),
         ))
@@ -366,49 +372,58 @@ impl Relay {
             Ok(sources) => sources,
             Err(err) => return Answer::Failed(Error::Relay(err.to_string())),
         };
+        let mut miss = Miss::Absent;
         for source in &sources {
-            let mut headers = Vec::new();
-            if let Some(range) = pull.range.and_then(header_value) {
-                headers.push((RANGE, range));
-            }
-            let request = Request {
-                method: if pull.head { Method::HEAD } else { Method::GET },
-                path: format!("/{}/blobs/{digest}", source.repository),
-                repository: source.repository.clone(),
-                headers,
-            };
-            let Some(response) = self.send(source, &request).await else {
-                continue;
-            };
-            let answer = match (response.status, pull.head, pull.range) {
-                (StatusCode::OK, true, _) => head_response(&response)
-                    .map(|head| Answer::Served(metrics::Source::Upstream, head)),
-                (StatusCode::OK, false, None) => {
-                    let length = response.headers.get(CONTENT_LENGTH).cloned();
-                    let feed = Feed::Upstream(response.body);
-                    Some(self.relay_blob(feed, length, digest, pull.name).await)
-                }
-                // A range, answered as upstream answers it: unhashed, not kept (D7's limit).
-                (
-                    StatusCode::OK
-                    | StatusCode::PARTIAL_CONTENT
-                    | StatusCode::RANGE_NOT_SATISFIABLE,
-                    false,
-                    Some(_),
-                ) => Some(Answer::Served(
-                    metrics::Source::Upstream,
-                    passthrough(response, digest),
-                )),
-                (status, ..) => {
-                    debug!(%status, name = pull.name, "upstream has no such blob for the relay");
-                    None
-                }
-            };
-            if let Some(answer) = answer {
-                return answer;
+            match self
+                .relay_upstream_blob(source, pull, digest, &digest_text)
+                .await
+            {
+                Ok(answer) => return answer,
+                Err(met) => miss = miss.or(met),
             }
         }
-        Answer::Missing
+        miss.answer()
+    }
+
+    /// The blob from one source, or why it gives none: the next source is tried. `text` is `digest` as text.
+    async fn relay_upstream_blob(
+        &self,
+        source: &Source,
+        pull: &Pull<'_>,
+        digest: &Digest,
+        text: &str,
+    ) -> Result<Answer, Miss> {
+        let mut headers = Vec::new();
+        if let Some(range) = pull.range.and_then(header_value) {
+            headers.push((RANGE, range));
+        }
+        let request = Request {
+            method: if pull.head { Method::HEAD } else { Method::GET },
+            path: format!("/{}/blobs/{text}", source.repository),
+            repository: source.repository.clone(),
+            headers,
+        };
+        let (response, host) = self.send(source, &request).await?;
+        match (response.status, pull.head, pull.range) {
+            (StatusCode::OK, true, _) => head_response(&response)
+                .map(|head| Answer::Served(metrics::Source::Upstream, head))
+                .ok_or_else(|| failed(host, pull.name, text, "a head without a length")),
+            (StatusCode::OK, false, None) => {
+                let length = response.headers.get(CONTENT_LENGTH).cloned();
+                let feed = Feed::Upstream(response.body);
+                Ok(self.relay_blob(feed, length, digest, pull.name).await)
+            }
+            // A range, answered as upstream answers it: unhashed, not kept (D7's limit).
+            (
+                StatusCode::OK | StatusCode::PARTIAL_CONTENT | StatusCode::RANGE_NOT_SATISFIABLE,
+                false,
+                Some(_),
+            ) => Ok(Answer::Served(
+                metrics::Source::Upstream,
+                passthrough(response, digest),
+            )),
+            _ => Err(missed(&response, host, pull.name, text)),
+        }
     }
 
     /// A blob whole, of `length`: hashed as it streams, kept when the digest matches, and never sent to its end when it
@@ -461,8 +476,12 @@ impl Relay {
         Answer::Served(source, out)
     }
 
-    /// Sends to the first candidate of `source` that answers.
-    async fn send(&self, source: &Source, request: &Request) -> Option<Upstreamed> {
+    /// Sends to the first candidate of `source` that answers: its answer and its host, else a failure.
+    async fn send<'s>(
+        &self,
+        source: &'s Source,
+        request: &Request,
+    ) -> Result<(Upstreamed, &'s str), Miss> {
         let mut last = None;
         for endpoint in &source.candidates {
             match self
@@ -470,15 +489,81 @@ impl Relay {
                 .send(endpoint, &source.credentials, request)
                 .await
             {
-                Ok(response) => return Some(response),
+                Ok(response) => return Ok((response, &endpoint.authority)),
                 Err(err) => last = Some(err),
             }
         }
         if let Some(err) = last {
             warn!(error = %err, "a registry does not answer the relay");
         }
-        None
+        Err(Miss::Refused(Refusal::Failed))
     }
+}
+
+/// Why a source served nothing. Of all sources', the runtime gets the worst.
+enum Miss {
+    /// Upstream has no such content, or denies it to the node (D66): a 404, and CRI-O pulls it itself.
+    Absent,
+    /// Upstream refused, or failed.
+    Refused(Refusal),
+}
+
+impl Miss {
+    /// Of `self` and `other`, met later, the one the runtime gets: a limit over a failure over a 404, the first of
+    /// equals.
+    fn or(self, other: Self) -> Self {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+
+    const fn rank(&self) -> u8 {
+        match self {
+            Self::Absent => 0,
+            Self::Refused(Refusal::Failed) => 1,
+            Self::Refused(Refusal::Limited(_)) => 2,
+        }
+    }
+
+    fn answer(self) -> Answer {
+        match self {
+            Self::Absent => Answer::Missing,
+            Self::Refused(refusal) => Answer::Refused(refusal),
+        }
+    }
+}
+
+/// What `response`, which serves nothing, tells the runtime of `name`'s `reference`, from `host` (D129).
+fn missed(response: &Upstreamed, host: &str, name: &str, reference: &str) -> Miss {
+    let status = response.status;
+    if matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ) {
+        debug!(%status, host, name, reference, "upstream does not serve the relay");
+        return Miss::Absent;
+    }
+    if response.refusal().is_none() {
+        return failed(
+            host,
+            name,
+            reference,
+            &format!("upstream answered {status}"),
+        );
+    }
+    warn!(%status, host, name, reference, "upstream limits the relay: CRI-O gets a 429");
+    Miss::Refused(Refusal::Limited(response.headers.get(RETRY_AFTER).cloned()))
+}
+
+/// Upstream at `host` failed `name`'s `reference`, for `why`: CRI-O gets a 502 (D129).
+fn failed(host: &str, name: &str, reference: &str, why: &str) -> Miss {
+    warn!(
+        host,
+        name, reference, why, "upstream failed the relay: CRI-O gets a 502"
+    );
+    Miss::Refused(Refusal::Failed)
 }
 
 impl Pulls for Relay {

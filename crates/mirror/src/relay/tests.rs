@@ -443,6 +443,174 @@ fn is_missing(answer: &Answer) -> bool {
     matches!(answer, Answer::Missing)
 }
 
+fn refusal(answer: Answer) -> Option<Refusal> {
+    match answer {
+        Answer::Refused(refusal) => Some(refusal),
+        Answer::Served(..) | Answer::Missing | Answer::Failed(_) => None,
+    }
+}
+
+/// A reply of `status` with no body, and `Retry-After: retry_after` when given.
+fn refused(status: u16, retry_after: Option<&str>) -> Reply {
+    let mut reply = Reply::ok("");
+    reply.status = status;
+    if let Some(retry_after) = retry_after {
+        reply
+            .headers
+            .push(("retry-after".to_owned(), retry_after.to_owned()));
+    }
+    reply
+}
+
+#[tokio::test]
+async fn crio_gets_upstreams_limit_as_a_429_its_failure_as_a_502_and_a_404_only_from_a_404() {
+    let node = Node::new().await;
+    let relay = node.relay(1 << 30);
+    let limited = |retry_after: &'static str| {
+        Some(Refusal::Limited(Some(HeaderValue::from_static(
+            retry_after,
+        ))))
+    };
+    for (reference, reply, expected) in [
+        ("limited", refused(429, Some("120")), limited("120")),
+        ("bare", refused(429, None), Some(Refusal::Limited(None))),
+        (
+            "date",
+            refused(429, Some("Fri, 31 Dec 9999 23:59:59 GMT")),
+            limited("Fri, 31 Dec 9999 23:59:59 GMT"),
+        ),
+        ("busy", refused(503, Some("30")), limited("30")),
+        ("down", refused(503, None), Some(Refusal::Failed)),
+        ("broken", refused(500, None), Some(Refusal::Failed)),
+        ("odd", refused(418, None), Some(Refusal::Failed)),
+        ("denied", refused(403, None), None),
+    ] {
+        node.registry
+            .put(&format!("/v2/app/web/manifests/{reference}"), reply);
+        let answer = relay
+            .pull(pull(Kind::Manifest, &tag(reference), false, None))
+            .await;
+        let missing = is_missing(&answer);
+        assert_eq!(refusal(answer), expected, "{reference}");
+        assert_eq!(missing, expected.is_none(), "{reference}");
+    }
+    // Blobs alike, a head too, and a 404 is a fall through.
+    let image = Image::new(&node.registry, &[100, 200]);
+    read(
+        relay
+            .pull(pull(Kind::Manifest, &tag("1.0"), false, None))
+            .await,
+    )
+    .await
+    .unwrap();
+    let layer = sha(&image.layers[0]);
+    node.registry.put(
+        &format!("/v2/app/web/blobs/{layer}"),
+        refused(429, Some("5")),
+    );
+    for head in [false, true] {
+        assert_eq!(
+            refusal(relay.pull(pull(Kind::Blob, &by(&layer), head, None)).await),
+            limited("5"),
+            "head={head}"
+        );
+    }
+    let gone = sha(&image.layers[1]);
+    node.registry
+        .put(&format!("/v2/app/web/blobs/{gone}"), refused(404, None));
+    assert!(is_missing(
+        &relay.pull(pull(Kind::Blob, &by(&gone), false, None)).await
+    ));
+    // A registry that does not answer is a failure.
+    let dead = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    node.sources(vec![source(dead, Credentials::Anonymous)]);
+    let relay = node.relay(1 << 30);
+    assert_eq!(
+        refusal(
+            relay
+                .pull(pull(Kind::Manifest, &tag("limited"), false, None))
+                .await
+        ),
+        Some(Refusal::Failed)
+    );
+}
+
+#[tokio::test]
+async fn of_every_sources_miss_crio_gets_the_limit_before_the_failure_before_the_404() {
+    let node = Node::new().await;
+    let mirror = Registry::start().await;
+    let dead = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    node.sources(vec![
+        source(mirror.address, Credentials::Anonymous),
+        source(dead, Credentials::Anonymous),
+        source(node.registry.address, Credentials::Anonymous),
+    ]);
+    let relay = node.relay(1 << 30);
+    // The mirror has no such manifest, the dead one fails, and the registry limits.
+    node.registry
+        .put("/v2/app/web/manifests/1.0", refused(429, Some("60")));
+    assert_eq!(
+        refusal(
+            relay
+                .pull(pull(Kind::Manifest, &tag("1.0"), false, None))
+                .await
+        ),
+        Some(Refusal::Limited(Some(HeaderValue::from_static("60"))))
+    );
+    // The mirror limits, the registry has none: still the limit.
+    mirror.put("/v2/app/web/manifests/2.0", refused(429, None));
+    assert_eq!(
+        refusal(
+            relay
+                .pull(pull(Kind::Manifest, &tag("2.0"), false, None))
+                .await
+        ),
+        Some(Refusal::Limited(None))
+    );
+    // Both limit: the first's.
+    mirror.put("/v2/app/web/manifests/4.0", refused(429, Some("30")));
+    node.registry
+        .put("/v2/app/web/manifests/4.0", refused(429, Some("90")));
+    assert_eq!(
+        refusal(
+            relay
+                .pull(pull(Kind::Manifest, &tag("4.0"), false, None))
+                .await
+        ),
+        Some(Refusal::Limited(Some(HeaderValue::from_static("30"))))
+    );
+    // Nobody has it, and the dead one failed.
+    assert_eq!(
+        refusal(
+            relay
+                .pull(pull(Kind::Manifest, &tag("3.0"), false, None))
+                .await
+        ),
+        Some(Refusal::Failed)
+    );
+    // A limit, then a source that serves: served.
+    let image = Image::new(&node.registry, &[100]);
+    mirror.put("/v2/app/web/manifests/1.0", refused(429, Some("60")));
+    node.registry.put(
+        "/v2/app/web/manifests/1.0",
+        Reply::ok(image.manifest.clone()),
+    );
+    let got = read(
+        relay
+            .pull(pull(Kind::Manifest, &tag("1.0"), false, None))
+            .await,
+    )
+    .await
+    .unwrap();
+    assert_eq!(got.body, image.manifest);
+}
+
 #[tokio::test]
 async fn a_manifest_by_tag_is_resolved_upstream_served_with_its_digest_and_kept() {
     let node = Node::new().await;
@@ -899,15 +1067,7 @@ async fn a_registry_that_has_no_manifest_or_wants_a_login_the_node_lacks_is_a_fa
             .pull(pull(Kind::Manifest, &tag("1.0"), false, None))
             .await
     ));
-    // Other statuses, and a kind the relay does not serve.
-    let mut reply = Reply::ok("");
-    reply.status = 429;
-    node.registry.put("/v2/app/web/manifests/busy", reply);
-    assert!(is_missing(
-        &relay
-            .pull(pull(Kind::Manifest, &tag("busy"), false, None))
-            .await
-    ));
+    // A kind the relay does not serve.
     assert!(is_missing(
         &relay
             .pull(pull(Kind::Referrers, &tag("x"), false, None))
@@ -956,7 +1116,7 @@ async fn the_nodes_login_answers_a_basic_challenge() {
 }
 
 #[tokio::test]
-async fn a_manifest_by_digest_that_is_not_that_digest_or_is_of_a_kind_the_relay_does_not_read_is_a_fall_through()
+async fn a_manifest_by_digest_that_is_not_that_digest_is_a_502_and_one_the_relay_does_not_read_a_fall_through()
  {
     let node = Node::new().await;
     let relay = node.relay(1 << 30);
@@ -965,11 +1125,14 @@ async fn a_manifest_by_digest_that_is_not_that_digest_or_is_of_a_kind_the_relay_
         &format!("/v2/app/web/manifests/{wrong}"),
         Reply::ok(r#"{"schemaVersion":2,"config":{"digest":"sha256:00"},"layers":[]}"#),
     );
-    assert!(is_missing(
-        &relay
-            .pull(pull(Kind::Manifest, &by(&wrong), false, None))
-            .await
-    ));
+    assert_eq!(
+        refusal(
+            relay
+                .pull(pull(Kind::Manifest, &by(&wrong), false, None))
+                .await
+        ),
+        Some(Refusal::Failed)
+    );
     assert!(!relay.cache().contains(&wrong));
     // A schema 1 manifest, by tag: no children to know.
     node.registry.put(

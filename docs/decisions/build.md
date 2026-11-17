@@ -269,7 +269,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `e2e/` and `oracle/` stay at the top level.
 - **Because:** the user asked for libraries and binaries apart. A library holds code a fuzz target, a test or another binary can reuse; a binary-only crate cannot be linked by them.
 
-## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94, D113, D120)
+## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94, D113, D120, D130)
 
 - **Decision:**
   - **Runtimes:** containerd and CRI-O. cri-dockerd has no NRI, so the gate cannot run there.
@@ -448,7 +448,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
 
 
-## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113)
+## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130)
 
 - **Decision:**
   - **Reflectors:** the agents of the control plane and of the first worker run `role = "reflector"` (D2 puts reflectors on control-plane nodes; kind's second control plane would add an etcd member and kind's own balancer for nothing the peer suites test). Both are in every agent's `reflector.members`, by node name and kind-network address, port 7483; the second worker is the client no reflector runs on.
@@ -656,3 +656,10 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `just mutants --file crates/runtime/src/crio/images.rs` on `main`: 15 mutants in 7 min 43 s, 9 caught, 6 unviable, none missed, exit 0.
 - **Cost:** a run off Linux needs a container engine; mutants of code built only off Linux, such as `crio/images.rs`'s stand-in `watch`, go untested, as on CI. Each worktree's mutants build stays in its directory of the volume (D118).
 - **Revisit when:** speculaire runs on an OS other than Linux, or a contributor builds without a container engine (D57).
+
+## D130: The rate-limit suite runs in the IPv4 pass only (amends D63, D94)
+
+- **Decision:** `e2e/tests/limits.rs` returns at once in the dual-stack pass (D94): its test runs once per leg, in the IPv4 pass, on both runtimes. Every other suite runs in both passes.
+- **Because:** the test waits out a 120 s `Retry-After`, and what it checks, a host paused and taken up again, does not depend on the address family. Twice per leg would add 2 min to each of the 14.
+- **Measured (M4 step 02):** locally on Docker Desktop arm64 with kind, the suite's test took 130 s on containerd 2.4 and 138 s on CRI-O 1.37; both images' artifacts were in the store 120.6 s after the `429`. On PR #179's CI the test took 130 s in the IPv4 pass of each leg, and the legs 13.4 min (containerd 2.4, x86_64), 13.1 min (containerd 2.4, arm64) and 16.0 min (CRI-O 1.37, arm64).
+- **Revisit when:** a leg nears its 20 min budget, then the suite goes nightly; or the pause depends on the address family.

@@ -21,6 +21,7 @@ On CRI-O every pull of a mirrored registry goes through the agent, which fetches
 
 - A pull that fails with the agent down succeeds on kubelet's retry, straight from the registry.
 - An image that needs a pod pull secret is pulled by CRI-O itself: the mirror answers 404 to its manifest.
+- A registry that limits the node reaches CRI-O as a 429 with the registry's `Retry-After`, which CRI-O waits out up to 5 times; one that fails, by a 5xx, a broken body or no answer, as a 502. Each is a warning, `upstream limits the relay: CRI-O gets a 429` or `upstream failed the relay: CRI-O gets a 502`, naming the host, the status or failure, the image and the reference, and `speculaire_mirror_requests_total{result="refused"}` counts it (D129). A 429 is the registry's limit on the node's address: add registry credentials, or a pull-through cache.
 - A registry whose `registries.conf` prefix has a port is not mirrored: `configure` lists it as left alone, and CRI-O pulls it directly (D88).
 - `a registry does not answer the relay` (warning) names a failure to reach every endpoint of a source; `speculaire_mirror_requests_total{result="error"}` counts the requests the relay could not answer, and the agent stops at startup, naming the directory, when it cannot open `blob_cache.directory`.
 - A credential that lives in a credential helper is not used (D80, D89): the log says which helper, and the registry is asked anonymously.
@@ -86,7 +87,7 @@ Shown in `kubectl describe pod` under `CreateContainerError`.
 | `rejected: <detail>` | A signature, attestation or SBOM check failed (D20) | Fix the image; the verdict is final for this policy and trust root |
 | `rejected: attestation <predicateType> missing (.att tags are not supported)` | The attestation exists only as a `.att` tag (D43) | Attest again with a current cosign, which attaches a bundle as a referrer |
 | `unverifiable: <detail>` | Artifacts or the trust root could not be obtained (D17, D20) | Check upstream reachability and credentials; it is retried automatically |
-| `unverifiable: upstream rate limited: <host>` | The registry answered `429`, or `503` with `Retry-After`; discovery to that host pauses until its `Retry-After`, at most 1 h (D38) | Add registry credentials, or wait |
+| `unverifiable: upstream rate limited: <host>` | The registry answered `429`, or `503` with `Retry-After`; discovery to that host pauses, for every image, until its `Retry-After`, at most 1 h, and resumes by itself. Until M5 the journal says it at `info`: `discovery of <digest>: unverifiable: upstream rate limited: <host>` (D38, D128) | Add registry credentials, or wait |
 
 ## Reflector refusals
 
@@ -129,6 +130,7 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | `speculaire_lookup_seconds_count{result="miss"}` | Its share of lookups rises while every `speculaire_reflector_connected` is 1: the reflectors answer, but lack what the nodes hold; look for refused streams (`speculaire_reflector_announce_rejected_total`) and for nodes whose `speculaire_p2p_enabled` is 0 (D103) |
 | `speculaire_tag_conflicts_total` | It increases: two peers resolved one tag to different manifests; the warning log `two peers resolved a tag to different digests` names it. Usually a tag moved while nodes still hold the old image; else a node may lie (D123) |
 | `speculaire_mirror_requests_total{result="error"}` | It increases: the mirror could not read content it may hold, and answered 404; the warning log names the error (D85) |
+| `speculaire_mirror_requests_total{result="refused"}` | It rises on CRI-O: a registry limits the node (429) or fails (502), and pulls wait or fail; the warning logs name the host (D129) |
 | `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, or on its previous registry config, or a registry config read left a credential, certificate or key file out, or the kubelet certificate or the cluster CA cannot be loaded and the previous one stays; the error log names the file and the line (D30, D91, D92, D95) |
 | `speculaire_identity_path{path="annotation"}` | It is 1: the node runs containerd 2.3, with its known identity gap (D15) |
 | `speculaire_trust_root_expiry_timestamp_seconds` | Less than 7 days away: once it passes, new verifications become `unverifiable`; cached verdicts keep serving |

@@ -100,7 +100,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - `Unverifiable` and `Pending` are short-lived and retried anyway.
 - **Revisit when:** the DaemonSet phase starts. Then keep the file on a `hostPath` under `/run/speculaire`.
 
-## D38: Upstream rate limits pause discovery per registry host (amends D20; amended by D43)
+## D38: Upstream rate limits pause discovery per registry host (amends D20; amended by D43, D128)
 
 - **Decision:**
   - An upstream `429`, or a `503` with `Retry-After`, makes the verdict `Unverifiable { reason: "upstream rate limited: <host>", retry_at }`. `retry_at` is the later of the next backoff step and `Retry-After` (seconds or HTTP date), capped at 1 h.
@@ -137,7 +137,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
 
-## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127)
+## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128)
 
 - **Decision:**
   - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends, and read the list once more 1 s after a watch starts: no answer tells when containerd holds the subscription, and an image pulled in between waited 60 s in CI. Once the agent stops, a follower that loses the runtime ends without a warning: the agent's own teardown cut it. The CRI-O relay protects the listed images from eviction through it.
@@ -176,3 +176,18 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Limit:** a peer that lists only some artifacts of a root hides the rest from this node until M5's upstream check. A `.sig` has no `subject`: any node can list any simple-signing manifest under a target, which M5's signature check rejects.
 - **Measured (M4 step 04, locally on Docker Desktop arm64, kind, `just e2e containerd 2.4` and `just e2e crio 1.37`):** with zot as upstream, one node pulled and discovered the signed test image (3 bundles: signature, SLSA, SPDX; its `.sig`); the worker, its agent stopped, pulled the image, was cut off from zot and started its agent. Its store held every artifact 2.8 s after the agent started on containerd (agent start and first reflector stream included) and 0.26 s on CRI-O; each digest counted `source="peer",result="ok"`; zot logged no request from the worker after its agent started, and no request for the `.att` tag over the whole test. Each full local leg, cluster up and down included, took 318 s on containerd and 374 s on CRI-O.
 - **Revisit when:** nodes that hold an image often lack its artifacts, then announce a key per target's referrers; or M5 finds peers withholding artifacts upstream has.
+
+## D128: A refusal pauses its host for every discovery; the root waits for `retry_at` and the journal says why (amends D38, D121)
+
+- **Decision:**
+  - **Refusal:** `speculaire-registry` reads a refusal off a response: a `429`, with its `Retry-After` when that parses, or a `503` with a `Retry-After` that parses. `Retry-After` is whole seconds or an HTTP date (RFC 9110 §10.2.3), a date in the past being 0 s. The fuzz target `retry_after` covers the parser.
+  - **Pauses:** one table of hosts, by endpoint authority, is shared by every discovery of the agent. A refused request pauses its host until the later of the next backoff step and `Retry-After`, capped at 1 h (D38). The backoff step is 30 s, doubled at each refusal in a row, capped at 5 min (D20); any other answer of the host clears its entry. A paused endpoint is skipped like an absent one: discovery tries the root's other sources, and the store and peers before them (D126).
+  - **Outcome:** a refusal ends the root's discovery, nothing recorded, with `Unverifiable { reason: "upstream rate limited: <host>", retry_at }`; a root no source served ends `Unverifiable { reason: "artifacts unreachable", retry_at: now + 10 min }` (D121). The root is discovered again at its `retry_at`, by itself, without waiting for a listing. Until M5, the journal shows the outcome as one `info` line, `discovery of <digest>: unverifiable: <reason>`; M5's verdict takes the reason as it is.
+  - **Relay:** the pauses do not hold the CRI-O relay. Its requests are the pull CRI-O would send itself, and it passes upstream's refusal on to CRI-O (D129).
+  - **Counted** once per refused request as `speculaire_artifact_fetches_total{source="upstream",result="rate_limited"}`.
+- **Because:**
+  - Docker Hub's limit is per client address, not per image: an image that hits it means every image of that host would. A request sent before `Retry-After` extends the ban, and those that CRI-O's pulls need come first.
+  - An artifact fetched halfway through a root would leave it recorded with a part of its artifacts, and a recorded root is never asked again (D121).
+  - A root waiting for the next full listing after its `retry_at` would wait up to 60 s more.
+  - The verdict, and the reason in it, come at M5; a journal line in its words lets an operator see the limit today.
+- **Revisit when:** M5 produces verdicts, or a registry limits per image rather than per client.

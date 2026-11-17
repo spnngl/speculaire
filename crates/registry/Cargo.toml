@@ -13,6 +13,7 @@ aws-lc-rs.workspace = true
 bytes.workspace = true
 http.workspace = true
 http-body-util.workspace = true
+httpdate.workspace = true
 hyper = { workspace = true, features = ["client"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1"] }
 percent-encoding.workspace = true
