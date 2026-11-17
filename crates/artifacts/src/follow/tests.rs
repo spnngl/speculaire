@@ -15,7 +15,7 @@ use speculaire_runtime::registries::{
 
 use super::*;
 use crate::discover::{Limits, Local};
-use crate::store::Store;
+use crate::store::{Artifact, Kind, Store};
 
 fn digest(n: u8) -> Digest {
     Digest::parse(&format!("sha256:{}", format!("{n:02x}").repeat(32))).unwrap()
@@ -103,10 +103,12 @@ fn a_root_has_its_names_in_order_once_each_and_none_once_it_left_the_list() {
     assert_eq!(names(&list, &digest(12)), Vec::<String>::new());
 }
 
-/// Follows the list the returned sender scripts, with `store`, logging in `asked` each name a root is asked under.
+/// Follows the list the returned sender scripts, with `store`, from `linked` on, logging in `asked` each name a root
+/// is asked under.
 fn start(
     store: Arc<Store>,
     asked: &Arc<Asked>,
+    linked: impl Future<Output = ()> + Send + 'static,
 ) -> (mpsc::Sender<Update>, tokio::task::JoinHandle<()>) {
     let unlinked = speculaire_mirror::fetch::Fetcher::new(
         std::path::PathBuf::new(),
@@ -129,6 +131,7 @@ fn start(
     let followed = tokio::spawn(follow(
         discovery,
         Arc::new(Scripted(Mutex::new(Some(receiver)))),
+        linked,
     ));
     (script, followed)
 }
@@ -138,7 +141,7 @@ async fn the_roots_of_an_image_just_listed_go_before_those_of_a_listing() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
     let asked = Arc::new(Asked::default());
-    let (script, followed) = start(store, &asked);
+    let (script, followed) = start(store, &asked, std::future::ready(()));
 
     script
         .send(Update::Listing(vec![
@@ -167,7 +170,7 @@ async fn a_recorded_root_is_skipped_and_a_failed_one_is_tried_again_at_its_retry
     let store = Arc::new(Store::open(dir.path()).unwrap());
     store.record(&digest(10), &[]).await.unwrap();
     let asked = Arc::new(Asked::default());
-    let (script, followed) = start(store, &asked);
+    let (script, followed) = start(store, &asked, std::future::ready(()));
     let listing = || {
         Update::Listing(vec![
             image(1, &[("reg.test/old", 10)]),
@@ -205,7 +208,7 @@ async fn a_root_the_store_fails_is_tried_again_after_the_retry_time() {
     let root = digest(20);
     std::fs::create_dir_all(dir.path().join("blobs/sha256").join(root.encoded())).unwrap();
     let asked = Arc::new(Asked::default());
-    let (script, followed) = start(store, &asked);
+    let (script, followed) = start(store, &asked, std::future::ready(()));
     let listing = || Update::Listing(vec![image(2, &[("reg.test/new", 20)])]);
     let settle = || tokio::time::sleep(Duration::from_millis(10));
     let discoveries = || asked.1.load(Ordering::Relaxed);
@@ -222,6 +225,127 @@ async fn a_root_the_store_fails_is_tried_again_after_the_retry_time() {
     assert_eq!(discoveries(), 2);
     // The store failed before any source was asked.
     assert!(asked.0.lock().unwrap().is_empty());
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_root_that_leaves_the_list_is_collected_and_discovered_again_when_it_comes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let bundle = speculaire_oci::hash::of("sha256", b"bundle").unwrap();
+    store.keep(&bundle, b"bundle").await.unwrap();
+    let artifact = Artifact {
+        target: digest(10),
+        manifest: bundle.clone(),
+        kind: Kind::Bundle,
+        blobs: Vec::new(),
+    };
+    store.record(&digest(10), &[artifact]).await.unwrap();
+    store.record(&digest(20), &[]).await.unwrap();
+    let asked = Arc::new(Asked::default());
+    let (script, followed) = start(Arc::clone(&store), &asked, std::future::ready(()));
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+
+    script
+        .send(Update::Listing(vec![
+            image(1, &[("reg.test/a", 10)]),
+            image(2, &[("reg.test/b", 20)]),
+        ]))
+        .await
+        .unwrap();
+    settle().await;
+    assert!(store.contains(&bundle));
+    assert!(asked.0.lock().unwrap().is_empty());
+
+    // No listing: the image's removal alone collects its root.
+    script.send(Update::Removed(digest(1))).await.unwrap();
+    settle().await;
+    assert!(!store.contains(&bundle));
+    assert_eq!(store.recorded(&digest(10)).await.unwrap(), None);
+    assert!(store.recorded(&digest(20)).await.unwrap().is_some());
+
+    script
+        .send(Update::Listed(image(1, &[("reg.test/a", 10)])))
+        .await
+        .unwrap();
+    settle().await;
+    assert_eq!(*asked.0.lock().unwrap(), ["reg.test/a"]);
+
+    // A root listed since the last collection is collected too once it leaves.
+    store.record(&digest(10), &[]).await.unwrap();
+    script.send(Update::Removed(digest(1))).await.unwrap();
+    settle().await;
+    assert_eq!(store.recorded(&digest(10)).await.unwrap(), None);
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_store_is_collected_from_the_first_listing_and_discovery_waits_for_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let orphan = speculaire_oci::hash::of("sha256", b"orphan").unwrap();
+    store.keep(&orphan, b"orphan").await.unwrap();
+    let asked = Arc::new(Asked::default());
+    let (link, linked) = tokio::sync::oneshot::channel::<()>();
+    let (script, followed) = start(Arc::clone(&store), &asked, async move {
+        let _ = linked.await;
+    });
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+
+    settle().await;
+    assert!(
+        store.contains(&orphan),
+        "no collection before the first listing"
+    );
+    script
+        .send(Update::Listing(vec![image(1, &[("reg.test/a", 10)])]))
+        .await
+        .unwrap();
+    settle().await;
+    assert!(!store.contains(&orphan));
+    assert!(asked.0.lock().unwrap().is_empty());
+
+    link.send(()).unwrap();
+    settle().await;
+    assert_eq!(*asked.0.lock().unwrap(), ["reg.test/a"]);
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_listing_collects_the_store_even_when_no_root_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let asked = Arc::new(Asked::default());
+    let (script, followed) = start(Arc::clone(&store), &asked, std::future::ready(()));
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+    script
+        .send(Update::Listing(vec![image(1, &[("reg.test/a", 10)])]))
+        .await
+        .unwrap();
+    settle().await;
+    let orphan = speculaire_oci::hash::of("sha256", b"orphan").unwrap();
+    store.keep(&orphan, b"orphan").await.unwrap();
+
+    // Sent together, the listing comes in behind the image, with the updates already queued.
+    script
+        .send(Update::Listed(image(2, &[("reg.test/b", 20)])))
+        .await
+        .unwrap();
+    script
+        .send(Update::Listing(vec![
+            image(1, &[("reg.test/a", 10)]),
+            image(2, &[("reg.test/b", 20)]),
+        ]))
+        .await
+        .unwrap();
+    settle().await;
+    assert!(!store.contains(&orphan));
 
     drop(script);
     followed.await.unwrap();

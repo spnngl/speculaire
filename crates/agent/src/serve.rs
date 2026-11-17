@@ -447,7 +447,8 @@ const LINK_WAIT: Duration = Duration::from_secs(10);
 /// through the mirror's fetcher, then upstream (D121, D126); the store is what the node serves of them (D124).
 ///
 /// Discovery starts once `peers` turns true, or after [`LINK_WAIT`]: a root it found unreachable waits
-/// [`speculaire_artifacts::discover::RETRY`], so its first pass asks peers when the node has any.
+/// [`speculaire_artifacts::discover::RETRY`], so its first pass asks peers when the node has any. The store is
+/// collected from the first listing on (D131).
 fn start_discovery(
     config: &Config,
     node: &RuntimeNode,
@@ -470,10 +471,11 @@ fn start_discovery(
         Limits::new(config.sbom.max_size.get()),
     );
     let images = node.images();
-    tokio::spawn(async move {
-        linked_or_after(peers, LINK_WAIT).await;
-        speculaire_artifacts::follow(Arc::new(discovery), images).await;
-    });
+    tokio::spawn(speculaire_artifacts::follow(
+        Arc::new(discovery),
+        images,
+        linked_or_after(peers, LINK_WAIT),
+    ));
     Ok(store)
 }
 

@@ -397,7 +397,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Revisit when:** a tag must follow upstream within a bound; then add a max age, or a `HEAD` upstream that wins when it answers.
 
 
-## D124: The peer API serves the artifact store and its referrers, announced beside the content (amends D99, D100)
+## D124: The peer API serves the artifact store and its referrers, announced beside the content (amends D99, D100; amended by D131)
 
 - **Decision:**
   - **Announcement (D99):** the agent's holdings keep one set of keys per source: the runtime's content (or the blob cache), the artifact store, and the tags (D123). A listing of one source replaces only its own set. A key is announced while any source holds it, withdrawn when none does, and a stream's snapshot is their union. The store is an `Inventory`: a listing of its blobs, then each blob it keeps.
@@ -411,9 +411,9 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - The store is keyed by digest, as content is, so the repository in the path tells nothing (D100).
   - The `.sig` manifest's config is the generic image config, which names no artifact; its single layer's media type is what it is.
   - The mirror stays free of discovery and its registry access; `crates/artifacts` already sits above the runtime crates.
-- **Limit:** the referrers index is a hint, not content-addressed: any node with a node identity can list any manifest, so a reader fetches each by digest and checks its `subject` (`docs/security.md`). The store deletes nothing yet: a blob removed by hand stays announced until the agent restarts, and then answers a 404.
+- **Limit:** the referrers index is a hint, not content-addressed: any node with a node identity can list any manifest, so a reader fetches each by digest and checks its `subject` (`docs/security.md`).
 - **Measured (M4 step 03, locally on Docker Desktop arm64, kind):** `e2e/tests/artifacts.rs` passes on containerd 2.4 and CRI-O 1.37: once a worker discovered the signed test image, the other node, with kubelet's certificate, lists its 3 bundles (signature, SLSA, SPDX) and its `.sig`; filtered on the bundle type it gets the 3 and the header; a manifest with no artifact gives an empty list; every listed manifest and every blob they name come back matching their digest; the loopback mirror still answers referrers 404. In `crates/reflect/src/client/holdings.rs`, a digest held by the content and the store stays announced until both drop it. Each full local leg, cluster up and down included, took 286 s on containerd and 362 s on CRI-O.
-- **Revisit when:** the store collects its blobs, which then announce their removal, or a reader needs referrers by repository.
+- **Revisit when:** a reader needs referrers by repository.
 
 ## D127: A tag is announced once its image lists a repository digest in the tag's repository; the image list is read again 1 s after each hint (amends D121, D123)
 

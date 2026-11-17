@@ -1,6 +1,8 @@
-//! The trigger of discovery at M4: every manifest digest the runtime's image list names is a root (D121).
+//! The trigger of discovery at M4: every manifest digest the runtime's image list names is a root (D121). The store
+//! keeps only what the roots listed name (D131).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 
 use speculaire_oci::reference::Digest;
@@ -10,6 +12,7 @@ use tokio::time::{Instant, sleep_until};
 use tracing::{info, warn};
 
 use crate::discover::{Discovery, Error, RETRY};
+use crate::store::Store;
 
 /// What discovery came to for a root this run.
 enum Done {
@@ -20,22 +23,42 @@ enum Done {
 
 /// Discovers the artifacts of each root the image list of `images` names, once per run, until the list ends.
 ///
+/// Discovery starts once `linked` completes. The store is collected at each listing and whenever a root leaves the
+/// list, from the first listing on: it announces nothing until then.
+///
 /// A root recorded by an earlier run is not discovered again; one whose discovery failed is tried again at the time
-/// its error gives, or after [`RETRY`] when the store failed. A root that leaves the list keeps its artifacts.
+/// its error gives, or after [`RETRY`] when the store failed. A root that leaves the list loses its artifacts, and is
+/// discovered again if it comes back.
 ///
 /// The roots of an image just listed go before those a listing queued: a pull waits for one discovery at most, not
 /// for every root a restart finds unrecorded.
-pub async fn follow(discovery: Arc<Discovery>, images: Arc<dyn Images>) {
+pub async fn follow(
+    discovery: Arc<Discovery>,
+    images: Arc<dyn Images>,
+    linked: impl Future<Output = ()> + Send,
+) {
     let (sender, mut updates) = mpsc::channel(16);
     let following = tokio::spawn(images.follow(sender));
+    let mut linked = std::pin::pin!(linked);
+    let mut is_linked = false;
     let mut list = List::default();
     let mut queue = VecDeque::new();
     let mut done: HashMap<Digest, Done> = HashMap::new();
+    // The roots listed, and whether a listing came since the last collection.
+    let mut listed = HashSet::new();
+    let mut relisted = false;
     loop {
         while let Ok(update) = updates.try_recv() {
-            enqueue(&mut list, &mut queue, update);
+            relisted |= enqueue(&mut list, &mut queue, update);
         }
-        let Some(root) = queue.pop_front() else {
+        if roots_left(&list, &mut listed) || relisted {
+            collect(discovery.store(), &listed).await;
+            // A root collected is discovered again when it comes back.
+            done.retain(|root, _| listed.contains(root));
+            relisted = false;
+        }
+        let next = if is_linked { queue.pop_front() } else { None };
+        let Some(root) = next else {
             let next = done
                 .values()
                 .filter_map(|done| match done {
@@ -51,9 +74,10 @@ pub async fn follow(discovery: Arc<Discovery>, images: Arc<dyn Images>) {
             };
             tokio::select! {
                 update = updates.recv() => match update {
-                    Some(update) => enqueue(&mut list, &mut queue, update),
+                    Some(update) => relisted |= enqueue(&mut list, &mut queue, update),
                     None => break,
                 },
+                () = &mut linked, if !is_linked => is_linked = true,
                 () = wake => {
                     // Due roots are forgotten, so that one which left the list is not woken for again.
                     let now = Instant::now();
@@ -108,8 +132,11 @@ pub async fn follow(discovery: Arc<Discovery>, images: Arc<dyn Images>) {
     following.abort();
 }
 
-/// Applies `update` to `list` and queues its roots: those of an image listed in front, those of a listing behind.
-fn enqueue(list: &mut List, queue: &mut VecDeque<Digest>, update: Update) {
+/// Applies `update` to `list` and queues its roots, and tells whether `update` is a listing.
+///
+/// The roots of an image listed go in front, those of a listing behind.
+fn enqueue(list: &mut List, queue: &mut VecDeque<Digest>, update: Update) -> bool {
+    let listing = matches!(update, Update::Listing(_));
     match &update {
         Update::Listed(image) => {
             for repo_digest in image.repo_digests.iter().rev() {
@@ -126,6 +153,26 @@ fn enqueue(list: &mut List, queue: &mut VecDeque<Digest>, update: Update) {
         Update::Removed(_) => {}
     }
     list.apply(update);
+    listing
+}
+
+/// Sets `listed` to the roots `list` names, and tells whether one it held left.
+fn roots_left(list: &List, listed: &mut HashSet<Digest>) -> bool {
+    let now: HashSet<Digest> = list
+        .images()
+        .flat_map(|image| &image.repo_digests)
+        .map(|repo_digest| repo_digest.digest.clone())
+        .collect();
+    let left = !listed.is_subset(&now);
+    *listed = now;
+    left
+}
+
+/// Collects `store` down to what the roots `listed` name.
+async fn collect(store: &Arc<Store>, listed: &HashSet<Digest>) {
+    if let Err(e) = store.collect(listed.clone()).await {
+        warn!(error = %e, "the artifact store cannot be collected: what it holds stays until the next listing");
+    }
 }
 
 /// The names the list gives the manifest digest `root`, once each, in the list's order; none once it left the list.
