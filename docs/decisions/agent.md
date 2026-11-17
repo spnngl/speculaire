@@ -141,7 +141,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Without the certificates the mirror cannot listen (D14). Without the entry, containerd never calls the mirror, so verification starts only at the gate (D22), and every first start waits.
 - **Revisit when:** a packaging runs `configure` for the admin, as the DaemonSet's init container would.
 
-## D60: Config values parse into types, and the remaining keys get names (amends D16, D47; amended by D87)
+## D60: Config values parse into types, and the remaining keys get names (amends D16, D47; amended by D87, D135)
 
 - **Decision:**
   - Keys the decisions left unnamed, with their defaults:
@@ -149,7 +149,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
     - `identity.certificate = "/var/lib/kubelet/pki/kubelet-client-current.pem"` and `identity.ca = "/etc/kubernetes/pki/ca.crt"`, D16's paths;
     - `reflector.url = ""`, meaning no reflector and no peers, or an `https://host[:port]` URL with no path;
     - `reflector.members = []`, a list of `{ node = "<node name>", address = "<ip:port>" }`.
-  - **Value syntax:** durations are strings that `humantime` reads (`"300ms"`, `"10m"`); sizes are strings with a binary unit (`"64MiB"`; `B`, `KiB`, `MiB`, `GiB`, `TiB`); paths are absolute; `config.poll_interval` is longer than zero; `peer.max_uploads` and `prewarm.seeds` are at least 1; `log.filter` must parse as an `EnvFilter`. Each value parses once into a type that prints back as written. `gate.exempt.images` and `prewarm.images` stay strings until the gate compiles its globs and the reflector resolves its references.
+  - **Value syntax:** durations are strings such as `"300ms"`, `"10m"` or `"1h30m"` (D135); sizes are strings with a binary unit (`"64MiB"`; `B`, `KiB`, `MiB`, `GiB`, `TiB`); paths are absolute; `config.poll_interval` is longer than zero; `peer.max_uploads` and `prewarm.seeds` are at least 1; `log.filter` must parse as an `EnvFilter`. Each value parses once into a type that prints back as written. `gate.exempt.images` and `prewarm.images` stay strings until the gate compiles its globs and the reflector resolves its references.
   - The reload class lives in the type: each restart key (D47) is a `Restart<T>`.
   - `check-config` reports the file, line, column and dotted key, such as `line 22, column 1: gate.unmached: unknown field`.
   - Two tests hold `packaging/config.toml` to the code: the uncommented file parses to `Config::default()` (D47), and its TOML equals `Config::default()` serialized, so a key missing from the file fails. A third fails when ARCHITECTURE.md, `docs/*.md` or `docs/decisions/*.md` names a dotted key in backticks that the file lacks; `docs/TODECIDE.md` is skipped, because its keys are not decided.
@@ -328,3 +328,18 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The `hosts_edit` fuzz target found both: scheduled run 43582227237, then a local run.
   - Putting the mirror after a leading `[host.""]` keeps the file's meaning but breaks "first in the file", and a table that containerd ignores is the admin's mistake to remove.
 - **Revisit when:** containerd lists a `[host.""]` that opens the file, or refuses it.
+
+## D135: Durations and timestamps are printed and read by our own code (amends D60)
+
+- **Decision:**
+  - **Durations:** one or more groups of a whole number in ASCII digits and a unit, with nothing between or around them. The units are `d` (24 h), `h`, `m`, `s`, `ms`, `us` and `ns`, and decrease from group to group, so each comes at most once: `1h30m` and `90s` read; `1m1h`, `1s1s`, `1h 30m`, `1.5h`, `-1s`, `10`, `1min` and `1µs` do not. A total longer than `Duration::MAX` (`u64::MAX` s) is refused. Zero reads; the keys of type `Interval` (`config.poll_interval`, `peer.stall_timeout`) still refuse it.
+  - **Printing:** a group for each unit that is not zero, largest first, each below the next unit, or `0s`: `90s` prints `1m30s` and `24h` prints `1d`. A duration written that way prints back as written (D60); any other prints in that form, which reads back to the same duration.
+  - **Timestamps:** D52's `until` is RFC 3339 in UTC to the second (`2024-02-29T12:00:00Z`), from Howard Hinnant's `civil_from_days`. A time after 9999-12-31T23:59:59Z prints as that second, and one before 1970 as the epoch.
+  - **Place:** the leaf crate `crates/time`, `speculaire-time`, for the agent's config, `speculaire-loadgen`'s flags and the mirror. The fuzz target `duration` checks that every text read prints as one that reads back to the same duration.
+- **Because:**
+  - `humantime` is unmaintained (RUSTSEC-2026-0542, no patched version), which fails `deps (deny)` under `unmaintained = "all"`; the tree used two of its functions, about 100 lines.
+  - Units out of order or repeated read more like a typo than an intent. Refusing them and spaces leaves each duration one canonical text, the one it prints. Without spaces, signs or fractions, Go's `time.ParseDuration` reads every text it reads that has no `d` and stays under Go's 292 years: the spelling admins already write in containerd's `hosts.toml`.
+  - Months and years have no fixed length; `m` is the minute. No release has shipped, so refusing humantime's other spellings (`1 h`, `2days`, `1y`) breaks no installed config.
+  - The agent, the mirror and `speculaire-loadgen` share no crate whose subject is time; a crate of its own adds no edge between the others.
+  - A printer that cannot fail keeps a log line from panicking: humantime's returned `fmt::Error` after year 9999, which `DENY_MAX` (D52) had to avoid.
+- **Revisit when:** an admin needs a unit or spelling the grammar refuses, or a timestamp needs a fraction of a second.

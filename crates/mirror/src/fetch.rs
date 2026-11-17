@@ -510,8 +510,8 @@ async fn race(
 }
 
 /// When a denial for `ttl` from now ends, as the warning and the audit event print it.
-fn end_of_denial(ttl: Duration) -> humantime::Rfc3339Timestamp {
-    humantime::format_rfc3339_seconds(SystemTime::now() + ttl)
+fn end_of_denial(ttl: Duration) -> impl std::fmt::Display {
+    speculaire_time::rfc3339(SystemTime::now() + ttl)
 }
 
 /// Waits until `deadline`, or forever without one.

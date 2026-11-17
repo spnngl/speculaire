@@ -121,6 +121,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/configure` | `configure`, `unconfigure`, the preflight and the node half of `check-config`, as thin functions over the runtime's `Wiring` and `Settings` traits; it names no runtime (D82, D83, D86, D90) |
 | `crates/fake-runtime` | Test support: a fake containerd on a socket, answering the CRI `Version`, `ListImages` and introspection `Plugins` (D87), and CRI-O's `GET /config` (D89, D90) |
 | `crates/pki` | the mirror's local CA and certificates (D14, D82); later kubelet certificate loading and rotation, rustls verifiers (D16) |
+| `crates/time` | Durations as the config writes them, and RFC 3339 timestamps (D135) |
 | `crates/load` | The load scenario `speculaire-loadgen` runs: simulated agents on `crates/reflect`'s client, the reflector's targets measured from `/proc` and `/metrics` (D33, D104) |
 | `crates/reflect` | Protobuf frames over TLS (D105), the reflector's server and index (D97), and the agent's client: `Members`, one `Announce` stream per member carrying its numbered `Lookup`s, hedged (D2, D98) |
 | `crates/artifacts` | Discovery of each listed image's artifacts from the *artifact store*, then peers through the mirror's fetcher, then upstream through the runtime's `Registries`, into the store, which the peer API serves and which keeps only what listed images name (D17, D43, D121, D124, D126, D131) |

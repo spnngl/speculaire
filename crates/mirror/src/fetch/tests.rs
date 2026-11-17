@@ -522,7 +522,7 @@ async fn a_denied_peer_is_allowed_again_once_deny_ttl_has_passed() {
 
 #[test]
 fn a_deny_ttl_past_the_clocks_range_denies() {
-    // humantime reads up to `u64::MAX` seconds; `Instant` and `SystemTime` hold fewer.
+    // A duration reads up to `u64::MAX` seconds (D135); `Instant` and `SystemTime` hold fewer.
     let fetcher = Fetcher::new(
         PathBuf::new(),
         Settings {
@@ -536,19 +536,21 @@ fn a_deny_ttl_past_the_clocks_range_denies() {
     };
     fetcher.0.deny(&[holder], &sha(b"wrong"));
     assert!(!fetcher.0.allowed("node-a"));
-    // humantime prints no date past year 9999.
-    humantime::parse_rfc3339(&end_of_denial(DENY_MAX).to_string()).unwrap();
+    // The longest denial ends 100 years from now, a date RFC 3339 prints as itself.
+    let year = |text: String| text.get(..4).and_then(|y| y.parse::<u64>().ok()).unwrap();
+    let now = year(speculaire_time::rfc3339(SystemTime::now()).to_string());
+    let end = year(end_of_denial(DENY_MAX).to_string());
+    assert!((now + 99..=now + 100).contains(&end), "{end}");
 }
 
 #[test]
 fn a_denial_prints_its_end() {
-    let end: SystemTime =
-        humantime::parse_rfc3339(&end_of_denial(Duration::from_secs(600)).to_string()).unwrap();
-    let left = end.duration_since(SystemTime::now()).unwrap();
-    assert!(
-        left > Duration::from_secs(590) && left <= Duration::from_secs(600),
-        "{left:?}"
-    );
+    let ttl = Duration::from_secs(600);
+    let first = speculaire_time::rfc3339(SystemTime::now() + ttl).to_string();
+    let end = end_of_denial(ttl).to_string();
+    let last = speculaire_time::rfc3339(SystemTime::now() + ttl).to_string();
+    // RFC 3339 times of the same width sort as they follow.
+    assert!(first <= end && end <= last, "{first} {end} {last}");
 }
 
 #[tokio::test]

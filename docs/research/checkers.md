@@ -51,5 +51,5 @@ Crates already in use (tokio, axum, hyper, http, tonic, prost, serde, toml, clap
 | dhat | adopt as Valgrind's DHAT: `just valgrind` (D104, D116) | The reflector's heap under the short load scenario, and the agents' during a peer pull; `deep` keeps the profiles as an artifact. The `dhat` crate would need its own global allocator in the binary. |
 | release-plz, cargo-release | trigger: M5 release | Compare with dedens' release recipes, which D27 ports. |
 | rustix | trigger: the first raw socket call | Peer credentials on the NRI socket, if a decision asks for them. |
-| jiff | skip | humantime covers durations; no calendar arithmetic. |
+| jiff | skip | `speculaire-time` covers durations and RFC 3339 timestamps (D135); no calendar arithmetic. |
 | cross, cargo-zigbuild | skip | Native per-arch builds in the build image (D57). |
