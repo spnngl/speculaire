@@ -61,6 +61,27 @@ impl Cluster {
         self.reject_to(node, host, Some(port))
     }
 
+    /// Resets every TCP connection the node opens off loopback to port 80 or 443 until the guard drops: no upstream,
+    /// the test ones on kind's network nor the internet's, can be reached, and peers and reflectors still can.
+    ///
+    /// # Errors
+    ///
+    /// When `iptables` fails.
+    pub fn reject_upstreams(&self, node: &str) -> Result<Rules<'_>, Failure> {
+        let rules = ["iptables", "ip6tables"]
+            .into_iter()
+            .flat_map(|tables| {
+                [80, 443].map(|port| {
+                    let rule = format!(
+                        "OUTPUT ! -o lo -p tcp --dport {port} -j REJECT --reject-with tcp-reset"
+                    );
+                    (tables, rule)
+                })
+            })
+            .collect();
+        Rules::insert(self, node, rules)
+    }
+
     fn reject_to(&self, node: &str, host: &str, port: Option<u16>) -> Result<Rules<'_>, Failure> {
         let port = port
             .map(|port| format!(" --dport {port}"))
