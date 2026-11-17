@@ -64,7 +64,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64, D86)
 - D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32; amended by D82, D85)
 - D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47; amended by D82)
-- D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62, D116, D118, D125)
+- D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62, D116, D118, D125, D140)
 - D58 [build](build.md): CI runs the check on the runner with prebuilt tools, and the musl build in the build image; `ci` jobs land with their content (amends D27, D57)
 - D59 [build](build.md): e2e is a Rust test crate of `#[ignore]`d suites on a kind cluster managed by `just e2e <minor>`, with pinned containerd, kind and kubectl (amends D27; amended by D63)
 - D60 [agent](agent.md): config values parse into types that print back as written; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47; amended by D87, D135, D137, D138)
@@ -83,8 +83,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D73 [distribution](distribution.md): a peer fetch silent for `peer.stall_timeout` moves to the next peer or falls through, without denying the peer (amends D7; amended by D102)
 - D74 [build](build.md): cargo-mutants tests the diff of each pull request in up to 4 shards, outside `required`; every package's tests run for each mutant, a hang killed by nextest counts as caught, one change is excluded (amends D27; amended by D125)
 - D75 [build](build.md): a second fuzz target, `config_values`, writes config files from the keys with literals each parser accepts or refuses, so the round trip reaches the values raw bytes seldom spell (amends D27)
-- D76 [build](build.md): cargo-careful runs the workspace's tests under AddressSanitizer on each pull request, in one job on glibc Linux, outside `required` (amends D27; amended by D97)
-- D77 [build](build.md): RAPx analyses the workspace on each pull request that changes Rust and every week, outside `required`; the dev image gains no RAPx (amends D27)
+- D76 [build](build.md): cargo-careful runs the workspace's tests under AddressSanitizer on each pull request, in one job on glibc Linux, outside `required` (amends D27; amended by D97, D140)
+- D77 [build](build.md): RAPx analyses the workspace on each pull request that changes Rust and every week, outside `required`; the dev image gains no RAPx (amends D27; amended by D140)
 - D78 [distribution](distribution.md): one `registry-config` crate holds both runtimes' parsers and reads what containerd reads: versions 1 to 4, any key case, credentials per host as secrets, ignored keys ignored (amends D17; amended by D115, D119)
 - D79 [build](build.md): `just oracle` also runs the Rust differential tests against the binary, mutated fuzz seeds included; the oracle reaches containerd's unexported parsers by linkname (amends D29, D70)
 - D80 [distribution](distribution.md): the CRI-O module reads what go.podman.io/image reads, from the files its `configfile` searches; credential helpers are not run, aliases are not parsed (amends D66, D70; amended by D89)
@@ -147,5 +147,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D137 [agent](agent.md): `log.filter` refuses whitespace around a directive, which tracing-subscriber 0.3.23 misreads or panics on (amends D60)
 - D138 [agent](agent.md): durations are numbers of seconds to the millisecond, TOML integers or floats, printed as the shortest decimal; strings are refused (amends D60, D135)
 - D139 [verification](verification.md): Sigstore fixtures are recorded from public-good Sigstore by the hand-run `fixtures.yml`, as OCI layouts with a TUF snapshot, checked offline by cosign and gh (amends D8)
+- D140 [build](build.md): the pinned nightly moves to `nightly-2026-11-17` and keeps the parallel frontend's default 2 threads; RAPx gets its own nightly, `rapx_nightly`; the check loop stays on stable (amends D57, D76, D77)
 
-Next free number: D140.
+Next free number: D141.

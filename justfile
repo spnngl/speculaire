@@ -3,12 +3,13 @@
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# The one pinned nightly: rustfmt (rustfmt.toml uses unstable options), `-Z` flags, cargo-careful and RAPx. RAPx builds
-# on rustc internals, so its version and this nightly move together: bump both by hand. Stable is pinned in
-# rust-toolchain.toml.
-nightly := "nightly-2026-10-26"
-# A commit of RAPx's main: its fix for async closures (safer-rust/RAPx#319) is in no release yet (0.7.65 predates it).
-# Back to a crates.io version once one has it.
+# The one pinned nightly: rustfmt (rustfmt.toml uses unstable options), `-Z` flags, cargo-careful and cargo-fuzz. Its
+# parallel frontend keeps its default 2 threads: more measured no faster (D140). Stable is pinned in rust-toolchain.toml.
+nightly := "nightly-2026-11-17"
+# RAPx builds on rustc internals: its own nightly, which moves with `rapx_rev`, by hand (D140). A commit of RAPx's main
+# with its fix for async closures (safer-rust/RAPx#319). Release 0.7.75 has the fix but builds on a newer nightly, and
+# stops on a compiler panic on the workspace (D140).
+rapx_nightly := "nightly-2026-10-26"
 rapx_rev := "8d9d0a2f0389f48891b9e8bd3321a70a932e2e90"
 # The container engine of `dev` and `musl`: `SPECULAIRE_CONTAINER=podman just dev check`.
 container := env("SPECULAIRE_CONTAINER", "docker")
@@ -345,8 +346,8 @@ profile target: (image "profile")
     EOF
 
 # Ported from dedens `justfile` at v0.1.0-131-gfd00747 (D16 there; D77 here).
-# Install RAPx at `rapx_rev` and what it builds on: the nightly's rustc-dev, rust-src and llvm-tools, and Z3 (on macOS
-# from Homebrew, `brew install z3`; on Linux, libz3-dev).
+# Install RAPx at `rapx_rev` and what it builds on: `rapx_nightly`'s rustc-dev, rust-src and llvm-tools, and Z3 (on
+# macOS from Homebrew, `brew install z3`; on Linux, libz3-dev).
 rapx-install:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -354,9 +355,9 @@ rapx-install:
         z3="$(brew --prefix z3)"
         export Z3_SYS_Z3_HEADER="$z3/include/z3.h" LIBRARY_PATH="$z3/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
     fi
-    rustup toolchain install {{ nightly }} --profile minimal --component rustc-dev,rust-src,llvm-tools-preview
-    rustc="$(rustup which --toolchain {{ nightly }} rustc)"
-    RUSTC="$rustc" rustup run {{ nightly }} cargo install --git https://github.com/safer-rust/RAPx --rev {{ rapx_rev }} rapx --locked
+    rustup toolchain install {{ rapx_nightly }} --profile minimal --component rustc-dev,rust-src,llvm-tools-preview
+    rustc="$(rustup which --toolchain {{ rapx_nightly }} rustc)"
+    RUSTC="$rustc" rustup run {{ rapx_nightly }} cargo install --git https://github.com/safer-rust/RAPx --rev {{ rapx_rev }} rapx --locked
 
 # Ported from dedens `justfile` at v0.1.0-131-gfd00747 (D16 there; D77 here).
 # RAPx static analysis, outside the gate: use-after-free, double free and leaks by default; `just rapx opt` for
@@ -366,9 +367,9 @@ rapx *args="check -f -m":
     set -euo pipefail
     # The nightly's own cargo first in PATH: RAPx calls `cargo`, which `rustup run` leaves to a Homebrew cargo
     # ahead in PATH, and the dependencies it builds don't load in RAPx's rustc.
-    rustc="$(rustup which --toolchain {{ nightly }} rustc)"
+    rustc="$(rustup which --toolchain {{ rapx_nightly }} rustc)"
     export PATH="$(dirname "$rustc"):$PATH"
-    CARGO_TARGET_DIR=target/rapx RUSTC="$rustc" rustup run {{ nightly }} cargo rapx {{ args }}
+    CARGO_TARGET_DIR=target/rapx RUSTC="$rustc" rustup run {{ rapx_nightly }} cargo rapx {{ args }}
 
 # `--locked` reads supply-chain/imports.lock, so it needs no network (D71).
 # Each crate of Cargo.lock is audited by an imported set, published by a trusted publisher, or exempted (cargo-vet)

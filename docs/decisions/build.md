@@ -204,10 +204,10 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:** pod authors choose registry hosts, so "a host from the registry config" was not bounded: a pod naming a new host would add series on every node. The `hosts.toml` tree is written by the admin.
 - **Revisit when:** admins need per-host numbers for hosts without a `hosts.toml` directory; the audit log (D37) already names them.
 
-## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58, D62, D116, D118, D125)
+## D57: One pinned toolchain, one build image, and `just dev` on macOS (amends D13, D19; amended by D58, D62, D116, D118, D125, D140)
 
 - **Decision:**
-  - `rust-toolchain.toml` pins stable `1.99.1` with clippy and rustfmt; the justfile pins one nightly, for rustfmt (`rustfmt.toml` uses unstable options) and `-Z` flags. `rust-version` is `1.95`, which `just msrv` checks.
+  - `rust-toolchain.toml` pins stable `1.99.1` with clippy and rustfmt; the justfile pins one nightly, for rustfmt (`rustfmt.toml` uses unstable options) and `-Z` flags, and RAPx its own (D140). `rust-version` is `1.95`, which `just msrv` checks.
   - `build/Containerfile` is the one build image, from the digest-pinned `rust:<channel>-alpine` whose tag is the pinned stable. Its `build` stage has lld, mimalloc's C toolchain, cargo-auditable and rust-audit-info; its `dev` stage adds the nightly rustfmt, just and the tools of `just check` and the dependency checks.
   - On macOS, `just dev <recipe>` runs any recipe in the `dev` stage; `just musl <target>` builds in the `build` stage. Named volumes keep the cargo registry and each architecture's target directory between runs. `SPECULAIRE_CONTAINER` picks the engine, default `docker`.
 - **Because:**
@@ -406,7 +406,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The `fuzz` workflow, dispatched on PR #27's branch (run 43106442458): `targets` and one job per target, `fuzz (config)` and `fuzz (config_values)`, green in 6 minutes each.
 - **Revisit when:** a target's coverage stops growing before its parsers' last lines, or `KEYS` falls behind its smoke test too often.
 
-## D76: cargo-careful runs the tests under AddressSanitizer on each pull request, in one job (amends D27; amended by D97)
+## D76: cargo-careful runs the tests under AddressSanitizer on each pull request, in one job (amends D27; amended by D97, D140)
 
 - **Decision:**
   - `just careful [sanitizer] [package]` runs `cargo careful test` on the pinned nightly (`nightly`), with its own target dir `target/careful` and no leak check (`detect_leaks=0`: a leak is no memory error). It names the host target, as `just fuzz` does (dedens D141). Without a package it runs `--workspace --exclude e2e`: every package but `e2e`, which needs a kind cluster. `fuzz/` is not a member; `just check` replays its seeds (D27).
@@ -426,12 +426,12 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `just dev careful address` cannot pass: the failures above, seen on aarch64 Alpine. The Done-when item of the plan names it; it is not met, and the decision above is the observed outcome.
 - **Revisit when:** the job passes 20 minutes (then one job per package, as dedens does), a nightly bump breaks the sanitized build twice in a row, or the build image gains a glibc stage.
 
-## D77: RAPx analyses the workspace on each pull request and every week, outside `required` (amends D27)
+## D77: RAPx analyses the workspace on each pull request and every week, outside `required` (amends D27; amended by D140)
 
 - **Decision:**
-  - `just rapx-install` builds RAPx at `rapx_rev` (dedens' commit of RAPx's main, with its fix for async closures, safer-rust/RAPx#319, in no release yet) on the pinned `nightly`, with the nightly's `rustc-dev`, `rust-src` and `llvm-tools-preview`, and Z3 (Homebrew on macOS, `libz3-dev` on Linux). `just rapx [args]` runs `cargo rapx`, by default `check -f -m` (use-after-free, double free, leaks); `just rapx opt` gives optimization hints. Its own target dir, `target/rapx`: RAPx runs `cargo clean --workspace` before each analysis.
+  - `just rapx-install` builds RAPx at `rapx_rev` (dedens' commit of RAPx's main, with its fix for async closures, safer-rust/RAPx#319) on its own nightly, `rapx_nightly` (D140), with the nightly's `rustc-dev`, `rust-src` and `llvm-tools-preview`, and Z3 (Homebrew on macOS, `libz3-dev` on Linux). `just rapx [args]` runs `cargo rapx`, by default `check -f -m` (use-after-free, double free, leaks); `just rapx opt` gives optimization hints. Its own target dir, `target/rapx`: RAPx runs `cargo clean --workspace` before each analysis.
   - `.github/workflows/rapx.yml` runs on a Monday cron, on `workflow_dispatch`, and on pull requests that change a Rust file, a manifest, `Cargo.lock`, the justfile or the workflow. One job, `rapx`, puts the `check` and the `opt` output in its summary. A new push cancels the PR's run. It is outside `required`.
-  - `rapx_rev` and `nightly` move together, by hand: RAPx builds on rustc internals.
+  - `rapx_rev` and `rapx_nightly` move together, by hand: RAPx builds on rustc internals.
   - `build/Containerfile`'s dev stage gains no RAPx: it needs Z3 and `rustc-dev` on a pinned nightly, and a local run is `just rapx-install` once.
 - **Because:**
   - A run costs a few minutes (dedens: 3 to 5), and `Box::into_raw` and `mem::forget` leak without `unsafe`, which `deny(unsafe_code)` cannot see.
@@ -663,3 +663,24 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:** the test waits out a 120 s `Retry-After`, and what it checks, a host paused and taken up again, does not depend on the address family. Twice per leg would add 2 min to each of the 14.
 - **Measured (M4 step 02):** locally on Docker Desktop arm64 with kind, the suite's test took 130 s on containerd 2.4 and 138 s on CRI-O 1.37; both images' artifacts were in the store 120.6 s after the `429`. On PR #179's CI the test took 130 s in the IPv4 pass of each leg, and the legs 13.4 min (containerd 2.4, x86_64), 13.1 min (containerd 2.4, arm64) and 16.0 min (CRI-O 1.37, arm64).
 - **Revisit when:** a leg nears its 20 min budget, then the suite goes nightly; or the pause depends on the address family.
+
+## D140: The pinned nightly keeps the parallel frontend's default; RAPx gets its own nightly (amends D57, D76, D77)
+
+- **Decision:**
+  - `nightly` moves to `nightly-2026-11-17`, past `nightly-2026-11-14`, which turned rustc's parallel frontend on with 2 threads by default. No recipe sets `--jobs-frontend`: rustfmt, `-Z direct-minimal-versions`, cargo-careful and cargo-fuzz run with the default.
+  - `rapx_nightly` pins RAPx's own nightly, `nightly-2026-10-26`, which moves with `rapx_rev`, by hand. `just rapx-install` and `just rapx` use it; nothing else does.
+  - No nightly recipe for the local check loop: `cargo check` and `cargo clippy` stay on the pinned stable, everywhere.
+  - Stable keeps the sequential frontend, and so the musl build and every binary we ship.
+- **Because:**
+  - More threads than 2 bought nothing measurable on this workspace; 8 slowed the fuzz build. Cargo already runs about as many crates as cores, so the frontend's threads only help the few crates compiled alone.
+  - The edit-check loop takes about 1 s on stable already, on macOS and in `just dev`; the nightly saves at most 0.3 s of it, and nothing on clippy, the lint `just check` runs. A second toolchain in the loop adds a second build directory and a second set of lints.
+  - RAPx's `rapx_rev` does not build on the new nightly (44 errors on rustc internals). Its release that does, 0.7.75 (RAPx `8ef7f386`), stops on a compiler panic on the workspace, `item_name: no name for DefPath { … Closure … }` from `rapx::def_ids::other_api::is_align_offset` (RAPx `77201d8e`), with 1 frontend thread too: a RAPx bug, not the parallel frontend's.
+  - The rustc blog post of 2026-11-16 warns that a parallel frontend's diagnostics may come in a different order and its binaries may not be reproducible: D57's reproducible musl build stays on stable.
+- **Measured** (Apple M5, 10 cores, cargo's default jobs, shared with other agents' builds, load average 20 to 85; medians in seconds, cold from an empty target directory, incremental after an edit of `crates/mirror` or `crates/agent`):
+  - `cargo check --workspace --all-targets --all-features`: cold 30.8 on stable, 33.4 / 26.6 / 27.1 with 2 / 4 / 8 frontend threads; incremental 1.0 on stable, 1.1 / 0.95 / 1.2.
+  - `cargo clippy`, same arguments: cold 27.8 on stable, 37.8 with 8 threads; incremental 1.0 and 1.55.
+  - `cargo fuzz build` (24 targets, release): cold 134 on `nightly-2026-10-26`, 117 / 106 / 117 / 236 with 1 / 2 / 4 / 8 threads; incremental 48, then 89 / 52 / 58 / 69.
+  - `cargo careful test --no-run`, the standard library rebuild included: cold 67 to 78 on `nightly-2026-10-26`, 62 to 64 / 64 to 67 / 61 to 67 with 2 / 4 / 8 threads; incremental 2.4 to 4.2 for all.
+  - In `just dev` (Docker Desktop on the same Mac, 10 CPUs, 7.7 GiB): `cargo check` cold 67 on stable (59 to 76), 31 to 55 on the nightly with no trend from 1 to 8 threads; incremental 1.0 on stable, 0.6 to 0.8 on the nightly. `cargo clippy` incremental 1.1 on stable, 1.1 to 1.5 on the nightly.
+  - rustfmt of `nightly-2026-11-17` leaves the workspace and `fuzz/` unchanged.
+- **Revisit when:** the parallel frontend reaches stable (then use it for everything, after checking two clean musl builds still match), or a RAPx release builds and runs on the pinned nightly (then one nightly again).
