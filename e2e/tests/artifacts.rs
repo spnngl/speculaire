@@ -162,6 +162,30 @@ impl Worker {
         output.stdout
     }
 
+    /// The manifests and blobs that the store's records of other roots than `expected`'s name.
+    fn named_by_others(&self, expected: &Expected) -> BTreeSet<String> {
+        let own = format!("{}.json", expected.root.hex());
+        let records = self.sh(&format!(
+            "cd {STORE}/roots/sha256 && for f in *.json; do [ \"$f\" = {own} ] || {{ cat \"$f\"; echo; }}; done"
+        ));
+        let mut named = BTreeSet::new();
+        for record in records
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        {
+            for artifact in record["artifacts"].as_array().into_iter().flatten() {
+                let blobs = artifact["blobs"].as_array().into_iter().flatten();
+                named.extend(
+                    std::iter::once(&artifact["manifest"])
+                        .chain(blobs)
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned),
+                );
+            }
+        }
+        named
+    }
+
     /// Sets the agent's `log.filter`; the agent restarts at the next [`Self::forget`].
     fn log_filter(&mut self, filter: &str) {
         if !self.config_changed {
@@ -807,11 +831,17 @@ fn a_node_cut_off_from_upstream_gets_every_artifact_from_the_node_that_discovere
         took.as_millis()
     );
 
-    // The counters start with the agent: each artifact digest came from a peer. Other images B lists may count upstream.
-    let digests: BTreeSet<&String> = expected.digests().collect();
+    // The counters start with the agent: each artifact digest came from a peer. Other images B lists may count upstream,
+    // and a blob their artifacts also name may have come with them: the empty config of kindnetd's attestation and of
+    // these bundles, when kindnetd is discovered first, from its own upstream (D131).
+    let others = b.named_by_others(&expected);
+    let digests: BTreeSet<&String> = expected
+        .digests()
+        .filter(|digest| !others.contains(*digest))
+        .collect();
     assert!(
         peer >= f64::from(u32::try_from(digests.len()).unwrap()),
-        "{peer} from peers, {} digests",
+        "{peer} from peers, {} digests no other root names: {digests:?}",
         digests.len()
     );
     assert!(asked.is_empty(), "{asked:?}");
