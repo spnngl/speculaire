@@ -167,11 +167,24 @@ impl Cluster {
     ///
     /// When the agent is not ready within 120 s.
     pub fn reset_agent(&self, node: &str) -> Result<(), Failure> {
+        self.restart_with_empty_journal(node)?;
+        self.wait_ready(node)
+    }
+
+    /// Stops the node's agent, empties its journal and starts the agent, without waiting for it.
+    ///
+    /// The agent stops first: one still running may write a warning between the vacuum and its stop, such as a
+    /// discovery failing on an upstream the test has just removed.
+    ///
+    /// # Errors
+    ///
+    /// When `systemctl` fails to start the agent.
+    pub fn restart_with_empty_journal(&self, node: &str) -> Result<(), Failure> {
         self.sh(
             node,
-            "journalctl --rotate && journalctl --vacuum-time=1s; systemctl reset-failed speculaire; systemctl restart speculaire",
-        )?;
-        self.wait_ready(node)
+            "systemctl stop speculaire; journalctl --rotate && journalctl --vacuum-time=1s; systemctl reset-failed speculaire; systemctl start speculaire",
+        )
+        .map(drop)
     }
 
     /// Waits until the node's agent answers `/readyz`.
