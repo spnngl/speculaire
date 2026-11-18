@@ -12,6 +12,7 @@ use speculaire_runtime::images::{Image, RepoDigest, Update};
 use speculaire_runtime::registries::{
     Error as ConfigError, Reference, Registries, Reloaded, Source,
 };
+use tokio::sync::oneshot;
 
 use super::*;
 use crate::discover::{Limits, Local};
@@ -52,17 +53,31 @@ impl Images for Scripted {
 }
 
 /// Registry config that has no source of any name, and logs each name asked; as the node's content, it holds nothing
-/// and counts the manifests asked, one per discovery.
+/// and counts the manifests asked, one per discovery. The manifest of the root in `2`, if any, comes only once its
+/// receiver does: its discovery runs until then.
 #[derive(Default)]
-struct Asked(Mutex<Vec<String>>, AtomicUsize);
+struct Asked(
+    Mutex<Vec<String>>,
+    AtomicUsize,
+    Mutex<Option<(Digest, oneshot::Receiver<()>)>>,
+);
 
 impl Local for Asked {
     fn manifest<'a>(
         &'a self,
-        _: &'a Digest,
+        root: &'a Digest,
         _: u64,
     ) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send + 'a>> {
         self.1.fetch_add(1, Ordering::Relaxed);
+        let mut stalled = self.2.lock().unwrap();
+        if stalled.as_ref().is_some_and(|(stalled, _)| stalled == root)
+            && let Some((_, released)) = stalled.take()
+        {
+            return Box::pin(async move {
+                let _ = released.await;
+                None
+            });
+        }
         Box::pin(std::future::ready(None))
     }
 }
@@ -348,6 +363,52 @@ async fn a_root_that_leaves_the_list_is_collected_and_discovered_again_when_it_c
     script.send(Update::Removed(digest(1))).await.unwrap();
     settle().await;
     assert_eq!(store.recorded(&digest(10)).await.unwrap(), None);
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_root_that_leaves_the_list_while_another_is_discovered_is_collected_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let bundle = speculaire_oci::hash::of("sha256", b"bundle").unwrap();
+    store.keep(&bundle, b"bundle").await.unwrap();
+    let artifact = Artifact {
+        target: digest(10),
+        manifest: bundle.clone(),
+        kind: Kind::Bundle,
+        blobs: Vec::new(),
+    };
+    store.record(&digest(10), &[artifact]).await.unwrap();
+    let asked = Arc::new(Asked::default());
+    let (release, released) = oneshot::channel();
+    *asked.2.lock().unwrap() = Some((digest(20), released));
+    let (script, followed) = start(Arc::clone(&store), &asked, std::future::ready(()), None);
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+
+    script
+        .send(Update::Listing(vec![
+            image(1, &[("reg.test/a", 10)]),
+            image(2, &[("reg.test/b", 20)]),
+        ]))
+        .await
+        .unwrap();
+    settle().await;
+    assert_eq!(asked.1.load(Ordering::Relaxed), 1, "20 is being discovered");
+    script.send(Update::Removed(digest(1))).await.unwrap();
+    settle().await;
+    assert!(!store.contains(&bundle));
+    assert_eq!(store.recorded(&digest(10)).await.unwrap(), None);
+
+    // The root being discovered leaves too: its record, written as its discovery ends, goes once it has ended.
+    store.record(&digest(20), &[]).await.unwrap();
+    script.send(Update::Removed(digest(2))).await.unwrap();
+    settle().await;
+    assert!(store.recorded(&digest(20)).await.unwrap().is_some());
+    release.send(()).unwrap();
+    settle().await;
+    assert_eq!(store.recorded(&digest(20)).await.unwrap(), None);
 
     drop(script);
     followed.await.unwrap();

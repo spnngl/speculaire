@@ -92,6 +92,56 @@ pub struct Store {
     changes: broadcast::Sender<Change>,
     /// Whether a collection ran, which the inventory waits for.
     collected: watch::Sender<bool>,
+    /// What discoveries under way may hold before a record names it.
+    pending: Mutex<Pending>,
+}
+
+/// The roots discoveries under way started on, and the blobs they found or kept: a collection keeps them (D144).
+#[derive(Debug, Default)]
+struct Pending {
+    discoveries: usize,
+    collections: usize,
+    digests: HashSet<Digest>,
+}
+
+impl Pending {
+    /// Keeps `digest` from collections while a discovery runs.
+    fn hold(&mut self, digest: &Digest) {
+        if self.discoveries > 0 {
+            self.digests.insert(digest.clone());
+        }
+    }
+
+    /// Forgets the digests once neither a discovery nor a collection runs: each discovery ended with its record, or
+    /// failed and left blobs that nothing names. A collection under way keeps those of a discovery that ended since it
+    /// read the records.
+    fn settle(&mut self) {
+        if self.discoveries == 0 && self.collections == 0 {
+            self.digests.clear();
+        }
+    }
+}
+
+/// A discovery under way, from [`Store::discovering`] until dropped.
+pub(crate) struct Discovering<'a>(&'a Store);
+
+impl Drop for Discovering<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.0.pending();
+        pending.discoveries -= 1;
+        pending.settle();
+    }
+}
+
+/// A collection under way, until dropped.
+struct Collecting<'a>(&'a Store);
+
+impl Drop for Collecting<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.0.pending();
+        pending.collections -= 1;
+        pending.settle();
+    }
 }
 
 impl Store {
@@ -120,6 +170,7 @@ impl Store {
             roots: Mutex::new(roots),
             changes: broadcast::channel(BACKLOG).0,
             collected: watch::channel(false).0,
+            pending: Mutex::default(),
         })
     }
 
@@ -131,6 +182,23 @@ impl Store {
     /// Whether the blob `digest` is held.
     pub fn contains(&self, digest: &Digest) -> bool {
         self.path(digest).is_file()
+    }
+
+    /// Starts the discovery of `root`: until the returned guard drops, a collection keeps the root's record and every
+    /// blob [`Self::hold`] found or a writer kept (D144).
+    pub(crate) fn discovering(&self, root: &Digest) -> Discovering<'_> {
+        let mut pending = self.pending();
+        pending.discoveries += 1;
+        pending.digests.insert(root.clone());
+        Discovering(self)
+    }
+
+    /// Whether the blob `digest` is held; a collection keeps it from then on while a discovery runs (D144).
+    pub(crate) fn hold(&self, digest: &Digest) -> bool {
+        let mut pending = self.pending();
+        pending.hold(digest);
+        // Under the lock: a collection deletes the blob before this looks, or not at all.
+        self.contains(digest)
     }
 
     /// The content of the blob `digest`, if held.
@@ -238,8 +306,8 @@ impl Store {
     /// The record of each root not in `listed` goes first, then each blob that is neither a listed root nor named by a
     /// listed root's record. The first collection, done or failed, opens the [`Inventory`].
     ///
-    /// Discovery keeps a root's blobs before its record, so it must not run meanwhile: [`crate::follow()`] does both in
-    /// turn.
+    /// Discovery keeps a root's blobs before its record: a collection beside it keeps the root being discovered and
+    /// what the discovery found or kept, forgotten once neither a discovery nor a collection runs (D144).
     ///
     /// # Errors
     ///
@@ -256,12 +324,17 @@ impl Store {
     }
 
     fn collect_blocking(&self, listed: &HashSet<Digest>) -> Result<(), Error> {
+        self.pending().collections += 1;
+        let _collecting = Collecting(self);
         // Records go first: a crash in between leaves blobs that no record names, which the next collection deletes,
         // and never a record naming a blob gone.
         for (root, path) in named(&self.directory.join("roots"), ".json")? {
             let Some(root) = root.filter(|root| !listed.contains(root)) else {
                 continue;
             };
+            if self.pending().digests.contains(&root) {
+                continue;
+            }
             std::fs::remove_file(&path).map_err(|e| io_error(&path, e))?;
             self.roots().remove(&root);
             info!(%root, "the artifacts of a root no longer listed are deleted");
@@ -276,6 +349,11 @@ impl Store {
             let Some(digest) = digest.filter(|digest| !named_by_listed.contains(digest)) else {
                 continue;
             };
+            // Held to the deletion: a discovery that holds the blob meanwhile finds it gone and keeps it again.
+            let pending = self.pending();
+            if pending.digests.contains(&digest) {
+                continue;
+            }
             let meta = std::fs::metadata(&path).map_err(|e| io_error(&path, e))?;
             // The store writes only files there: anything else came by hand, and stays.
             if !meta.is_file() {
@@ -289,6 +367,7 @@ impl Store {
                     bytes.saturating_sub(size)
                 });
             debug!(%digest, size, "a blob no listed root names is deleted");
+            drop(pending);
             let _ = self.changes.send(Change::Removed(digest));
         }
         Ok(())
@@ -302,6 +381,10 @@ impl Store {
 
     fn roots(&self) -> MutexGuard<'_, HashMap<Digest, Vec<Artifact>>> {
         self.roots.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn pending(&self) -> MutexGuard<'_, Pending> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn path(&self, digest: &Digest) -> PathBuf {
@@ -364,6 +447,8 @@ impl Writer {
             .map_err(|e| io_error(&self.path, e))?;
         let target = store.path(&self.digest);
         create_parent(&target).await?;
+        // Before the link: a collection beside the discovery that keeps the blob leaves it.
+        store.pending().hold(&self.digest);
         // A link fails on a blob held already, which a rename would replace while another root reads it.
         match tokio::fs::hard_link(&self.path, &target).await {
             Ok(()) => {

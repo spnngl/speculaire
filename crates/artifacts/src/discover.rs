@@ -180,6 +180,7 @@ impl Discovery {
     /// When peers give no artifact and no source serves the root's manifest, a host refuses to serve more for now, or
     /// the store fails.
     pub async fn discover(&self, root: &Digest, names: &[String]) -> Result<Vec<Artifact>, Error> {
+        let _discovering = self.store.discovering(root);
         let mut index = self.held(root).await?;
         let mut artifacts = self.nearby(root, index.as_deref()).await?;
         if artifacts.is_empty() {
@@ -519,7 +520,7 @@ impl Discovery {
         target: &Digest,
     ) -> Result<Option<Artifact>, Error> {
         for blob in blobs {
-            if self.store.contains(blob) {
+            if self.store.hold(blob) {
                 continue;
             }
             let kept = match origin {
