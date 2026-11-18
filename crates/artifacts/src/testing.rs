@@ -296,6 +296,35 @@ impl Fixture {
         fixture
     }
 
+    /// `case` with the SET annotation, `dev.sigstore.cosign/bundle`, removed from each layer of its `.sig`: a legacy
+    /// signature cosign never logged, as `--tlog-upload=false` makes.
+    ///
+    /// # Panics
+    ///
+    /// When `case` has no `.sig`, or as [`Fixture::load`].
+    pub async fn unlogged(case: &str) -> Self {
+        let mut fixture = Self::load(case).await;
+        let artifact = fixture
+            .artifacts
+            .iter()
+            .position(|artifact| artifact.kind == Kind::Signature)
+            .expect("the case has a .sig");
+        let text = fixture.text(&fixture.artifacts[artifact].manifest).await;
+        let mut manifest: Value = serde_json::from_str(&text).expect("a manifest is JSON");
+        for layer in manifest["layers"]
+            .as_array_mut()
+            .expect("a .sig manifest names its layers")
+        {
+            layer["annotations"]
+                .as_object_mut()
+                .expect("a .sig layer has annotations")
+                .remove("dev.sigstore.cosign/bundle");
+        }
+        fixture.artifacts[artifact].manifest = fixture.keep_text(&manifest.to_string()).await;
+        fixture.record().await;
+        fixture
+    }
+
     /// `case` with one byte of its first bundle's signature flipped: that bundle, and the referrer manifest that names
     /// it, are new blobs of the same sizes.
     ///
