@@ -23,6 +23,7 @@ use speculaire_oci::tagged::Tagged;
 use speculaire_registry_config::containerd::config::{self as containerd_config_file, Registry};
 use speculaire_registry_config::containerd::hosts;
 use speculaire_registry_config::crio::{auth, registries};
+use speculaire_verify::policy::{MatchHash, Policies, Policy, Signer};
 
 /// A fuzz entry point.
 pub type Entry = fn(&[u8]);
@@ -53,6 +54,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("link", link),
     ("retry_after", retry_after),
     ("duration", duration),
+    ("policy", policy),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -764,5 +766,53 @@ pub fn duration(data: &[u8]) {
     {
         let printed = display(read).to_string();
         assert_eq!(printed.parse(), Ok(float), "{text:?} printed {printed:?}");
+    }
+}
+
+/// The policy file (D11, D142).
+///
+/// A file that parses has, in each policy, a glob and an authority, and a keyless authority has an identity; parsing it
+/// again gives the same policies, and a match hash does not depend on the order of the policies.
+///
+/// # Panics
+///
+/// When parsing panics, or a parsed file breaks one of those.
+pub fn policy(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let Ok(policies) = Policies::parse(text) else {
+        return;
+    };
+    for policy in policies.iter() {
+        assert!(
+            !policy.images().is_empty() && !policy.authorities().is_empty(),
+            "{text}"
+        );
+        for authority in policy.authorities() {
+            if let Signer::Keyless { identities } = &authority.signer {
+                assert!(!identities.is_empty(), "{text}");
+            }
+        }
+    }
+    let again = Policies::parse(text).expect("text that parsed parses again");
+    assert_eq!(
+        MatchHash::of(policies.iter()),
+        MatchHash::of(again.iter()),
+        "{text}"
+    );
+    let all: Vec<&Policy> = policies.iter().collect();
+    assert_eq!(
+        MatchHash::of(all.iter().copied()),
+        MatchHash::of(all.iter().rev().copied()),
+        "{text}"
+    );
+    for image in ["nginx", "ghcr.io/myorg/app:v1", "registry.example:5000/a/b"] {
+        let reference = Reference::parse_docker_ref(image).expect("a valid reference");
+        assert!(
+            policies
+                .matching(&reference)
+                .all(|policy| policy.images().iter().any(|glob| glob.matches(&reference)))
+        );
     }
 }

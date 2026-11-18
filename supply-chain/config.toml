@@ -22,6 +22,10 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
+[[exemptions.annotate-snippets]]
+version = "0.12.18"
+criteria = "safe-to-deploy"
+
 [[exemptions.arc-swap]]
 version = "1.9.5"
 criteria = "safe-to-deploy"
@@ -190,6 +194,10 @@ criteria = "safe-to-run"
 version = "0.3.6"
 criteria = "safe-to-run"
 
+[[exemptions.encoding_rs_io]]
+version = "0.1.8"
+criteria = "safe-to-deploy"
+
 [[exemptions.evmap]]
 version = "11.0.0"
 criteria = "safe-to-deploy"
@@ -236,6 +244,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.getset]]
 version = "0.1.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.granit-parser]]
+version = "2.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.h2]]
@@ -490,6 +502,10 @@ criteria = "safe-to-deploy"
 version = "0.1.30"
 criteria = "safe-to-deploy"
 
+[[exemptions.scopeguard]]
+version = "1.1.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.sd-notify]]
 version = "0.5.0"
 criteria = "safe-to-deploy"
@@ -504,6 +520,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.security-framework-sys]]
 version = "2.17.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde-saphyr]]
+version = "2.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.shuttle]]
@@ -620,6 +640,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tracing-subscriber]]
 version = "0.3.23"
+criteria = "safe-to-deploy"
+
+[[exemptions.unicode-width]]
+version = "0.2.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasm-bindgen]]

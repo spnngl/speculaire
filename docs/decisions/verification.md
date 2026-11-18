@@ -12,7 +12,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The GitHub *release* attestation (`in-toto.io/attestation/release/v0.2`, a v0.3 bundle with an RFC 3161 timestamp and no log entry) is rejected: `bundle must have an inclusion proof`. We don't use it.
 - **Revisit when:** —
 
-## D11: Policy shape and image matching (amended by D65, D81, D136)
+## D11: Policy shape and image matching (amended by D65, D81, D136, D142)
 
 - **Decision:**
   - The policy is a file shaped like `ClusterImagePolicy`. *authorities* pass if any one passes; *attestations* pass only if all do. v1 conditions are predicateType presence plus the SBOM checks in D12; CEL comes later.
@@ -256,3 +256,23 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - A private Fulcio, Rekor and TUF repository (sigstore/scaffolding) costs a Kubernetes cluster per CI run, and tests our setup of them rather than what the gate meets.
   - A recording carries real certificates, SCTs, inclusion proofs and checkpoints, the artifacts' real shapes (GitHub's referrer bundles, BuildKit's attestation manifests, cosign's legacy tags), and the TUF metadata the agent fetches, all usable offline.
 - **Revisit when:** a fixture's expired certificate or TUF metadata breaks a test that cannot pin the verification time, or sigstore-go's testing CA embeds SCTs.
+
+
+## D142: The policy file holds `ClusterImagePolicy` documents of a subset, matched on the repository name (amends D11)
+
+- **Decision:**
+  - The policy file is one or more YAML documents, each a `ClusterImagePolicy` of `apiVersion: policy.sigstore.dev/v1beta1` holding only the fields below. Any other field, kind or version refuses the file, naming its document and field path (`document 1, spec.authorities[0].keyless.url`). An empty document is skipped; two policies with one `metadata.name` refuse the file. `serde-saphyr` 2.2 reads the YAML, duplicate keys refused.
+    - `metadata.name`; `spec.images[].glob`; `spec.authorities[]`, each with an optional `name`, one of `key` and `keyless`, and `attestations[]` of `name` and `predicateType`.
+    - `key.data` only: one PEM `PUBLIC KEY` inline. `kms`, `secretRef` and `hashAlgorithm` are refused.
+    - `keyless.identities[]` only, each with one of `issuer` and `issuerRegExp` and one of `subject` and `subjectRegExp` (D136). `url`, `ca-cert`, `trustRootRef` and `insecureIgnoreSCT` are refused, as are the authority's `ctlog`, `rfc3161timestamp`, `source`, `signatureFormat` and `static`, `spec.mode`, `spec.match` and every `policy` (CUE, Rego).
+    - `spec.sbom: required`, an extension, makes the image need an SBOM that passes D12's tiers.
+  - Every authority needs a transparency-log entry; no field turns it off. An attestation requirement is met only by a Sigstore bundle (D43), and the missing-attestation reason says `(.att tags are not supported)`. An SBOM requirement accepts the SPDX predicate types `https://spdx.dev/Document` and `https://spdx.dev/Document/v2.3`.
+  - A glob matches the reference's `name()` (D81): the normalised repository, without tag or digest. A glob naming a tag or a digest refuses the file. `crates/verify`'s `Glob` ports policy-controller v0.15.1's `glob.go`, `index.docker.io/` read as `docker.io/`; the fallback that matches the unnormalised text (`glob.go:91-95`) is not ported. `gate.exempt.images` (D18) uses the same `Glob`.
+  - A missing policy file is no policy: no image matches, and `gate.unmatched` decides (D23). A file that exists and does not parse stops the agent at startup and makes `speculaire check-config` exit 1.
+  - The *policy match* is keyed in a verdict (D20) by the SHA-256 of its policies' content hashes, sorted: file order, key order, layout and comments do not change it.
+- **Because:**
+  - Each refused field needs a cluster, a second trust root or an evaluator the node does not have: a node has one trust root (D26), reads no Kubernetes secret, and has no CUE or Rego. Refusing names what will not be checked; ignoring it would pass images the admin meant to reject.
+  - policy-controller matches `ref.Name()` with the tag (`nginx` reads `index.docker.io/library/nginx:latest`). Matching the repository keeps a policy from depending on the tag a pod spec chose.
+  - `serde_yaml` and `serde_yaml_ng` are unmaintained (RUSTSEC-2024-0449) and `serde_yml` unsound (RUSTSEC-2025-0068), so `cargo deny` refuses them. `serde-saphyr` is maintained and passes.
+  - The bench (D106) and nodes without verification run with no file; a missing file is a choice, a broken one a mistake.
+- **Revisit when:** an admin needs `kms`, a second trust root or CEL conditions (D11).

@@ -29,6 +29,7 @@ speculaire-registry = { path = "../crates/registry" }
 speculaire-registry-config = { path = "../crates/registry-config" }
 speculaire-runtime = { path = "../crates/runtime" }
 speculaire-time = { path = "../crates/time" }
+speculaire-verify = { path = "../crates/verify" }
 # `reflect` decodes protobuf; the same version as the workspace's.
 prost = "0.14.5"
 # `token_answer` reads the token it parsed; the same version as the workspace's.
@@ -227,6 +228,13 @@ bench = false
 [[bin]]
 name = "duration"
 path = "fuzz_targets/duration.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy"
+path = "fuzz_targets/policy.rs"
 test = false
 doc = false
 bench = false

@@ -125,7 +125,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/load` | The load scenario `speculaire-loadgen` runs: simulated agents on `crates/reflect`'s client, the reflector's targets measured from `/proc` and `/metrics` (D33, D104) |
 | `crates/reflect` | Protobuf frames over TLS (D105), the reflector's server and index (D97), and the agent's client: `Members`, one `Announce` stream per member carrying its numbered `Lookup`s, hedged (D2, D98) |
 | `crates/artifacts` | Discovery of each listed image's artifacts from the *artifact store*, then peers through the mirror's fetcher, then upstream through the runtime's `Registries`, into the store, which the peer API serves and which keeps only what listed images name (D17, D43, D121, D124, D126, D131) |
-| `crates/verify` | Sigstore glue, policy, SBOM checks and verdict cache, over `crates/artifacts` (planned) |
+| `crates/verify` | Sigstore glue, policy, SBOM checks and verdict cache, over `crates/artifacts`; the policy file and its globs so far |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data, a workspace of its own, run by `just fuzz <target>` and nightly; `just check` replays their seeds on stable (D27). `config` takes raw bytes and `config_values` a config file written from the keys (D75) |
 | `fixtures/` | `sigstore/`: Sigstore fixtures recorded from public-good by `fixtures.yml`, one OCI layout per case with its trusted root, read by the crates' tests through `crates/artifacts`' `testing` feature and pushed to e2e's upstreams (D139, D141) |

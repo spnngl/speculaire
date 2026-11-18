@@ -44,6 +44,8 @@ On CRI-O every pull of a mirrored registry goes through the agent, which fetches
 
 `speculaire agent` stops before it serves, and `speculaire check-config` exits 1, with one line per problem: `<file or socket>: <message>` (D86). Each message names the key. The last two rows come from `agent` only, which listens and opens the blob cache where `check-config` does not. Restart the runtime after changing its config.
 
+A policy file that does not parse stops both before any runtime check, with one line: `the policy file <path>: document <n>, <field>: <message>`, or the line and column of a YAML error. A field outside D142's subset, such as `keyless.url` or `key.kms`, is refused rather than ignored; `packaging/policy.yaml` shows the fields accepted. Without the file, no policy matches and `gate.unmatched` decides (D23).
+
 | Message | Meaning | Action |
 |---|---|---|
 | `cannot connect to <socket>` / `<socket> did not answer ...` | The runtime does not answer the CRI `Version` call within 5 s | Start the runtime, or set `runtime.containerd_socket` or `runtime.crio_socket` |

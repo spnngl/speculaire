@@ -8,10 +8,11 @@
 )]
 
 use std::collections::BTreeSet;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use e2e::node::{Rules, TRUSTED_ROOT};
+use e2e::node::{POLICY, Rules, TRUSTED_ROOT};
 use e2e::upstream::{FIXTURES, Kind, Upstream};
 use e2e::{Cluster, IpFamily};
 use serde_json::Value;
@@ -93,14 +94,23 @@ fn recorded(artifact: &Artifact) -> Recorded {
     )
 }
 
-/// The node the suite pulls on, which no reflector runs on. Dropping it removes the fixtures and restarts its agent.
+/// The tests share the worker and its agent: one at a time.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+/// The example policy file, of no fixture's repository.
+const EXAMPLE_POLICY: &str = include_str!("../../packaging/policy.yaml");
+
+/// The node the suite pulls on, which no reflector runs on. Dropping it removes the fixtures and the policy file, and
+/// restarts its agent.
 struct Worker {
     cluster: Cluster,
     name: String,
+    _serial: MutexGuard<'static, ()>,
 }
 
 impl Worker {
     fn new() -> Self {
+        let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         let cluster = Cluster::from_env();
         let reflectors = cluster.reflectors();
         let name = cluster
@@ -110,7 +120,11 @@ impl Worker {
             .map(|n| n.name)
             .find(|name| !reflectors.contains(name))
             .expect("a node no reflector runs on");
-        Self { cluster, name }
+        Self {
+            cluster,
+            name,
+            _serial: serial,
+        }
     }
 
     fn sh(&self, script: &str) -> String {
@@ -204,7 +218,10 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let script = format!("{}; systemctl restart speculaire", rmi(&self.cluster));
+        let script = format!(
+            "{}; rm -f {POLICY}; systemctl reset-failed speculaire; systemctl restart speculaire",
+            rmi(&self.cluster)
+        );
         let _ = self.cluster.exec_output(&self.name, &["sh", "-c", &script]);
         if !std::thread::panicking() {
             self.cluster.wait_ready(&self.name).unwrap();
@@ -253,6 +270,39 @@ fn assert_fallback_and_sig_tags_read(plain: &Upstream, cases: &[Case]) {
 
 fn hex(digest: &impl ToString) -> String {
     digest.to_string().trim_start_matches("sha256:").to_owned()
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_policy_file_outside_the_subset_stops_the_agent_which_starts_on_the_example() {
+    if Cluster::from_env().ip_family() == IpFamily::Dual {
+        return;
+    }
+    let worker = Worker::new();
+    let refused = EXAMPLE_POLICY.replacen(
+        "    keyless:\n",
+        "    keyless:\n      url: https://fulcio.example\n",
+        1,
+    );
+    assert_ne!(refused, EXAMPLE_POLICY);
+    worker.cluster.policy(&worker.name, &refused).unwrap();
+    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
+    let restart = worker
+        .cluster
+        .exec_output(&worker.name, &["systemctl", "restart", "speculaire"])
+        .unwrap();
+    assert!(!restart.success, "the agent started on a refused policy");
+    let journal = worker.sh(&format!(
+        "journalctl -u speculaire --no-pager -o cat --since '{}'",
+        since.trim()
+    ));
+    let reason = format!(
+        "the policy file {POLICY}: document 1, spec.authorities[0].keyless.url: unknown field `url`"
+    );
+    assert!(journal.contains(&reason), "no {reason:?} in:\n{journal}");
+
+    worker.cluster.policy(&worker.name, EXAMPLE_POLICY).unwrap();
+    worker.cluster.start_agent(&worker.name).unwrap();
 }
 
 #[test]

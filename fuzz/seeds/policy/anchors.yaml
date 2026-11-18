@@ -1,0 +1,15 @@
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata: {name: anchors}
+spec:
+  images: [{glob: "*"}, {glob: "*/*"}, {glob: "index.docker.io/library/**"}, {glob: "registry.example:5000/a/*"}]
+  authorities:
+  - name: &ci ci
+    keyless:
+      identities:
+      - {issuerRegExp: "https://(token|accounts)\\.example(/.*)?", subject: *ci}
+      - {issuer: "https://issuer.example", subjectRegExp: "(?i)^https://github\\.com/[a-z]+/.*$"}
+    attestations:
+    - {name: sbom, predicateType: "https://spdx.dev/Document"}
+    - {name: sbom23, predicateType: "https://spdx.dev/Document/v2.3"}
+  sbom: required

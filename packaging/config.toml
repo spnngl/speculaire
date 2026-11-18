@@ -47,7 +47,7 @@
 #socket = "/var/run/nri/nri.sock"
 
 [verify]
-# The policy file (D26).
+# The policy file (D26, D142): `ClusterImagePolicy` documents, as in the example `policy.yaml`. Without it, no policy matches.
 #policy = "/etc/speculaire/policy.yaml"
 # "" follows the Sigstore public-good root through TUF; a path pins a trusted_root.json (D26).
 #trusted_root = ""

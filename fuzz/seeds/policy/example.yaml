@@ -1,0 +1,46 @@
+# An example of /etc/speculaire/policy.yaml, which no package installs (D26). Without the file, no policy matches any
+# image and `gate.unmatched` decides (D23). `speculaire check-config` checks it.
+#
+# Each document is a sigstore policy-controller ClusterImagePolicy, of the fields below only; any other field is
+# refused (D11, D142).
+# - spec.images: globs on the image's normalised repository name, without tag or digest: `nginx` is
+#   `docker.io/library/nginx`. `*` matches within one path segment, `**` across them. An image must pass every policy
+#   that matches it.
+# - spec.authorities: one of them must pass. An authority is `keyless` (a Fulcio certificate whose issuer and subject
+#   match one of `identities`) or `key` (a PEM public key in `data`). Each is checked against the node's trust root
+#   (verify.trusted_root), with a transparency log entry required. `subjectRegExp` and `issuerRegExp` match the whole
+#   value (D136).
+# - attestations: every one an authority lists must be there, signed by that authority, with that predicateType.
+# - spec.sbom: `required` makes the image need an SBOM (D12); leave it out otherwise.
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: myorg-releases
+spec:
+  images:
+  - glob: ghcr.io/myorg/**
+  authorities:
+  - name: release-workflow
+    keyless:
+      identities:
+      - issuer: https://token.actions.githubusercontent.com
+        subjectRegExp: https://github\.com/myorg/[^/]+/\.github/workflows/release\.yml@refs/tags/v.+
+    attestations:
+    - name: provenance
+      predicateType: https://slsa.dev/provenance/v1
+  sbom: required
+---
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: vendor-key
+spec:
+  images:
+  - glob: registry.vendor.example/**
+  authorities:
+  - key:
+      data: |
+        -----BEGIN PUBLIC KEY-----
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE6wJ+7IL+2qMfqSoQq/zsCQXk4iTY
+        MJJ+shgTbUF05rabtVFHArO2kN3Rb5hqBvkC1TrZ2vnPUyrd3PdyTkGVTg==
+        -----END PUBLIC KEY-----

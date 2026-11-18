@@ -14,6 +14,7 @@ clap.workspace = true
 speculaire-agent.workspace = true
 speculaire-configure.workspace = true
 speculaire-runtime.workspace = true
+speculaire-verify.workspace = true
 
 [dev-dependencies]
 rustls.workspace = true

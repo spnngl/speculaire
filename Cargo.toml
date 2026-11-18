@@ -26,6 +26,7 @@ speculaire-registry = { path = "crates/registry" }
 speculaire-registry-config = { path = "crates/registry-config" }
 speculaire-runtime = { path = "crates/runtime" }
 speculaire-time = { path = "crates/time" }
+speculaire-verify = { path = "crates/verify" }
 speculaire-configure = { path = "crates/configure" }
 anyhow = "1.0.104"
 # D88: the digests of the relay, on the provider that rustls uses (D13).
@@ -84,6 +85,15 @@ sd-notify = "0.5.0"
 rustls-native-certs = "0.8.5"
 # D92: the certificate and key files of a host are parsed when the registry config is read, not when a request needs them.
 rustls-pki-types = "1.16.0"
+# D136: identity patterns parsed alone, then anchored at both ends before they are built.
+regex-automata = { version = "0.4.18", default-features = false, features = [
+  "meta",
+  "perf",
+  "std",
+  "syntax",
+  "unicode",
+] }
+regex-syntax = "0.8.11"
 # D121: inotify on CRI-O's image directory; already in the tree through tempfile.
 rustix = { version = "1.1.6", default-features = false, features = [
   "event",
@@ -95,6 +105,10 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_path_to_error = "0.1.20"
+# D142: the policy file; serde_yaml and serde_yml fail `cargo deny`.
+serde-saphyr = { version = "2.2.0", default-features = false, features = [
+  "deserialize",
+] }
 socket2 = "0.6.5"
 tempfile = "3.27.0"
 time = { version = "0.3.55", default-features = false, features = ["std"] }

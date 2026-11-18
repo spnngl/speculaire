@@ -16,6 +16,7 @@ use speculaire_agent::config;
 use speculaire_agent::node::Node;
 use speculaire_runtime::detect::{self, Runtime, Sockets};
 use speculaire_runtime::wiring::{Problem, Report};
+use speculaire_verify::Policies;
 
 /// P2P image mirror and supply-chain gate for containerd and CRI-O.
 #[derive(Parser)]
@@ -38,8 +39,8 @@ enum Command {
     /// Check a config file and this node's runtime config, without starting the agent: exit 0 when all is as
     /// `configure` leaves it, 1 otherwise, naming each file.
     ///
-    /// It checks the file itself, and that the runtime goes through the mirror: containerd's `hosts.toml` files, or
-    /// CRI-O's drop-in. Checks of the policy and trust root arrive with verification.
+    /// It checks the file itself, the policy file it names, and that the runtime goes through the mirror: containerd's
+    /// `hosts.toml` files, or CRI-O's drop-in. Checks of the trust root arrive with verification.
     CheckConfig {
         /// The config file.
         #[arg(default_value = config::DEFAULT_PATH)]
@@ -181,10 +182,12 @@ fn verdict(err: &mut impl Write, problems: &[Problem]) -> anyhow::Result<()> {
     }
 }
 
-/// Exits non-zero, naming each file or socket, when the config is invalid, the agent would refuse to start on this
-/// node (D86), or the runtime's config is not as `configure` leaves it.
+/// Exits non-zero, naming each file or socket, when the config or the policy is invalid, the agent would refuse to
+/// start on this node (D86), or the runtime's config is not as `configure` leaves it.
 fn check_config(path: &std::path::Path, runtime: &RuntimeArg) -> anyhow::Result<()> {
-    let node = node(path)?;
+    let config = config::load(path)?;
+    Policies::load(config.verify.policy.get())?;
+    let node = Node::new(&config);
     let runtime = runtime.resolve(&node.sockets)?;
     let on = node.on(runtime);
     let problems = speculaire_configure::check_all(
