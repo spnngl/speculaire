@@ -154,11 +154,16 @@ fn start(
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_roots_of_an_image_just_listed_go_before_those_of_a_listing() {
+async fn the_roots_of_an_image_just_listed_go_beside_a_listing_s_discovery_which_does_not_run_twice()
+ {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
     let asked = Arc::new(Asked::default());
+    let (release, released) = oneshot::channel();
+    *asked.2.lock().unwrap() = Some((digest(10), released));
     let (script, followed) = start(store, &asked, std::future::ready(()), None);
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+    let discoveries = || asked.1.load(Ordering::Relaxed);
 
     script
         .send(Update::Listing(vec![
@@ -167,11 +172,25 @@ async fn the_roots_of_an_image_just_listed_go_before_those_of_a_listing() {
         ]))
         .await
         .unwrap();
+    settle().await;
+    assert_eq!(discoveries(), 1, "10 is being discovered");
     script
         .send(Update::Listed(image(3, &[("reg.test/pulled", 30)])))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    settle().await;
+    assert_eq!(*asked.0.lock().unwrap(), ["reg.test/pulled"]);
+
+    // An image just listed whose root is being discovered waits for that discovery.
+    script
+        .send(Update::Listed(image(4, &[("reg.test/a", 10)])))
+        .await
+        .unwrap();
+    settle().await;
+    assert_eq!(discoveries(), 2);
+
+    release.send(()).unwrap();
+    settle().await;
     assert_eq!(
         *asked.0.lock().unwrap(),
         ["reg.test/pulled", "reg.test/a", "reg.test/b"]

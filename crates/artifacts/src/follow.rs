@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +31,81 @@ enum Done {
     Discovered,
     /// Discovered again from this time on.
     Retry(Instant),
+}
+
+/// A discovery under way: its root, when it started, and what it comes to.
+struct Running {
+    root: Digest,
+    started: Instant,
+    discovered: Pin<Box<dyn Future<Output = Result<Vec<Artifact>, Error>> + Send>>,
+}
+
+/// The roots queued for discovery, and the one discovered, if any: a lane discovers one root at a time (D146).
+#[derive(Default)]
+struct Lane {
+    queue: VecDeque<Digest>,
+    running: Option<Running>,
+}
+
+impl Lane {
+    /// Starts discovering the first root queued that is due, listed and not recorded, unless a discovery runs already.
+    /// A root that `elsewhere` discovers is dropped: that discovery records it.
+    async fn start(
+        &mut self,
+        discovery: &Arc<Discovery>,
+        list: &List,
+        done: &mut HashMap<Digest, Done>,
+        elsewhere: Option<&Digest>,
+    ) {
+        while self.running.is_none() {
+            let Some(root) = self.queue.pop_front() else {
+                return;
+            };
+            let due = match done.get(&root) {
+                None => true,
+                Some(Done::Discovered) => false,
+                Some(Done::Retry(at)) => *at <= Instant::now(),
+            };
+            let names = names(list, &root);
+            if !due || names.is_empty() || elsewhere == Some(&root) {
+                continue;
+            }
+            let recorded = match discovery.store().recorded(&root).await {
+                Ok(recorded) => recorded.is_some(),
+                Err(e) => {
+                    warn!(%root, error = %e, "a root's record cannot be read: its artifacts are discovered again");
+                    false
+                }
+            };
+            if recorded {
+                done.insert(root, Done::Discovered);
+                continue;
+            }
+            let discovery = Arc::clone(discovery);
+            let asked = root.clone();
+            self.running = Some(Running {
+                root,
+                started: Instant::now(),
+                discovered: Box::pin(async move { discovery.discover(&asked, &names).await }),
+            });
+        }
+    }
+
+    /// The root discovered, when its discovery started, and what it came to, once it ends; never while none runs.
+    async fn ended(&mut self) -> (Digest, Instant, Result<Vec<Artifact>, Error>) {
+        let Some(running) = &mut self.running else {
+            return std::future::pending().await;
+        };
+        let discovered = running.discovered.as_mut().await;
+        let (root, started) = (running.root.clone(), running.started);
+        self.running = None;
+        (root, started, discovered)
+    }
+
+    /// The root discovered, if any.
+    fn root(&self) -> Option<&Digest> {
+        self.running.as_ref().map(|running| &running.root)
+    }
 }
 
 /// The roots asked again soon after a reflector stream came up (D134).
@@ -98,8 +174,9 @@ impl Soon {
 /// most 10 s after `last_up`, the time the latest reflector stream came up, is tried again 3 times 20 s apart first
 /// (D134): a reflector that just restarted names no holder until each agent's stream to it is back. A root that leaves the list loses its artifacts, and is discovered again if it comes back.
 ///
-/// The roots of an image just listed go before those a listing queued: a pull waits for one discovery at most, not
-/// for every root a restart finds unrecorded.
+/// The roots of an image just listed have a lane of their own, beside that of the roots a listing or a retry queued
+/// (D146): a pull waits at most for the discovery of another image just listed, not for a root that a listing found
+/// and whose sources do not answer.
 pub async fn follow(
     discovery: Arc<Discovery>,
     images: Arc<dyn Images>,
@@ -111,7 +188,7 @@ pub async fn follow(
     let mut linked = std::pin::pin!(linked);
     let mut is_linked = false;
     let mut list = List::default();
-    let mut queue = VecDeque::new();
+    let (mut pulled, mut backlog) = (Lane::default(), Lane::default());
     let mut done: HashMap<Digest, Done> = HashMap::new();
     let mut soon = Soon {
         last_up,
@@ -123,81 +200,60 @@ pub async fn follow(
     let mut stale = false;
     loop {
         while let Ok(update) = updates.try_recv() {
-            stale |= enqueue(&mut list, &mut queue, update);
+            stale |= enqueue(&mut list, &mut pulled.queue, &mut backlog.queue, update);
         }
+        // The store is collected as a root leaves the list, discoveries running or not: one may wait on peers and
+        // upstream for seconds (D144).
         if roots_left(&list, &mut listed) || stale {
             collect(discovery.store(), &listed, &mut done, &mut soon).await;
             stale = false;
         }
-        let next = if is_linked { queue.pop_front() } else { None };
-        let Some(root) = next else {
-            let next = done
-                .values()
-                .filter_map(|done| match done {
-                    Done::Retry(at) => Some(*at),
-                    Done::Discovered => None,
-                })
-                .min();
-            let wake = async {
-                match next {
-                    Some(at) => sleep_until(at).await,
-                    None => std::future::pending().await,
-                }
-            };
-            tokio::select! {
-                update = updates.recv() => match update {
-                    Some(update) => stale |= enqueue(&mut list, &mut queue, update),
+        if is_linked {
+            pulled
+                .start(&discovery, &list, &mut done, backlog.root())
+                .await;
+            backlog
+                .start(&discovery, &list, &mut done, pulled.root())
+                .await;
+        }
+        let next = done
+            .values()
+            .filter_map(|done| match done {
+                Done::Retry(at) => Some(*at),
+                Done::Discovered => None,
+            })
+            .min();
+        let wake = async {
+            match next {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+        let (root, started, discovered) = tokio::select! {
+            ended = pulled.ended() => ended,
+            ended = backlog.ended() => ended,
+            update = updates.recv() => {
+                match update {
+                    Some(update) => stale |= enqueue(&mut list, &mut pulled.queue, &mut backlog.queue, update),
                     None => break,
-                },
-                () = &mut linked, if !is_linked => is_linked = true,
-                () = wake => {
-                    // Due roots are forgotten, so that one which left the list is not woken for again.
-                    let now = Instant::now();
-                    done.retain(|root, done| match done {
-                        Done::Retry(at) if *at <= now => {
-                            queue.push_back(root.clone());
-                            false
-                        }
-                        Done::Retry(_) | Done::Discovered => true,
-                    });
                 }
+                continue;
             }
-            continue;
-        };
-        let due = match done.get(&root) {
-            None => true,
-            Some(Done::Discovered) => false,
-            Some(Done::Retry(at)) => *at <= Instant::now(),
-        };
-        let names = names(&list, &root);
-        if !due || names.is_empty() {
-            continue;
-        }
-        let recorded = match discovery.store().recorded(&root).await {
-            Ok(recorded) => recorded.is_some(),
-            Err(e) => {
-                warn!(%root, error = %e, "a root's record cannot be read: its artifacts are discovered again");
-                false
+            () = &mut linked, if !is_linked => {
+                is_linked = true;
+                continue;
             }
-        };
-        if recorded {
-            done.insert(root, Done::Discovered);
-            continue;
-        }
-        let started = Instant::now();
-        // The list is followed meanwhile, and the store collected as a root leaves it: a discovery may wait on peers
-        // and upstream for seconds (D144).
-        let discovered = {
-            let mut discovering = std::pin::pin!(discovery.discover(&root, &names));
-            loop {
-                tokio::select! {
-                    discovered = &mut discovering => break discovered,
-                    Some(update) = updates.recv() => stale |= enqueue(&mut list, &mut queue, update),
-                }
-                if roots_left(&list, &mut listed) || stale {
-                    collect(discovery.store(), &listed, &mut done, &mut soon).await;
-                    stale = false;
-                }
+            () = wake => {
+                // Due roots are forgotten, so that one which left the list is not woken for again.
+                let now = Instant::now();
+                done.retain(|root, done| match done {
+                    Done::Retry(at) if *at <= now => {
+                        backlog.queue.push_back(root.clone());
+                        false
+                    }
+                    Done::Retry(_) | Done::Discovered => true,
+                });
+                continue;
             }
         };
         // Recorded after it left the list: collected at the next turn.
@@ -210,19 +266,27 @@ pub async fn follow(
 
 /// Applies `update` to `list` and queues its roots, and tells whether `update` is a listing.
 ///
-/// The roots of an image listed go in front, those of a listing behind.
-fn enqueue(list: &mut List, queue: &mut VecDeque<Digest>, update: Update) -> bool {
+/// The roots of an image listed go in `pulled`, those of a listing in `backlog`.
+fn enqueue(
+    list: &mut List,
+    pulled: &mut VecDeque<Digest>,
+    backlog: &mut VecDeque<Digest>,
+    update: Update,
+) -> bool {
     let listing = matches!(update, Update::Listing(_));
     match &update {
         Update::Listed(image) => {
-            for repo_digest in image.repo_digests.iter().rev() {
-                queue.push_front(repo_digest.digest.clone());
-            }
+            pulled.extend(
+                image
+                    .repo_digests
+                    .iter()
+                    .map(|repo_digest| repo_digest.digest.clone()),
+            );
         }
         Update::Listing(images) => {
             for repo_digest in images.iter().flat_map(|image| &image.repo_digests) {
-                if !queue.contains(&repo_digest.digest) {
-                    queue.push_back(repo_digest.digest.clone());
+                if !backlog.contains(&repo_digest.digest) {
+                    backlog.push_back(repo_digest.digest.clone());
                 }
             }
         }
