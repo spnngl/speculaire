@@ -209,3 +209,36 @@ async fn an_expired_tuf_repository_leaves_the_check_unverifiable() {
         "{reason}"
     );
 }
+
+#[tokio::test]
+async fn another_trust_root_verifies_the_bundle_again() {
+    let fixture = Fixture::load("keyless").await;
+    let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
+    let signatures = Signatures::default();
+    let mut bytes =
+        std::fs::read(Path::new(FIXTURES).join("trusted_root.json")).expect("the recorded root");
+    bytes.push(b'\n');
+    let other = TrustRoot::parse(&bytes).expect("the recorded root with one more newline");
+    assert_ne!(other.hash(), pinned().hash());
+
+    let first = pinned();
+    for root in [&first, &other, &other] {
+        let results = signatures
+            .check(
+                &fixture.store,
+                &fixture.root,
+                &fixture.artifacts,
+                &policy,
+                Ok(root),
+            )
+            .await
+            .expect("the store and the trust root are there");
+        assert_eq!(results, [Ok(workflow())]);
+    }
+
+    assert_eq!(
+        signatures.hits(),
+        1,
+        "only the second check under the same root reuses its verification"
+    );
+}

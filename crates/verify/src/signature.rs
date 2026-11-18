@@ -310,3 +310,28 @@ fn artifact(target: &Digest) -> ArtifactDigest {
     ArtifactDigest::new(algorithm, DigestBytes::new(bytes))
         .expect("a digest holds a hash of its algorithm's size")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_target_keeps_its_algorithm_and_hash() {
+        for (algorithm, expected, size) in [
+            ("sha256", HashAlgorithm::Sha2256, 32),
+            ("sha384", HashAlgorithm::Sha2384, 48),
+            ("sha512", HashAlgorithm::Sha2512, 64),
+        ] {
+            let bytes: Vec<u8> = (0..size).map(|at| at + 0xa0).collect();
+            let hex = bytes
+                .iter()
+                .fold(String::new(), |hex, byte| hex + &format!("{byte:02x}"));
+            let target = Digest::parse(&format!("{algorithm}:{hex}")).expect("a digest");
+
+            let artifact = artifact(&target);
+
+            assert_eq!(artifact.algorithm(), expected);
+            assert_eq!(artifact.as_bytes(), bytes);
+        }
+    }
+}
