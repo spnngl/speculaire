@@ -35,7 +35,7 @@ use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
 use crate::status::{self, Status};
-use crate::{systemd, telemetry};
+use crate::{systemd, telemetry, trust};
 
 /// Runs the agent with the config at `path`.
 ///
@@ -48,11 +48,12 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     let config = config::load(path)?;
     let logs = log::install(&config.log, &config.audit)?;
     check_policy(config.verify.policy.get())?;
+    let trust = trust::Source::read(&config.verify)?;
     let node = Node::new(&config);
     let node = preflight(&node)?;
     tokio::runtime::Runtime::new()
         .context("starting the runtime")?
-        .block_on(serve(path, watch, config, logs, node))
+        .block_on(serve(path, watch, config, logs, node, trust))
 }
 
 /// Refuses to start on a policy file that does not parse (D30); a missing file is no policy (D142).
@@ -85,12 +86,17 @@ fn preflight(node: &Node) -> anyhow::Result<RuntimeNode> {
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the startup, step by step in order, then the loop"
+)]
 async fn serve(
     path: &Path,
     mut watch: Watch,
     mut config: Config,
     logs: Logs,
     node: RuntimeNode,
+    trust: trust::Source,
 ) -> anyhow::Result<()> {
     // Before any listener opens and before READY=1: a signal's default action would end the agent, and a signal that
     // arrives during startup is handled once it is done.
@@ -128,6 +134,7 @@ async fn serve(
         }
     });
     info!(%address, "status listener open");
+    let _trust_root = trust.hold(); // Held while the agent serves; TUF refreshes it (D143).
     // P2P waits for the identity; readiness does not (D16, D45).
     let mut identity = Identity::load(&config.identity);
     // `/readyz` answers 503 until the mirror listens and the artifact store is open (D45, D121); an agent that cannot

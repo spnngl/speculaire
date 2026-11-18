@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::node::{POLICY, Rules, TRUSTED_ROOT};
 use e2e::upstream::{FIXTURES, Kind, Upstream};
@@ -303,6 +303,25 @@ fn a_policy_file_outside_the_subset_stops_the_agent_which_starts_on_the_example(
 
     worker.cluster.policy(&worker.name, EXAMPLE_POLICY).unwrap();
     worker.cluster.start_agent(&worker.name).unwrap();
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn the_agent_holds_the_pinned_trust_root_until_after_now() {
+    if Cluster::from_env().ip_family() == IpFamily::Dual {
+        return;
+    }
+    let worker = Worker::new();
+    let expiry = worker
+        .cluster
+        .metrics(&worker.name)
+        .unwrap()
+        .get("speculaire_trust_root_expiry_timestamp_seconds");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    assert!(
+        expiry.is_some_and(|expiry| expiry > now.as_secs_f64()),
+        "{expiry:?}"
+    );
 }
 
 #[test]

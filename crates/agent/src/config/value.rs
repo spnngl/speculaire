@@ -39,6 +39,7 @@ string_conversions!(
     PeerAddress,
     Absolute,
     TrustedRoot,
+    TufUrl,
     ReflectorUrl,
     NodeName,
     LogFilter
@@ -450,6 +451,67 @@ impl fmt::Display for TrustedRoot {
     }
 }
 
+/// The `https://` URL of a TUF repository: the host and the path its metadata is under (D143).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TufUrl {
+    authority: String,
+    root: String,
+}
+
+impl TufUrl {
+    /// `host` or `host:port`.
+    #[must_use]
+    pub fn authority(&self) -> &str {
+        &self.authority
+    }
+
+    /// The path the metadata is under, with no trailing `/`: `""` for the top.
+    #[must_use]
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+}
+
+impl Default for TufUrl {
+    /// Sigstore's public-good repository.
+    fn default() -> Self {
+        Self {
+            authority: "tuf-repo-cdn.sigstore.dev".to_owned(),
+            root: String::new(),
+        }
+    }
+}
+
+impl FromStr for TufUrl {
+    type Err = InvalidValue;
+    fn from_str(s: &str) -> Result<Self, InvalidValue> {
+        let invalid = || {
+            InvalidValue(format!(
+                "expected a URL such as \"https://tuf-repo-cdn.sigstore.dev\", found {s:?}"
+            ))
+        };
+        let uri: http::Uri = s.parse().map_err(|_| invalid())?;
+        // `Uri` takes `user:password@` into the authority, which `Display` and `Debug` would print (D37).
+        if uri.scheme() != Some(&http::uri::Scheme::HTTPS) || uri.query().is_some() {
+            return Err(invalid());
+        }
+        match uri.authority() {
+            Some(authority) if !authority.as_str().contains('@') => Ok(Self {
+                authority: authority.as_str().to_owned(),
+                root: uri.path().trim_end_matches('/').to_owned(),
+            }),
+            _ => Err(invalid()),
+        }
+    }
+}
+
+impl fmt::Display for TufUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "https://{}{}", self.authority, self.root)
+    }
+}
+
 /// The `https://` URL of the reflectors' load balancer (D2), or none, written `""`: then peers are off.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -700,6 +762,12 @@ mod tests {
         for s in ["", "/etc/speculaire/trusted_root.json"] {
             assert_eq!(s.parse::<TrustedRoot>().unwrap().to_string(), s);
         }
+        for s in [
+            "https://tuf-repo-cdn.sigstore.dev",
+            "https://mirror.example:8443/sigstore/tuf",
+        ] {
+            assert_eq!(s.parse::<TufUrl>().unwrap().to_string(), s);
+        }
         for s in ["node-1", "a.b-c.d0", "123"] {
             assert_eq!(s.parse::<NodeName>().unwrap().to_string(), s);
         }
@@ -730,6 +798,18 @@ mod tests {
             Some("reflector.example")
         );
         assert_eq!("node-1".parse::<NodeName>().unwrap().as_str(), "node-1");
+        let tuf = "https://mirror.example:8443/tuf/"
+            .parse::<TufUrl>()
+            .unwrap();
+        assert_eq!(
+            (tuf.authority(), tuf.root()),
+            ("mirror.example:8443", "/tuf")
+        );
+        let tuf = TufUrl::default();
+        assert_eq!(
+            (tuf.authority(), tuf.root()),
+            ("tuf-repo-cdn.sigstore.dev", "")
+        );
     }
 
     #[test]
@@ -793,6 +873,15 @@ mod tests {
             assert!(s.parse::<PeerAddress>().is_err(), "{s}");
         }
         assert!("relative/root.json".parse::<TrustedRoot>().is_err());
+        for s in [
+            "",
+            "http://tuf.example",
+            "tuf.example",
+            "https://alice@tuf.example",
+            "https://tuf.example/?a=b",
+        ] {
+            assert!(s.parse::<TufUrl>().is_err(), "{s}");
+        }
     }
 
     #[test]

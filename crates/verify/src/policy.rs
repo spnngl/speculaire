@@ -322,7 +322,7 @@ impl fmt::Display for MatchHash {
     }
 }
 
-fn sha256(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
     to_array(&digest(&SHA256, bytes))
 }
 

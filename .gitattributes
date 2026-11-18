@@ -110,3 +110,6 @@ fuzz/seeds/crio_inspect/** -text
 
 # Recorded Sigstore fixtures are byte-exact: digests and signatures cover every byte (D141).
 fixtures/sigstore/** -text
+
+# The initial TUF root, as sigstore-trust-root embeds it: byte-exact, as the recorded copy in fixtures/sigstore/tuf/.
+crates/verify/src/tuf_root.json -text

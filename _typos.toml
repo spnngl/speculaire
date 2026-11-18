@@ -1,12 +1,14 @@
 # typos: `just check`.
 [files]
-# Fuzz seeds are misspelt on purpose; tests/data and the recorded fixtures hold upstream bytes as they are.
+# Fuzz seeds are misspelt on purpose; tests/data, the recorded fixtures and the initial TUF root hold upstream bytes as
+# they are.
 extend-exclude = [
   "plan/",
   "fuzz/seeds/",
   "**/tests/data/",
   "fixtures/**/*.json",
   "fixtures/sigstore/layouts/",
+  "crates/verify/src/tuf_root.json",
 ]
 
 [default]

@@ -49,8 +49,15 @@
 [verify]
 # The policy file (D26, D142): `ClusterImagePolicy` documents, as in the example `policy.yaml`. Without it, no policy matches.
 #policy = "/etc/speculaire/policy.yaml"
-# "" follows the Sigstore public-good root through TUF; a path pins a trusted_root.json (D26).
+# "" follows the Sigstore public-good root through TUF; a path pins a trusted_root.json, read at start (D26).
+# Restart.
 #trusted_root = ""
+# The TUF repository of the root, when none is pinned (D143). Restart.
+#tuf_url = "https://tuf-repo-cdn.sigstore.dev"
+# Where the TUF metadata is kept, served when the repository cannot be reached until it expires (D143). Restart.
+#tuf_cache = "/var/lib/speculaire/tuf"
+# How often the TUF metadata is refreshed, in seconds (D143). Restart.
+#tuf_refresh = 21600
 # How long a stale verdict keeps serving during re-verification (D21).
 #stale_max = 3600
 

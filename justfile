@@ -598,9 +598,12 @@ e2e-up runtime version kubernetes="": e2e-tools
     url="https://$(socket "$(address "$cluster-lb")" 7483)"
     # The reference config, at log.filter "info" so that a healthy start leaves entries in the journal, with peers on.
     agent_config="{{ e2e_dir }}/$cluster.toml"
+    # The trusted root the upstreams pinned on every node: the agents never reach Sigstore's TUF repository.
     sed -e 's/^#filter = "warn"$/filter = "info"/' -e "s|^#url = \"\"$|url = \"$url\"|" \
-        -e "s|^#members = \[\]$|members = [$members]|" packaging/config.toml >"$agent_config"
+        -e "s|^#members = \[\]$|members = [$members]|" \
+        -e 's|^#trusted_root = ""$|trusted_root = "/etc/speculaire/trusted_root.json"|' packaging/config.toml >"$agent_config"
     grep -q '^filter = "info"$' "$agent_config"
+    grep -q '^trusted_root = ' "$agent_config"
     grep -q '^url = ' "$agent_config"
     grep -q '^members = ' "$agent_config"
     # The packages' paths: the binary, the unit and the config (D69).

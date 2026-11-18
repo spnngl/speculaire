@@ -17,7 +17,7 @@ This product includes software ported from distribution/reference (https://githu
 licensed under the Apache License, Version 2.0, and from opencontainers/go-digest (https://github.com/opencontainers/go-digest),
 Copyright 2019, 2020 OCI Contributors, Copyright 2017 Docker, Inc., licensed under the Apache License, Version 2.0.
 
-This product includes test data from sigstore-rust (https://github.com/sigstore/sigstore-rust),
+This product includes test data and the initial TUF root from sigstore-rust (https://github.com/sigstore/sigstore-rust),
 Copyright The Sigstore Authors, licensed under the Apache License, Version 2.0.
 
 This product includes software ported from sigstore policy-controller (https://github.com/sigstore/policy-controller),
