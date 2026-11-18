@@ -88,6 +88,11 @@ Shown in `kubectl describe pod` under `CreateContainerError`.
 | `unmatched` | No policy matches the image, and `gate.unmatched = "deny"` (D23) | Add a policy, or exempt the image |
 | `rejected: <detail>` | A signature, attestation or SBOM check failed (D20) | Fix the image; the verdict is final for this policy and trust root |
 | `rejected: attestation <predicateType> missing (.att tags are not supported)` | The attestation exists only as a `.att` tag (D43) | Attest again with a current cosign, which attaches a bundle as a referrer |
+| `rejected: no signature` | No Sigstore bundle names the image as its subject (D145) | Sign the image with cosign v3, which attaches a bundle as a referrer |
+| `rejected: signature invalid: <cause>` | A bundle names the image but does not verify against the trust root: altered, without a transparency-log entry, or bound to another digest (D142, D145) | Sign the image again |
+| `rejected: identity mismatch: signed by <SAN> (issuer <issuer>)` | A bundle verifies, but its signer matches none of the authority's identities; `by a key` when a key signed it for a keyless authority, or another key (D136, D145) | Add that identity to the policy, or sign with the expected identity |
+| `rejected: certificate issuer <DN> is unknown to the trust root` | Another Sigstore instance signed the bundle, such as GitHub's private one for private repositories (D43, D145) | Sign or attest on public-good Sigstore |
+| `unverifiable: trust root: <cause>` | The node holds no trust root: TUF and its cache both failed, or the first refresh is still running (D143) | Check that the node reaches `verify.tuf_url`; it is retried automatically |
 | `unverifiable: <detail>` | Artifacts or the trust root could not be obtained (D17, D20) | Check upstream reachability and credentials; it is retried automatically |
 | `unverifiable: upstream rate limited: <host>` | The registry answered `429`, or `503` with `Retry-After`; discovery to that host pauses, for every image, until its `Retry-After`, at most 1 h, and resumes by itself. Until M5 the journal says it at `info`: `discovery of <digest>: unverifiable: upstream rate limited: <host>` (D38, D128) | Add registry credentials, or wait |
 
