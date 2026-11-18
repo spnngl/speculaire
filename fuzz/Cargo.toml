@@ -245,3 +245,10 @@ path = "fuzz_targets/trusted_root.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+bench = false
