@@ -130,7 +130,8 @@ impl Signatures {
             .collect();
         let mut results = Vec::with_capacity(policy.authorities().len());
         for authority in policy.authorities() {
-            let mut result = Err(Failure::Missing);
+            let mut satisfied = None;
+            let mut closest = Failure::Missing;
             for bundle in &bundles {
                 let entry = Entry {
                     target: target.clone(),
@@ -143,20 +144,15 @@ impl Signatures {
                 let signed = self.signed(store, root, entry, &authority.signer).await?;
                 match judge(signed, &authority.signer) {
                     Ok(signed) => {
-                        result = Ok(signed);
+                        satisfied = Some(signed);
                         break;
                     }
                     Err(failure) => {
-                        if result
-                            .as_ref()
-                            .is_err_and(|closest| failure.closeness() > closest.closeness())
-                        {
-                            result = Err(failure);
-                        }
+                        closest = std::cmp::max_by_key(closest, failure, Failure::closeness);
                     }
                 }
             }
-            results.push(result);
+            results.push(satisfied.ok_or(closest));
         }
         Ok(results)
     }

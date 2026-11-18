@@ -272,3 +272,33 @@ async fn only_a_bundle_whose_subject_is_the_image_counts() {
         assert_eq!(results, [Err(Failure::Missing)]);
     }
 }
+
+#[tokio::test]
+async fn an_authority_fails_with_the_reason_of_the_closest_bundle() {
+    let tampered = Fixture::flipped("keyless").await;
+    let intact = Fixture::load("keyless").await.artifacts;
+    let policy = policy(&[keyless(
+        "subject: https://github.com/spnngl/speculaire/.github/workflows/release.yml@refs/heads/main",
+    )]);
+
+    for artifacts in [
+        [intact[0].clone(), tampered.artifacts[0].clone()],
+        [tampered.artifacts[0].clone(), intact[0].clone()],
+    ] {
+        let results = Signatures::default()
+            .check(
+                &tampered.store,
+                &tampered.root,
+                &artifacts,
+                &policy,
+                Ok(&pinned()),
+            )
+            .await
+            .expect("the store holds both bundles");
+        assert_eq!(
+            results,
+            [Err(Failure::Mismatch(workflow()))],
+            "{artifacts:?}"
+        );
+    }
+}
