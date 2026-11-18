@@ -1,8 +1,8 @@
-//! The signature check (D8, D11, D20, D144): which authorities of a policy the Sigstore bundles that name an image
+//! The signature check (D8, D11, D20, D145): which authorities of a policy the Sigstore bundles that name an image
 //! satisfy, and why the others fail.
 //!
 //! A bundle counts as a signature of the image its in-toto subject or message digest names, whatever its predicate
-//! type, as for `cosign verify` (D144). It is verified against the trust root once, with any identity, and its signer
+//! type, as for `cosign verify` (D145). It is verified against the trust root once, with any identity, and its signer
 //! matched against each authority afterwards: a policy change matches identities again without verifying again.
 
 use std::collections::HashMap;

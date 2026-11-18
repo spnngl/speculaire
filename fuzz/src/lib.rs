@@ -846,7 +846,7 @@ fn recorded_root() -> &'static TrustRoot {
     })
 }
 
-/// A Sigstore bundle, as the artifact store holds it (D144), verified as a signature of the recorded keyless image
+/// A Sigstore bundle, as the artifact store holds it (D145), verified as a signature of the recorded keyless image
 /// by its certificate and of the recorded key image by `cosign.pub`.
 ///
 /// A bundle that verifies verifies the same again.
