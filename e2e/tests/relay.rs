@@ -279,14 +279,7 @@ impl Drop for Worker {
         }
         // Some of these tests provoke warnings on purpose; `unit.rs` asserts the journal holds none, so the
         // journal is emptied and the agent restarted for the entries it writes at start.
-        let _ = self.cluster.exec_output(
-            &self.name,
-            &[
-                "sh",
-                "-c",
-                "journalctl --rotate && journalctl --vacuum-time=1s; systemctl reset-failed speculaire; systemctl restart speculaire",
-            ],
-        );
+        let _ = self.cluster.restart_with_empty_journal(&self.name);
         // A second panic while a failed test unwinds would abort the whole binary; the next `Worker::on` waits anyway.
         if !std::thread::panicking() {
             self.wait_ready();
