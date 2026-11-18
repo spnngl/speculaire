@@ -8,6 +8,7 @@ use jiff::Timestamp;
 use sigstore_trust_root::TrustedRoot;
 use sigstore_trust_root::trusted_root::CertChain;
 use sigstore_tuf::{FileStore, Repository, StoreRepository, TrustedMetadataSet, Updater};
+use sigstore_verify::Verifier;
 
 use crate::policy::sha256;
 
@@ -19,11 +20,23 @@ const TUF_ROOT: &[u8] = include_bytes!("tuf_root.json");
 const TARGET: &str = "trusted_root.json";
 
 /// A trusted root the agent verifies against: the parsed `trusted_root.json`, its hash and its expiry.
-#[derive(Debug)]
 pub struct TrustRoot {
     root: TrustedRoot,
     hash: RootHash,
     expiry: Option<Timestamp>,
+    /// The root's keys and certificates, prepared once for every bundle.
+    verifier: Verifier,
+    /// The DER subject of each certificate of its certificate authorities: the issuers a signing certificate may name.
+    issuers: Vec<Vec<u8>>,
+}
+
+impl fmt::Debug for TrustRoot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TrustRoot")
+            .field("hash", &self.hash)
+            .field("expiry", &self.expiry)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The SHA-256 of a `trusted_root.json` as read, the trust-root part of a verdict's key (D20).
@@ -71,6 +84,9 @@ pub enum ParseError {
         /// Its place in the chain, from 0.
         certificate: usize,
     },
+    /// sigstore-rust refuses the root's keys or certificates, as malformed, duplicated or unsupported.
+    #[error(transparent)]
+    Material(#[from] sigstore_verify::Error),
 }
 
 /// Why the agent holds no trust root: every verification ends `unverifiable` with this reason.
@@ -112,7 +128,21 @@ impl TrustRoot {
         let root: TrustedRoot = serde_json::from_slice(bytes)?;
         let hash = RootHash(sha256(bytes));
         let expiry = expiry(&root)?;
-        Ok(Self { root, hash, expiry })
+        let verifier = Verifier::new(&root)?;
+        let issuers = root
+            .certificate_authorities
+            .iter()
+            .flat_map(|ca| &ca.cert_chain.certificates)
+            .filter_map(|entry| x509_parser::parse_x509_certificate(entry.raw_bytes.as_bytes()).ok())
+            .map(|(_, cert)| cert.subject().as_raw().to_vec())
+            .collect();
+        Ok(Self {
+            root,
+            hash,
+            expiry,
+            verifier,
+            issuers,
+        })
     }
 
     /// The trusted root that `repository` serves through TUF at `now`, its metadata kept in `cache`; when that fails,
@@ -173,6 +203,17 @@ impl TrustRoot {
     #[must_use]
     pub const fn expiry(&self) -> Option<Timestamp> {
         self.expiry
+    }
+
+    /// The verifier over the root's keys and certificates.
+    pub(crate) const fn verifier(&self) -> &Verifier {
+        &self.verifier
+    }
+
+    /// Whether `issuer`, the DER name a certificate gives as its issuer, is the subject of one of the root's certificate
+    /// authorities (D43).
+    pub(crate) fn knows_issuer(&self, issuer: &[u8]) -> bool {
+        self.issuers.iter().any(|subject| subject == issuer)
     }
 }
 
@@ -248,7 +289,7 @@ fn metadata_expiry(trusted: &TrustedMetadataSet) -> Timestamp {
 }
 
 /// An error and its sources on one line: sigstore-tuf's `Display` leaves out the cause.
-fn chain(error: &dyn std::error::Error) -> String {
+pub(crate) fn chain(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(next) = source {

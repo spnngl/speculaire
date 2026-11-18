@@ -116,6 +116,10 @@ sigstore-trust-root = { version = "0.16.0", default-features = false, features =
 sigstore-tuf = { version = "0.16.0", default-features = false, features = [
   "aws-lc-rs",
 ] }
+# D8, D144: bundle verification, on aws-lc-rs (D13); it re-exports the bundle types.
+sigstore-verify = { version = "0.16.0", default-features = false, features = [
+  "aws-lc-rs",
+] }
 # The time type of sigstore-rust's API.
 jiff = { version = "0.2.46", default-features = false, features = ["std"] }
 socket2 = "0.6.5"
