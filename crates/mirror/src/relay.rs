@@ -24,7 +24,7 @@ use speculaire_oci::hash::{self, Hash};
 use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::reference::Digest;
 use speculaire_registry::{Client, Request, Response as Upstreamed};
-use speculaire_runtime::content::Error;
+use speculaire_runtime::content::{Content as _, Error};
 use speculaire_runtime::images::Images;
 use speculaire_runtime::registries::{self, Registries, Source};
 use tokio::sync::Notify;
@@ -197,12 +197,20 @@ impl Relay {
             return Answer::Missing;
         }
         // A manifest by digest that this relay served for this name, or that one it served points to, is its own to
-        // serve again, else the peers' (D123).
+        // serve again, else the peers' (D123). What is below it is learnt again: the cache outlives a restart.
         if let Reference::Digest(digest) = reference
             && self.known.has(digest, pull.name)
         {
-            if self.cache.contains(digest) {
-                return from_content(&*self.cache, Kind::Manifest, digest, pull.head, None).await;
+            if let Ok(Some(blob)) = self.cache.open(digest).await
+                && let Ok(bytes) = blob.read_all(MAX_MANIFEST as u64).await
+                && let Some(media_type) = media_type(&bytes)
+                && let Ok(children) = manifest::children(&bytes)
+            {
+                self.learn(pull.name, digest, &children);
+                return Answer::Served(
+                    metrics::Source::Local,
+                    manifest_response(&bytes, digest, media_type, pull.head),
+                );
             }
             if let Some(blob) = self.fetcher.whole(Kind::Manifest, digest).await
                 && let Ok(bytes) = blob.read_all(MAX_MANIFEST as u64).await

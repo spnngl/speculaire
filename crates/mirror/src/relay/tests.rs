@@ -789,6 +789,53 @@ async fn a_blob_is_served_only_below_a_manifest_the_relay_served_and_is_fetched_
     );
 }
 
+/// The e2e verify suite on CRI-O: an index pulled again after a restart, its manifest from the cache, then its config.
+#[tokio::test]
+async fn the_blobs_below_a_manifest_served_from_the_cache_are_served_too() {
+    let node = Node::new().await;
+    let image = Image::new(&node.registry, &[1000]);
+    let index = Bytes::from(format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"digest":"{}","size":{}}}]}}"#,
+        image.manifest_digest,
+        image.manifest.len()
+    ));
+    let mut reply = Reply::ok(index);
+    reply.headers.push((
+        "content-type".to_owned(),
+        "application/vnd.oci.image.index.v1+json".to_owned(),
+    ));
+    node.registry.put("/v2/app/web/manifests/multi", reply);
+    let config = sha(&image.config);
+    let below = by(&image.manifest_digest);
+    for restart in [false, true] {
+        let relay = node.relay(1 << 30);
+        read(
+            relay
+                .pull(pull(Kind::Manifest, &tag("multi"), false, None))
+                .await,
+        )
+        .await
+        .unwrap();
+        let got = read(relay.pull(pull(Kind::Manifest, &below, false, None)).await)
+            .await
+            .unwrap();
+        let from = if restart {
+            metrics::Source::Local
+        } else {
+            metrics::Source::Upstream
+        };
+        assert_eq!(got.source, from);
+        let got = read(
+            relay
+                .pull(pull(Kind::Blob, &by(&config), false, None))
+                .await,
+        )
+        .await
+        .expect("the config below the manifest");
+        assert!(got.body == image.config.as_ref(), "the config differs");
+    }
+}
+
 #[tokio::test]
 async fn a_blob_whose_bytes_are_not_its_digest_is_never_sent_whole_and_never_kept() {
     let node = Node::new().await;
