@@ -25,7 +25,7 @@ use speculaire_registry_config::containerd::config::{self as containerd_config_f
 use speculaire_registry_config::containerd::hosts;
 use speculaire_registry_config::crio::{auth, registries};
 use speculaire_verify::policy::{MatchHash, Policies, Policy, PublicKey, Signer};
-use speculaire_verify::{TrustRoot, signature};
+use speculaire_verify::{TrustRoot, legacy, signature};
 
 /// A fuzz entry point.
 pub type Entry = fn(&[u8]);
@@ -59,6 +59,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("policy", policy),
     ("trusted_root", trusted_root),
     ("bundle", bundle),
+    ("simplesigning", simplesigning),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -874,6 +875,39 @@ pub fn bundle(data: &[u8]) {
             assert_eq!(
                 signed,
                 signature::verify(recorded_root(), &target, data, key)
+            );
+        }
+    }
+}
+
+/// The recorded `legacy-sig` image, its `.sig` manifest and that manifest's one simple signing payload.
+const LEGACY_IMAGE: &str =
+    "sha256:167b7290fd4fd86b9040b699e97cd3471b960281d4158e3bd655df2f68e0eb73";
+const LEGACY_MANIFEST: &[u8] = include_bytes!(
+    "../../fixtures/sigstore/layouts/legacy-sig/blobs/sha256/9390ade129eb1c390b04bacebdd1a7edef608b1d3717d7421ee6b89a5a7f0e73"
+);
+const LEGACY_PAYLOAD: &[u8] = include_bytes!(
+    "../../fixtures/sigstore/layouts/legacy-sig/blobs/sha256/1e6dcfc6a19dcd80fe62b428bbf4bb10ad08e7319401e20792d59f88163193bd"
+);
+
+/// A legacy `.sig` layer from the artifact store (D147): arbitrary bytes as its simple signing payload under the
+/// recorded `.sig` manifest, then as that manifest over the recorded payload, verified as a signature of the recorded
+/// image.
+///
+/// A layer that verifies verifies the same again.
+///
+/// # Panics
+///
+/// When verification panics, or verifying again differs.
+pub fn simplesigning(data: &[u8]) {
+    let target =
+        speculaire_oci::reference::Digest::parse(LEGACY_IMAGE).expect("the recorded digest parses");
+    for (manifest, payload) in [(LEGACY_MANIFEST, data), (data, LEGACY_PAYLOAD)] {
+        let signed = legacy::verify(recorded_root(), &target, manifest, 0, payload, None);
+        if signed.is_ok() {
+            assert_eq!(
+                signed,
+                legacy::verify(recorded_root(), &target, manifest, 0, payload, None)
             );
         }
     }
