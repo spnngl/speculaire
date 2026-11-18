@@ -238,3 +238,10 @@ path = "fuzz_targets/policy.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "trusted_root"
+path = "fuzz_targets/trusted_root.rs"
+test = false
+doc = false
+bench = false

@@ -26,6 +26,9 @@ pub(crate) const NODE: &str = "load-reflector";
 const CONTAINERD: &str = "v2.4.2";
 /// The variable that names a node's process for a wrapper, such as `just profile`'s, which names its output after it.
 const NODE_VARIABLE: &str = "SPECULAIRE_LOAD_NODE";
+/// The trusted root each node pins, the one recorded with the Sigstore fixtures (D141): no node asks Sigstore's TUF
+/// repository.
+const TRUSTED_ROOT: &str = include_str!("../../../fixtures/sigstore/trusted_root.json");
 
 /// How long an agent may take to answer `/readyz` 200, under Valgrind too.
 const READY: Duration = Duration::from_mins(2);
@@ -111,6 +114,7 @@ impl Node {
             )?;
         }
         std::fs::write(path.join("ca.crt"), cluster.ca())?;
+        std::fs::write(path.join("trusted_root.json"), TRUSTED_ROOT)?;
         std::fs::write(path.join("node.pem"), cluster.kubelet(name))?;
         let any = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         let d = path.display();
@@ -128,6 +132,7 @@ impl Node {
                  [mirror]\naddress = \"{any}\"\ndirectory = \"{d}/mirror\"\n\
                  [blob_cache]\ndirectory = \"{d}/blobs\"\n\
                  [artifacts]\ndirectory = \"{d}/artifacts\"\n\
+                 [verify]\ntrusted_root = \"{d}/trusted_root.json\"\n\
                  [metrics]\naddress = \"{any}\"\n\
                  [log]\nfilter = \"{LOG_FILTER}\"\n\
                  {tables}"

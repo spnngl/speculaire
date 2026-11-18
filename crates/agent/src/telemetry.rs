@@ -16,6 +16,9 @@ pub const CONFIG_RELOAD_FAILURES: &str = "speculaire_config_reload_failures_tota
 pub const P2P_ENABLED: &str = "speculaire_p2p_enabled";
 /// `speculaire_identity_expiry_timestamp_seconds`: when the node identity in use expires, once one is loaded (D16).
 pub const IDENTITY_EXPIRY: &str = "speculaire_identity_expiry_timestamp_seconds";
+/// `speculaire_trust_root_expiry_timestamp_seconds`: when the trust root in use stops verifying, `0` while none is held
+/// (D143).
+pub const TRUST_ROOT_EXPIRY: &str = "speculaire_trust_root_expiry_timestamp_seconds";
 
 /// `speculaire_runtime_alive_tasks`: tasks alive in the agent's async runtime.
 pub const RUNTIME_ALIVE_TASKS: &str = "speculaire_runtime_alive_tasks";
@@ -68,6 +71,10 @@ fn describe() {
     describe_gauge!(
         IDENTITY_EXPIRY,
         "When the kubelet certificate in use expires, in seconds since the epoch"
+    );
+    describe_gauge!(
+        TRUST_ROOT_EXPIRY,
+        "When the trust root in use stops verifying, in seconds since the epoch; 0 while none is held"
     );
     describe_gauge!(
         RUNTIME_ALIVE_TASKS,

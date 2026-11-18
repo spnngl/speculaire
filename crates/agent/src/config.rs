@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 pub use value::{
     Absolute, ByteSize, Interval, InvalidValue, LogFilter, Loopback, MaxUploads, NodeName,
-    PeerAddress, ReflectorUrl, RegistryName, Span, TrustedRoot,
+    PeerAddress, ReflectorUrl, RegistryName, Span, TrustedRoot, TufUrl,
 };
 
 /// Where the agent reads its settings when `--config` names no other file (D30).
@@ -102,7 +102,10 @@ impl Config {
             verify:
                 Verify {
                     policy: _,
-                    trusted_root: _,
+                    trusted_root,
+                    tuf_url,
+                    tuf_cache,
+                    tuf_refresh,
                     stale_max: _,
                 },
             sbom: Sbom { max_size: _ },
@@ -174,6 +177,30 @@ impl Config {
             &running.runtime.crio_socket,
         );
         keep(&mut kept, "nri.socket", socket, &running.nri.socket);
+        keep(
+            &mut kept,
+            "verify.trusted_root",
+            trusted_root,
+            &running.verify.trusted_root,
+        );
+        keep(
+            &mut kept,
+            "verify.tuf_url",
+            tuf_url,
+            &running.verify.tuf_url,
+        );
+        keep(
+            &mut kept,
+            "verify.tuf_cache",
+            tuf_cache,
+            &running.verify.tuf_cache,
+        );
+        keep(
+            &mut kept,
+            "verify.tuf_refresh",
+            tuf_refresh,
+            &running.verify.tuf_refresh,
+        );
         keep(&mut kept, "mirror.address", mirror, &running.mirror.address);
         keep(
             &mut kept,
@@ -385,7 +412,13 @@ pub struct Verify {
     /// The policy file (D26).
     pub policy: Absolute,
     /// The Sigstore trust root (D26).
-    pub trusted_root: TrustedRoot,
+    pub trusted_root: Restart<TrustedRoot>,
+    /// The TUF repository the trust root comes from when none is pinned (D143).
+    pub tuf_url: Restart<TufUrl>,
+    /// Where the TUF metadata is kept, to serve when the repository cannot be reached (D143).
+    pub tuf_cache: Restart<Absolute>,
+    /// How often the TUF metadata is refreshed (D143).
+    pub tuf_refresh: Restart<Interval>,
     /// How long a stale verdict keeps serving during re-verification (D21).
     pub stale_max: Span,
 }
@@ -394,7 +427,10 @@ impl Default for Verify {
     fn default() -> Self {
         Self {
             policy: Absolute::new("/etc/speculaire/policy.yaml"),
-            trusted_root: TrustedRoot::PublicGood,
+            trusted_root: Restart(TrustedRoot::PublicGood),
+            tuf_url: Restart(TufUrl::default()),
+            tuf_cache: Restart(Absolute::new("/var/lib/speculaire/tuf")),
+            tuf_refresh: Restart(Interval::from_secs(21_600)),
             stale_max: Span::from_secs(3600),
         }
     }

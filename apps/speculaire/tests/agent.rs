@@ -19,6 +19,7 @@ use secrecy::ExposeSecret as _;
 use speculaire_fake_runtime::{Answers, Fake};
 use speculaire_pki::mirror::{Mirror, Part};
 use speculaire_pki::testing::Cluster;
+use speculaire_verify::TrustRoot;
 
 const WAIT: Duration = Duration::from_secs(10);
 /// Port 0: the kernel picks a port no one holds, and the agent names it once bound.
@@ -297,7 +298,8 @@ fn mirror_certificates() -> &'static Path {
     })
 }
 
-/// Writes a config on `node` with its listeners on port 0; `extra`, first, holds top-level keys and further tables.
+/// Writes a config on `node` with its listeners on port 0 and the recorded trust root pinned; `extra`, first, holds
+/// top-level keys and further tables.
 fn write_config(path: &Path, node: &Node, extra: &str) {
     // The agent names the port each listener got at `info`; a test's own `[log]` filter shows it too.
     let log = if extra.contains("[log]") {
@@ -305,10 +307,16 @@ fn write_config(path: &Path, node: &Node, extra: &str) {
     } else {
         "[log]\nfilter = \"info\"\n"
     };
+    // A test with a `[verify]` of its own names its trust root: with none, the agent would ask Sigstore's TUF repository.
+    let verify = if extra.contains("[verify]") {
+        String::new()
+    } else {
+        format!("[verify]\ntrusted_root = \"{TRUSTED_ROOT}\"\n")
+    };
     std::fs::write(
         path,
         format!(
-            "{extra}\n{log}[metrics]\naddress = \"{ANY_PORT}\"\n{}\n[mirror]\naddress = \"{ANY_PORT}\"\ndirectory = \"{}\"\n",
+            "{extra}\n{log}{verify}[metrics]\naddress = \"{ANY_PORT}\"\n{}\n[mirror]\naddress = \"{ANY_PORT}\"\ndirectory = \"{}\"\n",
             node.table(),
             mirror_certificates().display()
         ),
@@ -933,6 +941,12 @@ fn check_config_exits_1_with_the_same_messages_and_0_on_a_node_that_is_right() {
 
 const EXAMPLE_POLICY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/policy.yaml");
 
+/// The trusted root recorded in step 01's fixtures (D141).
+const TRUSTED_ROOT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../fixtures/sigstore/trusted_root.json"
+);
+
 #[test]
 fn a_policy_outside_the_subset_stops_check_config_and_the_agent_naming_its_field() {
     let config = "version = 3\n[plugins.'io.containerd.cri.v1.images'.registry]\nconfig_path = \"@DIR@/certs.d\"\n";
@@ -1000,13 +1014,84 @@ fn a_policy_outside_the_subset_stops_check_config_and_the_agent_naming_its_field
         }
     }
     // The agent starts on the example, and says how many policies it read.
-    let agent = Agent::start(&format!("[verify]\npolicy = \"{EXAMPLE_POLICY}\"\n"));
+    let agent = Agent::start(&format!(
+        "[verify]\npolicy = \"{EXAMPLE_POLICY}\"\ntrusted_root = \"{TRUSTED_ROOT}\"\n"
+    ));
     let (_, lines) = agent.stop();
     assert!(
         lines.iter().any(
             |line| line.contains(r#""message":"policy read""#) && line.contains(r#""count":2"#)
         ),
         "{lines:?}"
+    );
+}
+
+#[test]
+fn a_pinned_trust_root_that_is_missing_or_corrupt_stops_check_config_and_the_agent() {
+    let config = "version = 3\n[plugins.'io.containerd.cri.v1.images'.registry]\nconfig_path = \"@DIR@/certs.d\"\n";
+    let node = Node::new(Answers::containerd("v2.4.2"), Some(config));
+    let root = node.dir.path().join("trusted_root.json");
+    let extra = format!(
+        "[mirror]\ndirectory = \"{}/mirror\"\n[verify]\ntrusted_root = \"{}\"\n",
+        node.dir.path().display(),
+        root.display()
+    );
+    assert_eq!(run_on(&node, "configure", ANY_PORT, &extra).0, Some(0));
+    for (text, error) in [
+        (None, "reading the trusted root"),
+        (Some("{\"tlogs\": 1}"), "the trusted root"),
+    ] {
+        if let Some(text) = text {
+            std::fs::write(&root, text).unwrap();
+        }
+        for command in ["check-config", "agent"] {
+            let (code, stderr) = run_on(&node, command, ANY_PORT, &extra);
+            assert_eq!(code, Some(1), "{command}: {stderr}");
+            assert!(
+                stderr.contains(&format!("{error} {}", root.display())),
+                "{command}: {stderr}"
+            );
+        }
+    }
+    std::fs::copy(TRUSTED_ROOT, &root).unwrap();
+    assert_eq!(
+        run_on(&node, "check-config", ANY_PORT, &extra),
+        (Some(0), String::new())
+    );
+}
+
+#[test]
+fn a_pinned_trust_root_is_read_at_start_with_its_hash_and_expiry() {
+    let mut agent = Agent::start("");
+    let line = agent.line(&[r#""message":"trust root read""#, r#""source":"pinned""#]);
+    let root = TrustRoot::load(Path::new(TRUSTED_ROOT)).unwrap();
+    assert!(
+        line.contains(&format!(r#""hash":"{}""#, root.hash())),
+        "{line}"
+    );
+    let expiry = metric(&agent, "speculaire_trust_root_expiry_timestamp_seconds").unwrap();
+    let seconds: f64 = expiry.rsplit(' ').next().unwrap().parse().unwrap();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    assert!(seconds > now.as_secs_f64(), "{expiry}");
+}
+
+#[test]
+fn an_unreachable_tuf_repository_with_no_cache_leaves_no_trust_root() {
+    let cache = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(&format!(
+        "[verify]\ntuf_url = \"https://127.0.0.1:1\"\ntuf_cache = \"{}\"\n",
+        cache.path().display()
+    ));
+    let line = agent.line(&[r#""message":"no trust root""#, "the cache: "]);
+    assert!(
+        line.contains("TUF: ") && line.contains("127.0.0.1:1"),
+        "{line}"
+    );
+    assert_eq!(
+        metric(&agent, "speculaire_trust_root_expiry_timestamp_seconds").as_deref(),
+        Some("speculaire_trust_root_expiry_timestamp_seconds 0")
     );
 }
 

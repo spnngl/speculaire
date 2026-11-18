@@ -109,6 +109,15 @@ serde_path_to_error = "0.1.20"
 serde-saphyr = { version = "2.2.0", default-features = false, features = [
   "deserialize",
 ] }
+# D8, D143: the trust root, without HTTP client (the TUF transport is ours) and on aws-lc-rs (D13).
+sigstore-trust-root = { version = "0.16.0", default-features = false, features = [
+  "aws-lc-rs",
+] }
+sigstore-tuf = { version = "0.16.0", default-features = false, features = [
+  "aws-lc-rs",
+] }
+# The time type of sigstore-rust's API.
+jiff = { version = "0.2.46", default-features = false, features = ["std"] }
 socket2 = "0.6.5"
 tempfile = "3.27.0"
 time = { version = "0.3.55", default-features = false, features = ["std"] }

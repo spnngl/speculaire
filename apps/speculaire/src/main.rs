@@ -12,8 +12,8 @@ use std::time::SystemTime;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand, ValueEnum};
-use speculaire_agent::config;
 use speculaire_agent::node::Node;
+use speculaire_agent::{config, trust};
 use speculaire_runtime::detect::{self, Runtime, Sockets};
 use speculaire_runtime::wiring::{Problem, Report};
 use speculaire_verify::Policies;
@@ -182,11 +182,12 @@ fn verdict(err: &mut impl Write, problems: &[Problem]) -> anyhow::Result<()> {
     }
 }
 
-/// Exits non-zero, naming each file or socket, when the config or the policy is invalid, the agent would refuse to
-/// start on this node (D86), or the runtime's config is not as `configure` leaves it.
+/// Exits non-zero, naming each file or socket, when the config, the policy or a pinned trust root is invalid, the agent
+/// would refuse to start on this node (D86), or the runtime's config is not as `configure` leaves it.
 fn check_config(path: &std::path::Path, runtime: &RuntimeArg) -> anyhow::Result<()> {
     let config = config::load(path)?;
     Policies::load(config.verify.policy.get())?;
+    trust::Source::read(&config.verify)?;
     let node = Node::new(&config);
     let runtime = runtime.resolve(&node.sockets)?;
     let on = node.on(runtime);

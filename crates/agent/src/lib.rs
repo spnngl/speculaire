@@ -8,5 +8,6 @@ mod serve;
 pub mod status;
 mod systemd;
 pub mod telemetry;
+pub mod trust;
 
 pub use serve::run;

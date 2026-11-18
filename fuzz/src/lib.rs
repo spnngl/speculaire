@@ -23,6 +23,7 @@ use speculaire_oci::tagged::Tagged;
 use speculaire_registry_config::containerd::config::{self as containerd_config_file, Registry};
 use speculaire_registry_config::containerd::hosts;
 use speculaire_registry_config::crio::{auth, registries};
+use speculaire_verify::TrustRoot;
 use speculaire_verify::policy::{MatchHash, Policies, Policy, Signer};
 
 /// A fuzz entry point.
@@ -55,6 +56,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("retry_after", retry_after),
     ("duration", duration),
     ("policy", policy),
+    ("trusted_root", trusted_root),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -815,4 +817,20 @@ pub fn policy(data: &[u8]) {
                 .all(|policy| policy.images().iter().any(|glob| glob.matches(&reference)))
         );
     }
+}
+
+/// A pinned `trusted_root.json` (D26, D143).
+///
+/// Bytes that parse give the same hash and expiry when parsed again.
+///
+/// # Panics
+///
+/// When parsing panics, or parsing again differs.
+pub fn trusted_root(data: &[u8]) {
+    let Ok(root) = TrustRoot::parse(data) else {
+        return;
+    };
+    let again = TrustRoot::parse(data).expect("bytes that parsed parse again");
+    assert_eq!(root.hash(), again.hash());
+    assert_eq!(root.expiry(), again.expiry());
 }

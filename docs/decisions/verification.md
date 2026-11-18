@@ -2,7 +2,7 @@
 
 How artifacts become verdicts. Index: `docs/decisions/README.md`.
 
-## D8: Crypto comes from sigstore-rust (amended by D43, D136, D139)
+## D8: Crypto comes from sigstore-rust (amended by D43, D136, D139, D143)
 
 - **Decision:** use `sigstore-verify` and `sigstore-trust-root` (sigstore-rust, crates 0.16). We write OCI discovery, regex identity matching and the legacy `.sig` → v0.1-bundle conversion ourselves. The conversion also checks that the SimpleSigning payload's `critical.image.docker-manifest-digest` equals the image digest, since the bundle verifier only binds the signature to the payload. Attestations are verified only as bundles (D43).
 - **Because:**
@@ -276,3 +276,19 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - `serde_yaml` and `serde_yaml_ng` are unmaintained (RUSTSEC-2024-0449) and `serde_yml` unsound (RUSTSEC-2025-0068), so `cargo deny` refuses them. `serde-saphyr` is maintained and passes.
   - The bench (D106) and nodes without verification run with no file; a missing file is a choice, a broken one a mistake.
 - **Revisit when:** an admin needs `kms`, a second trust root or CEL conditions (D11).
+
+## D143: The trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h (amends D8)
+
+- **Decision:**
+  - A `verify.trusted_root` path pins a `trusted_root.json`, read at start: a missing or corrupt file stops the agent and makes `check-config` exit 1 (D30). No TUF runs then.
+  - Otherwise `sigstore-tuf` 0.16, without its `client` feature, fetches the root through our `Repository` on `speculaire_registry::Client`: anonymous, on the system's trust, a 404 or 403 read as no such file, as sigstore-tuf's own transport does. The initial TUF root is version 16 of the public-good repository, `crates/verify/src/tuf_root.json`, a copy of sigstore-rust's `crates/sigstore-trust-root/repository/tuf_root.json` at `sigstore-verify-v0.16.0`. Settings: `verify.tuf_url = "https://tuf-repo-cdn.sigstore.dev"`, `verify.tuf_cache = "/var/lib/speculaire/tuf"`, `verify.tuf_refresh = 21600`. These three and `trusted_root` are restart keys (D47).
+  - A refresh runs in the background at start, then every `tuf_refresh`, or 60 s after a failure. When the repository fails, the cache is refreshed again offline, every signature and expiry checked as if fetched. When both fail the node holds no trust root, and the reason names both (`TUF: …; the cache: …`); it holds none either until the first refresh ends. With none, verifications end `unverifiable` (D20).
+  - The trust-root hash of a verdict's key (D20) is the SHA-256 of the `trusted_root.json` bytes. The root's expiry is the latest end among its keys whose end is known: a key's `validFor.end`, and for a certificate or timestamp authority also its chain's earliest `notAfter`. A root from TUF expires no later than the first of the root, timestamp, snapshot and targets metadata. `speculaire_trust_root_expiry_timestamp_seconds` shows it, 0 while no root is held.
+  - `sigstore-verify` and `sigstore-bundle` enter the workspace with the verification that calls them.
+- **Because:**
+  - sigstore-trust-root's `tuf` feature hardwires reqwest, a second HTTP and TLS stack, and `directories`; the embedded TUF root sits behind it too. tough 0.24 would add a second TUF implementation and snafu. sigstore-tuf alone checks the same metadata and leaves the transport ours: the registry client's connections, trust and `User-Agent`.
+  - The public-good root's current keys have no `validFor.end`, so their certificates give the only end there is.
+  - The public-good timestamp is signed for 7 days and re-signed once 6 remain, so daily (`x-tuf-on-ci-expiry-period` 7, `x-tuf-on-ci-signing-period` 6, root v16): a TUF root always expires within 7 days, and the alert fires below 3 days, after 3 days or more without a refresh. A 6 h refresh tries about 28 times in a timestamp's life.
+  - The pinned root and the refresh task are set up at start; re-verifying on a trust-root change is D21's.
+- **Measured:** 23 crates enter `Cargo.lock` (sigstore-trust-root, sigstore-tuf, sigstore-types, sigstore-crypto, jiff, x509-cert and their dependencies), with no ring and no reqwest. A refresh from the recorded repository served in process, then from its cache, takes under 0.1 s.
+- **Revisit when:** TUF travels P2P (D26), or sigstore-trust-root's `tuf` feature stops pulling reqwest.
