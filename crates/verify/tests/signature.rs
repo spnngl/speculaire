@@ -303,4 +303,10 @@ async fn an_authority_fails_with_the_reason_of_the_closest_bundle() {
             "{artifacts:?}"
         );
     }
+
+    assert_eq!(
+        signatures.hits(),
+        2,
+        "the second check reuses both bundles' results"
+    );
 }
