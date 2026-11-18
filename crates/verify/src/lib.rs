@@ -3,6 +3,7 @@
 //! artifact store, and the TUF repository of a trust root is a transport the caller passes in.
 
 pub mod glob;
+pub mod legacy;
 pub mod pattern;
 pub mod policy;
 pub mod signature;
