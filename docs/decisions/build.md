@@ -526,7 +526,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** a metric described but never set passes. A metric set but not described is caught by the tests of `/metrics` only when they emit it.
 - **Revisit when:** a metric is set without its `describe`, or the catalog is generated from the code.
 
-## D112: The e2e cluster has four upstreams and a signed test image; the proxy throttles and a node can lose an upstream (amends D94; amended by D120)
+## D112: The e2e cluster has four upstreams and a signed test image; the proxy throttles and a node can lose an upstream (amends D94; amended by D120, D141)
 
 - **Decision:**
   - **Start:** after `kind create cluster`, `just e2e-up` runs `cargo run -p e2e --bin upstreams` (`e2e::upstream::start`). It starts the upstreams, pushes the test images to each, writes each node's runtime config for them and restarts the runtime, before the agents are installed. Each upstream is `<cluster>-<role>.e2e.test` (`e2e::upstream::Kind`), and `e2e-down` removes it by the cluster's label:
@@ -657,7 +657,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** a run off Linux needs a container engine; mutants of code built only off Linux, such as `crio/images.rs`'s stand-in `watch`, go untested, as on CI. Each worktree's mutants build stays in its directory of the volume (D118).
 - **Revisit when:** speculaire runs on an OS other than Linux, or a contributor builds without a container engine (D57).
 
-## D130: The rate-limit suite runs in the IPv4 pass only (amends D63, D94)
+## D130: The rate-limit suite runs in the IPv4 pass only (amends D63, D94; amended by D141)
 
 - **Decision:** `e2e/tests/limits.rs` returns at once in the dual-stack pass (D94): its test runs once per leg, in the IPv4 pass, on both runtimes. Every other suite runs in both passes.
 - **Because:** the test waits out a 120 s `Retry-After`, and what it checks, a host paused and taken up again, does not depend on the address family. Twice per leg would add 2 min to each of the 14.
@@ -684,3 +684,18 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - In `just dev` (Docker Desktop on the same Mac, 10 CPUs, 7.7 GiB): `cargo check` cold 67 on stable (59 to 76), 31 to 55 on the nightly with no trend from 1 to 8 threads; incremental 1.0 on stable, 0.6 to 0.8 on the nightly. `cargo clippy` incremental 1.1 on stable, 1.1 to 1.5 on the nightly.
   - rustfmt of `nightly-2026-11-17` leaves the workspace and `fuzz/` unchanged.
 - **Revisit when:** the parallel frontend reaches stable (then use it for everything, after checking two clean musl builds still match), or a RAPx release builds and runs on the pinned nightly (then one nightly again).
+
+## D141: The recorded Sigstore fixtures live in `fixtures/sigstore/`, for the crates' tests and e2e's upstreams (amends D112, D130)
+
+- **Decision:**
+  - **Place:** `fixtures/sigstore/`, at the top of the repository, holds D139's recording as its workflow uploaded it, byte for byte (`.gitattributes`: `-text`): one OCI layout per case under `layouts/`, `expected.json`, `trusted_root.json`, `tuf/` and the `key` case's `cosign.pub`. Its `README.md` names the run and how to record again. It stays under 2 MB. `typos` skips its JSON and its layouts.
+  - **Not recorded:** `github-private-attestation.sigstore.json`, a bundle from GitHub's private Sigstore instance, is sigstore-rust's at `sigstore-verify-v0.16.0` (Apache-2.0, `NOTICE`). The negative cases are built by code, from the recordings: `Fixture::signature_of` (a case whose only artifact is another case's `.sig`) and `Fixture::flipped` (one byte of a bundle's DSSE signature changed, with the referrer manifest that names it).
+  - **Crates' tests:** `speculaire-artifacts` has a `testing` feature. `testing::Layout` reads a case's layout and computes what discovery records of it (`Layout::artifacts`); `testing::Fixture::load` keeps that in a store of its own, in a temporary directory: the root if an index, each artifact's manifest and blobs, the record. A unit test serves every layout to discovery, with the referrers API and without, and checks it records what `Fixture::load` holds.
+  - **e2e:** `just e2e-up` copies each layout with `regctl image copy --referrers --digest-tags` from `ocidir://` to zot and to the plain upstream, as `e2e/fixtures:<case>` (`e2e::upstream::FIXTURES`): zot answers its referrers API, `registry:3` serves the recorded fallback tags and `.sig` tags. Every node has the recorded trusted root at `/etc/speculaire/trusted_root.json` (`Cluster::pin`); `Cluster::policy` writes `/etc/speculaire/policy.yaml`. The e2e job installs protoc: through `speculaire-artifacts` the suites build the runtime client, which compiles its `.proto`.
+  - **The verify suite:** `e2e/tests/verify.rs`, M5's suite, runs in the IPv4 pass only, as D130's does. Its first test pulls every case from zot, then from the plain upstream, and checks the worker records what `Layout::artifacts` computes and keeps every blob of it. On arm64 it skips the two BuildKit cases, image indexes of `linux/amd64` alone, which no arm64 node pulls; the unit test covers them.
+- **Because:**
+  - The crates' tests and e2e read the same recording, so it lives above both. The test harness signs with `--tlog-upload=false`, so its bundles cannot pass verification against a trusted root; the recordings can, offline, with their pinned root.
+  - Built negative cases cost no new recording, and each new recording writes to the public Rekor log (D139).
+  - The verification suites (M5) assert outcomes, so they run once per leg; the address family changes nothing they check.
+- **Measured:** the fixtures are 154 files, 345 kB. Locally on Docker Desktop arm64 with kind, the harness's test images took 6.9 s without the fixtures and 7.9 s with them (containerd 2.4); the verify suite's test, 11 cases each from zot then the plain upstream, took 18.8 s on containerd 2.4 and 7.2 s on CRI-O 1.37. The unit test takes 7.6 s on macOS.
+- **Revisit when:** the fixtures near 2 MB; the recording's certificates or TUF metadata expire for a test that cannot pin its time; a multi-platform recording lets arm64 pull the BuildKit cases.

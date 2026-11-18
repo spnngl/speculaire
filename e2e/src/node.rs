@@ -11,7 +11,33 @@ use crate::registry::{docker, fail};
 use crate::upstream::Digest;
 use crate::{Cluster, Failure, Runtime};
 
+/// The verification policy the agent reads by default (D8).
+pub const POLICY: &str = "/etc/speculaire/policy.yaml";
+/// The trusted root each node pins: the one recorded with the Sigstore fixtures (D141).
+pub const TRUSTED_ROOT: &str = "/etc/speculaire/trusted_root.json";
+
+/// See [`TRUSTED_ROOT`].
+const RECORDED_ROOT: &str = include_str!("../../fixtures/sigstore/trusted_root.json");
+
 impl Cluster {
+    /// Pins the fixtures' recorded trusted root on `node`, at [`TRUSTED_ROOT`].
+    ///
+    /// # Errors
+    ///
+    /// When the node's command fails.
+    pub fn pin(&self, node: &str) -> Result<(), Failure> {
+        self.write(node, TRUSTED_ROOT, RECORDED_ROOT)
+    }
+
+    /// Writes `policy`, YAML ending in a newline, to [`POLICY`] on `node`.
+    ///
+    /// # Errors
+    ///
+    /// When the node's command fails.
+    pub fn policy(&self, node: &str, policy: &str) -> Result<(), Failure> {
+        self.write(node, POLICY, policy)
+    }
+
     /// The file a node serves its peers `digest` from (D67): in containerd's content store, or in the agent's blob
     /// cache on CRI-O.
     #[must_use]

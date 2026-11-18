@@ -8,6 +8,8 @@ pub mod discover;
 pub mod follow;
 pub mod metrics;
 pub mod store;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use discover::{Discovery, Limits, Local};
 pub use follow::follow;

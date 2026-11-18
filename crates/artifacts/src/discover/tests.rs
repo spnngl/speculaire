@@ -23,6 +23,8 @@ use tokio::net::TcpListener;
 
 use super::*;
 
+mod recorded;
+
 pub(super) const NAME: &str = "reg.test/app";
 const MIRROR: &str = "127.0.0.1:7480";
 

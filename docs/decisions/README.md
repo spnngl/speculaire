@@ -119,7 +119,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34)
 - D110 [distribution](distribution.md): the content directory is `io.containerd.content.v1.content` below the `root` of containerd's config, `/var/lib/containerd` when it names none; an agent test serves a blob from a temporary root (amends D5, D85)
 - D111 [distribution](distribution.md): every request of the upstream client carries `User-Agent: speculaire/<version>` (amends D88)
-- D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94; amended by D120)
+- D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94; amended by D120, D141)
 - D113 [build](build.md): pull requests run 4 e2e legs, the newest containerd and CRI-O on both architectures; `main` runs all 14 (amends D63, D94)
 - D114 [build](build.md): the bench samples the agent's cgroup `anon` and `file` every second; peak memory, and so the release bar, is the peak of `anon` (amends D35, D106)
 - D115 [distribution](distribution.md): a negative `dial_timeout` in a `hosts.toml` is parsed, and the host is left out of the registry's sources, as containerd cannot dial it (amends D78; amended by D119)
@@ -137,7 +137,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D127 [distribution](distribution.md): a tag is announced only while its image lists a repository digest in the tag's repository, as the peer API needs to resolve it; the image list is read again 1 s after each hint, since containerd's CRI plugin lists a reference after publishing its event (amends D121, D123)
 - D128 [verification](verification.md): a refusal (`429`, or `503` with `Retry-After`) pauses its host for every discovery; the root waits for `retry_at`, and an `info` line `discovery of <digest>: unverifiable: <reason>` shows it until M5; the CRI-O relay is not paused (amends D38, D121)
 - D129 [distribution](distribution.md): the CRI-O relay passes upstream's refusal on: a `429` with its `Retry-After`, a `502` when upstream failed, a `404` only for upstream's `404`, `401` or `403`; each refusal is a `warn` line (amends D85, D88)
-- D130 [build](build.md): the rate-limit e2e suite runs in the IPv4 pass only (amends D63, D94)
+- D130 [build](build.md): the rate-limit e2e suite runs in the IPv4 pass only (amends D63, D94; amended by D141)
 - D131 [verification](verification.md): the artifact store keeps what the listed roots' records name, a shared blob while any does; it is collected at each full listing and each removal, between discoveries, each deletion withdrawn; it announces only after its first collection; no grace for roots not yet listed (amends D121, D124)
 - D132 [reflector](reflector.md): a stream its reflector ends because it stops is a drop however short, so a reflector restarted often does not push the agent's retries to 60 s apart (amends D98)
 - D133 [verification](verification.md): a referrers index whose `manifests` is `null`, as Google's Artifact Registry answers for none, lists none; one without `manifests` is still no index (amends D121)
@@ -148,5 +148,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D138 [agent](agent.md): durations are numbers of seconds to the millisecond, TOML integers or floats, printed as the shortest decimal; strings are refused (amends D60, D135)
 - D139 [verification](verification.md): Sigstore fixtures are recorded from public-good Sigstore by the hand-run `fixtures.yml`, as OCI layouts with a TUF snapshot, checked offline by cosign and gh (amends D8)
 - D140 [build](build.md): the pinned nightly moves to `nightly-2026-11-17` and keeps the parallel frontend's default 2 threads; RAPx gets its own nightly, `rapx_nightly`; the check loop stays on stable (amends D57, D76, D77)
+- D141 [build](build.md): the recorded Sigstore fixtures live in `fixtures/sigstore/`, read by the crates' tests through `speculaire-artifacts`' `testing` feature and pushed by `just e2e-up` to zot and the plain upstream, with their trusted root pinned on every node; M5's `verify` e2e suite runs in the IPv4 pass only (amends D112, D130)
 
-Next free number: D141.
+Next free number: D142.

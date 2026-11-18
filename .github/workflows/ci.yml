@@ -203,6 +203,11 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      # protoc: the suites read the recorded fixtures through speculaire-artifacts, whose runtime client compiles its
+      # .proto at build time (D141).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -215,6 +220,9 @@ jobs:
       - run: rustup toolchain install
       # Before the artifact: restoring a cache replaces target/.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: speculaire-${{ matrix.platform.target }}

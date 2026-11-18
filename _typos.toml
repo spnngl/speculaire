@@ -1,7 +1,13 @@
 # typos: `just check`.
 [files]
-# Fuzz seeds are misspelt on purpose, and tests/data holds upstream copies as they are.
-extend-exclude = ["plan/", "fuzz/seeds/", "**/tests/data/"]
+# Fuzz seeds are misspelt on purpose; tests/data and the recorded fixtures hold upstream bytes as they are.
+extend-exclude = [
+  "plan/",
+  "fuzz/seeds/",
+  "**/tests/data/",
+  "fixtures/**/*.json",
+  "fixtures/sigstore/layouts/",
+]
 
 [default]
 # "ANDed": "AND" in capitals, then a suffix.

@@ -1,6 +1,7 @@
-//! What `just e2e-up` starts beside the cluster (D94, D112): the four upstreams, the test images on each, and each
-//! node's runtime config for them.
+//! What `just e2e-up` starts beside the cluster (D94, D112): the four upstreams, the test images on each, the recorded
+//! Sigstore fixtures on two (D141), and each node's runtime config for them.
 
+use std::path::Path;
 use std::time::Instant;
 
 use super::{Kind, Upstream};
@@ -19,6 +20,11 @@ pub const UNSIGNED: &str = "e2e/unsigned:1";
 pub const COSIGN_PUBLIC_KEY: &str = "/etc/speculaire-e2e/cosign.pub";
 /// The auth file CRI-O's `global_auth_file` names, which holds the private upstream's login (D89).
 pub const CRIO_AUTH_FILE: &str = "/etc/crio/e2e-auth.json";
+/// The repository of the recorded Sigstore fixtures (D141) on zot and on the plain upstream, one tag per case.
+pub const FIXTURES: &str = "e2e/fixtures";
+
+/// The fixtures' OCI layouts, one directory per case.
+const LAYOUTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/sigstore/layouts");
 
 /// zot on port 80, plain HTTP: a name with a port is not mirrored on CRI-O (D88).
 const ZOT_CONFIG: &str = r#"{"distSpecVersion":"1.1.1","storage":{"rootDirectory":"/var/lib/registry"},"http":{"address":"0.0.0.0","port":"80"},"log":{"level":"info"}}"#;
@@ -36,8 +42,9 @@ const OFFLINE: [&str; 6] = [
     "--allow-insecure-registry",
 ];
 
-/// Starts the upstreams of [`Kind`], pushes [`SIGNED`] and [`UNSIGNED`] to each, and points every node's runtime at
-/// them. They live as long as the cluster; what fails on the way is removed.
+/// Starts the upstreams of [`Kind`], pushes [`SIGNED`] and [`UNSIGNED`] to each and [`FIXTURES`] to zot and the plain
+/// one, pins the fixtures' trusted root on every node and points its runtime at them. They live as long as the cluster;
+/// what fails on the way is removed.
 ///
 /// # Errors
 ///
@@ -68,14 +75,16 @@ pub fn start(cluster: &Cluster) -> Result<(), Failure> {
     let building = Instant::now();
     let public_key = build(cluster, &referrers)?;
     copy(&referrers, &[&plain, &private, &public])?;
+    push_fixtures(&[&referrers, &plain])?;
     eprintln!(
-        "e2e: the test images took {:.1} s",
+        "e2e: the test images and fixtures took {:.1} s",
         building.elapsed().as_secs_f64()
     );
 
     for node in cluster.nodes()? {
         let node = &node.name;
         cluster.write(node, COSIGN_PUBLIC_KEY, &public_key)?;
+        cluster.pin(node)?;
         // The public upstream's CA, only in the system trust store.
         cluster.write(
             node,
@@ -261,7 +270,25 @@ fn copy(from: &Upstream, to: &[&Upstream]) -> Result<(), Failure> {
             )
         })
         .collect();
-    regctl_after(&setup.join(" && "), &script.join(" && ")).map(drop)
+    regctl_after(&setup.join(" && "), &script.join(" && "), None).map(drop)
+}
+
+/// Copies each fixture's layout to each of `to` as [`FIXTURES`]`:<case>`, with its referrers and its digest tags: zot
+/// gets the referrers as such, a registry without the referrers API the recorded fallback tags.
+fn push_fixtures(to: &[&Upstream]) -> Result<(), Failure> {
+    let layouts = Path::new(LAYOUTS)
+        .canonicalize()
+        .map_err(|e| fail(LAYOUTS, &e))?;
+    let setup: Vec<String> = to.iter().copied().map(Upstream::reach).collect();
+    let targets: Vec<&str> = to.iter().map(|upstream| upstream.address()).collect();
+    let script = format!(
+        "for case in $(ls /layouts); do for target in {}; do \
+         regctl image copy --referrers --digest-tags \"ocidir:///layouts/$case:$case\" \"$target/{FIXTURES}:$case\" \
+         || exit 1; done; done",
+        targets.join(" ")
+    );
+    let volume = format!("{}:/layouts:ro", layouts.display());
+    regctl_after(&setup.join(" && "), &script, Some(&volume)).map(drop)
 }
 
 /// A Docker volume, the working directory of the containers that [`Volume::run`] starts; removed when this drops.

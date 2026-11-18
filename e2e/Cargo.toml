@@ -18,3 +18,7 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The recorded Sigstore fixtures (D141), read as discovery records them.
+speculaire-artifacts = { workspace = true, features = ["testing"] }

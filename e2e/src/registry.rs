@@ -330,24 +330,25 @@ pub(crate) fn regctl(address: &str, script: &str) -> Result<String, Failure> {
     regctl_after(
         &format!("regctl registry set --tls disabled {address} >/dev/null"),
         script,
+        None,
     )
 }
 
-/// Runs `setup`, the `regctl registry` commands that reach the registries, then `script`, as [`regctl`] does.
-pub(crate) fn regctl_after(setup: &str, script: &str) -> Result<String, Failure> {
-    docker(&[
-        "run",
-        "--rm",
-        "--network",
-        NETWORK,
-        "--label",
-        LABEL,
-        "--entrypoint",
-        "sh",
-        &hub::pulled(COPY_IMAGE)?,
-        "-c",
-        &format!("{setup} && {script}"),
-    ])
+/// Runs `setup`, the `regctl registry` commands that reach the registries, then `script`, as [`regctl`] does, with
+/// `volume`, a `docker run --volume` argument, if any.
+pub(crate) fn regctl_after(
+    setup: &str,
+    script: &str,
+    volume: Option<&str>,
+) -> Result<String, Failure> {
+    let image = hub::pulled(COPY_IMAGE)?;
+    let script = format!("{setup} && {script}");
+    let mut args = vec!["run", "--rm", "--network", NETWORK, "--label", LABEL];
+    if let Some(volume) = volume {
+        args.extend(["--volume", volume]);
+    }
+    args.extend(["--entrypoint", "sh", &image, "-c", &script]);
+    docker(&args)
 }
 
 /// A line of an `htpasswd` file for [`USER`] with [`PASSWORD`], bcrypt-hashed.

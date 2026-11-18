@@ -107,3 +107,6 @@ docs/rfc/archive/** -diff
 
 # Fuzz seeds are byte-exact: HTTP responses end their lines with CRLF.
 fuzz/seeds/crio_inspect/** -text
+
+# Recorded Sigstore fixtures are byte-exact: digests and signatures cover every byte (D141).
+fixtures/sigstore/** -text
