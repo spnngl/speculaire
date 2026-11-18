@@ -2,7 +2,7 @@
 
 How artifacts become verdicts. Index: `docs/decisions/README.md`.
 
-## D8: Crypto comes from sigstore-rust (amended by D43, D136, D139, D143)
+## D8: Crypto comes from sigstore-rust (amended by D43, D136, D139, D143, D145)
 
 - **Decision:** use `sigstore-verify` and `sigstore-trust-root` (sigstore-rust, crates 0.16). We write OCI discovery, regex identity matching and the legacy `.sig` → v0.1-bundle conversion ourselves. The conversion also checks that the SimpleSigning payload's `critical.image.docker-manifest-digest` equals the image digest, since the bundle verifier only binds the signature to the payload. Attestations are verified only as bundles (D43).
 - **Because:**
@@ -40,7 +40,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Vulnerability data changes daily while the image does not, which breaks verdicts cached per digest. A vulnerability database on every node is also heavy, and makes nodes disagree.
 - **Revisit when:** users ask for content rules (CEL) or for vulnerability gating (that needs verdict expiry).
 
-## D20: Verdict model (amended by D31, D38, D65)
+## D20: Verdict model (amended by D31, D38, D65, D145)
 
 - **Decision:**
   - `enum Verdict { Allow, Rejected { reason }, Unverifiable { reason, retry_at }, Pending }`.
@@ -112,7 +112,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Docker Hub counts manifest `GET`s against its pull limit, but not `HEAD`s. Most images have no fallback or `.sig` tag, so probing with `HEAD` keeps verification from spending the node's pull budget.
 - **Revisit when:** —
 
-## D43: Attestations count only as Sigstore bundles; `.att` tags are ignored (amends D8, D38; amended by D49)
+## D43: Attestations count only as Sigstore bundles; `.att` tags are ignored (amends D8, D38; amended by D49, D145)
 
 - **Decision:**
   - An attestation counts only as a Sigstore bundle (`application/vnd.dev.sigstore.bundle.v0.3+json`, as cosign v3 and GitHub attestations write it), found as an OCI referrer through the referrers API or the `sha256-<hex>` fallback tag.
@@ -277,7 +277,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The bench (D106) and nodes without verification run with no file; a missing file is a choice, a broken one a mistake.
 - **Revisit when:** an admin needs `kms`, a second trust root or CEL conditions (D11).
 
-## D143: The trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h (amends D8)
+## D143: The trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h (amends D8; amended by D145)
 
 - **Decision:**
   - A `verify.trusted_root` path pins a `trusted_root.json`, read at start: a missing or corrupt file stops the agent and makes `check-config` exit 1 (D30). No TUF runs then.
@@ -305,3 +305,21 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - A blob a discovery keeps is marked before it is linked: a collection running meanwhile never finds it unmarked.
 - **Limit:** the artifacts of a root removed while its own discovery runs stay until that discovery ends.
 - **Revisit when:** discoveries of different roots run in parallel, or a root's own discovery outlasts the 2 s often.
+
+## D145: A bundle is verified once per trust root, with any identity, then matched to each authority (amends D8, D20, D43, D143)
+
+- **Decision:**
+  - `speculaire_verify::Signatures::check` reads each `Kind::Bundle` artifact whose subject is the image, its bundle the manifest's last blob, and returns one result per authority of the policy: who signed the bundle that satisfies it, or why none does. The policy's signature check passes when one authority passes (D11).
+  - A bundle counts as a signature of the image its DSSE in-toto subject or its message digest names, whatever its predicate type, as `cosign verify` does with the new bundle format (cosign v3.1.3 `cmd/cosign/cli/verify/verify.go:239`). An image GitHub's `attest` alone signed passes the signature check.
+  - A bundle holding a certificate is verified with `VerificationPolicy::any_identity()`: chain to the trust root's Fulcio at the log's integrated time, SCT, transparency-log entry (D142), signature. Its SAN and OIDC issuer are then matched against the authority's identities with D136's matchers. A bundle holding a public key is verified with `PublicKeyVerificationPolicy` and the authority's key, entry required; it satisfies key authorities only.
+  - Before any crypto, the leaf certificate's issuer must be the subject of a certificate in one of the trust root's certificate-authority chains; otherwise the reason names that issuer, such as `O=GitHub, Inc., CN=Fulcio Intermediate l1` for GitHub's private instance (D43).
+  - Results are kept in memory per (image digest, bundle digest, SHA-256 of the authority's key or none), for one trust root: a new trust-root hash empties them, and so does the 16 384th entry. A second check of the bundle under another policy matches identities only; `Signatures::hits()` counts it. Saving them in `cache.bin` is D31's, with the verdict cache.
+  - An authority no bundle satisfies fails with the reason of the bundle that came closest, in this order: `identity mismatch: signed by <SAN> (issuer <issuer>)` (or `by a key`), `certificate issuer <DN> is unknown to the trust root`, `signature invalid: <cause>`, `no signature`. No trust root, or a bundle the store cannot give, makes the check `Unverifiable` (`trust root: <absent>`), never `Rejected` (D20).
+  - Only `sigstore-verify` 0.16 enters the workspace: it re-exports sigstore-bundle's types, so `sigstore-bundle` is no direct dependency.
+- **Because:**
+  - Verifying with any identity first lets every authority and every policy share one verification; sigstore-verify matches identities exactly only (`verify.rs:156`), and D136's regular expressions need the SAN anyway.
+  - cosign v3 signs with a DSSE bundle of predicate type `https://sigstore.dev/cosign/sign/v1`, and its verify accepts any verified bundle as a signature; requiring that predicate would reject images cosign passes. An attestation requirement still never counts the signature predicate.
+  - GitHub's private bundles carry no transparency-log entry and chain to a CA the public trust root lacks: naming the CA tells the admin why, where sigstore-verify reports a chain or a log error.
+  - The closest reason is the one an admin can act on: a mismatch names the signer to put in the policy.
+- **Measured:** 8 crates enter `Cargo.lock` (sigstore-verify, sigstore-bundle, sigstore-rekor, sigstore-tsa, sigstore-merkle, cms, serde_json_canonicalizer, ryu-js). One verification takes 1.2 ms for the keyless fixture and 0.65 ms for the key fixture (release, Apple M5); parsing the trusted root with its verifier takes 0.25 ms.
+- **Revisit when:** sigstore-verify matches identities by pattern, or cosign stops counting attestations as signatures.
