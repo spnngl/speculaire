@@ -252,3 +252,10 @@ path = "fuzz_targets/bundle.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "simplesigning"
+path = "fuzz_targets/simplesigning.rs"
+test = false
+doc = false
+bench = false
