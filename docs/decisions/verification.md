@@ -137,7 +137,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
 
-## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134)
+## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146)
 
 - **Decision:**
   - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends, and read the list once more 1 s after a watch starts: no answer tells when containerd holds the subscription, and an image pulled in between waited 60 s in CI. Once the agent stops, a follower that loses the runtime ends without a warning: the agent's own teardown cut it. The CRI-O relay protects the listed images from eviction through it.
@@ -293,7 +293,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Measured:** 23 crates enter `Cargo.lock` (sigstore-trust-root, sigstore-tuf, sigstore-types, sigstore-crypto, jiff, x509-cert and their dependencies), with no ring and no reqwest. A refresh from the recorded repository served in process, then from its cache, takes under 0.1 s.
 - **Revisit when:** TUF travels P2P (D26), or sigstore-trust-root's `tuf` feature stops pulling reqwest.
 
-## D144: The artifact store is collected beside a discovery, which keeps its root and what it holds (amends D131)
+## D144: The artifact store is collected beside a discovery, which keeps its root and what it holds (amends D131; amended by D146)
 
 - **Decision:**
   - **Collected:** the follower of the image list reads the list while a discovery runs, and collects the store at each full listing and whenever a root leaves the list, as D131 does between discoveries.
@@ -323,3 +323,15 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The closest reason is the one an admin can act on: a mismatch names the signer to put in the policy.
 - **Measured:** 8 crates enter `Cargo.lock` (sigstore-verify, sigstore-bundle, sigstore-rekor, sigstore-tsa, sigstore-merkle, cms, serde_json_canonicalizer, ryu-js). One verification takes 1.2 ms for the keyless fixture and 0.65 ms for the key fixture (release, Apple M5); parsing the trusted root with its verifier takes 0.25 ms.
 - **Revisit when:** sigstore-verify matches identities by pattern, or cosign stops counting attestations as signatures.
+
+## D146: The roots of an image just listed have a discovery lane of their own (amends D121, D144)
+
+- **Decision:**
+  - **Lanes:** the follower of the image list runs two discoveries at most, one per lane, each one root at a time. The roots of an image just listed go in the pulled lane, in the order they come. Those a full listing queues, and those due again after a failure (D128, D134), go in the backlog lane.
+  - **Once:** a lane that comes to a root the other lane is discovering drops it: that discovery records it.
+  - The store's guard of D144 counts discoveries: a collection keeps the roots and blobs of both lanes.
+- **Because:**
+  - With one lane, a pull waited for the discovery in flight, and that one can be of a root no source answers soon: a connect waits 15 s, a request 30 s. On PR #197's amd64 containerd 2.4 dual-stack leg, run 44380305182, an agent restarted at 19:55:17.85 began with one of kind's preloaded `docker.io/library/import-*` roots, whose sources are internet registries. `e2e/signed:1` was pulled at 19:55:18.46, and 10.5 s later the store held nothing and the agent had logged no discovery since its start, where every other start on that node logged its first within 0.7 s.
+  - The roots a pull adds are those a node needs to run a pod, and soon to admit it at M5. A pull waits only for the discovery of another image just listed.
+  - Two lanes bound what a restart and a burst of pulls ask of peers and upstreams at once.
+- **Revisit when:** M5's manifest-fetch trigger needs a root discovered while its pull waits, or a pull often waits for another pulled image's discovery.
