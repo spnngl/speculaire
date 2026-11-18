@@ -192,7 +192,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The verdict, and the reason in it, come at M5; a journal line in its words lets an operator see the limit today.
 - **Revisit when:** M5 produces verdicts, or a registry limits per image rather than per client.
 
-## D131: The artifact store keeps only what the listed roots name, collected at each listing and each removal (amends D121, D124)
+## D131: The artifact store keeps only what the listed roots name, collected at each listing and each removal (amends D121, D124; amended by D144)
 
 - **Decision:**
   - **Kept:** a listed root's index blob (D126), and every artifact manifest and blob of a listed root's record. A blob two roots name stays while either is listed, such as the empty config every Sigstore bundle names (D124).
@@ -292,3 +292,16 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The pinned root and the refresh task are set up at start; re-verifying on a trust-root change is D21's.
 - **Measured:** 23 crates enter `Cargo.lock` (sigstore-trust-root, sigstore-tuf, sigstore-types, sigstore-crypto, jiff, x509-cert and their dependencies), with no ring and no reqwest. A refresh from the recorded repository served in process, then from its cache, takes under 0.1 s.
 - **Revisit when:** TUF travels P2P (D26), or sigstore-trust-root's `tuf` feature stops pulling reqwest.
+
+## D144: The artifact store is collected beside a discovery, which keeps its root and what it holds (amends D131)
+
+- **Decision:**
+  - **Collected:** the follower of the image list reads the list while a discovery runs, and collects the store at each full listing and whenever a root leaves the list, as D131 does between discoveries.
+  - **Kept:** while a discovery runs, a collection keeps its root's record and every blob it found held or kept. The store forgets them once neither a discovery nor a collection runs, so a failed discovery's blobs go at the next collection, as in D131.
+  - **Ended:** a root that left the list while being discovered is collected once its discovery ends.
+- **Because:**
+  - A discovery waits on peers and upstream for seconds. On PR #194's arm64 containerd 2.4 leg, the discovery of a root no source served ran 6.1 s, and the bundle of an image removed meanwhile was withdrawn 5.6 s after `crictl rmi`, where D131 measured half a second and the e2e suite allows 2 s.
+  - The store checks whether a blob is held under the lock a collection holds through each deletion: the collection deletes the blob before the discovery looks, which then fetches it again, or keeps it.
+  - A blob a discovery keeps is marked before it is linked: a collection running meanwhile never finds it unmarked.
+- **Limit:** the artifacts of a root removed while its own discovery runs stay until that discovery ends.
+- **Revisit when:** discoveries of different roots run in parallel, or a root's own discovery outlasts the 2 s often.

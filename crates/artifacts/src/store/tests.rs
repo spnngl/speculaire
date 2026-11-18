@@ -407,6 +407,31 @@ async fn a_collection_deletes_what_no_listed_root_names_and_keeps_a_blob_another
     followed.await.unwrap();
 }
 
+#[tokio::test]
+async fn a_collection_beside_a_discovery_keeps_its_root_and_what_it_held_until_it_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let (a, _) = signed(&store, "a").await;
+    let (root, other) = (digest_of(b"root"), digest_of(b"other"));
+    let (kept, empty) = (digest_of(b"kept"), digest_of(b"{}"));
+    let discovering = store.discovering(&root);
+    store.keep(&kept, b"kept").await.unwrap();
+    // The empty config `a` names, which the discovery then has no need to fetch.
+    assert!(store.hold(&empty));
+    assert!(!store.hold(&other));
+    store.record(&root, &[]).await.unwrap();
+    // Neither `a` nor the root being discovered is listed.
+    store.collect(HashSet::new()).await.unwrap();
+    assert_eq!(store.recorded(&a).await.unwrap(), None);
+    assert!(store.contains(&kept) && store.contains(&empty));
+    assert!(store.recorded(&root).await.unwrap().is_some());
+
+    drop(discovering);
+    store.collect(HashSet::new()).await.unwrap();
+    assert!(held(dir.path()).is_empty());
+    assert_eq!(store.recorded(&root).await.unwrap(), None);
+}
+
 /// A crash after a record went and before its blobs did, or after a blob went and before its withdrawal: the next
 /// agent announces only what its store holds once collected.
 #[tokio::test]

@@ -138,7 +138,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D128 [verification](verification.md): a refusal (`429`, or `503` with `Retry-After`) pauses its host for every discovery; the root waits for `retry_at`, and an `info` line `discovery of <digest>: unverifiable: <reason>` shows it until M5; the CRI-O relay is not paused (amends D38, D121)
 - D129 [distribution](distribution.md): the CRI-O relay passes upstream's refusal on: a `429` with its `Retry-After`, a `502` when upstream failed, a `404` only for upstream's `404`, `401` or `403`; each refusal is a `warn` line (amends D85, D88)
 - D130 [build](build.md): the rate-limit e2e suite runs in the IPv4 pass only (amends D63, D94; amended by D141)
-- D131 [verification](verification.md): the artifact store keeps what the listed roots' records name, a shared blob while any does; it is collected at each full listing and each removal, between discoveries, each deletion withdrawn; it announces only after its first collection; no grace for roots not yet listed (amends D121, D124)
+- D131 [verification](verification.md): the artifact store keeps what the listed roots' records name, a shared blob while any does; it is collected at each full listing and each removal, between discoveries, each deletion withdrawn; it announces only after its first collection; no grace for roots not yet listed (amends D121, D124; amended by D144)
 - D132 [reflector](reflector.md): a stream its reflector ends because it stops is a drop however short, so a reflector restarted often does not push the agent's retries to 60 s apart (amends D98)
 - D133 [verification](verification.md): a referrers index whose `manifests` is `null`, as Google's Artifact Registry answers for none, lists none; one without `manifests` is still no index (amends D121)
 - D134 [verification](verification.md): a discovery that starts within 10 s of the latest reflector stream coming up and finds no source is tried again 3 times, 20 s apart, before D121's 10 min (amends D121, D126)
@@ -151,5 +151,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D141 [build](build.md): the recorded Sigstore fixtures live in `fixtures/sigstore/`, read by the crates' tests through `speculaire-artifacts`' `testing` feature and pushed by `just e2e-up` to zot and the plain upstream, with their trusted root pinned on every node; M5's `verify` e2e suite runs in the IPv4 pass only (amends D112, D130)
 - D142 [verification](verification.md): the policy file holds `ClusterImagePolicy` documents of a subset, any other field refusing it; globs match the repository name; a missing file is no policy (amends D11)
 - D143 [verification](verification.md): the trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h, served from cache while the repository fails; its hash is its file's SHA-256, its expiry the earliest of its TUF metadata or the latest end of its keys (amends D8)
+- D144 [verification](verification.md): the store is collected beside a discovery, which keeps from collection its root and every blob it finds held or keeps, until no discovery and no collection runs; a root that left the list while discovered is collected once its discovery ends (amends D131)
 
-Next free number: D144.
+Next free number: D145.

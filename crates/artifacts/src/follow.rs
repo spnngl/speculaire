@@ -13,7 +13,7 @@ use tokio::time::{Instant, sleep_until};
 use tracing::{info, warn};
 
 use crate::discover::{Discovery, Error, RETRY, Reason};
-use crate::store::Store;
+use crate::store::{Artifact, Store};
 
 /// How long after a reflector stream comes up a discovery that starts is asked again soon when no source serves its
 /// root (D134).
@@ -61,12 +61,37 @@ impl Soon {
         self.left.insert(root.clone(), after);
         Some(Instant::now() + SOON)
     }
+
+    /// What the discovery of `root`, started at `started`, came to, logged.
+    fn ended(
+        &mut self,
+        root: &Digest,
+        started: Instant,
+        discovered: Result<Vec<Artifact>, Error>,
+    ) -> Done {
+        match discovered {
+            Ok(artifacts) => {
+                info!(%root, artifacts = artifacts.len(), "artifacts discovered");
+                Done::Discovered
+            }
+            // An image pulled with a pull secret only is unreachable by design (D17), and a rate limit is upstream's
+            // to set (D38): no warning.
+            Err(e @ Error::Unverifiable { retry_at, .. }) => {
+                info!("discovery of {root}: {e}");
+                Done::Retry(self.next(root, started, &e).unwrap_or(retry_at))
+            }
+            Err(e @ Error::Store(_)) => {
+                warn!(%root, error = %e, "artifacts not discovered");
+                Done::Retry(Instant::now() + RETRY)
+            }
+        }
+    }
 }
 
 /// Discovers the artifacts of each root the image list of `images` names, once per run, until the list ends.
 ///
 /// Discovery starts once `linked` completes. The store is collected at each listing and whenever a root leaves the
-/// list, from the first listing on: it announces nothing until then.
+/// list, from the first listing on, a discovery running or not (D144): it announces nothing until then.
 ///
 /// A root recorded by an earlier run is not discovered again; one whose discovery failed is tried again at the time
 /// its error gives, or after [`RETRY`] when the store failed. A root no source served, in a discovery that started at
@@ -92,19 +117,17 @@ pub async fn follow(
         last_up,
         left: HashMap::new(),
     };
-    // The roots listed, and whether a listing came since the last collection.
+    // The roots listed, and whether the store may hold what they do not name: a listing came since the last
+    // collection, or a root that left was recorded.
     let mut listed = HashSet::new();
-    let mut relisted = false;
+    let mut stale = false;
     loop {
         while let Ok(update) = updates.try_recv() {
-            relisted |= enqueue(&mut list, &mut queue, update);
+            stale |= enqueue(&mut list, &mut queue, update);
         }
-        if roots_left(&list, &mut listed) || relisted {
-            collect(discovery.store(), &listed).await;
-            // A root collected is discovered again when it comes back.
-            done.retain(|root, _| listed.contains(root));
-            soon.left.retain(|root, _| listed.contains(root));
-            relisted = false;
+        if roots_left(&list, &mut listed) || stale {
+            collect(discovery.store(), &listed, &mut done, &mut soon).await;
+            stale = false;
         }
         let next = if is_linked { queue.pop_front() } else { None };
         let Some(root) = next else {
@@ -123,7 +146,7 @@ pub async fn follow(
             };
             tokio::select! {
                 update = updates.recv() => match update {
-                    Some(update) => relisted |= enqueue(&mut list, &mut queue, update),
+                    Some(update) => stale |= enqueue(&mut list, &mut queue, update),
                     None => break,
                 },
                 () = &mut linked, if !is_linked => is_linked = true,
@@ -162,23 +185,25 @@ pub async fn follow(
             continue;
         }
         let started = Instant::now();
-        match discovery.discover(&root, &names).await {
-            Ok(artifacts) => {
-                info!(%root, artifacts = artifacts.len(), "artifacts discovered");
-                done.insert(root, Done::Discovered);
+        // The list is followed meanwhile, and the store collected as a root leaves it: a discovery may wait on peers
+        // and upstream for seconds (D144).
+        let discovered = {
+            let mut discovering = std::pin::pin!(discovery.discover(&root, &names));
+            loop {
+                tokio::select! {
+                    discovered = &mut discovering => break discovered,
+                    Some(update) = updates.recv() => stale |= enqueue(&mut list, &mut queue, update),
+                }
+                if roots_left(&list, &mut listed) || stale {
+                    collect(discovery.store(), &listed, &mut done, &mut soon).await;
+                    stale = false;
+                }
             }
-            // An image pulled with a pull secret only is unreachable by design (D17), and a rate limit is upstream's
-            // to set (D38): no warning.
-            Err(e @ Error::Unverifiable { retry_at, .. }) => {
-                info!("discovery of {root}: {e}");
-                let at = soon.next(&root, started, &e).unwrap_or(retry_at);
-                done.insert(root, Done::Retry(at));
-            }
-            Err(e @ Error::Store(_)) => {
-                warn!(%root, error = %e, "artifacts not discovered");
-                done.insert(root, Done::Retry(Instant::now() + RETRY));
-            }
-        }
+        };
+        // Recorded after it left the list: collected at the next turn.
+        stale |= !listed.contains(&root);
+        let ended = soon.ended(&root, started, discovered);
+        done.insert(root, ended);
     }
     following.abort();
 }
@@ -219,11 +244,19 @@ fn roots_left(list: &List, listed: &mut HashSet<Digest>) -> bool {
     left
 }
 
-/// Collects `store` down to what the roots `listed` name.
-async fn collect(store: &Arc<Store>, listed: &HashSet<Digest>) {
+/// Collects `store` down to what the roots `listed` name, and forgets the others in `done` and `soon`: a root collected
+/// is discovered again when it comes back.
+async fn collect(
+    store: &Arc<Store>,
+    listed: &HashSet<Digest>,
+    done: &mut HashMap<Digest, Done>,
+    soon: &mut Soon,
+) {
     if let Err(e) = store.collect(listed.clone()).await {
         warn!(error = %e, "the artifact store cannot be collected: what it holds stays until the next listing");
     }
+    done.retain(|root, _| listed.contains(root));
+    soon.left.retain(|root, _| listed.contains(root));
 }
 
 /// The names the list gives the manifest digest `root`, once each, in the list's order; none once it left the list.
