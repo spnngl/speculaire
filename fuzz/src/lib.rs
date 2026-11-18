@@ -14,6 +14,7 @@ mod smoke;
 mod values;
 
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use speculaire_agent::config;
@@ -23,8 +24,8 @@ use speculaire_oci::tagged::Tagged;
 use speculaire_registry_config::containerd::config::{self as containerd_config_file, Registry};
 use speculaire_registry_config::containerd::hosts;
 use speculaire_registry_config::crio::{auth, registries};
-use speculaire_verify::TrustRoot;
-use speculaire_verify::policy::{MatchHash, Policies, Policy, Signer};
+use speculaire_verify::policy::{MatchHash, Policies, Policy, PublicKey, Signer};
+use speculaire_verify::{TrustRoot, signature};
 
 /// A fuzz entry point.
 pub type Entry = fn(&[u8]);
@@ -57,6 +58,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("duration", duration),
     ("policy", policy),
     ("trusted_root", trusted_root),
+    ("bundle", bundle),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -833,4 +835,46 @@ pub fn trusted_root(data: &[u8]) {
     let again = TrustRoot::parse(data).expect("bytes that parsed parse again");
     assert_eq!(root.hash(), again.hash());
     assert_eq!(root.expiry(), again.expiry());
+}
+
+/// The recorded trusted root the `bundle` target verifies against, parsed once.
+fn recorded_root() -> &'static TrustRoot {
+    static ROOT: OnceLock<TrustRoot> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        TrustRoot::parse(include_bytes!("../../fixtures/sigstore/trusted_root.json"))
+            .expect("the recorded trusted root parses")
+    })
+}
+
+/// A Sigstore bundle, as the artifact store holds it (D144), verified as a signature of the recorded keyless image
+/// by its certificate and of the recorded key image by `cosign.pub`.
+///
+/// A bundle that verifies verifies the same again.
+///
+/// # Panics
+///
+/// When verification panics, or verifying again differs.
+pub fn bundle(data: &[u8]) {
+    let key = PublicKey::try_from(include_str!("../../fixtures/sigstore/cosign.pub").to_owned())
+        .expect("the recorded key parses");
+    for (target, key) in [
+        (
+            "sha256:32ee66583f82cd56da74ff4f6e85c4fd8f552c73dfa3a5d945cc5b201f8abcf0",
+            None,
+        ),
+        (
+            "sha256:e5376e3fef52cf9bad8caca4a04978fd76dc9a564083d6a463d168321e6f7a98",
+            Some(&key),
+        ),
+    ] {
+        let target =
+            speculaire_oci::reference::Digest::parse(target).expect("the recorded digests parse");
+        let signed = signature::verify(recorded_root(), &target, data, key);
+        if signed.is_ok() {
+            assert_eq!(
+                signed,
+                signature::verify(recorded_root(), &target, data, key)
+            );
+        }
+    }
 }
