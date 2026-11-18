@@ -133,7 +133,9 @@ impl TrustRoot {
             .certificate_authorities
             .iter()
             .flat_map(|ca| &ca.cert_chain.certificates)
-            .filter_map(|entry| x509_parser::parse_x509_certificate(entry.raw_bytes.as_bytes()).ok())
+            .filter_map(|entry| {
+                x509_parser::parse_x509_certificate(entry.raw_bytes.as_bytes()).ok()
+            })
             .map(|(_, cert)| cert.subject().as_raw().to_vec())
             .collect();
         Ok(Self {

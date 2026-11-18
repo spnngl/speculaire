@@ -1,8 +1,10 @@
 //! The trust root over the recorded TUF repository of step 01 (D141), served in process: no socket.
 
-use std::path::{Path, PathBuf};
+mod recorded;
 
-use jiff::Timestamp;
+use std::path::Path;
+
+use recorded::{Recorded, at, pinned};
 use sigstore_tuf::Repository;
 use sigstore_tuf::transport::FetchFuture;
 use speculaire_artifacts::testing::FIXTURES;
@@ -13,19 +15,6 @@ use speculaire_verify::trust::{LoadError, ParseError};
 const VALID: &str = "2026-11-20T00:00:00Z";
 /// The recorded timestamp role's expiry, the first of the recorded metadata.
 const TIMESTAMP_EXPIRY: &str = "2026-11-24T13:19:56Z";
-
-/// The recorded repository, read from `fixtures/sigstore/tuf/`.
-struct Recorded;
-
-impl Repository for Recorded {
-    fn fetch_metadata<'a>(&'a self, name: &'a str, _: u64) -> FetchFuture<'a> {
-        Box::pin(async move { Ok(read(&tuf().join(name))) })
-    }
-
-    fn fetch_target<'a>(&'a self, path: &'a str, _: u64) -> FetchFuture<'a> {
-        Box::pin(async move { Ok(read(&tuf().join("targets").join(path))) })
-    }
-}
 
 /// A repository whose every fetch fails, as when the CDN is unreachable.
 struct Unreachable;
@@ -38,24 +27,6 @@ impl Repository for Unreachable {
     fn fetch_target<'a>(&'a self, _: &'a str, _: u64) -> FetchFuture<'a> {
         Box::pin(async { Err(sigstore_tuf::Error::transport("unreachable")) })
     }
-}
-
-fn tuf() -> PathBuf {
-    Path::new(FIXTURES).join("tuf")
-}
-
-/// The file, or `None` when it does not exist: the end of the root chain.
-fn read(path: &Path) -> Option<Vec<u8>> {
-    std::fs::read(path).ok()
-}
-
-fn at(time: &str) -> Timestamp {
-    time.parse().expect("the test times are RFC 3339")
-}
-
-fn pinned() -> TrustRoot {
-    TrustRoot::load(&Path::new(FIXTURES).join("trusted_root.json"))
-        .expect("the recorded trusted root parses")
 }
 
 #[tokio::test]
