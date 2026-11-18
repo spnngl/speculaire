@@ -1,19 +1,18 @@
 //! The signature check over the recorded fixtures of step 01 (D139), offline: which authorities a bundle satisfies.
 
+mod recorded;
+
 use std::path::Path;
 
+use recorded::{Recorded, at, pinned};
 use speculaire_artifacts::testing::{FIXTURES, Fixture, GITHUB_PRIVATE};
 use speculaire_verify::signature::{AuthorityResult, Failure, Signatures, Signed};
 use speculaire_verify::{Policies, Policy, TrustRoot};
 
 /// The workflow that signed every keyless case.
-const SAN: &str = "https://github.com/spnngl/speculaire/.github/workflows/fixtures.yml@refs/heads/main";
+const SAN: &str =
+    "https://github.com/spnngl/speculaire/.github/workflows/fixtures.yml@refs/heads/main";
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
-
-fn pinned() -> TrustRoot {
-    TrustRoot::load(&Path::new(FIXTURES).join("trusted_root.json"))
-        .expect("the recorded trusted root parses")
-}
 
 /// One policy over every image, with `authorities` (each a list item, indented as one) as its authorities.
 fn policy(authorities: &[String]) -> Policy {
@@ -34,13 +33,25 @@ fn keyless(subject: &str) -> String {
 /// A key authority holding `cosign.pub`.
 fn key() -> String {
     let pem = std::fs::read_to_string(Path::new(FIXTURES).join("cosign.pub")).expect("cosign.pub");
-    let data: String = pem.lines().map(|line| format!("        {line}\n")).collect();
-    format!("  - key:\n      data: |\n{data}")
+    pem.lines()
+        .fold("  - key:\n      data: |\n".to_owned(), |text, line| {
+            text + "        " + line + "\n"
+        })
 }
 
-async fn check(signatures: &Signatures, fixture: &Fixture, policy: &Policy) -> Vec<AuthorityResult> {
+async fn check(
+    signatures: &Signatures,
+    fixture: &Fixture,
+    policy: &Policy,
+) -> Vec<AuthorityResult> {
     signatures
-        .check(&fixture.store, &fixture.root, &fixture.artifacts, policy, Ok(&pinned()))
+        .check(
+            &fixture.store,
+            &fixture.root,
+            &fixture.artifacts,
+            policy,
+            Ok(&pinned()),
+        )
         .await
         .expect("the store and the trust root are there")
 }
@@ -69,14 +80,19 @@ async fn a_key_bundle_passes_the_policy_holding_its_key() {
 
     let results = check(&Signatures::default(), &fixture, &policy).await;
 
-    assert_eq!(results, [Err(Failure::Mismatch(Signed::Key)), Ok(Signed::Key)]);
+    assert_eq!(
+        results,
+        [Err(Failure::Mismatch(Signed::Key)), Ok(Signed::Key)]
+    );
 }
 
 #[tokio::test]
 async fn another_workflow_or_a_pattern_over_part_of_the_san_fails_naming_the_signer() {
     let fixture = Fixture::load("keyless").await;
     let policy = policy(&[
-        keyless("subject: https://github.com/spnngl/speculaire/.github/workflows/release.yml@refs/heads/main"),
+        keyless(
+            "subject: https://github.com/spnngl/speculaire/.github/workflows/release.yml@refs/heads/main",
+        ),
         keyless(r"subjectRegExp: https://github\.com/spnngl/speculaire/"),
         key(),
     ]);
@@ -137,7 +153,13 @@ async fn no_trust_root_leaves_the_check_unverifiable() {
     let absent = speculaire_verify::Absent::new("TUF: unreachable");
 
     let unverifiable = Signatures::default()
-        .check(&fixture.store, &fixture.root, &fixture.artifacts, &policy, Err(&absent))
+        .check(
+            &fixture.store,
+            &fixture.root,
+            &fixture.artifacts,
+            &policy,
+            Err(&absent),
+        )
         .await
         .expect_err("no trust root");
 
@@ -153,7 +175,37 @@ async fn a_second_policy_over_the_same_bundle_reuses_its_verification() {
 
     assert_eq!(check(&signatures, &fixture, &first).await, [Ok(workflow())]);
     assert_eq!(signatures.hits(), 0);
-    assert_eq!(check(&signatures, &fixture, &second).await, [Ok(workflow())]);
+    assert_eq!(
+        check(&signatures, &fixture, &second).await,
+        [Ok(workflow())]
+    );
 
     assert_eq!(signatures.hits(), 1, "the keyless case holds one bundle");
+}
+
+#[tokio::test]
+async fn an_expired_tuf_repository_leaves_the_check_unverifiable() {
+    let fixture = Fixture::load("keyless").await;
+    let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
+    let cache = tempfile::tempdir().expect("a temporary directory");
+    let absent = TrustRoot::fetch(Recorded, cache.path(), at("2026-11-25T00:00:00Z"))
+        .await
+        .expect_err("the recorded timestamp role has expired");
+
+    let unverifiable = Signatures::default()
+        .check(
+            &fixture.store,
+            &fixture.root,
+            &fixture.artifacts,
+            &policy,
+            Err(&absent),
+        )
+        .await
+        .expect_err("no trust root");
+
+    let reason = unverifiable.to_string();
+    assert!(
+        reason.starts_with("trust root: ") && reason.contains("expired"),
+        "{reason}"
+    );
 }

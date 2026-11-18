@@ -94,15 +94,16 @@ pub struct Signatures {
 #[derive(Debug, Default)]
 struct Cache {
     root: Option<RootHash>,
-    results: HashMap<Key, AuthorityResult>,
+    results: HashMap<Entry, AuthorityResult>,
 }
 
 /// One bundle as a signature of one image, verified by the key of a key authority or else by its certificate.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Key {
+struct Entry {
     target: Digest,
     bundle: Digest,
-    key: Option<[u8; 32]>,
+    /// The SHA-256 of the key's DER, for a key authority.
+    public_key: Option<[u8; 32]>,
 }
 
 impl Signatures {
@@ -131,15 +132,15 @@ impl Signatures {
         for authority in policy.authorities() {
             let mut result = Err(Failure::Missing);
             for bundle in &bundles {
-                let key = Key {
+                let entry = Entry {
                     target: target.clone(),
                     bundle: (*bundle).clone(),
-                    key: match &authority.signer {
+                    public_key: match &authority.signer {
                         Signer::Key { public_key } => Some(sha256(public_key.der())),
                         Signer::Keyless { .. } => None,
                     },
                 };
-                let signed = self.signed(store, root, key, &authority.signer).await?;
+                let signed = self.signed(store, root, entry, &authority.signer).await?;
                 match judge(signed, &authority.signer) {
                     Ok(signed) => {
                         result = Ok(signed);
@@ -166,50 +167,53 @@ impl Signatures {
         self.hits.load(Ordering::Relaxed)
     }
 
-    /// Who signed the bundle of `key`: kept, or read from `store` and verified.
+    /// Who signed the bundle of `entry`: kept, or read from `store` and verified.
     async fn signed(
         &self,
         store: &Store,
         root: &TrustRoot,
-        key: Key,
+        entry: Entry,
         signer: &Signer,
     ) -> Result<AuthorityResult, Unverifiable> {
-        if let Some(kept) = self.kept(root.hash(), &key) {
+        if let Some(kept) = self.kept(root.hash(), &entry) {
             self.hits.fetch_add(1, Ordering::Relaxed);
             return Ok(kept);
         }
         let bytes = store
-            .read(&key.bundle)
+            .read(&entry.bundle)
             .await
             .map_err(|e| Unverifiable(format!("artifact store: {e}")))?
             .ok_or_else(|| {
-                Unverifiable(format!("bundle {} is not in the artifact store", key.bundle))
+                Unverifiable(format!(
+                    "bundle {} is not in the artifact store",
+                    entry.bundle
+                ))
             })?;
         let public_key = match signer {
             Signer::Key { public_key } => Some(public_key),
             Signer::Keyless { .. } => None,
         };
-        let signed = verify(root, &key.target, &bytes, public_key);
-        self.keep(root.hash(), key, signed.clone());
-        Ok(signed)
+        let result = verify(root, &entry.target, &bytes, public_key);
+        self.keep(root.hash(), entry, result.clone());
+        Ok(result)
     }
 
-    fn kept(&self, root: RootHash, key: &Key) -> Option<AuthorityResult> {
+    fn kept(&self, root: RootHash, entry: &Entry) -> Option<AuthorityResult> {
         let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         if cache.root == Some(root) {
-            cache.results.get(key).cloned()
+            cache.results.get(entry).cloned()
         } else {
             None
         }
     }
 
-    fn keep(&self, root: RootHash, key: Key, signed: AuthorityResult) {
+    fn keep(&self, root: RootHash, entry: Entry, result: AuthorityResult) {
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         if cache.root != Some(root) || cache.results.len() >= LIMIT {
             cache.root = Some(root);
             cache.results.clear();
         }
-        cache.results.insert(key, signed);
+        cache.results.insert(entry, result);
     }
 }
 
@@ -272,14 +276,14 @@ fn by_certificate(root: &TrustRoot, target: ArtifactDigest, bundle: &Bundle) -> 
     }
 }
 
-/// Whether `signed` satisfies `signer`: a certificate whose issuer and subject match one identity, or the key it was
+/// Whether `verified` satisfies `signer`: a certificate whose issuer and subject match one identity, or the key it was
 /// verified with.
-fn judge(signed: AuthorityResult, signer: &Signer) -> AuthorityResult {
-    match (signed?, signer) {
+fn judge(verified: AuthorityResult, signer: &Signer) -> AuthorityResult {
+    match (verified?, signer) {
         (Signed::Certificate { subject, issuer }, Signer::Keyless { identities })
-            if identities
-                .iter()
-                .any(|identity| identity.issuer.matches(&issuer) && identity.subject.matches(&subject)) =>
+            if identities.iter().any(|identity| {
+                identity.issuer.matches(&issuer) && identity.subject.matches(&subject)
+            }) =>
         {
             Ok(Signed::Certificate { subject, issuer })
         }
@@ -294,7 +298,8 @@ fn artifact(target: &Digest) -> ArtifactDigest {
     let bytes = (0..hex.len())
         .step_by(2)
         .map(|at| {
-            u8::from_str_radix(&hex[at..at + 2], 16).expect("a digest is lower-case hex, two digits a byte")
+            u8::from_str_radix(&hex[at..at + 2], 16)
+                .expect("a digest is lower-case hex, two digits a byte")
         })
         .collect::<Vec<u8>>();
     let algorithm = match target.algorithm() {
