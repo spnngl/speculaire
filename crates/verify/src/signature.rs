@@ -2,8 +2,9 @@
 //! satisfy, and why the others fail.
 //!
 //! A bundle counts as a signature of the image its in-toto subject or message digest names, whatever its predicate
-//! type, as for `cosign verify` (D145). It is verified against the trust root once, with any identity, and its signer
-//! matched against each authority afterwards: a policy change matches identities again without verifying again.
+//! type, as for `cosign verify` (D145), and so does each layer of a `.sig` whose payload names it (D147). A signature
+//! is verified against the trust root once, with any identity, and its signer matched against each authority
+//! afterwards: a policy change matches identities again without verifying again.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -16,10 +17,11 @@ use sigstore_verify::{PublicKeyVerificationPolicy, VerificationPolicy};
 use speculaire_artifacts::{Artifact, Kind, Store};
 use speculaire_oci::reference::Digest;
 
+use crate::legacy;
 use crate::policy::{PublicKey, Signer, sha256};
 use crate::trust::{Absent, RootHash, TrustRoot, chain};
 
-/// The bundle results kept at most: past it the cache starts over, and each bundle is verified again once.
+/// The signature results kept at most: past it the cache starts over, and each signature is verified again once.
 const LIMIT: usize = 16_384;
 
 /// One authority's signature check: who signed the bundle that satisfies it, or why none does.
@@ -97,23 +99,36 @@ struct Cache {
     results: HashMap<Entry, AuthorityResult>,
 }
 
-/// One bundle as a signature of one image, verified by the key of a key authority or else by its certificate.
+/// One signature of one image, verified by the key of a key authority or else by its certificate.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Entry {
     target: Digest,
-    bundle: Digest,
+    source: Source,
     /// The SHA-256 of the key's DER, for a key authority.
     public_key: Option<[u8; 32]>,
 }
 
+/// Where a signature is, in the artifact store.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Source {
+    /// A Sigstore bundle.
+    Bundle(Digest),
+    /// Layer `index` of a `.sig` manifest, whose blob is `payload`.
+    Layer {
+        manifest: Digest,
+        index: usize,
+        payload: Digest,
+    },
+}
+
 impl Signatures {
-    /// The result of each authority of `policy`, in order, over the bundles among `artifacts` whose subject is
-    /// `target`, read from `store` and verified against `root`. The policy's signature check passes when one authority
-    /// passes (D11).
+    /// The result of each authority of `policy`, in order, over the bundles and `.sig` layers among `artifacts` whose
+    /// target is `target`, read from `store` and verified against `root`. The policy's signature check passes when one
+    /// authority passes (D11).
     ///
     /// # Errors
     ///
-    /// When there is no trust root, or the store cannot give a bundle it was not asked before.
+    /// When there is no trust root, or the store cannot give a signature it was not asked before.
     pub async fn check(
         &self,
         store: &Store,
@@ -123,19 +138,15 @@ impl Signatures {
         root: Result<&TrustRoot, &Absent>,
     ) -> Result<Vec<AuthorityResult>, Unverifiable> {
         let root = root.map_err(|absent| Unverifiable(format!("trust root: {absent}")))?;
-        let bundles: Vec<&Digest> = artifacts
-            .iter()
-            .filter(|artifact| artifact.kind == Kind::Bundle && artifact.target == *target)
-            .filter_map(|artifact| artifact.blobs.last())
-            .collect();
+        let sources = sources(target, artifacts);
         let mut results = Vec::with_capacity(policy.authorities().len());
         for authority in policy.authorities() {
             let mut satisfied = None;
             let mut closest = Failure::Missing;
-            for bundle in &bundles {
+            for source in &sources {
                 let entry = Entry {
                     target: target.clone(),
-                    bundle: (*bundle).clone(),
+                    source: source.clone(),
                     public_key: match &authority.signer {
                         Signer::Key { public_key } => Some(sha256(public_key.der())),
                         Signer::Keyless { .. } => None,
@@ -157,13 +168,13 @@ impl Signatures {
         Ok(results)
     }
 
-    /// The bundles whose result was kept from an earlier check, counted once per authority checked.
+    /// The signatures whose result was kept from an earlier check, counted once per authority checked.
     #[must_use]
     pub fn hits(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)
     }
 
-    /// Who signed the bundle of `entry`: kept, or read from `store` and verified.
+    /// Who signed the signature of `entry`: kept, or read from `store` and verified.
     async fn signed(
         &self,
         store: &Store,
@@ -175,21 +186,27 @@ impl Signatures {
             self.hits.fetch_add(1, Ordering::Relaxed);
             return Ok(kept);
         }
-        let bytes = store
-            .read(&entry.bundle)
-            .await
-            .map_err(|e| Unverifiable(format!("artifact store: {e}")))?
-            .ok_or_else(|| {
-                Unverifiable(format!(
-                    "bundle {} is not in the artifact store",
-                    entry.bundle
-                ))
-            })?;
         let public_key = match signer {
             Signer::Key { public_key } => Some(public_key),
             Signer::Keyless { .. } => None,
         };
-        let result = verify(root, &entry.target, &bytes, public_key);
+        let result = match &entry.source {
+            Source::Bundle(bundle) => {
+                verify(root, &entry.target, &read(store, bundle).await?, public_key)
+            }
+            Source::Layer {
+                manifest,
+                index,
+                payload,
+            } => legacy::verify(
+                root,
+                &entry.target,
+                &read(store, manifest).await?,
+                *index,
+                &read(store, payload).await?,
+                public_key,
+            ),
+        };
         self.keep(root.hash(), entry, result.clone());
         Ok(result)
     }
@@ -230,25 +247,38 @@ pub fn verify(
         .map_err(|e| e.to_string())
         .and_then(|text| Bundle::from_json(text).map_err(|e| chain(&e)))
         .map_err(|e| Failure::Invalid(format!("not a Sigstore bundle: {e}")))?;
-    let target = artifact(target);
+    verified(root, artifact(target), &bundle, key)
+}
+
+/// Verifies `bundle` as a signature of `signed`, the artifact or its digest, as [`verify`] does.
+pub(crate) fn verified<'a>(
+    root: &TrustRoot,
+    signed: impl Into<sigstore_verify::types::Artifact<'a>>,
+    bundle: &Bundle,
+    key: Option<&PublicKey>,
+) -> AuthorityResult {
     if !matches!(
         bundle.verification_material.content,
         VerificationMaterialContent::PublicKey(_)
     ) {
-        return by_certificate(root, target, &bundle);
+        return by_certificate(root, signed, bundle);
     }
     let Some(key) = key else {
         return Err(Failure::Mismatch(Signed::Key));
     };
     let policy = PublicKeyVerificationPolicy::new(DerPublicKey::new(key.der().to_vec()));
     root.verifier()
-        .verify(target, &bundle, &policy)
+        .verify(signed, bundle, &policy)
         .map(|_| Signed::Key)
         .map_err(|e| Failure::Invalid(chain(&e)))
 }
 
 /// Verifies `bundle` by its certificate, after checking that `root` knows its issuer.
-fn by_certificate(root: &TrustRoot, target: ArtifactDigest, bundle: &Bundle) -> AuthorityResult {
+fn by_certificate<'a>(
+    root: &TrustRoot,
+    signed: impl Into<sigstore_verify::types::Artifact<'a>>,
+    bundle: &Bundle,
+) -> AuthorityResult {
     let certificate = bundle
         .signing_certificate()
         .ok_or_else(|| Failure::Invalid("the bundle holds no certificate".to_owned()))?;
@@ -259,7 +289,7 @@ fn by_certificate(root: &TrustRoot, target: ArtifactDigest, bundle: &Bundle) -> 
     }
     let verified = root
         .verifier()
-        .verify(target, bundle, &VerificationPolicy::any_identity())
+        .verify(signed, bundle, &VerificationPolicy::any_identity())
         .map_err(|e| Failure::Invalid(chain(&e)))?;
     match (verified.identity(), verified.issuer()) {
         (Some(subject), Some(issuer)) => Ok(Signed::Certificate {
@@ -270,6 +300,38 @@ fn by_certificate(root: &TrustRoot, target: ArtifactDigest, bundle: &Bundle) -> 
             "its certificate names no identity or no OIDC issuer".to_owned(),
         )),
     }
+}
+
+/// The signatures among `artifacts` whose target is `target`: each bundle, and each layer of each `.sig`.
+fn sources(target: &Digest, artifacts: &[Artifact]) -> Vec<Source> {
+    let mut sources = Vec::new();
+    for artifact in artifacts
+        .iter()
+        .filter(|artifact| artifact.target == *target)
+    {
+        match artifact.kind {
+            Kind::Bundle => sources.extend(artifact.blobs.last().cloned().map(Source::Bundle)),
+            // Its blobs are its config, then its layers.
+            Kind::Signature => sources.extend(artifact.blobs.iter().skip(1).enumerate().map(
+                |(index, payload)| Source::Layer {
+                    manifest: artifact.manifest.clone(),
+                    index,
+                    payload: payload.clone(),
+                },
+            )),
+            Kind::Attestation => {}
+        }
+    }
+    sources
+}
+
+/// The blob `digest` of `store`.
+async fn read(store: &Store, digest: &Digest) -> Result<Vec<u8>, Unverifiable> {
+    store
+        .read(digest)
+        .await
+        .map_err(|e| Unverifiable(format!("artifact store: {e}")))?
+        .ok_or_else(|| Unverifiable(format!("{digest} is not in the artifact store")))
 }
 
 /// Whether `verified` satisfies `signer`: a certificate whose issuer and subject match one identity, or the key it was

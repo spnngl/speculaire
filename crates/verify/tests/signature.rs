@@ -286,20 +286,20 @@ async fn another_trust_root_verifies_the_bundle_again() {
 }
 
 #[tokio::test]
-async fn only_a_bundle_whose_subject_is_the_image_counts() {
+async fn only_a_signature_of_the_image_counts() {
     let fixture = Fixture::load("keyless").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
     let other = Fixture::load("key").await.root;
-    let mut signature = fixture.artifacts.clone();
-    for artifact in &mut signature {
-        artifact.kind = Kind::Signature;
+    let mut attestation = fixture.artifacts.clone();
+    for artifact in &mut attestation {
+        artifact.kind = Kind::Attestation;
     }
     let mut elsewhere = fixture.artifacts.clone();
     for artifact in &mut elsewhere {
         artifact.target = other.clone();
     }
 
-    for artifacts in [signature, elsewhere] {
+    for artifacts in [attestation, elsewhere] {
         let results = Signatures::default()
             .check(
                 &fixture.store,
