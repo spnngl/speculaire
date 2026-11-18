@@ -109,6 +109,11 @@ fn a_pinned_root_loads_with_its_hash_and_the_latest_end_of_its_keys() {
         .expect("the recorded trusted root");
     let root = pinned();
 
+    // The SHA-256 that names the target in the recorded TUF repository.
+    assert_eq!(
+        root.hash().to_string(),
+        "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66"
+    );
     assert_eq!(
         root.hash(),
         TrustRoot::parse(&bytes).expect("parses").hash()
