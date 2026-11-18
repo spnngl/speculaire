@@ -309,9 +309,10 @@ impl Fixture {
             .iter()
             .position(|artifact| artifact.kind == Kind::Bundle)
             .expect("the case has a bundle");
-        let layer = fixture.artifacts[artifact].blobs.len() - 1;
-        let old = fixture.artifacts[artifact].blobs[layer].clone();
-        let bundle = fixture.text(&old).await;
+        let layer = fixture.artifacts[artifact].blobs.last().cloned();
+        let bundle = fixture
+            .text(&layer.expect("a referrer manifest names its bundle"))
+            .await;
         let parsed: Value = serde_json::from_str(&bundle).expect("a bundle is JSON");
         let signature = parsed["dsseEnvelope"]["signatures"][0]["sig"]
             .as_str()
@@ -319,19 +320,45 @@ impl Fixture {
         // The first base64 digit carries the top 6 bits of the first byte: one byte changes, and no length.
         let first = if signature.starts_with('A') { "B" } else { "A" };
         let flipped = format!("{first}{}", signature.get(1..).unwrap_or_default());
-        let new = fixture
-            .keep_text(&bundle.replacen(signature, &flipped, 1))
+        fixture
+            .replace(artifact, &bundle.replacen(signature, &flipped, 1))
             .await;
-        let manifest = fixture.artifacts[artifact].manifest.clone();
-        let referrer = fixture.text(&manifest).await;
-        let manifest = fixture
-            .keep_text(&referrer.replacen(&old.to_string(), &new.to_string(), 1))
-            .await;
-        let changed = &mut fixture.artifacts[artifact];
-        changed.manifest = manifest;
-        changed.blobs[layer] = new;
         fixture.record().await;
         fixture
+    }
+
+    /// The root of `case` whose only artifact is a bundle of `bundle`, such as [`GITHUB_PRIVATE`], in place of the
+    /// case's first.
+    ///
+    /// # Panics
+    ///
+    /// When `case` has no bundle, or as [`Fixture::load`].
+    pub async fn bundled(case: &str, bundle: &str) -> Self {
+        let mut fixture = Self::load(case).await;
+        let artifact = fixture
+            .artifacts
+            .iter()
+            .position(|artifact| artifact.kind == Kind::Bundle)
+            .expect("the case has a bundle");
+        fixture.artifacts.swap(0, artifact);
+        fixture.artifacts.truncate(1);
+        fixture.replace(0, bundle).await;
+        fixture.record().await;
+        fixture
+    }
+
+    /// Keeps `bundle` in place of the bundle of the artifact at `artifact`, and a referrer manifest that names it.
+    async fn replace(&mut self, artifact: usize, bundle: &str) {
+        let layer = self.artifacts[artifact].blobs.len() - 1;
+        let old = self.artifacts[artifact].blobs[layer].clone();
+        let new = self.keep_text(bundle).await;
+        let referrer = self.text(&self.artifacts[artifact].manifest).await;
+        let manifest = self
+            .keep_text(&referrer.replacen(&old.to_string(), &new.to_string(), 1))
+            .await;
+        let changed = &mut self.artifacts[artifact];
+        changed.manifest = manifest;
+        changed.blobs[layer] = new;
     }
 
     /// Keeps the manifest and blobs of `artifact` from `layout`, and adds it to the record.
