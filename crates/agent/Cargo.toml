@@ -26,6 +26,7 @@ speculaire-pki.workspace = true
 speculaire-reflect.workspace = true
 speculaire-runtime.workspace = true
 speculaire-time.workspace = true
+speculaire-verify.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true

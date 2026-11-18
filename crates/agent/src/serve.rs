@@ -25,6 +25,7 @@ use speculaire_runtime::inventory::{Change, Inventory, Update};
 use speculaire_runtime::registries::{self, Registries, Reloaded};
 use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode};
+use speculaire_verify::Policies;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
@@ -46,11 +47,19 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     let watch = Watch::new(vec![path.to_owned()]);
     let config = config::load(path)?;
     let logs = log::install(&config.log, &config.audit)?;
+    check_policy(config.verify.policy.get())?;
     let node = Node::new(&config);
     let node = preflight(&node)?;
     tokio::runtime::Runtime::new()
         .context("starting the runtime")?
         .block_on(serve(path, watch, config, logs, node))
+}
+
+/// Refuses to start on a policy file that does not parse (D30); a missing file is no policy (D142).
+fn check_policy(path: &Path) -> anyhow::Result<()> {
+    let policies = Policies::load(path)?;
+    info!(path = %path.display(), count = policies.iter().count(), "policy read");
+    Ok(())
 }
 
 /// Refuses to start on a node where the agent would mirror or gate wrongly (D86), naming each file and key; returns the

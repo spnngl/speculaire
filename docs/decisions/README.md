@@ -18,7 +18,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136, D139)
 - D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
-- D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136)
+- D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136, D142)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57, D105, D107, D116)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
@@ -149,5 +149,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D139 [verification](verification.md): Sigstore fixtures are recorded from public-good Sigstore by the hand-run `fixtures.yml`, as OCI layouts with a TUF snapshot, checked offline by cosign and gh (amends D8)
 - D140 [build](build.md): the pinned nightly moves to `nightly-2026-11-17` and keeps the parallel frontend's default 2 threads; RAPx gets its own nightly, `rapx_nightly`; the check loop stays on stable (amends D57, D76, D77)
 - D141 [build](build.md): the recorded Sigstore fixtures live in `fixtures/sigstore/`, read by the crates' tests through `speculaire-artifacts`' `testing` feature and pushed by `just e2e-up` to zot and the plain upstream, with their trusted root pinned on every node; M5's `verify` e2e suite runs in the IPv4 pass only (amends D112, D130)
+- D142 [verification](verification.md): the policy file holds `ClusterImagePolicy` documents of a subset, any other field refusing it; globs match the repository name; a missing file is no policy (amends D11)
 
-Next free number: D142.
+Next free number: D143.

@@ -20,6 +20,9 @@ Copyright 2019, 2020 OCI Contributors, Copyright 2017 Docker, Inc., licensed und
 This product includes test data from sigstore-rust (https://github.com/sigstore/sigstore-rust),
 Copyright The Sigstore Authors, licensed under the Apache License, Version 2.0.
 
+This product includes software ported from sigstore policy-controller (https://github.com/sigstore/policy-controller),
+Copyright 2022 The Sigstore Authors, licensed under the Apache License, Version 2.0.
+
 This product includes software ported from the Go standard library (https://go.dev),
 Copyright 2009 The Go Authors, licensed under the BSD 3-Clause License, reproduced below.
 

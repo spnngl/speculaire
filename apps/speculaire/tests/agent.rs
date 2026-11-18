@@ -931,6 +931,85 @@ fn check_config_exits_1_with_the_same_messages_and_0_on_a_node_that_is_right() {
     );
 }
 
+const EXAMPLE_POLICY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/policy.yaml");
+
+#[test]
+fn a_policy_outside_the_subset_stops_check_config_and_the_agent_naming_its_field() {
+    let config = "version = 3\n[plugins.'io.containerd.cri.v1.images'.registry]\nconfig_path = \"@DIR@/certs.d\"\n";
+    let node = Node::new(Answers::containerd("v2.4.2"), Some(config));
+    let policy = node.dir.path().join("policy.yaml");
+    let extra = format!(
+        "[mirror]\ndirectory = \"{}/mirror\"\n[verify]\npolicy = \"{}\"\n",
+        node.dir.path().display(),
+        policy.display()
+    );
+    assert_eq!(run_on(&node, "configure", ANY_PORT, &extra).0, Some(0));
+    // No policy file is no policy.
+    assert_eq!(
+        run_on(&node, "check-config", ANY_PORT, &extra),
+        (Some(0), String::new())
+    );
+    let example = std::fs::read_to_string(EXAMPLE_POLICY).unwrap();
+    std::fs::write(&policy, &example).unwrap();
+    assert_eq!(
+        run_on(&node, "check-config", ANY_PORT, &extra),
+        (Some(0), String::new())
+    );
+    for (from, to, path) in [
+        (
+            "  name: vendor-key\n",
+            "  name: vendor-key\n  namespace: n\n",
+            "document 2, metadata.namespace:",
+        ),
+        (
+            "    keyless:\n",
+            "    keyless:\n      url: https://fulcio.example\n",
+            "spec.authorities[0].keyless.url:",
+        ),
+        (
+            "  - key:\n",
+            "  - ctlog:\n      url: https://rekor.example\n    key:\n",
+            "spec.authorities[0].ctlog:",
+        ),
+        (
+            "  sbom: required\n",
+            "  mode: warn\n",
+            "document 1, spec.mode:",
+        ),
+        (
+            "    attestations:\n",
+            "    static:\n      action: pass\n    attestations:\n",
+            "spec.authorities[0].static:",
+        ),
+        (
+            "subjectRegExp: https",
+            "subjectRegExp: a)|(.*https",
+            "spec.authorities[0].keyless.identities[0]: subjectRegExp",
+        ),
+    ] {
+        assert!(example.contains(from), "{from}");
+        std::fs::write(&policy, example.replacen(from, to, 1)).unwrap();
+        for command in ["check-config", "agent"] {
+            let (code, stderr) = run_on(&node, command, ANY_PORT, &extra);
+            assert_eq!(code, Some(1), "{command}: {stderr}");
+            assert!(
+                stderr.contains(&format!("the policy file {}: ", policy.display()))
+                    && stderr.contains(path),
+                "{command} does not name {path}: {stderr}"
+            );
+        }
+    }
+    // The agent starts on the example, and says how many policies it read.
+    let agent = Agent::start(&format!("[verify]\npolicy = \"{EXAMPLE_POLICY}\"\n"));
+    let (_, lines) = agent.stop();
+    assert!(
+        lines.iter().any(
+            |line| line.contains(r#""message":"policy read""#) && line.contains(r#""count":2"#)
+        ),
+        "{lines:?}"
+    );
+}
+
 /// A node whose containerd reads its `hosts.toml` trees from `certs.d` in the directory of the node.
 fn registry_node() -> Node {
     registry_node_with("")
