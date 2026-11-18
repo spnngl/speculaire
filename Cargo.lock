@@ -595,6 +595,7 @@ dependencies = [
  "prost",
  "rcgen",
  "serde_json",
+ "speculaire-artifacts",
 ]
 
 [[package]]

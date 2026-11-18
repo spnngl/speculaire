@@ -1,0 +1,1 @@
+{"critical":{"identity":{"docker-reference":"ghcr.io/spnngl/speculaire-fixtures"},"image":{"docker-manifest-digest":"sha256:167b7290fd4fd86b9040b699e97cd3471b960281d4158e3bd655df2f68e0eb73"},"type":"cosign container image signature"},"optional":null}

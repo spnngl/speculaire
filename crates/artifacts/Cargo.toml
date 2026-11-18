@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The recorded Sigstore fixtures (D141) loaded into a store, for other crates' tests.
+testing = ["dep:tempfile"]
+
 [dependencies]
 http.workspace = true
 http-body-util.workspace = true
@@ -19,6 +23,7 @@ speculaire-mirror.workspace = true
 speculaire-oci.workspace = true
 speculaire-registry.workspace = true
 speculaire-runtime.workspace = true
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tracing.workspace = true

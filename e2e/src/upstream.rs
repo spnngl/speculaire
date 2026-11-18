@@ -10,7 +10,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
-pub use start::{COSIGN_PUBLIC_KEY, CRIO_AUTH_FILE, SIGNED, UNSIGNED, start};
+pub use start::{COSIGN_PUBLIC_KEY, CRIO_AUTH_FILE, FIXTURES, SIGNED, UNSIGNED, start};
 
 use crate::registry::{PASSWORD, PLATFORM, USER, docker, fail, regctl_after};
 use crate::{Cluster, Failure};
@@ -91,7 +91,7 @@ impl Upstream {
     ///
     /// When the container or `script` fails.
     pub fn regctl(&self, script: &str) -> Result<String, Failure> {
-        regctl_after(&self.reach(), script)
+        regctl_after(&self.reach(), script, None)
     }
 
     /// The digest of `reference`, `<repository>:<tag>`, which [`SIGNED`] and [`UNSIGNED`] name.
