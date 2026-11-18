@@ -281,11 +281,13 @@ async fn an_authority_fails_with_the_reason_of_the_closest_bundle() {
         "subject: https://github.com/spnngl/speculaire/.github/workflows/release.yml@refs/heads/main",
     )]);
 
+    let signatures = Signatures::default();
+
     for artifacts in [
         [intact[0].clone(), tampered.artifacts[0].clone()],
         [tampered.artifacts[0].clone(), intact[0].clone()],
     ] {
-        let results = Signatures::default()
+        let results = signatures
             .check(
                 &tampered.store,
                 &tampered.root,
