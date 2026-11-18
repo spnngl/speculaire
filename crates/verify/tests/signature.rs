@@ -75,6 +75,47 @@ async fn a_keyless_bundle_passes_the_policy_naming_its_workflow() {
 }
 
 #[tokio::test]
+async fn a_legacy_sig_with_its_set_passes_the_policy_naming_its_workflow() {
+    let fixture = Fixture::load("legacy-sig").await;
+    let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
+
+    let results = check(&Signatures::default(), &fixture, &policy).await;
+
+    assert_eq!(results, [Ok(workflow())]);
+}
+
+#[tokio::test]
+async fn a_sig_served_for_another_image_names_the_image_it_signs() {
+    let fixture = Fixture::signature_of("legacy-sig", "keyless").await;
+    let signed = Fixture::load("legacy-sig").await.root;
+    let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
+
+    let results = check(&Signatures::default(), &fixture, &policy).await;
+
+    assert_eq!(
+        results,
+        [Err(Failure::Invalid(format!(
+            "the .sig signs {signed}, not this image"
+        )))]
+    );
+}
+
+#[tokio::test]
+async fn a_sig_without_its_set_names_the_missing_set() {
+    let fixture = Fixture::unlogged("legacy-sig").await;
+    let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
+
+    let results = check(&Signatures::default(), &fixture, &policy).await;
+
+    assert_eq!(
+        results,
+        [Err(Failure::Invalid(
+            "the .sig has no SET (annotation dev.sigstore.cosign/bundle)".to_owned()
+        ))]
+    );
+}
+
+#[tokio::test]
 async fn a_key_bundle_passes_the_policy_holding_its_key() {
     let fixture = Fixture::load("key").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}")), key()]);
