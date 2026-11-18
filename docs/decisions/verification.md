@@ -2,7 +2,7 @@
 
 How artifacts become verdicts. Index: `docs/decisions/README.md`.
 
-## D8: Crypto comes from sigstore-rust (amended by D43, D136, D139, D143, D145)
+## D8: Crypto comes from sigstore-rust (amended by D43, D136, D139, D143, D145, D147)
 
 - **Decision:** use `sigstore-verify` and `sigstore-trust-root` (sigstore-rust, crates 0.16). We write OCI discovery, regex identity matching and the legacy `.sig` → v0.1-bundle conversion ourselves. The conversion also checks that the SimpleSigning payload's `critical.image.docker-manifest-digest` equals the image digest, since the bundle verifier only binds the signature to the payload. Attestations are verified only as bundles (D43).
 - **Because:**
@@ -160,7 +160,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Revisit when:** M5 adds the manifest-fetch trigger; or a real image has more than 64 bundles.
 
 
-## D126: Discovery asks the artifact store, then peers, then upstream; peers list referrers from a target's first 4 holders (amends D102, D121; amended by D134)
+## D126: Discovery asks the artifact store, then peers, then upstream; peers list referrers from a target's first 4 holders (amends D102, D121; amended by D134, D147)
 
 - **Decision:**
   - **Order:** for each root, each target's manifests and blobs come from the artifact store, else from peers, else not at all; upstream (D121) is asked only when the store and peers give no artifact of the root. The root's manifest comes from the node's content (containerd's, or the relay's blob cache), else the store, else peers; an index fetched so is kept in the store, so that the node serves it on (D49, D124).
@@ -306,7 +306,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Limit:** the artifacts of a root removed while its own discovery runs stay until that discovery ends.
 - **Revisit when:** discoveries of different roots run in parallel, or a root's own discovery outlasts the 2 s often.
 
-## D145: A bundle is verified once per trust root, with any identity, then matched to each authority (amends D8, D20, D43, D143)
+## D145: A bundle is verified once per trust root, with any identity, then matched to each authority (amends D8, D20, D43, D143; amended by D147)
 
 - **Decision:**
   - `speculaire_verify::Signatures::check` reads each `Kind::Bundle` artifact whose subject is the image, its bundle the manifest's last blob, and returns one result per authority of the policy: who signed the bundle that satisfies it, or why none does. The policy's signature check passes when one authority passes (D11).
@@ -335,3 +335,18 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The roots a pull adds are those a node needs to run a pod, and soon to admit it at M5. A pull waits only for the discovery of another image just listed.
   - Two lanes bound what a restart and a burst of pulls ask of peers and upstreams at once.
 - **Revisit when:** M5's manifest-fetch trigger needs a root discovered while its pull waits, or a pull often waits for another pulled image's discovery.
+
+## D147: A legacy `.sig` layer is a signature once its payload names the image and its SET verifies (amends D8, D126, D145)
+
+- **Decision:**
+  - `Signatures::check` reads each layer of each `Kind::Signature` artifact whose target is the image, beside its bundles, and ranks their failures with theirs (D145). `speculaire_verify::legacy::verify(root, target, manifest, layer, payload, key)` checks one layer.
+  - The layer's simple signing payload must name the image in `critical.image.docker-manifest-digest`, before any crypto, as `cosign verify` does (cosign v3.1.3 `pkg/cosign/verifiers.go:43-46`); otherwise `signature invalid: the .sig signs <digest>, not this image`. No other payload field is read.
+  - The layer becomes a v0.1 bundle: its `dev.cosignproject.cosign/signature` as a message signature over the payload; its `dev.sigstore.cosign/certificate` leaf, or else a public key; its `dev.sigstore.cosign/bundle` annotation as a `hashedrekord` 0.0.1 entry whose SET is the inclusion promise. `dev.sigstore.cosign/chain` is ignored: the trust root holds the chain. It is then verified as a bundle is (D145).
+  - A layer without that annotation fails with `signature invalid: the .sig has no SET (annotation dev.sigstore.cosign/bundle)`: D142's transparency-log entry is required of `.sig` too.
+  - Results are kept per (image digest, `.sig` manifest digest and layer index, key hash), beside the bundles'.
+- **Because:**
+  - A `.sig` has no subject: any registry or peer can list any `.sig` under a target (D126). The payload digest is its only binding to the image, and the signature covers the payload.
+  - sigstore-verify accepts a v0.1 bundle with a SET and no inclusion proof (sigstore-verify v0.16.0 `crates/sigstore-bundle/src/validation.rs:130-142`), and checks the SET and the `hashedrekord` body against the payload: the conversion adds no crypto of ours.
+  - Each layer is one signature: cosign appends a layer per `cosign sign` of the same image.
+- **Measured:** one layer of the `legacy-sig` fixture verifies in 0.56 ms (release, Apple M5).
+- **Revisit when:** cosign drops `.sig` from `cosign verify`, or images signed with a key and a `.sig` need a fixture.

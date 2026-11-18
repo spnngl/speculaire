@@ -15,7 +15,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85, D110)
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66, D123)
 - D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73, D102)
-- D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136, D139, D143, D145)
+- D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136, D139, D143, D145, D147)
 - D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136, D142)
@@ -133,7 +133,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D123 [distribution](distribution.md): peers that hold a tag resolve it: agents announce tags under a domain-separated key, the mirror asks 2 holders and serves the first manifest, `hosts.toml` gets `resolve`, and `mirror.resolve_tags = false` turns it off live (amends D6, D66, D82, D85, D88, D99, D100, D102; amended by D127)
 - D124 [distribution](distribution.md): the peer API serves the artifact store: its blobs by digest after the runtime's content, and the referrers of a manifest in any repository, filtered by `artifactType`; the store is announced beside the content, each source of keys listed apart (amends D99, D100; amended by D131)
 - D125 [build](build.md): off Linux, `just mutants` and `just mutants-diff` run in the dev image, which has cargo-mutants, and build in the worktree's directory of the volume (amends D57, D74, D118)
-- D126 [verification](verification.md): discovery asks the artifact store, then peers, then upstream only when they give no artifact; peers list referrers from a target's first 4 holders, unioned, each fetched by digest and kept only when its `subject` is the target, or as the `.sig` it was listed as (amends D102, D121; amended by D134)
+- D126 [verification](verification.md): discovery asks the artifact store, then peers, then upstream only when they give no artifact; peers list referrers from a target's first 4 holders, unioned, each fetched by digest and kept only when its `subject` is the target, or as the `.sig` it was listed as (amends D102, D121; amended by D134, D147)
 - D127 [distribution](distribution.md): a tag is announced only while its image lists a repository digest in the tag's repository, as the peer API needs to resolve it; the image list is read again 1 s after each hint, since containerd's CRI plugin lists a reference after publishing its event (amends D121, D123)
 - D128 [verification](verification.md): a refusal (`429`, or `503` with `Retry-After`) pauses its host for every discovery; the root waits for `retry_at`, and an `info` line `discovery of <digest>: unverifiable: <reason>` shows it until M5; the CRI-O relay is not paused (amends D38, D121)
 - D129 [distribution](distribution.md): the CRI-O relay passes upstream's refusal on: a `429` with its `Retry-After`, a `502` when upstream failed, a `404` only for upstream's `404`, `401` or `403`; each refusal is a `warn` line (amends D85, D88)
@@ -152,7 +152,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D142 [verification](verification.md): the policy file holds `ClusterImagePolicy` documents of a subset, any other field refusing it; globs match the repository name; a missing file is no policy (amends D11)
 - D143 [verification](verification.md): the trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h, served from cache while the repository fails; its hash is its file's SHA-256, its expiry the earliest of its TUF metadata or the latest end of its keys (amends D8; amended by D145)
 - D144 [verification](verification.md): the store is collected beside a discovery, which keeps from collection its root and every blob it finds held or keeps, until no discovery and no collection runs; a root that left the list while discovered is collected once its discovery ends (amends D131; amended by D146)
-- D145 [verification](verification.md): a bundle naming the image, whatever its predicate type, is verified once per trust root with any identity, then its signer matched to each authority; an unknown CA is named before any crypto (amends D8, D20, D43, D143)
+- D145 [verification](verification.md): a bundle naming the image, whatever its predicate type, is verified once per trust root with any identity, then its signer matched to each authority; an unknown CA is named before any crypto (amends D8, D20, D43, D143; amended by D147)
 - D146 [verification](verification.md): the roots of an image just listed have a discovery lane of their own, beside that of a listing's roots and retries; each lane discovers one root at a time, and a root under way in one is dropped by the other (amends D121, D144)
+- D147 [verification](verification.md): a legacy `.sig` layer is a signature once its simple signing payload names the image and it verifies as a v0.1 bundle with its SET as log entry (amends D8, D126, D145)
 
-Next free number: D147.
+Next free number: D148.
