@@ -5,6 +5,7 @@ mod recorded;
 use std::path::Path;
 
 use recorded::{Recorded, at, pinned};
+use speculaire_artifacts::Kind;
 use speculaire_artifacts::testing::{FIXTURES, Fixture, GITHUB_PRIVATE};
 use speculaire_verify::signature::{AuthorityResult, Failure, Signatures, Signed};
 use speculaire_verify::{Policies, Policy, TrustRoot};
@@ -241,4 +242,33 @@ async fn another_trust_root_verifies_the_bundle_again() {
         1,
         "only the second check under the same root reuses its verification"
     );
+}
+
+#[tokio::test]
+async fn only_a_bundle_whose_subject_is_the_image_counts() {
+    let fixture = Fixture::load("keyless").await;
+    let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
+    let other = Fixture::load("key").await.root;
+    let mut signature = fixture.artifacts.clone();
+    for artifact in &mut signature {
+        artifact.kind = Kind::Signature;
+    }
+    let mut elsewhere = fixture.artifacts.clone();
+    for artifact in &mut elsewhere {
+        artifact.target = other.clone();
+    }
+
+    for artifacts in [signature, elsewhere] {
+        let results = Signatures::default()
+            .check(
+                &fixture.store,
+                &fixture.root,
+                &artifacts,
+                &policy,
+                Ok(&pinned()),
+            )
+            .await
+            .expect("the store and the trust root are there");
+        assert_eq!(results, [Err(Failure::Missing)]);
+    }
 }
