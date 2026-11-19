@@ -173,15 +173,17 @@ impl Worker {
         ));
     }
 
-    /// Removes the signed image from the runtime under every upstream's name, and its artifacts and record from the
-    /// store, then restarts the agent: it discovers the image again once it is listed.
+    /// Removes the signed image from the runtime under every upstream's name, and its artifacts, record and fetched mark
+    /// from the store, then restarts the agent: it discovers the image again once it is fetched or listed.
     fn forget(&self, expected: &Expected) {
         let files: Vec<String> = expected
             .digests()
             .chain(std::iter::once(&expected.root.to_string()))
             .map(|digest| {
                 let hex = digest.trim_start_matches("sha256:");
-                format!("{STORE}/blobs/sha256/{hex} {STORE}/roots/sha256/{hex}.json")
+                format!(
+                    "{STORE}/blobs/sha256/{hex} {STORE}/roots/sha256/{hex}.json {STORE}/fetched/sha256/{hex}"
+                )
             })
             .collect();
         self.cluster.stop_agent(&self.name).unwrap();
@@ -225,6 +227,27 @@ impl Worker {
         let _alone = self.alone();
         self.sh(&format!("crictl pull {}/{SIGNED}", upstream.address()));
         holds(&self.cluster, &self.name, expected, Instant::now())
+    }
+
+    /// Waits until the agent lists `root`, which deletes its fetched mark (D153): until then, removing the image keeps
+    /// the root's artifacts for the grace. The list may show the root up to 1 s after the pull (D127), after the fetch
+    /// announced its artifacts (D152).
+    fn listed(&self, root: &Digest) {
+        let mark = format!("{STORE}/fetched/sha256/{}", root.hex());
+        let start = Instant::now();
+        while self
+            .cluster
+            .exec_output(&self.name, &["test", "-e", &mark])
+            .unwrap()
+            .success
+        {
+            assert!(
+                start.elapsed() < WITHIN,
+                "{} does not list {root}",
+                self.name
+            );
+            sleep(Duration::from_millis(100));
+        }
     }
 
     /// Cuts the worker off from the other nodes' peer APIs while the rules live: discovery asks upstream once peers
@@ -868,6 +891,7 @@ fn a_stored_artifact_is_announced_and_withdrawn_with_its_image_within_2_s() {
         manifest.hex()
     ));
     let announced = told(cluster, &reader, &worker.name, &manifest, true, WITHIN);
+    worker.listed(&expected.root);
     let removed = worker.stamped(&worker.rmi());
     let withdrawn = told(cluster, &reader, &worker.name, &manifest, false, WITHIN);
     let ms = |from: u64, to: u64| to.saturating_sub(from) / 1_000_000;
@@ -929,6 +953,7 @@ fn a_blob_two_images_name_stays_and_a_restart_collects_the_image_removed_meanwhi
     }
 
     // Removing the signed image keeps the empty config, which the other still names.
+    worker.listed(&expected.root);
     worker.sh(&worker.rmi());
     for digest in &signed {
         told(cluster, &reader, name, digest, false, WITHIN);
