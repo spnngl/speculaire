@@ -50,6 +50,8 @@ exclude_re = [
   'crio/images\.rs:\d+:\d+: replace \| with \^ in watch_blocking$',
   # The stand-in `watch` off Linux: Linux, where mutants run, compiles it out, and elsewhere `Lost` has no `Default`.
   'crio/images\.rs:\d+:\d+: replace watch -> Lost with Default::default\(\)$',
+  # A directory left unsynced after a change in it: only a crash before the kernel writes it back loses the change.
+  'files\.rs:\d+:\d+: replace sync_parent -> io::Result<\(\)> with Ok\(\(\)\)$',
   # The children of more roots forgotten: a cache, read again from the store or the node as a manifest is fetched.
   'follow\.rs:\d+:\d+: replace \|\| with && in collect$',
   # A grace that ends at the very nanosecond of a collection: the mark goes at this one or the next.
