@@ -1,7 +1,7 @@
 //! A fake containerd or CRI-O, for tests that run where there is no runtime (the CI runner, macOS): it answers the CRI's
-//! `Version` and `ListImages`, containerd's introspection `Plugins`, content `List` and `Info` and events `Subscribe`,
-//! and CRI-O's `GET /config` on a Unix socket, which is all preflight, the registry config, the inventory and the
-//! mirror ask (D86, D99).
+//! `Version`, `ListImages` and `ListContainers`, containerd's introspection `Plugins`, content `List` and `Info` and
+//! events `Subscribe`, and CRI-O's `GET /config` on a Unix socket, which is all preflight, the registry config, the
+//! inventory, the mirror and the engine ask (D86, D99).
 
 use std::convert::Infallible;
 use std::io;
@@ -72,6 +72,49 @@ struct Image {
     repo_digests: Vec<String>,
 }
 
+/// `ListContainersRequest` of the CRI, its filter by state alone.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ListContainersRequest {
+    #[prost(message, optional, tag = "1")]
+    filter: Option<ContainerFilter>,
+}
+
+/// `ContainerFilter` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ContainerFilter {
+    #[prost(message, optional, tag = "2")]
+    state: Option<ContainerStateValue>,
+}
+
+/// `ContainerStateValue` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ContainerStateValue {
+    #[prost(int32, tag = "1")]
+    state: i32,
+}
+
+/// `ListContainersResponse` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ListContainersResponse {
+    #[prost(message, repeated, tag = "1")]
+    containers: Vec<Container>,
+}
+
+/// `Container` of the CRI: its state and image.
+#[derive(Clone, PartialEq, prost::Message)]
+struct Container {
+    #[prost(string, tag = "5")]
+    image_ref: String,
+    #[prost(int32, tag = "6")]
+    state: i32,
+    #[prost(string, tag = "10")]
+    image_id: String,
+}
+
+/// `CONTAINER_RUNNING` and `CONTAINER_EXITED` of the CRI's `ContainerState`.
+const RUNNING: i32 = 1;
+const EXITED: i32 = 2;
+
 /// What the fake answers.
 #[derive(Clone, Debug)]
 pub struct Answers {
@@ -86,6 +129,8 @@ pub struct Answers {
     pub plugins_unavailable: bool,
     /// The images of `ListImages`: ID, tags and digests.
     pub images: Vec<(String, Vec<String>, Vec<String>)>,
+    /// The containers of `ListContainers`: the image ID, and whether it runs; a filter by state is applied.
+    pub containers: Vec<(String, bool)>,
     /// The body of CRI-O's `GET /config`, its merged TOML; `None` answers 503.
     pub crio_config: Option<String>,
     /// The digests of containerd's content `List`, whatever the namespace; `Subscribe` sends no event, and `Info` finds
@@ -103,6 +148,7 @@ impl Answers {
             image_exports: Some((false, "/etc/containerd/certs.d".to_owned())),
             plugins_unavailable: false,
             images: Vec::new(),
+            containers: Vec::new(),
             content: Vec::new(),
             crio_config: None,
         }
@@ -117,6 +163,7 @@ impl Answers {
             image_exports: None,
             plugins_unavailable: false,
             images: Vec::new(),
+            containers: Vec::new(),
             content: Vec::new(),
             crio_config: Some(
                 "[crio.nri]\nenable_nri = true\nnri_disable_connections = false\n".to_owned(),
@@ -323,6 +370,7 @@ async fn route(
                 .unary(service, request)
                 .await
         }
+        "/runtime.v1.RuntimeService/ListContainers" => containers(answers, request).await,
         "/containerd.services.content.v1.Content/List" => content(answers, request).await,
         "/containerd.services.content.v1.Content/Info" => {
             Status::not_found("the fake runtime holds no bytes").into_http()
@@ -354,6 +402,38 @@ async fn content(
     });
     Grpc::new(ProstCodec::<ListContentResponse, ListContentRequest>::default())
         .server_streaming(service, request)
+        .await
+}
+
+/// The CRI's `ListContainers`: each container of `Answers::containers` in the state the filter asks, if it asks one.
+async fn containers(
+    answers: Arc<Answers>,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let service = tower::service_fn(move |listed: Request<ListContainersRequest>| {
+        let answers = Arc::clone(&answers);
+        async move {
+            let wanted = listed
+                .into_inner()
+                .filter
+                .and_then(|filter| filter.state)
+                .map(|state| state.state);
+            Ok::<_, Status>(Response::new(ListContainersResponse {
+                containers: answers
+                    .containers
+                    .iter()
+                    .map(|(id, running)| Container {
+                        image_ref: id.clone(),
+                        state: if *running { RUNNING } else { EXITED },
+                        image_id: id.clone(),
+                    })
+                    .filter(|container| wanted.is_none_or(|state| state == container.state))
+                    .collect(),
+            }))
+        }
+    });
+    Grpc::new(ProstCodec::<ListContainersResponse, ListContainersRequest>::default())
+        .unary(service, request)
         .await
 }
 

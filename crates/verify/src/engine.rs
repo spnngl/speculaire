@@ -1,8 +1,9 @@
 //! The verdict engine: one verdict per key for each root listed, from the artifacts discovery keeps (D20, D151).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
@@ -369,6 +370,11 @@ struct Group<'a> {
     policies: Vec<&'a Policy>,
 }
 
+/// The roots of the images the runtime's containers run now, which a change verifies again first (D21). It logs its
+/// own errors: an empty set keeps the engine's order.
+pub type Running =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = HashSet<Digest>> + Send>> + Send + Sync>;
+
 /// Keeps a verdict for each key of each root discovery is told of.
 pub struct Engine<D> {
     discovery: Arc<D>,
@@ -384,17 +390,19 @@ pub struct Engine<D> {
     asks: JoinSet<(Digest, Ask, Result<(), Error>)>,
     /// The roots to verify again after a change, in order.
     reverify: VecDeque<Digest>,
+    running: Running,
 }
 
 impl<D: Discover> Engine<D> {
     /// An engine verifying against the policies `policies` holds and the trust root `trust` holds, and again against
-    /// each change of them (D21).
+    /// each change of them, the roots `running` gives first (D21).
     #[must_use]
     pub fn new(
         discovery: Arc<D>,
         mut policies: watch::Receiver<Arc<Policies>>,
         signatures: Signatures,
         mut trust: watch::Receiver<Held>,
+        running: Running,
     ) -> Self {
         let held = trust.borrow_and_update().clone();
         let current = Arc::clone(&policies.borrow_and_update());
@@ -409,6 +417,7 @@ impl<D: Discover> Engine<D> {
             roots: HashMap::new(),
             asks: JoinSet::new(),
             reverify: VecDeque::new(),
+            running,
         }
     }
 
@@ -443,8 +452,8 @@ impl<D: Discover> Engine<D> {
                 },
                 () = sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => self.due().await,
                 // An error means the sender is gone: what it held stays.
-                Ok(()) = self.policy_feed.changed() => self.changed(),
-                Ok(()) = self.trust.changed() => self.changed(),
+                Ok(()) = self.policy_feed.changed() => self.changed().await,
+                Ok(()) = self.trust.changed() => self.changed().await,
                 () = std::future::ready(()), if !self.reverify.is_empty() => self.reverify_next().await,
             }
             self.count();
@@ -453,8 +462,8 @@ impl<D: Discover> Engine<D> {
     }
 
     /// Swaps in the policies and the trust root held now, and queues each root a key of which changed, its verdicts
-    /// stale under their new keys (D21).
-    fn changed(&mut self) {
+    /// stale under their new keys, those the runtime's containers run first (D21).
+    async fn changed(&mut self) {
         let policies = Arc::clone(&self.policy_feed.borrow_and_update());
         let previous = std::mem::replace(&mut self.policies, policies);
         let previous_root = self.trust_hash();
@@ -489,8 +498,14 @@ impl<D: Discover> Engine<D> {
             }
         }
         if self.reverify.len() > queued {
+            let running = (self.running)().await;
+            // The sort is stable: the other roots keep their order.
+            self.reverify
+                .make_contiguous()
+                .sort_by_key(|digest| !running.contains(digest));
             info!(
                 roots = self.reverify.len() - queued,
+                running = running.len(),
                 "the policies or the trust root changed: verifying again"
             );
         }

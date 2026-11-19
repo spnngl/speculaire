@@ -5,7 +5,7 @@
 //! list is read again and compared; the whole list is sent at the start, every [`RELIST`], and whenever the hints
 //! stopped, so a hint missed costs one interval at most.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,14 +64,8 @@ impl Image {
     /// with the hex alone; a repository digest or tag that does not parse is left out.
     #[must_use]
     pub fn from_listed(listed: &ListedImage) -> Option<Self> {
-        let id = if listed.id.contains(':') {
-            Digest::parse(&listed.id)
-        } else {
-            Digest::parse(&format!("sha256:{}", listed.id))
-        }
-        .ok()?;
         Some(Self {
-            id,
+            id: image_id(&listed.id)?,
             repo_digests: listed
                 .repo_digests
                 .iter()
@@ -84,6 +78,37 @@ impl Image {
                 .collect(),
         })
     }
+}
+
+/// The digest of an image ID as the CRI lists it: containerd with its algorithm, CRI-O with the hex alone.
+fn image_id(text: &str) -> Option<Digest> {
+    if text.contains(':') {
+        Digest::parse(text)
+    } else {
+        Digest::parse(&format!("sha256:{text}"))
+    }
+    .ok()
+}
+
+/// The roots of the images the runtime's running containers run: each repository digest of their images (D21).
+///
+/// # Errors
+///
+/// When the runtime does not answer `ListContainers` or `ListImages`.
+pub async fn running_roots(socket: &Path) -> Result<HashSet<Digest>, cri::Error> {
+    let running: HashSet<Digest> = cri::running_images(socket)
+        .await?
+        .iter()
+        .filter_map(|id| image_id(id))
+        .collect();
+    Ok(cri::list_images(socket)
+        .await?
+        .iter()
+        .filter_map(Image::from_listed)
+        .filter(|image| running.contains(&image.id))
+        .flat_map(|image| image.repo_digests)
+        .map(|repo_digest| repo_digest.digest)
+        .collect())
 }
 
 /// What a follower of the image list learns.

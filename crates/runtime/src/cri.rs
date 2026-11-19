@@ -21,6 +21,10 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// The method, in the CRI's `runtime.v1` package (`k8s.io/cri-api` `api.proto`).
 const VERSION_METHOD: &str = "/runtime.v1.RuntimeService/Version";
 const LIST_IMAGES_METHOD: &str = "/runtime.v1.ImageService/ListImages";
+const LIST_CONTAINERS_METHOD: &str = "/runtime.v1.RuntimeService/ListContainers";
+
+/// `CONTAINER_RUNNING` of the CRI's `ContainerState`.
+const CONTAINER_RUNNING: i32 = 1;
 
 /// The largest answer that is read: a node with thousands of images lists them in megabytes.
 const MAX_LIST: usize = 64 << 20;
@@ -68,6 +72,46 @@ pub struct ListedImage {
     /// `repository@digest` names.
     #[prost(string, repeated, tag = "3")]
     pub repo_digests: Vec<String>,
+}
+
+/// `ListContainersRequest`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ListContainersRequest {
+    #[prost(message, optional, tag = "1")]
+    filter: Option<ContainerFilter>,
+}
+
+/// `ContainerFilter`, by state alone.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ContainerFilter {
+    #[prost(message, optional, tag = "2")]
+    state: Option<ContainerStateValue>,
+}
+
+/// `ContainerStateValue`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ContainerStateValue {
+    #[prost(int32, tag = "1")]
+    state: i32,
+}
+
+/// `ListContainersResponse`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ListContainersResponse {
+    #[prost(message, repeated, tag = "1")]
+    containers: Vec<ListedContainer>,
+}
+
+/// The image fields of the CRI's `Container`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ListedContainer {
+    /// containerd: the image ID; CRI-O: some `repository@digest` of the image, or its ID
+    /// (`internal/oci/container.go:181` at v1.37.2).
+    #[prost(string, tag = "5")]
+    image_ref: String,
+    /// The image ID, as `ListImages` gives it; empty from a runtime older than the field.
+    #[prost(string, tag = "10")]
+    image_id: String,
 }
 
 /// What a runtime reports of itself.
@@ -221,4 +265,37 @@ pub async fn list_images(socket: &Path) -> Result<Vec<ListedImage>, Error> {
     )
     .await?;
     Ok(response.images)
+}
+
+/// `RuntimeService.ListContainers` on the socket of a runtime: the image ID of each running container, as
+/// [`ListedImage::id`] writes it, or its image reference from a runtime without the field.
+///
+/// # Errors
+///
+/// When the socket cannot be connected to, or the runtime does not answer in 5 s.
+pub async fn running_images(socket: &Path) -> Result<Vec<String>, Error> {
+    let request = ListContainersRequest {
+        filter: Some(ContainerFilter {
+            state: Some(ContainerStateValue {
+                state: CONTAINER_RUNNING,
+            }),
+        }),
+    };
+    let response: ListContainersResponse = timed(
+        socket,
+        LIST_CONTAINERS_METHOD,
+        unary(socket, LIST_CONTAINERS_METHOD, request),
+    )
+    .await?;
+    Ok(response
+        .containers
+        .into_iter()
+        .map(|container| {
+            if container.image_id.is_empty() {
+                container.image_ref
+            } else {
+                container.image_id
+            }
+        })
+        .collect())
 }

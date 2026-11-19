@@ -1,5 +1,6 @@
 //! The verdict engine over the recorded fixtures of step 01, offline, with discovery scripted (D20, D151).
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -38,6 +39,10 @@ struct Scripted {
     upstream: Semaphore,
     /// How many times verification read the store.
     reads: AtomicUsize,
+    /// The roots upstream was asked of once more, in order.
+    asked_again: Mutex<Vec<Digest>>,
+    /// The roots the runtime's containers run.
+    running: Mutex<HashSet<Digest>>,
 }
 
 impl Scripted {
@@ -64,7 +69,11 @@ impl Discover for Scripted {
         std::future::ready(self.answer(&self.discovered))
     }
 
-    fn again(&self, _: &Digest, _: &[String]) -> impl Future<Output = Result<(), Error>> + Send {
+    fn again(&self, root: &Digest, _: &[String]) -> impl Future<Output = Result<(), Error>> + Send {
+        self.asked_again
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(root.clone());
         let answer = self.answer(&self.again);
         async move {
             let _answers = self.upstream.acquire().await;
@@ -98,14 +107,25 @@ impl Run {
             again: Mutex::default(),
             upstream: Semaphore::new(0),
             reads: AtomicUsize::new(0),
+            asked_again: Mutex::default(),
+            running: Mutex::default(),
         });
         let (policies, policy_feed) = watch::channel(Arc::new(policies));
         let (trust, held) = watch::channel(trust);
+        let runtime = Arc::clone(&discovery);
         let engine = Engine::new(
             Arc::clone(&discovery),
             policy_feed,
             Signatures::new(MAX_SIZE),
             held,
+            Box::new(move || {
+                let running = runtime
+                    .running
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                Box::pin(std::future::ready(running))
+            }),
         );
         let verdicts = Arc::clone(engine.verdicts());
         let (found, told) = mpsc::unbounded_channel();
@@ -741,4 +761,85 @@ async fn a_policy_change_leaves_a_root_whose_discovery_runs_to_its_end() {
         })
         .expect("the engine runs");
     assert!(matches!(run.verdict(key).await, Verdict::Rejected { .. }));
+}
+
+#[tokio::test]
+async fn a_change_verifies_the_roots_of_running_containers_first() {
+    let fixture = Fixture::load("keyless").await;
+    let before = policies(&[("a", "reg.test/a", SAN)]);
+    let after = policies(&[("a", "reg.test/a", "https://example.test/another")]);
+    let run = Run::start(&fixture.store, before, true, Ok(pinned()));
+    run.discovery.upstream.add_permits(1);
+    // Roots with the artifacts of another: rejected under either policy, each once upstream was asked once more
+    // (D126).
+    let images: Vec<Digest> = (0..8).map(digest).collect();
+    let roots: Vec<Digest> = (10..18).map(digest).collect();
+    for root in &roots {
+        fixture
+            .store
+            .record(root, &fixture.artifacts)
+            .await
+            .expect("the store records the root");
+    }
+    let names: Vec<[(&str, &Digest); 1]> =
+        roots.iter().map(|root| [("reg.test/a", root)]).collect();
+    let listed: Vec<(&Digest, &[(&str, &Digest)])> = images
+        .iter()
+        .zip(&names)
+        .map(|(image, names)| (image, names.as_slice()))
+        .collect();
+    run.found
+        .send(Found::Roots {
+            listed: speculaire_artifacts::follow::roots(&list(&listed)),
+            fetched: Roots::new(),
+        })
+        .expect("the engine runs");
+    for root in &roots {
+        run.found
+            .send(Found::Ended {
+                root: root.clone(),
+                discovered: Ok(()),
+            })
+            .expect("the engine runs");
+    }
+    let asked = || {
+        run.discovery
+            .asked_again
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    };
+    for _ in 0..200 {
+        if asked().len() == roots.len() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(asked().len(), roots.len(), "each root asked once more");
+
+    let running = HashSet::from([roots[2].clone(), roots[5].clone()]);
+    run.discovery
+        .running
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone_from(&running);
+    run.discovery
+        .asked_again
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+    run.policies.send(Arc::new(after)).expect("the engine runs");
+    for _ in 0..200 {
+        if asked().len() == roots.len() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let asked = asked();
+    assert_eq!(asked.len(), roots.len(), "each root verified again");
+    assert_eq!(
+        asked[..2].iter().cloned().collect::<HashSet<_>>(),
+        running,
+        "{asked:?}"
+    );
 }

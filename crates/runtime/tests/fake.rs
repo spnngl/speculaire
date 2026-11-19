@@ -1,11 +1,14 @@
 //! The calls to a runtime, against a fake one on a socket.
 
+use std::collections::HashSet;
 use std::os::unix::net::UnixListener;
 use std::time::{Duration, Instant};
 
 use speculaire_fake_runtime::{Answers, Fake};
+use speculaire_oci::reference::Digest;
 use speculaire_runtime::containerd::{ImageExports, image_exports};
 use speculaire_runtime::cri::{self, Error};
+use speculaire_runtime::images;
 use speculaire_runtime::version::Release;
 
 #[test]
@@ -119,6 +122,53 @@ fn the_list_of_images_is_read_with_its_names() {
     assert_eq!(images[1].repo_tags.len(), 0);
     let err = runtime
         .block_on(cri::list_images(&dir.path().join("none.sock")))
+        .expect_err("no runtime");
+    assert!(matches!(err, Error::Connect { .. }), "{err}");
+}
+
+#[test]
+fn the_running_containers_give_the_roots_of_their_images() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let socket = dir.path().join("crio.sock");
+    let hex = |byte: char| byte.to_string().repeat(64);
+    let mut answers = Answers::crio("1.37.2");
+    // CRI-O lists an image ID with the hex alone.
+    answers.images = vec![
+        (
+            hex('1'),
+            Vec::new(),
+            vec![format!("reg.test/a@sha256:{}", hex('a'))],
+        ),
+        (
+            hex('2'),
+            Vec::new(),
+            vec![format!("reg.test/b@sha256:{}", hex('b'))],
+        ),
+        (
+            hex('3'),
+            Vec::new(),
+            vec![format!("reg.test/c@sha256:{}", hex('c'))],
+        ),
+    ];
+    answers.containers = vec![(hex('1'), true), (hex('2'), false), (hex('1'), true)];
+    let _fake = Fake::start(&socket, answers).expect("a fake runtime");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+
+    let roots = runtime
+        .block_on(images::running_roots(&socket))
+        .expect("an answer");
+
+    let root = Digest::parse(&format!("sha256:{}", hex('a'))).expect("a digest");
+    assert_eq!(
+        roots,
+        HashSet::from([root]),
+        "the stopped container's image is left out"
+    );
+    let err = runtime
+        .block_on(images::running_roots(&dir.path().join("none.sock")))
         .expect_err("no runtime");
     assert!(matches!(err, Error::Connect { .. }), "{err}");
 }

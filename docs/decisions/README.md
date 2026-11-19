@@ -161,6 +161,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D151 [verification](verification.md): the verdict engine follows discovery's roots, keys each root by the policies its names match, retries an `Unverifiable` key 10 s doubling to 5 min with its own discovery, asks upstream once before a first `Rejected`, and keeps verdicts in memory (amends D20, D121, D126; amended by D152, D154)
 - D152 [verification](verification.md): a `GET` of a manifest by digest, or by tag when the mirror serves it, makes its digest a discovery root before it is listed, unless listed, fetched or named by a known index; its first verification counts under `trigger="manifest"` (amends D22, D66, D121, D146, D151)
 - D153 [verification](verification.md): the store keeps what a root fetched and not listed names for `artifacts.grace` (600 s), marked on disk with its time so a restart keeps the grace (amends D131)
+- D154 [verification](verification.md): the policy file and a pinned trust root reload on SIGHUP or a changed stamp, a refused one keeping the previous; a changed key serves its previous verdict stale for up to `verify.stale_max` while its root is verified again under `trigger="reverify"` (amends D21, D30, D143, D151; amended by D155)
+- D155 [verification](verification.md): after a change, the roots the runtime's running containers run, from CRI `ListContainers` and `ListImages`, are verified again first (amends D154)
 
-Next free number: D154.
-- D154 [verification](verification.md): the policy file and a pinned trust root reload on SIGHUP or a changed stamp, a refused one keeping the previous; a changed key serves its previous verdict stale for up to `verify.stale_max` while its root is verified again under `trigger="reverify"` (amends D21, D30, D143, D151)
+Next free number: D156.
