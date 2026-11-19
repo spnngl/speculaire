@@ -38,8 +38,9 @@ exclude_re = [
   'engine\.rs:\d+:\d+: replace <impl Discover for Discovery>::(discover|again) -> Result<\(\), Error> with Ok\(\(\)\)$',
   # A stale verdict read at the very nanosecond `verify.stale_max` ends: it is pending this lookup or the next.
   'engine\.rs:\d+:\d+: replace < with <= in Verdicts::get$',
-  # The count of roots queued again, which only the log line of a change reads.
-  'engine\.rs:\d+:\d+: replace > with (==|<|>=) in Engine<D>::changed$',
+  # Whether a change queued roots: when it queued none, asking the runtime what runs and sorting the queue change no
+  # order, and only a log line differs.
+  'engine\.rs:\d+:\d+: replace > with >= in Engine<D>::changed$',
   # The log line and expiry gauge of a pinned trust root read again: the root it holds is the same either way.
   'trust\.rs:\d+:\d+: replace Holding::read with \(\)$',
   # A target with exactly as many referrers as the cap: truncating to the cap keeps them all, only a warning differs.

@@ -440,7 +440,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Revisit when:** pulls longer than the grace lose their artifacts before the runtime lists them.
 
 
-## D154: The policy file and a pinned trust root reload as the config does; a changed key serves its previous verdict stale (amends D21, D30, D143, D151)
+## D154: The policy file and a pinned trust root reload as the config does; a changed key serves its previous verdict stale (amends D21, D30, D143, D151; amended by D155)
 
 - **Decision:**
   - **Reload:** the policy file and a pinned `verify.trusted_root` are watched files (D93): SIGHUP reads them, a poll reads one whose stamp changed, or the policy file at a new `verify.policy`. A file refused keeps what was read before, is counted once in `speculaire_config_reload_failures_total` and logged with its reason. A TUF refresh that fails while a root is held keeps that root; one that brings the same hash is no change.
@@ -454,3 +454,16 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - A failed TUF refresh, or the same root fetched again, should not make every verdict stale.
   - One root per turn keeps the engine answering discovery and retries while it verifies a whole store again.
 - **Revisit when:** running containers must be verified first (D21): the engine needs the runtime's container list.
+
+
+## D155: After a change, the roots running containers run are verified again first (amends D154)
+
+- **Decision:**
+  - On a change that queues roots, the engine asks the runtime over the CRI which containers run (`ListContainers`, filtered on `CONTAINER_RUNNING`), maps each one's `image_id` (its `image_ref` when the field is empty) to the image of `ListImages` with that ID, and takes each repository digest of those images as a running root. A stable sort puts the running roots first in the queue; the others keep their order.
+  - A runtime that does not answer in 5 s leaves the queue in the engine's order, with a warning.
+  - "Running" is the runtime's containers until NRI `Synchronize` comes with the gate (M6).
+- **Because:**
+  - D21 asks for running containers first: their images are the ones a restart or a new replica pulls again soonest.
+  - Both runtimes fill `image_id` with the ID `ListImages` lists: containerd its config digest (`internal/cri/server/container_list.go:53-66` at v2.3.0), CRI-O its storage ID (`internal/oci/container.go:181-199` at v1.37.2), whose `image_ref` may be a `repository@digest` no registry served.
+  - One CRI call per change, not per root, and none while nothing changed.
+- **Revisit when:** the gate (M6) holds the running containers from NRI `Synchronize`.

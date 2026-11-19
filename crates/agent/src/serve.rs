@@ -1,8 +1,9 @@
 //! The agent process: loads the config, then serves until SIGTERM, reloading on SIGHUP and on file changes (D30).
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -25,8 +26,8 @@ use speculaire_runtime::content::Content;
 use speculaire_runtime::inventory::{Change, Inventory, Update};
 use speculaire_runtime::registries::{self, Registries, Reloaded};
 use speculaire_runtime::watch::Watch;
-use speculaire_runtime::{Fallback, Node as RuntimeNode};
-use speculaire_verify::{Engine, Policies, Signatures, Verdicts};
+use speculaire_runtime::{Fallback, Node as RuntimeNode, images};
+use speculaire_verify::{Engine, Policies, Running, Signatures, Verdicts};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
@@ -523,7 +524,13 @@ fn start_discovery(
     ));
     speculaire_verify::metrics::describe();
     let signatures = Signatures::new(config.sbom.max_size.get());
-    let engine = Engine::new(Arc::clone(&discovery), policies, signatures, trust);
+    let engine = Engine::new(
+        Arc::clone(&discovery),
+        policies,
+        signatures,
+        trust,
+        running(node.socket().to_owned()),
+    );
     let verdicts = Arc::clone(engine.verdicts());
     verdicts.set_stale_max(config.verify.stale_max.get());
     let (found, told) = tokio::sync::mpsc::unbounded_channel();
@@ -541,6 +548,19 @@ fn start_discovery(
         found,
     ));
     Ok((store, verdicts))
+}
+
+/// The roots the runtime's running containers run, asked over the CRI at `socket` (D21): none when it does not answer.
+fn running(socket: PathBuf) -> Running {
+    Box::new(move || {
+        let socket = socket.clone();
+        Box::pin(async move {
+            images::running_roots(&socket).await.unwrap_or_else(|e| {
+                warn!(error = %e, "the running containers are unknown: verifying again in no set order");
+                HashSet::new()
+            })
+        })
+    })
 }
 
 /// Resolves once `last_up` holds a time, or its sender drops, or after `wait`.

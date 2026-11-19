@@ -46,7 +46,7 @@ On CRI-O every pull of a mirrored registry goes through the agent, which fetches
 
 A policy file that does not parse stops both before any runtime check, with one line: `the policy file <path>: document <n>, <field>: <message>`, or the line and column of a YAML error. A field outside D142's subset, such as `keyless.url` or `key.kms`, is refused rather than ignored; `packaging/policy.yaml` shows the fields accepted. Without the file, no policy matches and `gate.unmatched` decides (D23).
 
-A running agent reads the policy file and a pinned trust root again on SIGHUP and when they change. One that does not parse logs `the policy file reload failed; the previous one stays in use` (or `the pinned trust root reload failed`) with the same line, and the previous one serves. A change logs `the policies or the trust root changed: verifying again`: each image keeps its previous verdict, marked stale, for up to `verify.stale_max`, until it is verified again under `trigger="reverify"` (D154).
+A running agent reads the policy file and a pinned trust root again on SIGHUP and when they change. One that does not parse logs `the policy file reload failed; the previous one stays in use` (or `the pinned trust root reload failed`) with the same line, and the previous one serves. A change logs `the policies or the trust root changed: verifying again`: each image keeps its previous verdict, marked stale, for up to `verify.stale_max`, until it is verified again under `trigger="reverify"` (D154). The roots of running containers go first; a runtime that does not answer the CRI logs `the running containers are unknown: verifying again in no set order` (D155).
 
 | Message | Meaning | Action |
 |---|---|---|
