@@ -415,10 +415,10 @@ async fn a_collection_beside_a_discovery_keeps_its_root_and_what_it_held_until_i
     let (root, other) = (digest_of(b"root"), digest_of(b"other"));
     let (kept, empty) = (digest_of(b"kept"), digest_of(b"{}"));
     let discovering = store.discovering(&root);
-    store.keep(&kept, b"kept").await.unwrap();
+    discovering.keep(&kept, b"kept").await.unwrap();
     // The empty config `a` names, which the discovery then has no need to fetch.
-    assert!(store.hold(&empty));
-    assert!(!store.hold(&other));
+    assert!(discovering.hold(&empty));
+    assert!(!discovering.hold(&other));
     store.record(&root, &[]).await.unwrap();
     // Neither `a` nor the root being discovered is listed.
     store.collect(HashSet::new()).await.unwrap();
@@ -430,6 +430,43 @@ async fn a_collection_beside_a_discovery_keeps_its_root_and_what_it_held_until_i
     store.collect(HashSet::new()).await.unwrap();
     assert!(held(dir.path()).is_empty());
     assert_eq!(store.recorded(&root).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn what_a_discovery_held_is_collected_once_it_ends_while_another_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let (ended, running) = (digest_of(b"ended"), digest_of(b"running"));
+    let (gone, kept) = (digest_of(b"gone"), digest_of(b"kept"));
+    let other = store.discovering(&running);
+    other.keep(&kept, b"kept").await.unwrap();
+    let discovering = store.discovering(&ended);
+    discovering.keep(&gone, b"gone").await.unwrap();
+    store.record(&ended, &[]).await.unwrap();
+    store.record(&running, &[]).await.unwrap();
+    drop(discovering);
+
+    store.collect(HashSet::new()).await.unwrap();
+    assert_eq!(store.recorded(&ended).await.unwrap(), None);
+    assert!(!store.contains(&gone));
+    assert!(store.recorded(&running).await.unwrap().is_some());
+    assert!(store.contains(&kept));
+    drop(other);
+}
+
+/// A collection may have read the records before those of a discovery that ended during it.
+#[tokio::test]
+async fn what_a_discovery_ending_during_a_collection_held_is_kept_until_the_collection_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let root = digest_of(b"root");
+    let discovering = store.discovering(&root);
+    store.pending().collections += 1;
+    let collecting = Collecting(&store);
+    drop(discovering);
+    assert!(store.pending().holds(&root));
+    drop(collecting);
+    assert!(!store.pending().holds(&root));
 }
 
 /// A crash after a record went and before its blobs did, or after a blob went and before its withdrawal: the next

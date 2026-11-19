@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use super::{Discovery, Error, Origin};
 use crate::metrics::{self, Outcome};
-use crate::store::{Artifact, Kind};
+use crate::store::{Artifact, Discovering, Kind};
 
 /// What the node holds of a manifest: the runtime's content, or the blob cache where the node relays (D67).
 pub trait Local: Send + Sync {
@@ -55,6 +55,7 @@ impl Discovery {
     /// The artifacts of `root` that the store and peers give, `index` being its manifest when held.
     pub(super) async fn nearby(
         &self,
+        discovering: &Discovering<'_>,
         root: &Digest,
         index: Option<&[u8]>,
     ) -> Result<Vec<Artifact>, Error> {
@@ -63,14 +64,17 @@ impl Discovery {
         if let Some((platform, attestations)) = self.platform(index) {
             targets.push(platform.clone());
             for attestation in attestations {
-                if let Some(artifact) = self.near_attestation(&platform, &attestation).await? {
+                if let Some(artifact) = self
+                    .near_attestation(discovering, &platform, &attestation)
+                    .await?
+                {
                     artifacts.push(artifact);
                     targets.push(attestation);
                 }
             }
         }
         for target in &targets {
-            self.listed(target, &mut artifacts).await?;
+            self.listed(discovering, target, &mut artifacts).await?;
         }
         Ok(artifacts)
     }
@@ -78,6 +82,7 @@ impl Discovery {
     /// The attestation manifest `digest` of `target`, kept with its blobs.
     async fn near_attestation(
         &self,
+        discovering: &Discovering<'_>,
         target: &Digest,
         digest: &Digest,
     ) -> Result<Option<Artifact>, Error> {
@@ -91,20 +96,23 @@ impl Discovery {
             debug!(%digest, "an attestation manifest from peers that is no image manifest is dropped");
             return Ok(None);
         };
-        let blobs: Vec<Digest> = std::iter::once(config).chain(layers).collect();
-        self.keep(
-            Origin::Peers,
-            digest,
-            &bytes,
-            &blobs,
-            Kind::Attestation,
-            target,
-        )
-        .await
+        let artifact = Artifact {
+            target: target.clone(),
+            manifest: digest.clone(),
+            kind: Kind::Attestation,
+            blobs: std::iter::once(config).chain(layers).collect(),
+        };
+        self.keep(discovering, Origin::Peers, &bytes, artifact)
+            .await
     }
 
     /// The bundles and `.sig` manifests that peers list about `target`, kept with their blobs.
-    async fn listed(&self, target: &Digest, artifacts: &mut Vec<Artifact>) -> Result<(), Error> {
+    async fn listed(
+        &self,
+        discovering: &Discovering<'_>,
+        target: &Digest,
+        artifacts: &mut Vec<Artifact>,
+    ) -> Result<(), Error> {
         let mut listed = self.peers.referrers(target).await;
         listed.retain(|d| {
             (d.may_be_bundle() || d.artifact_type.as_deref() == Some(SIMPLE_SIGNING))
@@ -138,9 +146,14 @@ impl Discovery {
                     continue;
                 }
             };
-            let blobs: Vec<Digest> = referrer.blobs().map(|blob| blob.digest.clone()).collect();
+            let artifact = Artifact {
+                target: target.clone(),
+                manifest: digest.clone(),
+                kind,
+                blobs: referrer.blobs().map(|blob| blob.digest.clone()).collect(),
+            };
             if let Some(artifact) = self
-                .keep(Origin::Peers, digest, &bytes, &blobs, kind, target)
+                .keep(discovering, Origin::Peers, &bytes, artifact)
                 .await?
             {
                 artifacts.push(artifact);

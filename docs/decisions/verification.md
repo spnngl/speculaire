@@ -293,7 +293,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Measured:** 23 crates enter `Cargo.lock` (sigstore-trust-root, sigstore-tuf, sigstore-types, sigstore-crypto, jiff, x509-cert and their dependencies), with no ring and no reqwest. A refresh from the recorded repository served in process, then from its cache, takes under 0.1 s.
 - **Revisit when:** TUF travels P2P (D26), or sigstore-trust-root's `tuf` feature stops pulling reqwest.
 
-## D144: The artifact store is collected beside a discovery, which keeps its root and what it holds (amends D131; amended by D146)
+## D144: The artifact store is collected beside a discovery, which keeps its root and what it holds (amends D131; amended by D146, D148)
 
 - **Decision:**
   - **Collected:** the follower of the image list reads the list while a discovery runs, and collects the store at each full listing and whenever a root leaves the list, as D131 does between discoveries.
@@ -324,7 +324,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Measured:** 8 crates enter `Cargo.lock` (sigstore-verify, sigstore-bundle, sigstore-rekor, sigstore-tsa, sigstore-merkle, cms, serde_json_canonicalizer, ryu-js). One verification takes 1.2 ms for the keyless fixture and 0.65 ms for the key fixture (release, Apple M5); parsing the trusted root with its verifier takes 0.25 ms.
 - **Revisit when:** sigstore-verify matches identities by pattern, or cosign stops counting attestations as signatures.
 
-## D146: The roots of an image just listed have a discovery lane of their own (amends D121, D144)
+## D146: The roots of an image just listed have a discovery lane of their own (amends D121, D144; amended by D148)
 
 - **Decision:**
   - **Lanes:** the follower of the image list runs two discoveries at most, one per lane, each one root at a time. The roots of an image just listed go in the pulled lane, in the order they come. Those a full listing queues, and those due again after a failure (D128, D134), go in the backlog lane.
@@ -350,3 +350,13 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Each layer is one signature: cosign appends a layer per `cosign sign` of the same image.
 - **Measured:** one layer of the `legacy-sig` fixture verifies in 0.56 ms (release, Apple M5).
 - **Revisit when:** cosign drops `.sig` from `cosign verify`, or images signed with a key and a `.sig` need a fixture.
+
+## D148: A discovery's holds end with it, whatever the other lane runs (amends D144, D146)
+
+- **Decision:**
+  - Each discovery holds its own root and blobs: `Store::discovering` returns a guard through which the discovery holds and keeps, and a collection keeps what any guard alive holds.
+  - A guard dropped while a collection runs leaves its holds until no collection runs: that collection may have read the records before the discovery's.
+  - Blobs kept outside a discovery, by `Store::keep` or `Writer::commit`, are held by none.
+- **Because:**
+  - D144 forgot the holds only once no discovery ran. With D146's backlog lane busy, the pulled lane's holds outlived its discovery, and the collection after `crictl rmi` skipped the root. On main's run 44430760175, arm64 containerd 2.4 k1.36, worker2 discovered `e2e/signed:1` at 00:54:55.280, containerd removed it at 00:54:55.796 while backlog discoveries ran until 00:54:56.549, and its bundle was deleted only at the agent's restart, 00:55:06.038; the e2e suite allows 2 s.
+- **Revisit when:** a discovery spawns tasks that keep blobs without its guard.

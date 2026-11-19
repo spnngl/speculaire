@@ -31,7 +31,7 @@ use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use crate::metrics::{self, OTHER, Outcome};
-use crate::store::{self, Artifact, Kind, Store};
+use crate::store::{self, Artifact, Discovering, Kind, Store};
 
 mod pauses;
 mod peers;
@@ -180,18 +180,20 @@ impl Discovery {
     /// When peers give no artifact and no source serves the root's manifest, a host refuses to serve more for now, or
     /// the store fails.
     pub async fn discover(&self, root: &Digest, names: &[String]) -> Result<Vec<Artifact>, Error> {
-        let _discovering = self.store.discovering(root);
+        let discovering = self.store.discovering(root);
         let mut index = self.held(root).await?;
-        let mut artifacts = self.nearby(root, index.as_deref()).await?;
+        let mut artifacts = self.nearby(&discovering, root, index.as_deref()).await?;
         if artifacts.is_empty() {
             let (upstream, fetched) = self.root(root, names, index.as_deref()).await?;
             index = fetched;
-            artifacts = self.upstream(&upstream, root, index.as_deref()).await?;
+            artifacts = self
+                .upstream(&discovering, &upstream, root, index.as_deref())
+                .await?;
         }
         if let Some(bytes) = &index
             && Index::parse(bytes).is_ok()
         {
-            self.store.keep(root, bytes).await?;
+            discovering.keep(root, bytes).await?;
         }
         self.store.record(root, &artifacts).await?;
         Ok(artifacts)
@@ -200,6 +202,7 @@ impl Discovery {
     /// The artifacts of `root` from `upstream`, `index` being its manifest when it is an index.
     async fn upstream(
         &self,
+        discovering: &Discovering<'_>,
         upstream: &Upstream,
         root: &Digest,
         index: Option<&[u8]>,
@@ -209,15 +212,19 @@ impl Discovery {
         if let Some((platform, attestations)) = self.platform(index) {
             targets.push(platform.clone());
             for attestation in attestations {
-                if let Some(artifact) = self.attestation(upstream, &platform, &attestation).await? {
+                if let Some(artifact) = self
+                    .attestation(discovering, upstream, &platform, &attestation)
+                    .await?
+                {
                     artifacts.push(artifact);
                     targets.push(attestation);
                 }
             }
         }
         for target in &targets {
-            self.bundles(upstream, target, &mut artifacts).await?;
-            if let Some(artifact) = self.signature(upstream, target).await? {
+            self.bundles(discovering, upstream, target, &mut artifacts)
+                .await?;
+            if let Some(artifact) = self.signature(discovering, upstream, target).await? {
                 artifacts.push(artifact);
             }
         }
@@ -331,6 +338,7 @@ impl Discovery {
     /// The attestation manifest `digest` of `target`, kept with its blobs.
     async fn attestation(
         &self,
+        discovering: &Discovering<'_>,
         upstream: &Upstream,
         target: &Digest,
         digest: &Digest,
@@ -343,21 +351,20 @@ impl Discovery {
             debug!(%digest, "an attestation manifest that is no image manifest is dropped");
             return Ok(None);
         };
-        let blobs: Vec<Digest> = std::iter::once(config).chain(layers).collect();
-        self.keep(
-            Origin::Upstream(upstream),
-            digest,
-            &bytes,
-            &blobs,
-            Kind::Attestation,
-            target,
-        )
-        .await
+        let artifact = Artifact {
+            target: target.clone(),
+            manifest: digest.clone(),
+            kind: Kind::Attestation,
+            blobs: std::iter::once(config).chain(layers).collect(),
+        };
+        self.keep(discovering, Origin::Upstream(upstream), &bytes, artifact)
+            .await
     }
 
     /// The Sigstore bundle referrers of `target`, kept with their blobs.
     async fn bundles(
         &self,
+        discovering: &Discovering<'_>,
         upstream: &Upstream,
         target: &Digest,
         artifacts: &mut Vec<Artifact>,
@@ -391,16 +398,14 @@ impl Discovery {
                     continue;
                 }
             };
-            let blobs: Vec<Digest> = referrer.blobs().map(|blob| blob.digest.clone()).collect();
+            let artifact = Artifact {
+                target: target.clone(),
+                manifest: descriptor.digest,
+                kind: Kind::Bundle,
+                blobs: referrer.blobs().map(|blob| blob.digest.clone()).collect(),
+            };
             if let Some(artifact) = self
-                .keep(
-                    Origin::Upstream(upstream),
-                    &descriptor.digest,
-                    &bytes,
-                    &blobs,
-                    Kind::Bundle,
-                    target,
-                )
+                .keep(discovering, Origin::Upstream(upstream), &bytes, artifact)
                 .await?
             {
                 artifacts.push(artifact);
@@ -479,6 +484,7 @@ impl Discovery {
     /// The manifest of the legacy `.sig` tag of `target`, kept with its blobs, if it exists.
     async fn signature(
         &self,
+        discovering: &Discovering<'_>,
         upstream: &Upstream,
         target: &Digest,
     ) -> Result<Option<Artifact>, Error> {
@@ -496,41 +502,37 @@ impl Discovery {
             debug!(%target, "a .sig tag that is no image manifest is dropped");
             return Ok(None);
         };
-        let blobs: Vec<Digest> = manifest.blobs().map(|blob| blob.digest.clone()).collect();
-        self.keep(
-            Origin::Upstream(upstream),
-            &digest,
-            &bytes,
-            &blobs,
-            Kind::Signature,
-            target,
-        )
-        .await
+        let artifact = Artifact {
+            target: target.clone(),
+            manifest: digest,
+            kind: Kind::Signature,
+            blobs: manifest.blobs().map(|blob| blob.digest.clone()).collect(),
+        };
+        self.keep(discovering, Origin::Upstream(upstream), &bytes, artifact)
+            .await
     }
 
-    /// Keeps the manifest `bytes` and the `blobs` it names as an artifact of `target`: `None` when a blob cannot be
-    /// had, which drops the artifact.
+    /// Keeps `artifact`, `bytes` being its manifest, with its blobs: `None` when a blob cannot be had, which drops the
+    /// artifact.
     async fn keep(
         &self,
+        discovering: &Discovering<'_>,
         origin: Origin<'_>,
-        digest: &Digest,
         bytes: &[u8],
-        blobs: &[Digest],
-        kind: Kind,
-        target: &Digest,
+        artifact: Artifact,
     ) -> Result<Option<Artifact>, Error> {
-        for blob in blobs {
-            if self.store.hold(blob) {
+        for blob in &artifact.blobs {
+            if discovering.hold(blob) {
                 continue;
             }
             let kept = match origin {
-                Origin::Upstream(upstream) => self.blob(upstream, blob).await?,
+                Origin::Upstream(upstream) => self.blob(discovering, upstream, blob).await?,
                 Origin::Peers => match self
                     .nearby_bytes(Wanted::Blob, blob, self.limits.blob)
                     .await?
                 {
                     Some(content) => {
-                        self.store.keep(blob, &content).await?;
+                        discovering.keep(blob, &content).await?;
                         true
                     }
                     None => false,
@@ -540,17 +542,17 @@ impl Discovery {
                 return Ok(None);
             }
         }
-        self.store.keep(digest, bytes).await?;
-        Ok(Some(Artifact {
-            target: target.clone(),
-            manifest: digest.clone(),
-            kind,
-            blobs: blobs.to_vec(),
-        }))
+        discovering.keep(&artifact.manifest, bytes).await?;
+        Ok(Some(artifact))
     }
 
     /// Fetches the blob `digest` into the store, checking it in flight: whether it is kept.
-    async fn blob(&self, upstream: &Upstream, digest: &Digest) -> Result<bool, Error> {
+    async fn blob(
+        &self,
+        discovering: &Discovering<'_>,
+        upstream: &Upstream,
+        digest: &Digest,
+    ) -> Result<bool, Error> {
         let path = format!("/{}/blobs/{digest}", upstream.source.repository);
         let Some(response) = self.send(upstream, Method::GET, &path, "*/*").await? else {
             return Ok(false);
@@ -575,7 +577,7 @@ impl Discovery {
                 }
             }
         }
-        match writer.commit(&self.store).await {
+        match discovering.commit(writer).await {
             Ok(()) => {
                 metrics::fetched(&upstream.label, Outcome::Ok);
                 Ok(true)
