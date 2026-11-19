@@ -18,7 +18,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136, D139, D143, D145, D147)
 - D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
-- D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136, D142)
+- D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136, D142, D149)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57, D105, D107, D116)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
@@ -50,7 +50,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D40 [build](build.md): SemVer, `0.x` until `enforce` ships; fixes for the latest minor only; containerd minors from 2.3 while upstream supports them (amended by D63)
 - D41 [gate](gate.md): `gate.wait` stays under half of containerd's `plugin_request_timeout`; a closed NRI connection re-registers at once (amended by D64)
 - D42 [agent](agent.md): `/metrics`, `/readyz` and `/livez` listen on `metrics.address`, port 7482, plain HTTP (amended by D45)
-- D43 [verification](verification.md): attestations count only as Sigstore bundles found as OCI referrers; `.att` tags and private GitHub attestations are not supported; `.sig` stays (amends D8, D38; amended by D49, D145)
+- D43 [verification](verification.md): attestations count only as Sigstore bundles found as OCI referrers; `.att` tags and private GitHub attestations are not supported; `.sig` stays (amends D8, D38; amended by D49, D145, D149)
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation
 - D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror and NRI registration (amends D42)
 - D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13)
@@ -156,5 +156,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D146 [verification](verification.md): the roots of an image just listed have a discovery lane of their own, beside that of a listing's roots and retries; each lane discovers one root at a time, and a root under way in one is dropped by the other (amends D121, D144; amended by D148)
 - D147 [verification](verification.md): a legacy `.sig` layer is a signature once its simple signing payload names the image and it verifies as a v0.1 bundle with its SET as log entry (amends D8, D126, D145)
 - D148 [verification](verification.md): each discovery holds its own root and blobs, released when it ends, or when the collection it ended during does (amends D144, D146)
+- D149 [verification](verification.md): an authority that requires attestations passes on bundles of each predicate type, compared exactly, by its signer; a cosign signature never counts; the first failing attestation names the reason (amends D11, D43)
 
-Next free number: D149.
+Next free number: D150.

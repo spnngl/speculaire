@@ -5,6 +5,9 @@
 //! type, as for `cosign verify` (D145), and so does each layer of a `.sig` whose payload names it (D147). A signature
 //! is verified against the trust root once, with any identity, and its signer matched against each authority
 //! afterwards: a policy change matches identities again without verifying again.
+//!
+//! An authority that requires attestations passes on them alone (D149): each needs a bundle signing an in-toto
+//! statement of its predicate type, and such a bundle is a signature of the image too.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -18,14 +21,21 @@ use speculaire_artifacts::{Artifact, Kind, Store};
 use speculaire_oci::reference::Digest;
 
 use crate::legacy;
-use crate::policy::{PublicKey, Signer, sha256};
+use crate::policy::{Authority, PublicKey, Signer, sha256};
+use crate::statement::Statement;
 use crate::trust::{Absent, RootHash, TrustRoot, chain};
 
 /// The signature results kept at most: past it the cache starts over, and each signature is verified again once.
 const LIMIT: usize = 16_384;
 
-/// One authority's signature check: who signed the bundle that satisfies it, or why none does.
-pub type AuthorityResult = Result<Signed, Failure>;
+/// The predicate type of a cosign v3 signature (cosign v3.1.3 `pkg/types/predicate.go:19`): never an attestation.
+const COSIGN_SIGNATURE: &str = "https://sigstore.dev/cosign/sign/v1";
+
+/// One signature's result: who signed it, or why it does not count.
+pub type SignatureResult = Result<Signed, Failure>;
+
+/// One authority's result: who signed what satisfies it, or what it lacks.
+pub type AuthorityResult = Result<Signed, Unmet>;
 
 /// Who signed a bundle whose signature verifies.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +90,51 @@ impl Failure {
     }
 }
 
+/// What an authority lacks: a signature, or one of the attestations it requires (D11, D149).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unmet {
+    /// Its signature, when it requires no attestation.
+    Signature(Failure),
+    /// The first of its attestations that fails, and why.
+    Attestation {
+        /// The attestation's predicate type, as the policy names it.
+        predicate_type: String,
+        /// The reason of the bundle attesting it that came closest; [`Failure::Missing`] when none does.
+        failure: Failure,
+    },
+}
+
+impl fmt::Display for Unmet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Signature(failure) => write!(f, "{failure}"),
+            // The reason D43 names: a `.att` tag is never read, so it is missing too.
+            Self::Attestation {
+                predicate_type,
+                failure: Failure::Missing,
+            } => write!(
+                f,
+                "attestation {predicate_type} missing (.att tags are not supported)"
+            ),
+            Self::Attestation {
+                predicate_type,
+                failure,
+            } => write!(f, "attestation {predicate_type}: {failure}"),
+        }
+    }
+}
+
+impl std::error::Error for Unmet {}
+
+/// A bundle that attests the image by an authority's signer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attested {
+    /// Who signed it.
+    pub signed: Signed,
+    /// The bundle, in the artifact store: [`Statement::of`] reads its statement.
+    pub bundle: Digest,
+}
+
 /// Why no check ran: no trust root, or a bundle the artifact store cannot give. Retried, never final (D20).
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
@@ -96,7 +151,15 @@ pub struct Signatures {
 #[derive(Debug, Default)]
 struct Cache {
     root: Option<RootHash>,
-    results: HashMap<Entry, AuthorityResult>,
+    results: HashMap<Entry, Kept>,
+}
+
+/// A signature's result, and the predicate type of the attestation it signs.
+#[derive(Clone, Debug)]
+struct Kept {
+    signed: SignatureResult,
+    /// Read whether or not the signature verifies, so that a bundle that fails names the attestation it fails.
+    attests: Option<String>,
 }
 
 /// One signature of one image, verified by the key of a key authority or else by its certificate.
@@ -123,8 +186,8 @@ enum Source {
 
 impl Signatures {
     /// The result of each authority of `policy`, in order, over the bundles and `.sig` layers among `artifacts` whose
-    /// target is `target`, read from `store` and verified against `root`. The policy's signature check passes when one
-    /// authority passes (D11).
+    /// target is `target`, read from `store` and verified against `root`. The policy's check passes when one authority
+    /// passes (D11).
     ///
     /// # Errors
     ///
@@ -141,31 +204,134 @@ impl Signatures {
         let sources = sources(target, artifacts);
         let mut results = Vec::with_capacity(policy.authorities().len());
         for authority in policy.authorities() {
-            let mut satisfied = None;
-            let mut closest = Failure::Missing;
-            for source in &sources {
-                let entry = Entry {
-                    target: target.clone(),
-                    source: source.clone(),
-                    public_key: match &authority.signer {
-                        Signer::Key { public_key } => Some(sha256(public_key.der())),
-                        Signer::Keyless { .. } => None,
-                    },
-                };
-                let signed = self.signed(store, root, entry, &authority.signer).await?;
-                match judge(signed, &authority.signer) {
-                    Ok(signed) => {
-                        satisfied = Some(signed);
-                        break;
-                    }
-                    Err(failure) => {
-                        closest = std::cmp::max_by_key(closest, failure, Failure::closeness);
-                    }
-                }
-            }
-            results.push(satisfied.ok_or(closest));
+            results.push(
+                self.authority(store, root, target, &sources, authority)
+                    .await?,
+            );
         }
         Ok(results)
+    }
+
+    /// The result of `authority`: on its attestations when it requires some, else on its signature.
+    async fn authority(
+        &self,
+        store: &Store,
+        root: &TrustRoot,
+        target: &Digest,
+        sources: &[Source],
+        authority: &Authority,
+    ) -> Result<AuthorityResult, Unverifiable> {
+        let mut signed = None;
+        // All of them, the first that fails naming the authority's reason (D11).
+        for attestation in &authority.attestations {
+            let predicate_type = &attestation.predicate_type;
+            match self
+                .attests(
+                    store,
+                    root,
+                    target,
+                    sources,
+                    &authority.signer,
+                    predicate_type,
+                )
+                .await?
+            {
+                Ok(attested) => signed = signed.or(Some(attested.signed)),
+                Err(failure) => {
+                    return Ok(Err(Unmet::Attestation {
+                        predicate_type: predicate_type.clone(),
+                        failure,
+                    }));
+                }
+            }
+        }
+        Ok(match signed {
+            Some(signed) => Ok(signed),
+            None => self
+                .signature(store, root, target, sources, &authority.signer)
+                .await?
+                .map_err(Unmet::Signature),
+        })
+    }
+
+    /// The first bundle among `artifacts` whose target is `target` that attests `predicate_type` by `signer`, verified
+    /// against `root`: how step 07 finds an SBOM (D12). A cosign signature attests nothing (D149).
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot give a bundle it was not asked before. The inner error is the reason of the bundle
+    /// attesting `predicate_type` that came closest, [`Failure::Missing`] when none does.
+    pub async fn attested(
+        &self,
+        store: &Store,
+        target: &Digest,
+        artifacts: &[Artifact],
+        signer: &Signer,
+        root: &TrustRoot,
+        predicate_type: &str,
+    ) -> Result<Result<Attested, Failure>, Unverifiable> {
+        let sources = sources(target, artifacts);
+        self.attests(store, root, target, &sources, signer, predicate_type)
+            .await
+    }
+
+    /// The first of `sources` whose signature satisfies `signer`, else the reason of the one that came closest.
+    async fn signature(
+        &self,
+        store: &Store,
+        root: &TrustRoot,
+        target: &Digest,
+        sources: &[Source],
+        signer: &Signer,
+    ) -> Result<SignatureResult, Unverifiable> {
+        let mut closest = Failure::Missing;
+        for source in sources {
+            let kept = self
+                .signed(store, root, entry(target, source.clone(), signer), signer)
+                .await?;
+            match judge(kept.signed, signer) {
+                Ok(by) => return Ok(Ok(by)),
+                Err(failure) => closest = closer(closest, failure),
+            }
+        }
+        Ok(Err(closest))
+    }
+
+    /// The first bundle of `sources` that attests `predicate_type` by `signer`, else the reason of the bundle attesting
+    /// it that came closest.
+    async fn attests(
+        &self,
+        store: &Store,
+        root: &TrustRoot,
+        target: &Digest,
+        sources: &[Source],
+        signer: &Signer,
+        predicate_type: &str,
+    ) -> Result<Result<Attested, Failure>, Unverifiable> {
+        let mut closest = Failure::Missing;
+        // A `.sig` layer signs a simple signing payload, never a statement.
+        for bundle in sources.iter().filter_map(|source| match source {
+            Source::Bundle(bundle) => Some(bundle),
+            Source::Layer { .. } => None,
+        }) {
+            let source = Source::Bundle(bundle.clone());
+            let kept = self
+                .signed(store, root, entry(target, source, signer), signer)
+                .await?;
+            if kept.attests.as_deref() != Some(predicate_type) {
+                continue;
+            }
+            match judge(kept.signed, signer) {
+                Ok(by) => {
+                    return Ok(Ok(Attested {
+                        signed: by,
+                        bundle: bundle.clone(),
+                    }));
+                }
+                Err(failure) => closest = closer(closest, failure),
+            }
+        }
+        Ok(Err(closest))
     }
 
     /// The signatures whose result was kept from an earlier check, counted once per authority checked.
@@ -174,14 +340,14 @@ impl Signatures {
         self.hits.load(Ordering::Relaxed)
     }
 
-    /// Who signed the signature of `entry`: kept, or read from `store` and verified.
+    /// Who signed the signature of `entry`, and what it attests: kept, or read from `store` and verified.
     async fn signed(
         &self,
         store: &Store,
         root: &TrustRoot,
         entry: Entry,
         signer: &Signer,
-    ) -> Result<AuthorityResult, Unverifiable> {
+    ) -> Result<Kept, Unverifiable> {
         if let Some(kept) = self.kept(root.hash(), &entry) {
             self.hits.fetch_add(1, Ordering::Relaxed);
             return Ok(kept);
@@ -190,28 +356,38 @@ impl Signatures {
             Signer::Key { public_key } => Some(public_key),
             Signer::Keyless { .. } => None,
         };
-        let result = match &entry.source {
-            Source::Bundle(bundle) => {
-                verify(root, &entry.target, &read(store, bundle).await?, public_key)
-            }
+        let kept = match &entry.source {
+            Source::Bundle(bundle) => match parse(&read(store, bundle).await?) {
+                Ok(bundle) => Kept {
+                    signed: verified(root, artifact(&entry.target), &bundle, public_key),
+                    attests: attests(&bundle),
+                },
+                Err(failure) => Kept {
+                    signed: Err(failure),
+                    attests: None,
+                },
+            },
             Source::Layer {
                 manifest,
                 index,
                 payload,
-            } => legacy::verify(
-                root,
-                &entry.target,
-                &read(store, manifest).await?,
-                *index,
-                &read(store, payload).await?,
-                public_key,
-            ),
+            } => Kept {
+                signed: legacy::verify(
+                    root,
+                    &entry.target,
+                    &read(store, manifest).await?,
+                    *index,
+                    &read(store, payload).await?,
+                    public_key,
+                ),
+                attests: None,
+            },
         };
-        self.keep(root.hash(), entry, result.clone());
-        Ok(result)
+        self.keep(root.hash(), entry, kept.clone());
+        Ok(kept)
     }
 
-    fn kept(&self, root: RootHash, entry: &Entry) -> Option<AuthorityResult> {
+    fn kept(&self, root: RootHash, entry: &Entry) -> Option<Kept> {
         let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         if cache.root == Some(root) {
             cache.results.get(entry).cloned()
@@ -220,14 +396,37 @@ impl Signatures {
         }
     }
 
-    fn keep(&self, root: RootHash, entry: Entry, result: AuthorityResult) {
+    fn keep(&self, root: RootHash, entry: Entry, kept: Kept) {
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         if cache.root != Some(root) || cache.results.len() >= LIMIT {
             cache.root = Some(root);
             cache.results.clear();
         }
-        cache.results.insert(entry, result);
+        cache.results.insert(entry, kept);
     }
+}
+
+/// The signature at `source` of `target`, verified by the key of a key `signer` or else by its certificate.
+fn entry(target: &Digest, source: Source, signer: &Signer) -> Entry {
+    Entry {
+        target: target.clone(),
+        source,
+        public_key: match signer {
+            Signer::Key { public_key } => Some(sha256(public_key.der())),
+            Signer::Keyless { .. } => None,
+        },
+    }
+}
+
+/// The closer of two bundles' reasons.
+fn closer(closest: Failure, failure: Failure) -> Failure {
+    std::cmp::max_by_key(closest, failure, Failure::closeness)
+}
+
+/// The predicate type of the in-toto statement `bundle` signs, unless it signs none or is a cosign signature (D149).
+fn attests(bundle: &Bundle) -> Option<String> {
+    let statement = Statement::of(bundle).ok()?;
+    (statement.predicate_type() != COSIGN_SIGNATURE).then(|| statement.predicate_type().to_owned())
 }
 
 /// Verifies `bundle`, the JSON of a Sigstore bundle, as a signature of `target` against `root`, with a transparency log
@@ -242,12 +441,16 @@ pub fn verify(
     target: &Digest,
     bundle: &[u8],
     key: Option<&PublicKey>,
-) -> AuthorityResult {
-    let bundle = std::str::from_utf8(bundle)
+) -> SignatureResult {
+    verified(root, artifact(target), &parse(bundle)?, key)
+}
+
+/// Parses `bundle`, the JSON of a Sigstore bundle.
+fn parse(bundle: &[u8]) -> Result<Bundle, Failure> {
+    std::str::from_utf8(bundle)
         .map_err(|e| e.to_string())
         .and_then(|text| Bundle::from_json(text).map_err(|e| chain(&e)))
-        .map_err(|e| Failure::Invalid(format!("not a Sigstore bundle: {e}")))?;
-    verified(root, artifact(target), &bundle, key)
+        .map_err(|e| Failure::Invalid(format!("not a Sigstore bundle: {e}")))
 }
 
 /// Verifies `bundle` as a signature of `signed`, the artifact or its digest, as [`verify`] does.
@@ -256,7 +459,7 @@ pub(crate) fn verified<'a>(
     signed: impl Into<sigstore_verify::types::Artifact<'a>>,
     bundle: &Bundle,
     key: Option<&PublicKey>,
-) -> AuthorityResult {
+) -> SignatureResult {
     if !matches!(
         bundle.verification_material.content,
         VerificationMaterialContent::PublicKey(_)
@@ -278,7 +481,7 @@ fn by_certificate<'a>(
     root: &TrustRoot,
     signed: impl Into<sigstore_verify::types::Artifact<'a>>,
     bundle: &Bundle,
-) -> AuthorityResult {
+) -> SignatureResult {
     let certificate = bundle
         .signing_certificate()
         .ok_or_else(|| Failure::Invalid("the bundle holds no certificate".to_owned()))?;
@@ -336,7 +539,7 @@ async fn read(store: &Store, digest: &Digest) -> Result<Vec<u8>, Unverifiable> {
 
 /// Whether `verified` satisfies `signer`: a certificate whose issuer and subject match one identity, or the key it was
 /// verified with.
-fn judge(verified: AuthorityResult, signer: &Signer) -> AuthorityResult {
+fn judge(verified: SignatureResult, signer: &Signer) -> SignatureResult {
     match (verified?, signer) {
         (Signed::Certificate { subject, issuer }, Signer::Keyless { identities })
             if identities.iter().any(|identity| {

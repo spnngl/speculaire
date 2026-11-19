@@ -25,6 +25,7 @@ use speculaire_registry_config::containerd::config::{self as containerd_config_f
 use speculaire_registry_config::containerd::hosts;
 use speculaire_registry_config::crio::{auth, registries};
 use speculaire_verify::policy::{MatchHash, Policies, Policy, PublicKey, Signer};
+use speculaire_verify::statement::Statement;
 use speculaire_verify::{TrustRoot, legacy, signature};
 
 /// A fuzz entry point.
@@ -60,6 +61,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("trusted_root", trusted_root),
     ("bundle", bundle),
     ("simplesigning", simplesigning),
+    ("statement", statement),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -911,4 +913,30 @@ pub fn simplesigning(data: &[u8]) {
             );
         }
     }
+}
+
+/// A DSSE payload from the artifact store as an in-toto statement (D149).
+///
+/// A statement that parses parses back from its type, predicate type and raw predicate to the same two.
+///
+/// # Panics
+///
+/// When parsing panics, or the statement written back from its parts differs.
+pub fn statement(data: &[u8]) {
+    let Ok(statement) = Statement::parse(data) else {
+        return;
+    };
+    let predicate_type =
+        serde_json::to_string(statement.predicate_type()).expect("a string serializes");
+    let predicate = statement
+        .predicate()
+        .map_or(String::new(), |raw| format!(",\"predicate\":{raw}"));
+    let text = format!(
+        "{{\"_type\":\"https://in-toto.io/Statement/v1\",\"predicateType\":{predicate_type}{predicate}}}"
+    );
+    let again = Statement::parse(text.as_bytes()).expect("a statement written back parses");
+    assert_eq!(
+        (again.predicate_type(), again.predicate()),
+        (statement.predicate_type(), statement.predicate())
+    );
 }

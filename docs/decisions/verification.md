@@ -12,7 +12,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The GitHub *release* attestation (`in-toto.io/attestation/release/v0.2`, a v0.3 bundle with an RFC 3161 timestamp and no log entry) is rejected: `bundle must have an inclusion proof`. We don't use it.
 - **Revisit when:** —
 
-## D11: Policy shape and image matching (amended by D65, D81, D136, D142)
+## D11: Policy shape and image matching (amended by D65, D81, D136, D142, D149)
 
 - **Decision:**
   - The policy is a file shaped like `ClusterImagePolicy`. *authorities* pass if any one passes; *attestations* pass only if all do. v1 conditions are predicateType presence plus the SBOM checks in D12; CEL comes later.
@@ -112,7 +112,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Docker Hub counts manifest `GET`s against its pull limit, but not `HEAD`s. Most images have no fallback or `.sig` tag, so probing with `HEAD` keeps verification from spending the node's pull budget.
 - **Revisit when:** —
 
-## D43: Attestations count only as Sigstore bundles; `.att` tags are ignored (amends D8, D38; amended by D49, D145)
+## D43: Attestations count only as Sigstore bundles; `.att` tags are ignored (amends D8, D38; amended by D49, D145, D149)
 
 - **Decision:**
   - An attestation counts only as a Sigstore bundle (`application/vnd.dev.sigstore.bundle.v0.3+json`, as cosign v3 and GitHub attestations write it), found as an OCI referrer through the referrers API or the `sha256-<hex>` fallback tag.
@@ -360,3 +360,18 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Because:**
   - D144 forgot the holds only once no discovery ran. With D146's backlog lane busy, the pulled lane's holds outlived its discovery, and the collection after `crictl rmi` skipped the root. On main's run 44430760175, arm64 containerd 2.4 k1.36, worker2 discovered `e2e/signed:1` at 00:54:55.280, containerd removed it at 00:54:55.796 while backlog discoveries ran until 00:54:56.549, and its bundle was deleted only at the agent's restart, 00:55:06.038; the e2e suite allows 2 s.
 - **Revisit when:** a discovery spawns tasks that keep blobs without its guard.
+
+## D149: An authority that requires attestations passes on bundles attesting each predicate type by its signer (amends D11, D43)
+
+- **Decision:**
+  - An attestation is a bundle naming the image (D145) whose DSSE envelope signs an in-toto statement, `_type` `https://in-toto.io/Statement/v1` or `v0.1`, of the required `predicateType`, compared exactly: cosign'"'"'s short names, such as `slsaprovenance1`, are not read. The predicate type of a cosign signature, `https://sigstore.dev/cosign/sign/v1`, is never an attestation; a `.sig` layer never is.
+  - An authority that requires attestations passes on them alone, as policy-controller does (v0.15.1 `pkg/webhook/validator.go:530-535`): every one needs a bundle of its predicate type by the authority'"'"'s signer, and its signer is the authority'"'"'s result. Each such bundle is a signature of the image (D145), so the signature check would add nothing. An authority without attestations passes on its signature.
+  - The first attestation that fails gives the authority'"'"'s reason (D11'"'"'s all-of): `attestation <predicateType> missing (.att tags are not supported)` when no bundle attests it, whether or not a `.att` tag exists (D43), else `attestation <predicateType>: <reason>` with the reason of the bundle attesting it that came closest (D145'"'"'s order). `Signatures::check` returns `Unmet::{Signature, Attestation}` per authority.
+  - The predicate type is read from each bundle with its signature, kept beside its result (D145), whether or not the signature verifies: a tampered attestation names its predicate type.
+  - `speculaire_verify::statement::Statement` borrows the payload: `_type`, `predicateType` and the raw `predicate`. Subjects are sigstore-verify'"'"'s to bind (sigstore-verify v0.16.0 `crates/sigstore-verify/src/artifact.rs:50-101`). `Signatures::attested(store, target, artifacts, signer, root, predicate_type)` gives the attesting bundle'"'"'s digest, and the statement is read from it again when needed: predicates are never kept, as SBOMs may be large.
+- **Because:**
+  - policy-controller'"'"'s `ClusterImagePolicy`, whose shape D11 takes, checks attestations instead of signatures for such an authority; cosign maps a short name to a URI before comparing (cosign v3.1.3 `pkg/policy/attestation.go:62-66`), but a predicate type is a URI, and an unread short name fails closed.
+  - A cosign v3 signature is a DSSE statement too: counting it would pass an attestation requirement with a plain signature.
+  - Reading the predicate type of a bundle that fails tells the admin which attestation is broken, where `missing` would send them to attest again.
+- **Measured:** `Statement::parse` takes 0.50 µs for the provenance fixture'"'"'s 1 031-byte statement and 0.12 µs for a cosign signature'"'"'s 230 bytes (release, Apple M5): beside a verification'"'"'s 1.2 ms (D145), the attestation check costs nothing more.
+- **Revisit when:** a policy needs a predicate'"'"'s content (`policy:` in `ClusterImagePolicy`), or users ask for cosign'"'"'s short names.

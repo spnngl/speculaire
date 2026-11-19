@@ -19,7 +19,7 @@ use sigstore_verify::types::{
 use speculaire_oci::reference::Digest;
 
 use crate::policy::PublicKey;
-use crate::signature::{AuthorityResult, Failure, verified};
+use crate::signature::{Failure, SignatureResult, verified};
 use crate::trust::{TrustRoot, chain};
 
 /// The annotation of a layer that holds its signature, in base64.
@@ -90,7 +90,7 @@ pub fn verify(
     layer: usize,
     payload: &[u8],
     key: Option<&PublicKey>,
-) -> AuthorityResult {
+) -> SignatureResult {
     let signed = image(payload)?;
     if signed != *target {
         return Err(Failure::Invalid(format!(
@@ -194,7 +194,7 @@ mod tests {
         manifest.to_string().into_bytes()
     }
 
-    fn check(manifest: &[u8], layer: usize, payload: &[u8]) -> AuthorityResult {
+    fn check(manifest: &[u8], layer: usize, payload: &[u8]) -> SignatureResult {
         let image = Digest::parse(IMAGE).expect("a digest");
         verify(&root(), &image, manifest, layer, payload, None)
     }

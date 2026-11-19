@@ -1,13 +1,16 @@
-//! The signature check over the recorded fixtures of step 01 (D139), offline: which authorities a bundle satisfies.
+//! The signature check over the recorded fixtures of step 01 (D139), offline: which authorities a bundle satisfies,
+//! with the attestations they require (D149).
 
 mod recorded;
 
 use std::path::Path;
 
 use recorded::{Recorded, at, pinned};
+use sigstore_verify::types::Bundle;
 use speculaire_artifacts::Kind;
 use speculaire_artifacts::testing::{FIXTURES, Fixture, GITHUB_PRIVATE};
-use speculaire_verify::signature::{AuthorityResult, Failure, Signatures, Signed};
+use speculaire_verify::signature::{AuthorityResult, Failure, Signatures, Signed, Unmet};
+use speculaire_verify::statement::Statement;
 use speculaire_verify::{Policies, Policy, TrustRoot};
 
 /// The workflow that signed every keyless case.
@@ -94,9 +97,9 @@ async fn a_sig_served_for_another_image_names_the_image_it_signs() {
 
     assert_eq!(
         results,
-        [Err(Failure::Invalid(format!(
+        [Err(Unmet::Signature(Failure::Invalid(format!(
             "the .sig signs {signed}, not this image"
-        )))]
+        ))))]
     );
 }
 
@@ -109,9 +112,9 @@ async fn a_sig_without_its_set_names_the_missing_set() {
 
     assert_eq!(
         results,
-        [Err(Failure::Invalid(
+        [Err(Unmet::Signature(Failure::Invalid(
             "the .sig has no SET (annotation dev.sigstore.cosign/bundle)".to_owned()
-        ))]
+        )))]
     );
 }
 
@@ -124,7 +127,10 @@ async fn a_key_bundle_passes_the_policy_holding_its_key() {
 
     assert_eq!(
         results,
-        [Err(Failure::Mismatch(Signed::Key)), Ok(Signed::Key)]
+        [
+            Err(Unmet::Signature(Failure::Mismatch(Signed::Key))),
+            Ok(Signed::Key)
+        ]
     );
 }
 
@@ -141,7 +147,7 @@ async fn another_workflow_or_a_pattern_over_part_of_the_san_fails_naming_the_sig
 
     let results = check(&Signatures::default(), &fixture, &policy).await;
 
-    let mismatch = Err(Failure::Mismatch(workflow()));
+    let mismatch = Err(Unmet::Signature(Failure::Mismatch(workflow())));
     assert_eq!(results, [mismatch.clone(), mismatch.clone(), mismatch]);
     let reason = results[0].as_ref().expect_err("a mismatch").to_string();
     assert!(reason.contains(SAN) && reason.contains(ISSUER), "{reason}");
@@ -155,7 +161,7 @@ async fn a_tampered_bundle_has_an_invalid_signature() {
     let results = check(&Signatures::default(), &fixture, &policy).await;
 
     assert!(
-        matches!(&results[..], [Err(Failure::Invalid(_))]),
+        matches!(&results[..], [Err(Unmet::Signature(Failure::Invalid(_)))]),
         "{results:?}"
     );
 }
@@ -169,9 +175,9 @@ async fn a_bundle_of_githubs_private_instance_names_its_unknown_issuer() {
 
     assert_eq!(
         results,
-        [Err(Failure::UnknownIssuer(
+        [Err(Unmet::Signature(Failure::UnknownIssuer(
             "O=GitHub, Inc., CN=Fulcio Intermediate l1".to_owned()
-        ))]
+        )))]
     );
     let reason = results[0].as_ref().expect_err("unknown").to_string();
     assert!(reason.contains("GitHub, Inc."), "{reason}");
@@ -184,7 +190,7 @@ async fn an_image_without_a_bundle_has_no_signature() {
 
     let results = check(&Signatures::default(), &fixture, &policy).await;
 
-    assert_eq!(results, [Err(Failure::Missing)]);
+    assert_eq!(results, [Err(Unmet::Signature(Failure::Missing))]);
     assert_eq!(Failure::Missing.to_string(), "no signature");
 }
 
@@ -310,7 +316,7 @@ async fn only_a_signature_of_the_image_counts() {
             )
             .await
             .expect("the store and the trust root are there");
-        assert_eq!(results, [Err(Failure::Missing)]);
+        assert_eq!(results, [Err(Unmet::Signature(Failure::Missing))]);
     }
 }
 
@@ -340,7 +346,7 @@ async fn an_authority_fails_with_the_reason_of_the_closest_bundle() {
             .expect("the store holds both bundles");
         assert_eq!(
             results,
-            [Err(Failure::Mismatch(workflow()))],
+            [Err(Unmet::Signature(Failure::Mismatch(workflow())))],
             "{artifacts:?}"
         );
     }
@@ -349,5 +355,181 @@ async fn an_authority_fails_with_the_reason_of_the_closest_bundle() {
         signatures.hits(),
         2,
         "the second check reuses both bundles' results"
+    );
+}
+const PROVENANCE: &str = "https://slsa.dev/provenance/v1";
+
+/// `authority` requiring an attestation of each of `predicate_types`.
+fn attesting(authority: String, predicate_types: &[&str]) -> String {
+    predicate_types
+        .iter()
+        .fold(authority + "    attestations:\n", |text, predicate_type| {
+            text + "    - name: a\n      predicateType: " + predicate_type + "\n"
+        })
+}
+
+/// The reason of an authority missing an attestation of `predicate_type`.
+fn missing(predicate_type: &str) -> AuthorityResult {
+    Err(Unmet::Attestation {
+        predicate_type: predicate_type.to_owned(),
+        failure: Failure::Missing,
+    })
+}
+
+#[tokio::test]
+async fn a_github_provenance_passes_the_policy_requiring_it_from_its_workflow() {
+    let fixture = Fixture::load("provenance").await;
+    let policy = policy(&[attesting(
+        keyless(&format!("subject: {SAN}")),
+        &[PROVENANCE],
+    )]);
+
+    let results = check(&Signatures::default(), &fixture, &policy).await;
+
+    assert_eq!(results, [Ok(workflow())]);
+}
+
+#[tokio::test]
+async fn an_attestation_only_in_an_att_tag_or_absent_is_missing() {
+    let policy = policy(&[attesting(
+        keyless(&format!("subject: {SAN}")),
+        &[PROVENANCE],
+    )]);
+
+    for case in ["att-only", "keyless", "legacy-sig", "unsigned"] {
+        let fixture = Fixture::load(case).await;
+
+        let results = check(&Signatures::default(), &fixture, &policy).await;
+
+        assert_eq!(results, [missing(PROVENANCE)], "{case}");
+        let reason = results[0].as_ref().expect_err("missing").to_string();
+        assert_eq!(
+            reason,
+            "attestation https://slsa.dev/provenance/v1 missing (.att tags are not supported)"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_attestation_by_another_identity_fails_naming_its_signer() {
+    let fixture = Fixture::load("provenance").await;
+    let policy = policy(&[attesting(
+        keyless(
+            "subject: https://github.com/spnngl/speculaire/.github/workflows/release.yml@refs/heads/main",
+        ),
+        &[PROVENANCE],
+    )]);
+
+    let results = check(&Signatures::default(), &fixture, &policy).await;
+
+    assert_eq!(
+        results,
+        [Err(Unmet::Attestation {
+            predicate_type: PROVENANCE.to_owned(),
+            failure: Failure::Mismatch(workflow()),
+        })]
+    );
+    let reason = results[0].as_ref().expect_err("a mismatch").to_string();
+    assert!(
+        reason.starts_with(
+            "attestation https://slsa.dev/provenance/v1: identity mismatch: signed by "
+        ) && reason.contains(SAN),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+async fn every_required_attestation_must_pass() {
+    let fixture = Fixture::load("provenance").await;
+    let spdx = "https://spdx.dev/Document";
+    let policy = policy(&[attesting(
+        keyless(&format!("subject: {SAN}")),
+        &[PROVENANCE, spdx],
+    )]);
+
+    let results = check(&Signatures::default(), &fixture, &policy).await;
+
+    assert_eq!(results, [missing(spdx)]);
+}
+
+#[tokio::test]
+async fn a_cosign_signature_is_never_an_attestation() {
+    let fixture = Fixture::load("keyless").await;
+    let signature = "https://sigstore.dev/cosign/sign/v1";
+    let policy = policy(&[attesting(keyless(&format!("subject: {SAN}")), &[signature])]);
+
+    let results = check(&Signatures::default(), &fixture, &policy).await;
+
+    assert_eq!(results, [missing(signature)]);
+}
+
+#[tokio::test]
+async fn a_tampered_attestation_is_invalid() {
+    let fixture = Fixture::flipped("provenance").await;
+    let policy = policy(&[attesting(
+        keyless(&format!("subject: {SAN}")),
+        &[PROVENANCE],
+    )]);
+
+    let results = check(&Signatures::default(), &fixture, &policy).await;
+
+    assert!(
+        matches!(
+            &results[..],
+            [Err(Unmet::Attestation { predicate_type, failure: Failure::Invalid(_) })] if predicate_type == PROVENANCE
+        ),
+        "{results:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_attested_sbom_gives_its_bundle_whose_statement_holds_the_predicate() {
+    let fixture = Fixture::load("attest-sbom").await;
+    let spdx = "https://spdx.dev/Document/v2.3";
+    let signer = policy(&[keyless(&format!("subject: {SAN}"))]).authorities()[0]
+        .signer
+        .clone();
+
+    let attested = Signatures::default()
+        .attested(
+            &fixture.store,
+            &fixture.root,
+            &fixture.artifacts,
+            &signer,
+            &pinned(),
+            spdx,
+        )
+        .await
+        .expect("the store holds the bundle")
+        .expect("attest-sbom attests an SPDX 2.3 document");
+
+    assert_eq!(attested.signed, workflow());
+    let text = fixture
+        .store
+        .read(&attested.bundle)
+        .await
+        .expect("the store reads")
+        .expect("the bundle is stored");
+    let bundle =
+        Bundle::from_json(std::str::from_utf8(&text).expect("JSON")).expect("the bundle parses");
+    let statement = Statement::of(&bundle).expect("its statement");
+    assert_eq!(statement.predicate_type(), spdx);
+    let predicate = statement.predicate().expect("a predicate");
+    assert!(predicate.contains("\"packages\""), "{predicate}");
+}
+
+#[tokio::test]
+async fn a_blob_that_is_no_bundle_is_an_invalid_signature() {
+    let fixture = Fixture::bundled("keyless", "{}").await;
+    let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
+
+    let results = check(&Signatures::default(), &fixture, &policy).await;
+
+    assert!(
+        matches!(
+            &results[..],
+            [Err(Unmet::Signature(Failure::Invalid(reason)))] if reason.starts_with("not a Sigstore bundle: ")
+        ),
+        "{results:?}"
     );
 }
