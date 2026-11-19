@@ -96,40 +96,74 @@ pub struct Store {
     pending: Mutex<Pending>,
 }
 
-/// The roots discoveries under way started on, and the blobs they found or kept: a collection keeps them (D144).
+/// What a collection keeps (D144, D148): the root each discovery under way started on and the blobs it found or kept,
+/// held until that discovery ends, and what the discoveries that ended during a collection held, until no collection
+/// runs, since such a collection may have read the records before theirs.
 #[derive(Debug, Default)]
 struct Pending {
-    discoveries: usize,
+    next: u64,
+    discoveries: HashMap<u64, HashSet<Digest>>,
     collections: usize,
-    digests: HashSet<Digest>,
+    ended: HashSet<Digest>,
 }
 
 impl Pending {
-    /// Keeps `digest` from collections while a discovery runs.
-    fn hold(&mut self, digest: &Digest) {
-        if self.discoveries > 0 {
-            self.digests.insert(digest.clone());
-        }
+    /// Whether a collection keeps `digest`.
+    fn holds(&self, digest: &Digest) -> bool {
+        self.ended.contains(digest) || self.discoveries.values().any(|held| held.contains(digest))
+    }
+}
+
+/// A discovery under way, from [`Store::discovering`] until dropped: what it holds, a collection keeps.
+pub(crate) struct Discovering<'a> {
+    store: &'a Store,
+    id: u64,
+}
+
+impl Discovering<'_> {
+    /// Whether the blob `digest` is held; a collection keeps it from then on until the discovery ends.
+    pub(crate) fn hold(&self, digest: &Digest) -> bool {
+        let mut pending = self.store.pending();
+        self.held(&mut pending, digest);
+        // Under the lock: a collection deletes the blob before this looks, or not at all.
+        self.store.contains(digest)
     }
 
-    /// Forgets the digests once neither a discovery nor a collection runs: each discovery ended with its record, or
-    /// failed and left blobs that nothing names. A collection under way keeps those of a discovery that ended since it
-    /// read the records.
-    fn settle(&mut self) {
-        if self.discoveries == 0 && self.collections == 0 {
-            self.digests.clear();
+    /// Keeps `bytes` as the blob `digest`, held as [`Self::hold`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::keep`].
+    pub(crate) async fn keep(&self, digest: &Digest, bytes: &[u8]) -> Result<(), Error> {
+        let mut writer = self.store.writer(digest).await?;
+        writer.write(bytes).await?;
+        self.commit(writer).await
+    }
+
+    /// Commits `writer`, its blob held as [`Self::hold`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::commit`].
+    pub(crate) async fn commit(&self, writer: Writer) -> Result<(), Error> {
+        writer.link(self.store, Some(self)).await
+    }
+
+    fn held(&self, pending: &mut Pending, digest: &Digest) {
+        if let Some(held) = pending.discoveries.get_mut(&self.id) {
+            held.insert(digest.clone());
         }
     }
 }
 
-/// A discovery under way, from [`Store::discovering`] until dropped.
-pub(crate) struct Discovering<'a>(&'a Store);
-
 impl Drop for Discovering<'_> {
     fn drop(&mut self) {
-        let mut pending = self.0.pending();
-        pending.discoveries -= 1;
-        pending.settle();
+        let mut pending = self.store.pending();
+        if let Some(held) = pending.discoveries.remove(&self.id)
+            && pending.collections > 0
+        {
+            pending.ended.extend(held);
+        }
     }
 }
 
@@ -140,7 +174,9 @@ impl Drop for Collecting<'_> {
     fn drop(&mut self) {
         let mut pending = self.0.pending();
         pending.collections -= 1;
-        pending.settle();
+        if pending.collections == 0 {
+            pending.ended.clear();
+        }
     }
 }
 
@@ -185,20 +221,15 @@ impl Store {
     }
 
     /// Starts the discovery of `root`: until the returned guard drops, a collection keeps the root's record and every
-    /// blob [`Self::hold`] found or a writer kept (D144).
+    /// blob the guard held or kept (D144, D148).
     pub(crate) fn discovering(&self, root: &Digest) -> Discovering<'_> {
         let mut pending = self.pending();
-        pending.discoveries += 1;
-        pending.digests.insert(root.clone());
-        Discovering(self)
-    }
-
-    /// Whether the blob `digest` is held; a collection keeps it from then on while a discovery runs (D144).
-    pub(crate) fn hold(&self, digest: &Digest) -> bool {
-        let mut pending = self.pending();
-        pending.hold(digest);
-        // Under the lock: a collection deletes the blob before this looks, or not at all.
-        self.contains(digest)
+        let id = pending.next;
+        pending.next += 1;
+        pending
+            .discoveries
+            .insert(id, HashSet::from([root.clone()]));
+        Discovering { store: self, id }
     }
 
     /// The content of the blob `digest`, if held.
@@ -307,7 +338,7 @@ impl Store {
     /// listed root's record. The first collection, done or failed, opens the [`Inventory`].
     ///
     /// Discovery keeps a root's blobs before its record: a collection beside it keeps the root being discovered and
-    /// what the discovery found or kept, forgotten once neither a discovery nor a collection runs (D144).
+    /// what the discovery held or kept, until the discovery ends or, when it ends meanwhile, the collection (D144, D148).
     ///
     /// # Errors
     ///
@@ -332,7 +363,7 @@ impl Store {
             let Some(root) = root.filter(|root| !listed.contains(root)) else {
                 continue;
             };
-            if self.pending().digests.contains(&root) {
+            if self.pending().holds(&root) {
                 continue;
             }
             std::fs::remove_file(&path).map_err(|e| io_error(&path, e))?;
@@ -351,7 +382,7 @@ impl Store {
             };
             // Held to the deletion: a discovery that holds the blob meanwhile finds it gone and keeps it again.
             let pending = self.pending();
-            if pending.digests.contains(&digest) {
+            if pending.holds(&digest) {
                 continue;
             }
             let meta = std::fs::metadata(&path).map_err(|e| io_error(&path, e))?;
@@ -437,7 +468,16 @@ impl Writer {
     /// # Errors
     ///
     /// When it does not match, or the file cannot be flushed or moved.
-    pub async fn commit(mut self, store: &Store) -> Result<(), Error> {
+    pub async fn commit(self, store: &Store) -> Result<(), Error> {
+        self.link(store, None).await
+    }
+
+    /// As [`Self::commit`], the blob held by `discovering` before the link: a collection beside it leaves the blob.
+    async fn link(
+        mut self,
+        store: &Store,
+        discovering: Option<&Discovering<'_>>,
+    ) -> Result<(), Error> {
         if !self.hash.matches() {
             return Err(Error::Mismatch(Box::new(self.digest.clone())));
         }
@@ -447,8 +487,9 @@ impl Writer {
             .map_err(|e| io_error(&self.path, e))?;
         let target = store.path(&self.digest);
         create_parent(&target).await?;
-        // Before the link: a collection beside the discovery that keeps the blob leaves it.
-        store.pending().hold(&self.digest);
+        if let Some(discovering) = discovering {
+            discovering.held(&mut store.pending(), &self.digest);
+        }
         // A link fails on a blob held already, which a rename would replace while another root reads it.
         match tokio::fs::hard_link(&self.path, &target).await {
             Ok(()) => {

@@ -434,6 +434,52 @@ async fn a_root_that_leaves_the_list_while_another_is_discovered_is_collected_at
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_pulled_root_that_leaves_the_list_is_collected_while_the_backlog_lane_discovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let asked = Arc::new(Asked::default());
+    let (_release, released) = oneshot::channel();
+    *asked.2.lock().unwrap() = Some((digest(20), released));
+    let (script, followed) = start(Arc::clone(&store), &asked, std::future::ready(()), None);
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+
+    script
+        .send(Update::Listing(vec![image(2, &[("reg.test/b", 20)])]))
+        .await
+        .unwrap();
+    settle().await;
+    script
+        .send(Update::Listed(image(3, &[("reg.test/pulled", 30)])))
+        .await
+        .unwrap();
+    settle().await;
+    assert_eq!(
+        *asked.0.lock().unwrap(),
+        ["reg.test/pulled"],
+        "30's discovery ended while 20's runs"
+    );
+    // What 30's discovery would have recorded, had a source served it.
+    let bundle = speculaire_oci::hash::of("sha256", b"bundle").unwrap();
+    store.keep(&bundle, b"bundle").await.unwrap();
+    let artifact = Artifact {
+        target: digest(30),
+        manifest: bundle.clone(),
+        kind: Kind::Bundle,
+        blobs: Vec::new(),
+    };
+    store.record(&digest(30), &[artifact]).await.unwrap();
+
+    // 20's discovery still runs: it holds nothing of 30's.
+    script.send(Update::Removed(digest(3))).await.unwrap();
+    settle().await;
+    assert_eq!(store.recorded(&digest(30)).await.unwrap(), None);
+    assert!(!store.contains(&bundle));
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_store_is_collected_from_the_first_listing_and_discovery_waits_for_the_link() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
