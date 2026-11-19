@@ -40,7 +40,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Vulnerability data changes daily while the image does not, which breaks verdicts cached per digest. A vulnerability database on every node is also heavy, and makes nodes disagree.
 - **Revisit when:** users ask for content rules (CEL) or for vulnerability gating (that needs verdict expiry).
 
-## D20: Verdict model (amended by D31, D38, D65, D145)
+## D20: Verdict model (amended by D31, D38, D65, D145, D151)
 
 - **Decision:**
   - `enum Verdict { Allow, Rejected { reason }, Unverifiable { reason, retry_at }, Pending }`.
@@ -137,7 +137,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
 
-## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146, D150)
+## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146, D150, D151)
 
 - **Decision:**
   - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends, and read the list once more 1 s after a watch starts: no answer tells when containerd holds the subscription, and an image pulled in between waited 60 s in CI. Once the agent stops, a follower that loses the runtime ends without a warning: the agent's own teardown cut it. The CRI-O relay protects the listed images from eviction through it.
@@ -160,7 +160,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Revisit when:** M5 adds the manifest-fetch trigger; or a real image has more than 64 bundles.
 
 
-## D126: Discovery asks the artifact store, then peers, then upstream; peers list referrers from a target's first 4 holders (amends D102, D121; amended by D134, D147)
+## D126: Discovery asks the artifact store, then peers, then upstream; peers list referrers from a target's first 4 holders (amends D102, D121; amended by D134, D147, D151)
 
 - **Decision:**
   - **Order:** for each root, each target's manifests and blobs come from the artifact store, else from peers, else not at all; upstream (D121) is asked only when the store and peers give no artifact of the root. The root's manifest comes from the node's content (containerd's, or the relay's blob cache), else the store, else peers; an index fetched so is kept in the store, so that the node serves it on (D49, D124).
@@ -391,3 +391,22 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Only the signed index binds an attestation manifest; the record is untrusted.
 - **Measured:** counting an 11.5 MB SPDX document of 50 000 packages takes 13 ms, against 29 ms to build it as a `serde_json::Value` (release, Apple M5).
 - **Revisit when:** SPDX 3 or CycloneDX 2 JSON shows up in attestations, or content rules (D12's later) need the packages themselves.
+
+
+## D151: The engine keeps verdicts in memory, per listed root, retried 10 s doubling to 5 min by its own discovery (amends D20, D121, D126)
+
+- **Decision:**
+  - **Feed:** `speculaire_artifacts::follow` tells the engine, on an unbounded channel, each change of the listed roots and their names (`Found::Listed`) and the end of each discovery or a root found recorded (`Found::Ended`). The engine in `speculaire_verify::engine` verifies one root at a time in its own task.
+  - **Keys:** the image identity is the listed manifest digest; the root's names are grouped by the match hash of the policies each name matches, one key per group (D11, D142), so a CRI-O image's repository digests give the same keys as containerd's images (D65). A name no policy matches has no verdict. A key is `Pending` from listing to its first verdict, and is forgotten with its root.
+  - **Combining:** a key is `Allow` when every matched policy passes, `Rejected` when one fails, else `Unverifiable`. A failing policy gives the reason of its first authority (D145) or of its SBOM (D150), as the operations guide lists them; the verdict line names the policies. No trust root gives `trust root: <why>` under no root hash (D143).
+  - **Retry (amends D20):** an `Unverifiable` key is verified again 10 s later, then after twice the wait each time, up to 5 min; a rate limit's `retry_at` is a floor (D38). While the root's artifacts are not recorded, the retry starts its own discovery, so D121's 10 min stays for roots no verdict waits on. Each discovery asks peers again. A peer's announcement does not trigger a retry yet.
+  - **Upstream once more (amends D126):** before a first `Rejected`, the engine asks `Discovery::again` once per listed root: upstream only, its artifacts added to the record. The key stays `Pending` meanwhile; when upstream fails or adds nothing the rejection stands.
+  - **Store:** `Verdicts`, a map from image to its kept keys under a `std::sync::RwLock`, held only to read or write the map. `Verdicts::get` takes a borrowed `Key` and clones an `Arc<str>` reason at most. A verdict under a new root hash replaces its key's. Verdicts live in memory; saving them to `cache.bin` is M6's (D31).
+  - **Logs (amends D121):** each changed verdict logs one INFO line, `verdict of <digest> under <policies>: <verdict>`, and the `verdict` audit event (D37). Discovery's own `discovery of <digest>: unverifiable: <reason>` line stays, for roots without policies.
+- **Because:**
+  - Discovery owns the image list; one channel keeps verification out of its lanes, and an unbounded one never blocks them on a slow check.
+  - Waiting 10 min (D121) on a root a pod waits for leaves it denied; 5 min caps the load a fleet's retries put on peers and upstream.
+  - Asking upstream once more covers a store filled by peers before the signer's latest signature; once per root bounds what an attacker serving bad artifacts can make the node fetch.
+  - A lookup without allocation keeps the gate's hot path off the allocator (D107).
+- **Measured:** a lookup among 1 000 images' verdicts takes 29 ns, without allocation (`just bench-micro`, release, Apple M5).
+- **Revisit when:** a peer's announcement should end a wait early (D20), or the gate needs verdicts across restarts before M6.

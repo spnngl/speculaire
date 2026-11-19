@@ -102,8 +102,8 @@ Shown in `kubectl describe pod` under `CreateContainerError`.
 | `rejected: SBOM unparsable: <where>` | The SBOM is not SPDX 2.3 JSON or CycloneDX 1.4 or later JSON, as its predicate type says (D12, D150) | Generate it again with a current syft, Trivy or BuildKit |
 | `rejected: SBOM without packages` | The SBOM lists no package but the image it describes: its generator found nothing (D12, D150) | Check the generator's scope; scan the image, not an empty directory |
 | `unverifiable: trust root: <cause>` | The node holds no trust root: TUF and its cache both failed, or the first refresh is still running (D143) | Check that the node reaches `verify.tuf_url`; it is retried automatically |
-| `unverifiable: <detail>` | Artifacts or the trust root could not be obtained (D17, D20) | Check upstream reachability and credentials; it is retried automatically |
-| `unverifiable: upstream rate limited: <host>` | The registry answered `429`, or `503` with `Retry-After`; discovery to that host pauses, for every image, until its `Retry-After`, at most 1 h, and resumes by itself. Until M5 the journal says it at `info`: `discovery of <digest>: unverifiable: upstream rate limited: <host>` (D38, D128) | Add registry credentials, or wait |
+| `unverifiable: <detail>` | Artifacts or the trust root could not be obtained (D17, D20); `artifacts unreachable` when no peer nor upstream served them | Check upstream reachability and credentials; it is retried 10 s later, then after twice the wait each time, up to 5 min (D151) |
+| `unverifiable: upstream rate limited: <host>` | The registry answered `429`, or `503` with `Retry-After`; discovery to that host pauses, for every image, until its `Retry-After`, at most 1 h, and resumes by itself. The journal says it at `info` as `verdict of <digest> under <policies>: unverifiable: upstream rate limited: <host>`, and as `discovery of <digest>: …` for an image no policy matches (D38, D128, D151) | Add registry credentials, or wait |
 
 ## Reflector refusals
 

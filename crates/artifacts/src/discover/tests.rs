@@ -376,6 +376,30 @@ async fn the_api_then_the_fallback_tag_then_the_sig_tag_and_each_tag_is_asked_by
 }
 
 #[tokio::test]
+async fn asked_again_upstream_adds_what_it_serves_now_to_the_record() {
+    let test = Test::start().await;
+    let root = test.root();
+    let signature = test.signature(&root);
+    let first = test.discover(&root).await.unwrap();
+    let (bundle, listed) = test.bundle(&root, BUNDLE, b"bundle");
+    test.referrers(&format!("/app/referrers/{root}"), &[listed], None);
+
+    let again = test
+        .discovery
+        .again(&root, &[NAME.to_owned()])
+        .await
+        .unwrap();
+
+    assert_eq!(kinds(&first), [(Kind::Signature, signature.clone())]);
+    assert_eq!(
+        kinds(&again),
+        [(Kind::Bundle, bundle), (Kind::Signature, signature)]
+    );
+    let store = test.discovery.store();
+    assert_eq!(store.recorded(&root).await.unwrap(), Some(again));
+}
+
+#[tokio::test]
 async fn a_tag_that_is_not_there_is_never_fetched() {
     let test = Test::start().await;
     let root = test.root();

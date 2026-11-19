@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use jiff::Timestamp;
 use sigstore_trust_root::TrustedRoot;
@@ -38,6 +39,9 @@ impl fmt::Debug for TrustRoot {
             .finish_non_exhaustive()
     }
 }
+
+/// The trust root in use, or why there is none: then every verification ends `unverifiable` (D20).
+pub type Held = Result<Arc<TrustRoot>, Absent>;
 
 /// The SHA-256 of a `trusted_root.json` as read, the trust-root part of a verdict's key (D20).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

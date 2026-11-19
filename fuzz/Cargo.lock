@@ -2297,6 +2297,7 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "jiff",
+ "metrics",
  "regex-automata",
  "regex-syntax",
  "serde",
@@ -2309,6 +2310,8 @@ dependencies = [
  "speculaire-artifacts",
  "speculaire-oci",
  "thiserror",
+ "tokio",
+ "tracing",
  "x509-parser",
 ]
 

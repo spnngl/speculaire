@@ -2732,7 +2732,10 @@ name = "speculaire-verify"
 version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
+ "divan",
  "jiff",
+ "metrics",
+ "metrics-exporter-prometheus",
  "regex-automata",
  "regex-syntax",
  "serde",
@@ -2744,9 +2747,11 @@ dependencies = [
  "sigstore-verify",
  "speculaire-artifacts",
  "speculaire-oci",
+ "speculaire-runtime",
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
  "x509-parser",
 ]
 

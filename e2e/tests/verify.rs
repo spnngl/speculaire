@@ -377,3 +377,179 @@ fn discovery_records_every_fixture_from_zot_and_from_the_plain_upstreams_fallbac
         );
     }
 }
+
+/// The workflow that signed the keyless fixtures.
+const SAN: &str =
+    "https://github.com/spnngl/speculaire/.github/workflows/fixtures.yml@refs/heads/main";
+
+/// A node other than the worker that pulled a fixture through its mirror, then forgot its artifacts, its agent stopped:
+/// it serves the image and not its artifacts until its agent discovers them again. Dropping it removes the fixtures and
+/// starts its agent.
+struct Holder<'a> {
+    cluster: &'a Cluster,
+    name: String,
+    /// Where its store records the fixture's root.
+    record: String,
+}
+
+impl<'a> Holder<'a> {
+    /// Pulls `case` as `reference` on a node other than `worker`, and forgets its artifacts: its agent stays stopped.
+    /// On CRI-O, a node serves only the manifests its relay served (D66), so the pull goes through the mirror.
+    fn pull(worker: &'a Worker, case: &Case, reference: &str) -> Self {
+        let cluster = &worker.cluster;
+        let name = cluster
+            .nodes()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .find(|name| *name != worker.name)
+            .expect("a second node");
+        let record = format!("{STORE}/roots/sha256/{}.json", hex(case.layout.root()));
+        let script = format!("{}; crictl pull {reference} >/dev/null", rmi(cluster));
+        let output = cluster.exec_output(&name, &["sh", "-c", &script]).unwrap();
+        assert!(output.success, "{script}: {output:?}");
+        let holder = Self {
+            cluster,
+            name,
+            record,
+        };
+        until(
+            &|| format!("{} never discovered {reference}", holder.name),
+            &mut || holder.recorded(),
+        );
+        cluster.stop_agent(&holder.name).unwrap();
+        let blobs: Vec<String> = case
+            .digests()
+            .into_iter()
+            .map(|digest| format!("{STORE}/blobs/sha256/{}", hex(&digest)))
+            .collect();
+        let script = format!("rm -f {} {}", holder.record, blobs.join(" "));
+        let output = cluster
+            .exec_output(&holder.name, &["sh", "-c", &script])
+            .unwrap();
+        assert!(output.success, "{script}: {output:?}");
+        holder
+    }
+
+    /// Whether its store recorded the fixture's root.
+    fn recorded(&self) -> bool {
+        self.cluster
+            .exec_output(&self.name, &["test", "-f", &self.record])
+            .unwrap()
+            .success
+    }
+}
+
+impl Drop for Holder<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .cluster
+            .exec_output(&self.name, &["sh", "-c", &rmi(self.cluster)]);
+        let _ = self.cluster.start_agent(&self.name);
+    }
+}
+
+/// The worker's agent journal since `since`, a time as `date '+%Y-%m-%d %H:%M:%S'` gives it.
+fn journal(worker: &Worker, since: &str) -> String {
+    worker.sh(&format!(
+        "journalctl -u speculaire --no-pager -o cat --since '{since}'"
+    ))
+}
+
+/// Waits until `done` holds, at most [`WITHIN`], and returns when it did; `what` names it otherwise.
+fn until(what: &dyn Fn() -> String, done: &mut dyn FnMut() -> bool) -> Instant {
+    let start = Instant::now();
+    while !done() {
+        assert!(start.elapsed() < WITHIN, "{}", what());
+        sleep(Duration::from_millis(200));
+    }
+    Instant::now()
+}
+
+/// Waits until the worker's journal since `since` holds `line`.
+fn logged(worker: &Worker, since: &str, line: &str) -> Instant {
+    until(
+        &|| format!("no {line:?} in:\n{}", journal(worker, since)),
+        &mut || journal(worker, since).contains(line),
+    )
+}
+
+/// A policy named `fixtures` over the fixtures at `host`, which the workflow that recorded them signs.
+fn fixtures_policy(host: &str) -> String {
+    format!(
+        "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: fixtures\nspec:\n  \
+         images:\n  - glob: {host}/{FIXTURES}\n  authorities:\n  - keyless:\n      identities:\n      - issuer: \
+         https://token.actions.githubusercontent.com\n        subject: {SAN}\n"
+    )
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn an_image_whose_artifacts_no_source_serves_is_unverifiable_until_a_peer_discovers_them() {
+    if Cluster::from_env().ip_family() == IpFamily::Dual {
+        return;
+    }
+    // A is the worker; zot serves the keyless fixture and its bundle.
+    let worker = Worker::new();
+    let cluster = &worker.cluster;
+    let case = Case::pullable()
+        .into_iter()
+        .find(|case| case.name == "keyless")
+        .expect("the keyless fixture");
+    let root = case.layout.root().to_string();
+    let host = cluster.upstream(Kind::Referrers).address().to_owned();
+    let reference = format!("{host}/{FIXTURES}:keyless");
+    cluster
+        .policy(&worker.name, &fixtures_policy(&host))
+        .unwrap();
+    worker.forget(std::slice::from_ref(&case));
+    let b = Holder::pull(&worker, &case, &reference);
+    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
+    let since = since.trim();
+    let unverifiable = {
+        // B starts without upstreams: it discovers nothing. A pulls from B once a reflector names B.
+        let _b_alone = cluster.reject_upstreams(&b.name).unwrap();
+        cluster.start_agent(&b.name).unwrap();
+        let _a_alone = cluster.reject_upstreams(&worker.name).unwrap();
+        let pull = ["crictl", "pull", reference.as_str()];
+        until(
+            &|| format!("{} never pulled from {}", worker.name, b.name),
+            &mut || cluster.exec_output(&worker.name, &pull).unwrap().success,
+        );
+        let line = format!("verdict of {root} under fixtures: unverifiable: artifacts unreachable");
+        let unverifiable = logged(&worker, since, &line);
+        let metrics = cluster.metrics(&worker.name).unwrap();
+        assert_eq!(
+            metrics.get(r#"speculaire_verdicts{state="unverifiable"}"#),
+            Some(1.0)
+        );
+        assert!(!b.recorded(), "{} discovered without upstreams", b.name);
+        unverifiable
+    };
+
+    // B discovers from zot as its agent starts again, and announces: A's next try finds the artifacts at B.
+    cluster.stop_agent(&b.name).unwrap();
+    cluster.start_agent(&b.name).unwrap();
+    let discovered = until(
+        &|| format!("{} has not discovered {root}", b.name),
+        &mut || b.recorded(),
+    );
+    let allowed = logged(
+        &worker,
+        since,
+        &format!("verdict of {root} under fixtures: allow"),
+    );
+    // The try after `discovered` comes at most one wait later, and a wait is at most 10 s more than the time since
+    // the first verdict (D151); 5 s more for the polls and A's discovery.
+    let waited = discovered - unverifiable;
+    assert!(
+        allowed - discovered <= waited + Duration::from_secs(15),
+        "allowed {:?} after B discovered, {waited:?} after unverifiable",
+        allowed - discovered
+    );
+    eprintln!(
+        "verify: unverifiable to allow {:.1} s, B discovered to A allowed {:.1} s",
+        (allowed - unverifiable).as_secs_f64(),
+        (allowed - discovered).as_secs_f64()
+    );
+}

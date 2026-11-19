@@ -180,9 +180,33 @@ impl Discovery {
     /// When peers give no artifact and no source serves the root's manifest, a host refuses to serve more for now, or
     /// the store fails.
     pub async fn discover(&self, root: &Digest, names: &[String]) -> Result<Vec<Artifact>, Error> {
+        self.run(root, names, false).await
+    }
+
+    /// Asks upstream for the artifacts of `root` once more, whatever peers give, and records them beside those
+    /// recorded: what a verdict about to be `Rejected` asks first (D126).
+    ///
+    /// # Errors
+    ///
+    /// As [`Discovery::discover`], when no source serves the root's manifest.
+    pub async fn again(&self, root: &Digest, names: &[String]) -> Result<Vec<Artifact>, Error> {
+        self.run(root, names, true).await
+    }
+
+    /// Discovers `root`, upstream alone and beside its record when `again`, else peers first.
+    async fn run(
+        &self,
+        root: &Digest,
+        names: &[String],
+        again: bool,
+    ) -> Result<Vec<Artifact>, Error> {
         let discovering = self.store.discovering(root);
         let mut index = self.held(root).await?;
-        let mut artifacts = self.nearby(&discovering, root, index.as_deref()).await?;
+        let mut artifacts = if again {
+            Vec::new()
+        } else {
+            self.nearby(&discovering, root, index.as_deref()).await?
+        };
         if artifacts.is_empty() {
             let (upstream, fetched) = self.root(root, names, index.as_deref()).await?;
             index = fetched;
@@ -194,6 +218,13 @@ impl Discovery {
             && Index::parse(bytes).is_ok()
         {
             discovering.keep(root, bytes).await?;
+        }
+        if again {
+            for artifact in self.store.recorded(root).await?.unwrap_or_default() {
+                if !artifacts.contains(&artifact) {
+                    artifacts.push(artifact);
+                }
+            }
         }
         self.store.record(root, &artifacts).await?;
         Ok(artifacts)

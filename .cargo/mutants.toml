@@ -33,6 +33,9 @@ exclude_re = [
   # meets its loose targets. The settling logs and the exit status of D33's run tell them apart.
   'node\.rs:\d+:\d+: replace Agent::settled -> anyhow::Result<Option<Duration>> with Ok\(Some\(Default::default\(\)\)\)$',
   'node\.rs:\d+:\d+: replace Agent::stop -> anyhow::Result<\(\)> with Ok\(\(\)\)$',
+  # The engine's one-line calls into discovery: `crates/artifacts` tests `Discovery::discover` and `again`, the e2e test
+  # of an unverifiable verdict sees the engine call `discover`, and an engine test of them would need a registry (D151).
+  'engine\.rs:\d+:\d+: replace <impl Discover for Discovery>::(discover|again) -> Result<\(\), Error> with Ok\(\(\)\)$',
   # A target with exactly as many referrers as the cap: truncating to the cap keeps them all, only a warning differs.
   'discover\.rs:\d+:\d+: replace > with >= in Discovery::bundles$',
   'peers\.rs:\d+:\d+: replace > with >= in Discovery::listed$',
