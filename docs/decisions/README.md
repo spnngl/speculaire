@@ -19,7 +19,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136, D142, D149)
-- D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node
+- D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node (amended by D150)
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57, D105, D107, D116)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
 - D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81, D86)
@@ -128,7 +128,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D118 [build](build.md): `just dev` mounts the tree at its host path and builds it in `/target<path>` of the shared volume; `just musl` keeps `/src` (amends D57; amended by D125)
 - D119 [distribution](distribution.md): the upstream client bounds the TCP connect to a host, and to the token endpoint it names, by the host's positive `dial_timeout`, one connection pool per trust and timeout; zero and CRI-O keep its own 15 s (amends D78, D88, D115)
 - D120 [build](build.md): e2e pulls Docker Hub's images from mirror.gcr.io, then `public.ecr.aws/docker` for official images, then Docker Hub, on the host and in the node images' runtime config (amends D63, D112; amended by D122)
-- D121 [verification](verification.md): an `Images` trait follows the runtime's image list, and each digest it lists is a discovery root, asked of its repositories in list order; only Sigstore bundle referrers and `.sig` are fetched, under caps, into the artifact store (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146)
+- D121 [verification](verification.md): an `Images` trait follows the runtime's image list, and each digest it lists is a discovery root, asked of its repositories in list order; only Sigstore bundle referrers and `.sig` are fetched, under caps, into the artifact store (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146, D150)
 - D122 [build](build.md): the justfile's recipes and the bench workflow pull Docker Hub's images through D120's mirrors with `just hub-pull`; build/Containerfile's base is a named build context of the one pulled (amends D120)
 - D123 [distribution](distribution.md): peers that hold a tag resolve it: agents announce tags under a domain-separated key, the mirror asks 2 holders and serves the first manifest, `hosts.toml` gets `resolve`, and `mirror.resolve_tags = false` turns it off live (amends D6, D66, D82, D85, D88, D99, D100, D102; amended by D127)
 - D124 [distribution](distribution.md): the peer API serves the artifact store: its blobs by digest after the runtime's content, and the referrers of a manifest in any repository, filtered by `artifactType`; the store is announced beside the content, each source of keys listed apart (amends D99, D100; amended by D131)
@@ -157,5 +157,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D147 [verification](verification.md): a legacy `.sig` layer is a signature once its simple signing payload names the image and it verifies as a v0.1 bundle with its SET as log entry (amends D8, D126, D145)
 - D148 [verification](verification.md): each discovery holds its own root and blobs, released when it ends, or when the collection it ended during does (amends D144, D146)
 - D149 [verification](verification.md): an authority that requires attestations passes on bundles of each predicate type, compared exactly, by its signer; a cosign signature never counts; the first failing attestation names the reason (amends D11, D43)
+- D150 [verification](verification.md): an SBOM passes in an attestation of `https://spdx.dev/Document`, `/v2.3` or `https://cyclonedx.org/bom` by an authority's signer, or in a BuildKit layer of an index it signs, counted by our own parser; discovery records a blob listed over `sbom.max_size` unfetched and the verifier rejects it by its listed size (amends D12, D121)
 
-Next free number: D150.
+Next free number: D151.

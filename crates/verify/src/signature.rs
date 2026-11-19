@@ -19,6 +19,7 @@ use sigstore_verify::types::{ArtifactDigest, Bundle, DerPublicKey, DigestBytes, 
 use sigstore_verify::{PublicKeyVerificationPolicy, VerificationPolicy};
 use speculaire_artifacts::{Artifact, Kind, Store};
 use speculaire_oci::reference::Digest;
+use speculaire_oci::referrers::Referrer;
 
 use crate::legacy;
 use crate::policy::{Authority, PublicKey, Signer, sha256};
@@ -30,6 +31,9 @@ const LIMIT: usize = 16_384;
 
 /// The predicate type of a cosign v3 signature (cosign v3.1.3 `pkg/types/predicate.go:19`): never an attestation.
 const COSIGN_SIGNATURE: &str = "https://sigstore.dev/cosign/sign/v1";
+
+/// The annotation of a bundle's referrer manifest naming the predicate type it signs, set by cosign and GitHub.
+const PREDICATE_TYPE: &str = "dev.sigstore.bundle.predicateType";
 
 /// One signature's result: who signed it, or why it does not count.
 pub type SignatureResult = Result<Signed, Failure>;
@@ -69,6 +73,9 @@ pub enum Failure {
     /// The bundle does not verify against the trust root, or does not name the image.
     #[error("signature invalid: {0}")]
     Invalid(String),
+    /// The bundle, or the `.sig` payload, is larger than `sbom.max_size`: its size, as its manifest lists it (D150).
+    #[error("signature over sbom.max_size: {0} bytes")]
+    Oversize(u64),
     /// The bundle's certificate comes from a certificate authority the trust root does not hold, such as GitHub's
     /// private Sigstore instance (D43): its issuer's name.
     #[error("certificate issuer {0} is unknown to the trust root")]
@@ -83,7 +90,7 @@ impl Failure {
     const fn closeness(&self) -> u8 {
         match self {
             Self::Missing => 0,
-            Self::Invalid(_) => 1,
+            Self::Invalid(_) | Self::Oversize(_) => 1,
             Self::UnknownIssuer(_) => 2,
             Self::Mismatch(_) => 3,
         }
@@ -141,10 +148,12 @@ pub struct Attested {
 pub struct Unverifiable(String);
 
 /// The signature check, with each bundle's result kept per trust root (D20).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Signatures {
     cache: Mutex<Cache>,
     hits: AtomicU64,
+    /// `sbom.max_size`: discovery leaves out a blob larger, its manifest still listing it (D150).
+    max_size: u64,
 }
 
 /// The results of one trust root.
@@ -173,9 +182,9 @@ struct Entry {
 
 /// Where a signature is, in the artifact store.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Source {
-    /// A Sigstore bundle.
-    Bundle(Digest),
+pub(crate) enum Source {
+    /// The Sigstore bundle of the referrer manifest `manifest`.
+    Bundle { manifest: Digest, bundle: Digest },
     /// Layer `index` of a `.sig` manifest, whose blob is `payload`.
     Layer {
         manifest: Digest,
@@ -185,6 +194,21 @@ enum Source {
 }
 
 impl Signatures {
+    /// A check that reads no blob larger than `max_size`, `sbom.max_size` (D12).
+    #[must_use]
+    pub fn new(max_size: u64) -> Self {
+        Self {
+            cache: Mutex::default(),
+            hits: AtomicU64::default(),
+            max_size,
+        }
+    }
+
+    /// The largest blob it reads, `sbom.max_size`.
+    pub(crate) const fn max_size(&self) -> u64 {
+        self.max_size
+    }
+
     /// The result of each authority of `policy`, in order, over the bundles and `.sig` layers among `artifacts` whose
     /// target is `target`, read from `store` and verified against `root`. The policy's check passes when one authority
     /// passes (D11).
@@ -276,7 +300,7 @@ impl Signatures {
     }
 
     /// The first of `sources` whose signature satisfies `signer`, else the reason of the one that came closest.
-    async fn signature(
+    pub(crate) async fn signature(
         &self,
         store: &Store,
         root: &TrustRoot,
@@ -310,13 +334,12 @@ impl Signatures {
     ) -> Result<Result<Attested, Failure>, Unverifiable> {
         let mut closest = Failure::Missing;
         // A `.sig` layer signs a simple signing payload, never a statement.
-        for bundle in sources.iter().filter_map(|source| match source {
-            Source::Bundle(bundle) => Some(bundle),
+        for (source, bundle) in sources.iter().filter_map(|source| match source {
+            Source::Bundle { bundle, .. } => Some((source, bundle)),
             Source::Layer { .. } => None,
         }) {
-            let source = Source::Bundle(bundle.clone());
             let kept = self
-                .signed(store, root, entry(target, source, signer), signer)
+                .signed(store, root, entry(target, source.clone(), signer), signer)
                 .await?;
             if kept.attests.as_deref() != Some(predicate_type) {
                 continue;
@@ -357,29 +380,45 @@ impl Signatures {
             Signer::Keyless { .. } => None,
         };
         let kept = match &entry.source {
-            Source::Bundle(bundle) => match parse(&read(store, bundle).await?) {
-                Ok(bundle) => Kept {
-                    signed: verified(root, artifact(&entry.target), &bundle, public_key),
-                    attests: attests(&bundle),
-                },
-                Err(failure) => Kept {
-                    signed: Err(failure),
-                    attests: None,
-                },
-            },
+            Source::Bundle { manifest, bundle } => {
+                match blob(store, manifest, bundle, self.max_size).await? {
+                    Blob::Kept(bytes) => match parse(&bytes) {
+                        Ok(bundle) => Kept {
+                            signed: verified(root, artifact(&entry.target), &bundle, public_key),
+                            attests: attests(&bundle),
+                        },
+                        Err(failure) => Kept {
+                            signed: Err(failure),
+                            attests: None,
+                        },
+                    },
+                    // Read only to pick the reason, as the predicate type of a bundle that fails (D149).
+                    Blob::Oversize {
+                        size,
+                        predicate_type,
+                    } => Kept {
+                        signed: Err(Failure::Oversize(size)),
+                        attests: predicate_type
+                            .filter(|predicate_type| predicate_type != COSIGN_SIGNATURE),
+                    },
+                }
+            }
             Source::Layer {
                 manifest,
                 index,
                 payload,
             } => Kept {
-                signed: legacy::verify(
-                    root,
-                    &entry.target,
-                    &read(store, manifest).await?,
-                    *index,
-                    &read(store, payload).await?,
-                    public_key,
-                ),
+                signed: match blob(store, manifest, payload, self.max_size).await? {
+                    Blob::Kept(payload) => legacy::verify(
+                        root,
+                        &entry.target,
+                        &read(store, manifest).await?,
+                        *index,
+                        &payload,
+                        public_key,
+                    ),
+                    Blob::Oversize { size, .. } => Err(Failure::Oversize(size)),
+                },
                 attests: None,
             },
         };
@@ -419,7 +458,7 @@ fn entry(target: &Digest, source: Source, signer: &Signer) -> Entry {
 }
 
 /// The closer of two bundles' reasons.
-fn closer(closest: Failure, failure: Failure) -> Failure {
+pub(crate) fn closer(closest: Failure, failure: Failure) -> Failure {
     std::cmp::max_by_key(closest, failure, Failure::closeness)
 }
 
@@ -506,14 +545,17 @@ fn by_certificate<'a>(
 }
 
 /// The signatures among `artifacts` whose target is `target`: each bundle, and each layer of each `.sig`.
-fn sources(target: &Digest, artifacts: &[Artifact]) -> Vec<Source> {
+pub(crate) fn sources(target: &Digest, artifacts: &[Artifact]) -> Vec<Source> {
     let mut sources = Vec::new();
     for artifact in artifacts
         .iter()
         .filter(|artifact| artifact.target == *target)
     {
         match artifact.kind {
-            Kind::Bundle => sources.extend(artifact.blobs.last().cloned().map(Source::Bundle)),
+            Kind::Bundle => sources.extend(artifact.blobs.last().map(|bundle| Source::Bundle {
+                manifest: artifact.manifest.clone(),
+                bundle: bundle.clone(),
+            })),
             // Its blobs are its config, then its layers.
             Kind::Signature => sources.extend(artifact.blobs.iter().skip(1).enumerate().map(
                 |(index, payload)| Source::Layer {
@@ -529,12 +571,60 @@ fn sources(target: &Digest, artifacts: &[Artifact]) -> Vec<Source> {
 }
 
 /// The blob `digest` of `store`.
-async fn read(store: &Store, digest: &Digest) -> Result<Vec<u8>, Unverifiable> {
+pub(crate) async fn read(store: &Store, digest: &Digest) -> Result<Vec<u8>, Unverifiable> {
     store
         .read(digest)
         .await
         .map_err(|e| Unverifiable(format!("artifact store: {e}")))?
-        .ok_or_else(|| Unverifiable(format!("{digest} is not in the artifact store")))
+        .ok_or_else(|| absent(digest))
+}
+
+fn absent(digest: &Digest) -> Unverifiable {
+    Unverifiable(format!("{digest} is not in the artifact store"))
+}
+
+/// A blob of an artifact, as the artifact store gives it.
+pub(crate) enum Blob {
+    /// Its bytes.
+    Kept(Vec<u8>),
+    /// Left out by discovery: its size, as its manifest lists it above `sbom.max_size` (D150), and the predicate type
+    /// that manifest's annotation names, unverified.
+    Oversize {
+        size: u64,
+        predicate_type: Option<String>,
+    },
+}
+
+/// The blob `digest` that the manifest `manifest` lists, read from `store`.
+///
+/// # Errors
+///
+/// When the store cannot give it, and its manifest does not list it above `max_size`.
+pub(crate) async fn blob(
+    store: &Store,
+    manifest: &Digest,
+    digest: &Digest,
+    max_size: u64,
+) -> Result<Blob, Unverifiable> {
+    if let Some(bytes) = store
+        .read(digest)
+        .await
+        .map_err(|e| Unverifiable(format!("artifact store: {e}")))?
+    {
+        return Ok(Blob::Kept(bytes));
+    }
+    let manifest = Referrer::parse(&read(store, manifest).await?).map_err(|_| absent(digest))?;
+    let size = manifest
+        .blobs()
+        .find(|blob| blob.digest == *digest)
+        .map(|listed| listed.size);
+    match size {
+        Some(size) if size > max_size => Ok(Blob::Oversize {
+            size,
+            predicate_type: manifest.annotations.get(PREDICATE_TYPE).cloned(),
+        }),
+        _ => Err(absent(digest)),
+    }
 }
 
 /// Whether `verified` satisfies `signer`: a certificate whose issuer and subject match one identity, or the key it was

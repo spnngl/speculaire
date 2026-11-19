@@ -4,3 +4,6 @@ allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-print-in-tests = true
 allow-dbg-in-tests = true
+
+# Product names, not code (D150).
+doc-valid-idents = ["BuildKit", "CycloneDX", ".."]

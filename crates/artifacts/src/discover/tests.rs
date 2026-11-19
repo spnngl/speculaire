@@ -258,6 +258,17 @@ impl Test {
         artifact_type: &str,
         content: &'static [u8],
     ) -> (Digest, Value) {
+        self.bundle_listed(subject, artifact_type, content, content.len())
+    }
+
+    /// As [`Test::bundle`], its layer descriptor listing `size` as the bundle's size.
+    fn bundle_listed(
+        &self,
+        subject: &Digest,
+        artifact_type: &str,
+        content: &'static [u8],
+        size: usize,
+    ) -> (Digest, Value) {
         let empty = self.registry.blob(b"{}");
         let layer = self.registry.blob(content);
         let bytes = json!({
@@ -265,7 +276,7 @@ impl Test {
             "mediaType": MANIFEST,
             "artifactType": artifact_type,
             "config": descriptor(EMPTY, &empty, 2),
-            "layers": [descriptor(BUNDLE, &layer, content.len())],
+            "layers": [descriptor(BUNDLE, &layer, size)],
             "subject": descriptor(MANIFEST, subject, 100),
         })
         .to_string();
@@ -498,15 +509,34 @@ async fn a_referrer_at_the_manifest_cap_is_fetched_and_one_listed_above_it_is_no
 }
 
 #[tokio::test]
-async fn a_blob_larger_than_the_cap_drops_its_artifact_and_one_at_the_cap_is_kept() {
+async fn a_blob_listed_above_the_cap_is_left_out_unfetched_and_one_growing_above_it_drops_its_artifact()
+ {
     let test = Test::with(Limits::new(4), |registry| vec![registry.endpoint()]).await;
     let root = test.root();
-    let (_, above) = test.bundle(&root, BUNDLE, b"a bundle of more than four bytes");
+    let (above, listed_above) = test.bundle(&root, BUNDLE, b"a bundle of more than four bytes");
     let (at, at_cap) = test.bundle(&root, BUNDLE, b"four");
-    test.referrers(&format!("/app/referrers/{root}"), &[above, at_cap], None);
+    let (_, growing) = test.bundle_listed(&root, BUNDLE, b"listed as four bytes", 4);
+    test.referrers(
+        &format!("/app/referrers/{root}"),
+        &[listed_above, at_cap, growing],
+        None,
+    );
+
+    let artifacts = test.discover(&root).await.unwrap();
+
     assert_eq!(
-        kinds(&test.discover(&root).await.unwrap()),
-        [(Kind::Bundle, at)]
+        kinds(&artifacts),
+        [(Kind::Bundle, above), (Kind::Bundle, at)]
+    );
+    let store = test.discovery.store();
+    let left_out = &artifacts[0].blobs[1];
+    assert!(!store.contains(left_out));
+    assert!(store.contains(&artifacts[0].manifest));
+    assert!(store.contains(&artifacts[1].blobs[1]));
+    let requests = test.registry.requests();
+    assert!(
+        !requests.contains(&format!("GET /app/blobs/{left_out}")),
+        "{requests:?}"
     );
 }
 

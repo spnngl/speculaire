@@ -253,6 +253,16 @@ impl Fixture {
     ///
     /// When the case's layout cannot be read or the store fails.
     pub async fn load(case: &str) -> Self {
+        Self::capped(case, u64::MAX).await
+    }
+
+    /// As [`Fixture::load`], with `sbom.max_size` at `max_size`: as discovery does, a blob larger stays named by its
+    /// artifact and out of the store (D150).
+    ///
+    /// # Panics
+    ///
+    /// As [`Fixture::load`].
+    pub async fn capped(case: &str, max_size: u64) -> Self {
         let layout = Layout::open(case);
         let dir = tempfile::tempdir().expect("a temporary directory");
         let store = Store::open(dir.path().join("store")).expect("a new store opens");
@@ -266,7 +276,7 @@ impl Fixture {
             fixture.keep(&layout.root, &layout.blob(&layout.root)).await;
         }
         for artifact in layout.artifacts() {
-            fixture.add(&layout, artifact).await;
+            fixture.add(&layout, artifact, max_size).await;
         }
         fixture.record().await;
         fixture
@@ -291,7 +301,7 @@ impl Fixture {
             target: fixture.root.clone(),
             ..signature
         };
-        fixture.add(&layout, artifact).await;
+        fixture.add(&layout, artifact, u64::MAX).await;
         fixture.record().await;
         fixture
     }
@@ -390,10 +400,16 @@ impl Fixture {
         changed.blobs[layer] = new;
     }
 
-    /// Keeps the manifest and blobs of `artifact` from `layout`, and adds it to the record.
-    async fn add(&mut self, layout: &Layout, artifact: Artifact) {
-        for blob in std::iter::once(&artifact.manifest).chain(&artifact.blobs) {
-            self.keep(blob, &layout.blob(blob)).await;
+    /// Keeps the manifest of `artifact` from `layout`, and each of its blobs up to `max_size` bytes, and adds it to the
+    /// record.
+    async fn add(&mut self, layout: &Layout, artifact: Artifact, max_size: u64) {
+        self.keep(&artifact.manifest, &layout.blob(&artifact.manifest))
+            .await;
+        for blob in &artifact.blobs {
+            let bytes = layout.blob(blob);
+            if u64::try_from(bytes.len()).is_ok_and(|len| len <= max_size) {
+                self.keep(blob, &bytes).await;
+            }
         }
         self.artifacts.push(artifact);
     }
