@@ -244,6 +244,23 @@ impl Worker {
             .collect()
     }
 
+    /// The digests of `expected` the worker's store holds.
+    fn held<'e>(&self, expected: &'e Expected) -> BTreeSet<&'e String> {
+        expected
+            .digests()
+            .filter(|digest| {
+                let hex = digest.trim_start_matches("sha256:");
+                self.cluster
+                    .exec_output(
+                        &self.name,
+                        &["test", "-e", &format!("{STORE}/blobs/sha256/{hex}")],
+                    )
+                    .unwrap()
+                    .success
+            })
+            .collect()
+    }
+
     /// The sum of `speculaire_artifact_fetches_total` over the series whose labels include each of `labels`.
     fn fetches(&self, labels: &[&str]) -> f64 {
         self.sh("curl -sf http://127.0.0.1:7482/metrics")
@@ -790,26 +807,39 @@ fn a_node_cut_off_from_upstream_gets_every_artifact_from_the_node_that_discovere
     wait_held(cluster, &b.name, &a, &expected);
 
     // B is cut off from every upstream, not only zot: another image's discovery, such as kindnetd's from mirror.gcr.io,
-    // would otherwise keep a blob these artifacts share, the empty config, uncounted.
-    let (took, peer) = {
+    // would otherwise fetch a blob these artifacts share, the empty config, from there.
+    let (took, peer, held) = {
         let _rejected = cluster.reject_upstreams(&b.name).unwrap();
+        let held = b.held(&expected);
         let start = Instant::now();
         cluster.start_agent(&b.name).unwrap();
         let took = holds(cluster, &b.name, &expected, start);
-        (took, b.fetches(&["source=\"peer\"", "result=\"ok\""]))
+        (took, b.fetches(&["source=\"peer\"", "result=\"ok\""]), held)
     };
     println!(
         "B held every artifact {} ms after its agent started",
         took.as_millis()
     );
 
-    // B held none of them: `forget` deleted them, and the agent's first collection what another discovery kept since
-    // (D131). The counters start with the agent: each digest came from a peer.
-    let digests: BTreeSet<&String> = expected.digests().collect();
+    // `forget` deleted every artifact, but another image's discovery between its restart and the stop, such as
+    // kindnetd's, may have kept a blob these artifacts share since: the empty config, which its record names and the
+    // store keeps (D131). No other image names their manifests. The counters start with the agent: each digest B
+    // lacked when it started came from a peer.
     assert!(
-        peer >= f64::from(u32::try_from(digests.len()).unwrap()),
-        "{peer} from peers, {} digests: {digests:?}",
-        digests.len()
+        expected
+            .artifacts
+            .iter()
+            .all(|(manifest, _)| !held.contains(manifest)),
+        "{held:?}"
+    );
+    let lacked: BTreeSet<&String> = expected
+        .digests()
+        .filter(|digest| !held.contains(digest))
+        .collect();
+    assert!(
+        peer >= f64::from(u32::try_from(lacked.len()).unwrap()),
+        "{peer} from peers, {} digests lacked: {lacked:?}",
+        lacked.len()
     );
     // No node ever asks for the `.att` tag (D43).
     let att = format!("sha256-{}.att", expected.root.hex());
@@ -851,20 +881,10 @@ fn a_stored_artifact_is_announced_and_withdrawn_with_its_image_within_2_s() {
     assert!(ms(removed, withdrawn) <= within);
 
     // Deleted before withdrawn. The empty config may stay: another image the worker lists may name it.
-    let left: Vec<&String> = expected
-        .digests()
+    let left: Vec<&String> = worker
+        .held(&expected)
+        .into_iter()
         .filter(|digest| *digest != EMPTY)
-        .filter(|digest| {
-            let hex = digest.trim_start_matches("sha256:");
-            worker
-                .cluster
-                .exec_output(
-                    &worker.name,
-                    &["test", "-e", &format!("{STORE}/blobs/sha256/{hex}")],
-                )
-                .unwrap()
-                .success
-        })
         .collect();
     assert!(left.is_empty(), "{left:?}");
     let record = format!("{STORE}/roots/sha256/{}.json", expected.root.hex());
