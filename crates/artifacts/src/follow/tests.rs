@@ -127,20 +127,23 @@ fn start(
     linked: impl Future<Output = ()> + Send + 'static,
     last_up: Option<Instant>,
 ) -> (mpsc::Sender<Update>, tokio::task::JoinHandle<()>) {
-    let (script, followed, _) = start_found(store, asked, linked, last_up);
+    let (script, followed, _, _) = start_found(store, asked, linked, last_up, Duration::ZERO);
     (script, followed)
 }
 
-/// As [`start`], with what verification is told.
+/// As [`start`], the store keeping a root fetched for `grace`, with what verification is told and the sender of the
+/// manifests fetched.
 fn start_found(
     store: Arc<Store>,
     asked: &Arc<Asked>,
     linked: impl Future<Output = ()> + Send + 'static,
     last_up: Option<Instant>,
+    grace: Duration,
 ) -> (
     mpsc::Sender<Update>,
     tokio::task::JoinHandle<()>,
     mpsc::UnboundedReceiver<Found>,
+    mpsc::UnboundedSender<Fetched>,
 ) {
     let unlinked = speculaire_mirror::fetch::Fetcher::new(
         std::path::PathBuf::new(),
@@ -161,14 +164,16 @@ fn start_found(
     ));
     let (script, receiver) = mpsc::channel(4);
     let (found, told) = mpsc::unbounded_channel();
+    let (fetch, fetched) = mpsc::unbounded_channel();
     let followed = tokio::spawn(follow(
         discovery,
         Arc::new(Scripted(Mutex::new(Some(receiver)))),
+        Fetching { fetched, grace },
         linked,
         watch::channel(last_up).1,
         found,
     ));
-    (script, followed, told)
+    (script, followed, told, fetch)
 }
 
 #[tokio::test(start_paused = true)]
@@ -177,7 +182,8 @@ async fn verification_is_told_the_roots_listed_then_each_discovery_and_each_root
     let store = Arc::new(Store::open(dir.path()).unwrap());
     store.record(&digest(10), &[]).await.unwrap();
     let asked = Arc::new(Asked::default());
-    let (script, followed, mut told) = start_found(store, &asked, std::future::ready(()), None);
+    let (script, followed, mut told, _) =
+        start_found(store, &asked, std::future::ready(()), None, Duration::ZERO);
     let listing = Update::Listing(vec![
         image(1, &[("reg.test/old", 10)]),
         image(2, &[("reg.test/new", 20)]),
@@ -200,8 +206,9 @@ async fn verification_is_told_the_roots_listed_then_each_discovery_and_each_root
     let mut found = Vec::new();
     while let Ok(event) = told.try_recv() {
         found.push(match event {
-            Found::Listed(roots) => {
-                let mut roots: Vec<_> = roots.into_iter().collect();
+            Found::Roots { listed, fetched } => {
+                assert!(fetched.is_empty());
+                let mut roots: Vec<_> = listed.into_iter().collect();
                 roots.sort_by_key(|(root, _)| root.to_string());
                 format!("{roots:?}")
             }
@@ -629,6 +636,181 @@ async fn each_listing_collects_the_store_even_when_no_root_left() {
         .unwrap();
     settle().await;
     assert!(!store.contains(&orphan));
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+/// A manifest fetched through the mirror, as it tells it.
+fn fetch(n: u8, name: &str) -> Fetched {
+    Fetched {
+        digest: digest(n),
+        name: name.to_owned(),
+    }
+}
+
+/// What verification was told, oldest first, each list of roots sorted.
+fn told(told: &mut mpsc::UnboundedReceiver<Found>) -> Vec<String> {
+    let sorted = |roots: Roots| {
+        let mut roots: Vec<_> = roots.into_iter().collect();
+        roots.sort_by_key(|(root, _)| root.to_string());
+        roots
+    };
+    let mut found = Vec::new();
+    while let Ok(event) = told.try_recv() {
+        found.push(match event {
+            Found::Roots { listed, fetched } => {
+                format!("listed {:?} fetched {:?}", sorted(listed), sorted(fetched))
+            }
+            Found::Ended { root, discovered } => {
+                format!("{root} {:?}", discovered.map_err(|e| e.to_string()))
+            }
+        });
+    }
+    found
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_manifest_fetched_is_a_root_kept_until_listed_unless_listed_fetched_or_named_by_an_index()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let index = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{}","size":2,"platform":{{"architecture":"amd64","os":"linux"}}}}]}}"#,
+        digest(50)
+    );
+    let index_root = speculaire_oci::hash::of("sha256", index.as_bytes()).unwrap();
+    let asked = Arc::new(Asked::default());
+    let (script, followed, mut found, fetched) = start_found(
+        Arc::clone(&store),
+        &asked,
+        std::future::ready(()),
+        None,
+        Duration::from_secs(3600),
+    );
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+    script
+        .send(Update::Listing(vec![image(1, &[("reg.test/a", 10)])]))
+        .await
+        .unwrap();
+    settle().await;
+    asked.0.lock().unwrap().clear();
+    told(&mut found);
+    // Held after the listing, which collected what it does not name.
+    store.keep(&index_root, index.as_bytes()).await.unwrap();
+    store.record(&index_root, &[]).await.unwrap();
+
+    // Listed, fetched twice, then fetched under the index it names: one root, discovered once.
+    for (n, name) in [(10, "reg.test/a"), (30, "reg.test/f"), (30, "reg.test/g")] {
+        fetched.send(fetch(n, name)).unwrap();
+    }
+    // Settled, so that the told come in one order.
+    settle().await;
+    fetched
+        .send(Fetched {
+            digest: index_root.clone(),
+            name: "reg.test/i".to_owned(),
+        })
+        .unwrap();
+    fetched.send(fetch(50, "reg.test/i")).unwrap();
+    settle().await;
+    assert_eq!(*asked.0.lock().unwrap(), ["reg.test/f"]);
+    let roots = |listed: &[(&Digest, &str)], fetched: &[(&Digest, &str)]| {
+        let roots = |roots: &[(&Digest, &str)]| {
+            roots
+                .iter()
+                .map(|(root, name)| ((*root).clone(), vec![(*name).to_owned()]))
+                .collect::<Vec<_>>()
+        };
+        format!("listed {:?} fetched {:?}", roots(listed), roots(fetched))
+    };
+    let mut fetched_both = [(&digest(30), "reg.test/f"), (&index_root, "reg.test/i")];
+    fetched_both.sort_by_key(|(root, _)| root.to_string());
+    assert_eq!(
+        told(&mut found),
+        [
+            roots(
+                &[(&digest(10), "reg.test/a")],
+                &[(&digest(30), "reg.test/f")]
+            ),
+            format!(
+                "{} Err(\"unverifiable: artifacts unreachable\")",
+                digest(30)
+            ),
+            roots(&[(&digest(10), "reg.test/a")], &fetched_both),
+            format!("{index_root} Ok(())"),
+        ]
+    );
+
+    // A listing within the grace keeps what a root fetched names; once listed, it is listed alone.
+    store.record(&digest(30), &[]).await.unwrap();
+    script
+        .send(Update::Listing(vec![image(1, &[("reg.test/a", 10)])]))
+        .await
+        .unwrap();
+    settle().await;
+    assert!(store.recorded(&digest(30)).await.unwrap().is_some());
+    assert!(store.recorded(&index_root).await.unwrap().is_some());
+    script
+        .send(Update::Listed(image(3, &[("reg.test/f", 30)])))
+        .await
+        .unwrap();
+    settle().await;
+    let mut listed_both = [(&digest(10), "reg.test/a"), (&digest(30), "reg.test/f")];
+    listed_both.sort_by_key(|(root, _)| root.to_string());
+    assert_eq!(
+        told(&mut found),
+        [roots(&listed_both, &[(&index_root, "reg.test/i")])]
+    );
+    // Its mark goes at once, the index's stays.
+    let marked = |root: &Digest| {
+        let algorithm = dir.path().join("fetched").join(root.algorithm());
+        algorithm.join(root.encoded()).exists()
+    };
+    assert!(!marked(&digest(30)));
+    assert!(marked(&index_root));
+
+    drop(script);
+    followed.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_root_fetched_and_not_listed_is_collected_as_its_grace_ends_but_not_before_the_first_listing()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    store.record(&digest(30), &[]).await.unwrap();
+    let asked = Arc::new(Asked::default());
+    let (script, followed, mut found, fetched) = start_found(
+        Arc::clone(&store),
+        &asked,
+        std::future::ready(()),
+        None,
+        Duration::ZERO,
+    );
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+
+    fetched.send(fetch(30, "reg.test/f")).unwrap();
+    settle().await;
+    assert!(store.recorded(&digest(30)).await.unwrap().is_some());
+    script.send(Update::Listing(Vec::new())).await.unwrap();
+    settle().await;
+    assert_eq!(store.recorded(&digest(30)).await.unwrap(), None);
+    let fetched_30 = format!("{:?}", [(digest(30), vec!["reg.test/f".to_owned()])]);
+    assert_eq!(
+        told(&mut found),
+        [
+            format!("listed [] fetched {fetched_30}"),
+            format!("{} Ok(())", digest(30)),
+            "listed [] fetched []".to_owned(),
+        ]
+    );
+
+    // After the first listing, a grace that ends collects with no listing.
+    store.record(&digest(31), &[]).await.unwrap();
+    fetched.send(fetch(31, "reg.test/f")).unwrap();
+    settle().await;
+    assert_eq!(store.recorded(&digest(31)).await.unwrap(), None);
 
     drop(script);
     followed.await.unwrap();

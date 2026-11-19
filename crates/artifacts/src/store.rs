@@ -7,6 +7,9 @@
 //! The node serves the store to peers: its blobs as [`Content`], announced as an [`Inventory`], and the artifacts about
 //! each manifest as [`Referrers`] (D124). `Store::collect` deletes what no listed root names, and the inventory opens
 //! only after the first collection, so a root removed while the agent was stopped is never announced (D131).
+//!
+//! A root the mirror was asked for before any runtime lists it is marked in `<dir>/fetched/<alg>/<hex>`, which holds
+//! the time of the fetch in seconds since the epoch: a collection keeps it for a grace from then (D153).
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -15,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use speculaire_mirror::referrers::Referrers;
@@ -192,7 +196,7 @@ impl Store {
         let tmp = directory.join("tmp");
         // Best effort: a part left behind only takes room, and creating `tmp` below reports a directory it cannot use.
         let _ = std::fs::remove_dir_all(&tmp);
-        for name in ["tmp", "blobs", "roots"] {
+        for name in ["tmp", "blobs", "roots", "fetched"] {
             let path = directory.join(name);
             std::fs::create_dir_all(&path).map_err(|e| io_error(&path, e))?;
         }
@@ -332,10 +336,32 @@ impl Store {
         parse_record(&path, &text).map(Some)
     }
 
-    /// Deletes what no root of `listed` names, and withdraws each blob deleted.
+    /// Marks `root`, which the mirror was asked for, as fetched now: a collection keeps it for a grace (D153).
     ///
-    /// The record of each root not in `listed` goes first, then each blob that is neither a listed root nor named by a
-    /// listed root's record. The first collection, done or failed, opens the [`Inventory`].
+    /// # Errors
+    ///
+    /// When the mark cannot be written.
+    pub async fn fetched(&self, root: &Digest) -> Result<(), Error> {
+        let since = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let path = self
+            .directory
+            .join("fetched")
+            .join(root.algorithm())
+            .join(root.encoded());
+        create_parent(&path).await?;
+        tokio::fs::write(&path, since.as_secs().to_string())
+            .await
+            .map_err(|e| io_error(&path, e))
+    }
+
+    /// Deletes what no root of `listed`, and no root fetched less than `grace` ago and not listed, names; withdraws
+    /// each blob deleted, and returns what the grace keeps.
+    ///
+    /// The marks of the roots listed or fetched `grace` ago or earlier go first, then the record of each root kept
+    /// neither by `listed` nor by its grace, then each blob that is neither such a root nor named by its record. The
+    /// first collection, done or failed, opens the [`Inventory`].
     ///
     /// Discovery keeps a root's blobs before its record: a collection beside it keeps the root being discovered and
     /// what the discovery held or kept, until the discovery ends or, when it ends meanwhile, the collection (D144, D148).
@@ -343,9 +369,13 @@ impl Store {
     /// # Errors
     ///
     /// When a record or a blob cannot be listed or deleted; the next collection tries again.
-    pub(crate) async fn collect(self: &Arc<Self>, listed: HashSet<Digest>) -> Result<(), Error> {
+    pub(crate) async fn collect(
+        self: &Arc<Self>,
+        listed: HashSet<Digest>,
+        grace: Duration,
+    ) -> Result<Graced, Error> {
         let store = Arc::clone(self);
-        let collected = tokio::task::spawn_blocking(move || store.collect_blocking(&listed))
+        let collected = tokio::task::spawn_blocking(move || store.collect_blocking(listed, grace))
             .await
             .unwrap_or_else(|err| Err(io_error(&self.directory, io::Error::other(err))));
         // Here rather than in the blocking task, whose thread may record to another recorder.
@@ -354,9 +384,15 @@ impl Store {
         collected
     }
 
-    fn collect_blocking(&self, listed: &HashSet<Digest>) -> Result<(), Error> {
+    fn collect_blocking(
+        &self,
+        mut listed: HashSet<Digest>,
+        grace: Duration,
+    ) -> Result<Graced, Error> {
         self.pending().collections += 1;
         let _collecting = Collecting(self);
+        let graced = self.graced(&listed, grace)?;
+        listed.extend(graced.roots.iter().cloned());
         // Records go first: a crash in between leaves blobs that no record names, which the next collection deletes,
         // and never a record naming a blob gone.
         for (root, path) in named(&self.directory.join("roots"), ".json")? {
@@ -401,7 +437,35 @@ impl Store {
             drop(pending);
             let _ = self.changes.send(Change::Removed(digest));
         }
-        Ok(())
+        Ok(graced)
+    }
+
+    /// The roots fetched less than `grace` ago and not `listed`; deletes the marks of the others.
+    fn graced(&self, listed: &HashSet<Digest>, grace: Duration) -> Result<Graced, Error> {
+        let now = SystemTime::now();
+        let mut graced = Graced::default();
+        for (root, path) in named(&self.directory.join("fetched"), "")? {
+            let Some(root) = root else {
+                continue;
+            };
+            let text = std::fs::read_to_string(&path).map_err(|e| io_error(&path, e))?;
+            // A mark that names no time is spent: the root waits for a listing as any other.
+            let ends = text
+                .trim()
+                .parse()
+                .ok()
+                .and_then(|secs| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs)))
+                .and_then(|fetched| fetched.checked_add(grace))
+                .filter(|ends| *ends > now && !listed.contains(&root));
+            match ends {
+                Some(ends) => {
+                    graced.ends = Some(graced.ends.map_or(ends, |first| first.min(ends)));
+                    graced.roots.insert(root);
+                }
+                None => std::fs::remove_file(&path).map_err(|e| io_error(&path, e))?,
+            }
+        }
+        Ok(graced)
     }
 
     /// Every blob held.
@@ -431,6 +495,15 @@ impl Store {
             .join(root.algorithm())
             .join(format!("{}.json", root.encoded()))
     }
+}
+
+/// What a collection kept for its grace (D153).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Graced {
+    /// The roots fetched and not listed whose grace runs.
+    pub(crate) roots: HashSet<Digest>,
+    /// When the first of their graces ends.
+    pub(crate) ends: Option<SystemTime>,
 }
 
 /// A blob being written to the store, deleted unless committed.

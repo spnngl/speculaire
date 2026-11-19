@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::node::{POLICY, Rules, TRUSTED_ROOT};
 use e2e::upstream::{FIXTURES, Kind, Upstream};
-use e2e::{Cluster, IpFamily};
+use e2e::{Cluster, IpFamily, Runtime};
 use serde_json::Value;
 use speculaire_artifacts::store::Artifact;
 use speculaire_artifacts::testing::{self, Layout};
@@ -551,5 +551,171 @@ fn an_image_whose_artifacts_no_source_serves_is_unverifiable_until_a_peer_discov
         "verify: unverifiable to allow {:.1} s, B discovered to A allowed {:.1} s",
         (allowed - unverifiable).as_secs_f64(),
         (allowed - discovered).as_secs_f64()
+    );
+}
+
+/// The loopback mirror (D14), and the directory of its client certificate.
+const MIRROR: &str = "https://127.0.0.1:7480";
+const MIRROR_DIR: &str = "/var/lib/speculaire/mirror";
+
+/// The worker's agent config.
+const CONFIG: &str = "/etc/speculaire/config.toml";
+
+/// Sets the worker's `artifacts.grace` to `secs` while it lives, the agent restarted by the caller: dropping it sets
+/// the default back, for the [`Worker`] dropped after it to restart the agent.
+struct Grace<'a>(&'a Worker);
+
+impl<'a> Grace<'a> {
+    fn set(worker: &'a Worker, secs: u64) -> Self {
+        worker.sh(&format!(
+            "sed -i 's/^#grace = 600$/grace = {secs}/' {CONFIG} && grep -q '^grace = {secs}$' {CONFIG}"
+        ));
+        Self(worker)
+    }
+}
+
+impl Drop for Grace<'_> {
+    fn drop(&mut self) {
+        let script = format!("sed -i 's/^grace = [0-9]*$/#grace = 600/' {CONFIG}");
+        let _ = self
+            .0
+            .cluster
+            .exec_output(&self.0.name, &["sh", "-c", &script]);
+    }
+}
+
+/// The time of the first line of the worker's journal since `since` that holds `line`, logged already, in seconds
+/// since the epoch.
+fn logged_at(worker: &Worker, since: &str, line: &str) -> f64 {
+    let journal = worker.sh(&format!(
+        "journalctl -u speculaire --no-pager -o short-unix --since '{since}'"
+    ));
+    let found = journal.lines().find(|logged| logged.contains(line));
+    found
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_pull_by_tag_is_verified_from_its_manifest_fetch_before_the_runtime_lists_the_image() {
+    if Cluster::from_env().ip_family() == IpFamily::Dual {
+        return;
+    }
+    let worker = Worker::new();
+    let cluster = &worker.cluster;
+    let case = Case::pullable()
+        .into_iter()
+        .find(|case| case.name == "keyless")
+        .expect("the keyless fixture");
+    let root = case.layout.root().to_string();
+    let host = cluster.upstream(Kind::Referrers).address().to_owned();
+    let reference = format!("{host}/{FIXTURES}:keyless");
+    cluster
+        .policy(&worker.name, &fixtures_policy(&host))
+        .unwrap();
+    worker.forget(std::slice::from_ref(&case));
+    cluster.wait_ready(&worker.name).unwrap();
+    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
+    let since = since.trim();
+
+    // The pull returns once the runtime lists the image.
+    let pulled: f64 = worker
+        .sh(&format!(
+            "crictl pull {reference} >/dev/null && date +%s.%N"
+        ))
+        .trim()
+        .parse()
+        .unwrap();
+    let line = format!("verdict of {root} under fixtures: allow");
+    logged(&worker, since, &line);
+    let allowed = logged_at(&worker, since, &line);
+    let metrics = cluster.metrics(&worker.name).unwrap();
+    let manifest =
+        metrics.get(r#"speculaire_verifications_total{result="allow",trigger="manifest"}"#);
+    assert!(
+        manifest >= Some(1.0),
+        "verifications under manifest: {manifest:?}"
+    );
+    eprintln!(
+        "verify: verdict {:.3} s before the pull returned",
+        pulled - allowed
+    );
+    assert!(
+        allowed <= pulled,
+        "verdict {:.3} s after the pull returned",
+        allowed - pulled
+    );
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_manifest_fetched_and_never_pulled_keeps_its_artifacts_through_a_restart_until_its_grace_ends()
+{
+    const GRACE: u64 = 20;
+    if Cluster::from_env().ip_family() == IpFamily::Dual {
+        return;
+    }
+    let worker = Worker::new();
+    let cluster = &worker.cluster;
+    let case = Case::pullable()
+        .into_iter()
+        .find(|case| case.name == "keyless")
+        .expect("the keyless fixture");
+    let root = case.layout.root().to_string();
+    let host = cluster.upstream(Kind::Referrers).address().to_owned();
+    let _grace = Grace::set(&worker, GRACE);
+    worker.forget(std::slice::from_ref(&case));
+    cluster.wait_ready(&worker.name).unwrap();
+
+    // containerd names the registry in `ns`, CRI-O first in the path (D66).
+    let path = match cluster.runtime() {
+        Runtime::Containerd => format!("/v2/{FIXTURES}/manifests/{root}?ns={host}"),
+        Runtime::Crio => format!("/v2/{host}/{FIXTURES}/manifests/{root}"),
+    };
+    let fetched = Instant::now();
+    worker.sh(&format!(
+        "curl -s -o /dev/null --cacert {MIRROR_DIR}/ca.crt --cert {MIRROR_DIR}/client.pem \
+         -H 'Accept: {INDEX}, application/vnd.oci.image.manifest.v1+json' '{MIRROR}{path}'"
+    ));
+    let expected = case.expected();
+    assert_eq!(worker.recorded(&case, fetched), expected);
+
+    // A restart lists the images again, and collects: the grace, kept on disk, keeps the root.
+    cluster.stop_agent(&worker.name).unwrap();
+    cluster.start_agent(&worker.name).unwrap();
+    cluster.wait_ready(&worker.name).unwrap();
+    // The first listing comes within a second of the start; it is collected at once.
+    sleep(Duration::from_secs(3));
+    let record = format!("{STORE}/roots/sha256/{}.json", hex(case.layout.root()));
+    let blobs: Vec<String> = case
+        .digests()
+        .into_iter()
+        .map(|digest| format!("{STORE}/blobs/sha256/{}", hex(&digest)))
+        .collect();
+    let held = || {
+        cluster
+            .exec_output(&worker.name, &["test", "-f", &record])
+            .unwrap()
+            .success
+    };
+    assert!(held(), "{root} collected within its grace");
+
+    // Collected as its grace ends, blobs too.
+    let collected = until(&|| format!("{root} kept after its grace"), &mut || !held());
+    let left = worker.sh(&format!("ls {} 2>/dev/null; true", blobs.join(" ")));
+    assert_eq!(left.trim(), "", "blobs kept after the grace");
+    let after = collected - fetched;
+    assert!(
+        after >= Duration::from_secs(GRACE - 1),
+        "collected {after:?} after the fetch"
+    );
+    eprintln!(
+        "verify: collected {:.1} s after the fetch",
+        after.as_secs_f64()
     );
 }

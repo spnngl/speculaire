@@ -146,7 +146,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - It has the same form as `metrics.address` and `reflector.listen`.
 - **Revisit when:** —
 
-## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80, D83, D102, D123)
+## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80, D83, D102, D123, D152)
 
 - **Decision:**
   - `speculaire configure` writes `/etc/containers/registries.conf.d/99-speculaire.conf`. For each registry it mirrors, the file holds one `[[registry]]` that copies the admin's effective entry for that prefix (`location`, `insecure`, `blocked`, its mirrors) and puts first `[[registry.mirror]] location = "<mirror.address>/<registry host>"` with `pull-from-mirror = "all"`.

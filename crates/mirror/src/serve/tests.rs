@@ -59,6 +59,7 @@ struct Server {
     address: SocketAddr,
     directory: tempfile::TempDir,
     mirror: Mirror,
+    fetched: mpsc::UnboundedReceiver<Fetched>,
     _stop: oneshot::Sender<()>,
 }
 
@@ -93,7 +94,8 @@ async fn start_pulls<P: Pulls>(pulls: P) -> Server {
     let listener = TcpListener::bind((IP, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
-    tokio::spawn(serve(listener, tls, Arc::new(pulls), async {
+    let (fetching, fetched) = mpsc::unbounded_channel();
+    tokio::spawn(serve(listener, tls, Arc::new(pulls), fetching, async {
         // An error means the sender went with the test: stop too.
         let _ = stopped.await;
     }));
@@ -101,6 +103,7 @@ async fn start_pulls<P: Pulls>(pulls: P) -> Server {
         address,
         directory,
         mirror,
+        fetched,
         _stop: stop,
     }
 }
@@ -697,6 +700,54 @@ async fn what_answers_is_told_the_name_the_reference_the_range_and_the_accept() 
             r#"manifest docker.io/library/busybox Some(Tag("1.37")) head=false range=None accept=Some("application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json")"#.to_owned(),
         ]
     );
+}
+
+/// Serves the manifest `digest_of(7)` for every manifest asked but the tag `missing`, and misses every blob.
+struct Tagged;
+
+impl Pulls for Tagged {
+    fn pull(&self, pull: Pull<'_>) -> impl std::future::Future<Output = Answer_> + Send {
+        let served =
+            pull.kind == Kind::Manifest && pull.reference != Some(&Reference::Tag("missing"));
+        std::future::ready(if served {
+            let bytes = Bytes::from_static(br#"{"layers":[]}"#);
+            let media_type = HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json");
+            // Another digest for a `HEAD`, which must never be told.
+            let digest = digest_of(if pull.head { 8 } else { 7 });
+            let response = manifest_response(&bytes, &digest, media_type, pull.head);
+            Answer_::Served(crate::metrics::Source::Upstream, response)
+        } else {
+            Answer_::Missing
+        })
+    }
+}
+
+#[tokio::test]
+async fn each_manifest_fetched_by_digest_or_served_by_tag_is_told_with_its_name() {
+    let mut server = start_pulls(Tagged).await;
+    let mut sender = client(&server).await;
+    let asked = digest_of(1);
+    let tag = |tag: &str| format!("/v2/registry.example/team/app/manifests/{tag}");
+    for (method, path) in [
+        // Told, as containerd names it, whatever answers; a `HEAD` or a blob is not.
+        (Method::GET, manifest_path(&asked)),
+        (Method::HEAD, manifest_path(&digest_of(2))),
+        (Method::GET, blob_path(&asked)),
+        // Told, on the digest served, as CRI-O names it; a `HEAD` or a tag not served is not.
+        (Method::GET, tag("v1")),
+        (Method::HEAD, tag("v1")),
+        (Method::GET, tag("missing")),
+    ] {
+        ask(&mut sender, method, &path, None).await;
+    }
+    for (digest, name) in [
+        (asked, "docker.io/library/busybox"),
+        (digest_of(7), "registry.example/team/app"),
+    ] {
+        let name = name.to_owned();
+        assert_eq!(server.fetched.recv().await, Some(Fetched { digest, name }));
+    }
+    assert!(server.fetched.try_recv().is_err());
 }
 
 /// Answers every pull with upstream's refusal: a limit on manifests, a failure on blobs.

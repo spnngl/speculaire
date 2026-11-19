@@ -199,6 +199,11 @@ impl Index {
         }
     }
 
+    /// Every manifest the index names, attestation manifests included, in index order.
+    pub fn manifests(&self) -> impl Iterator<Item = &Digest> {
+        self.entries.iter().map(|entry| &entry.digest)
+    }
+
     /// The attestation manifests of the entry `of`, in index order.
     #[must_use]
     pub fn attestations(&self, of: &Digest) -> Vec<&Digest> {
@@ -337,6 +342,7 @@ mod tests {
         assert_eq!(built.attestations(&digest(3)), [&digest(9), &digest(7)]);
         assert_eq!(built.attestations(&digest(1)), [&digest(8)]);
         assert_eq!(built.attestations(&digest(2)), Vec::<&Digest>::new());
+        assert!(built.manifests().eq([9, 1, 3, 8, 7].map(digest).iter()));
         // Even with the host's platform, an attestation manifest is never the platform's.
         let only = index(&[
             attestation(9, 3).replace("unknown\",\"os\":\"unknown", "amd64\",\"os\":\"linux")

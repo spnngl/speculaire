@@ -109,9 +109,11 @@ impl Config {
                     stale_max: _,
                 },
             sbom: Sbom { max_size: _ },
-            artifacts: Artifacts {
-                directory: artifact_directory,
-            },
+            artifacts:
+                Artifacts {
+                    directory: artifact_directory,
+                    grace,
+                },
             mirror:
                 Mirror {
                     address: mirror,
@@ -225,6 +227,12 @@ impl Config {
             "artifacts.directory",
             artifact_directory,
             &running.artifacts.directory,
+        );
+        keep(
+            &mut kept,
+            "artifacts.grace",
+            grace,
+            &running.artifacts.grace,
         );
         keep(&mut kept, "peer.address", peer, &running.peer.address);
         keep(
@@ -458,12 +466,15 @@ impl Default for Sbom {
 pub struct Artifacts {
     /// Where the *artifact store* keeps what discovery fetched (D121).
     pub directory: Restart<Absolute>,
+    /// How long the store keeps what a manifest fetched through the mirror names, when no listed image does (D153).
+    pub grace: Restart<Span>,
 }
 
 impl Default for Artifacts {
     fn default() -> Self {
         Self {
             directory: Restart(Absolute::new("/var/lib/speculaire/artifacts")),
+            grace: Restart(Span::from_secs(600)),
         }
     }
 }

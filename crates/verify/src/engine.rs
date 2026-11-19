@@ -211,11 +211,13 @@ impl Discover for Discovery {
     }
 }
 
-/// What the engine knows of a root listed.
+/// What the engine knows of a root listed or fetched.
 #[derive(Debug)]
 struct Root {
-    /// The names it is listed under.
+    /// The names it is listed under, else fetched under.
     names: Vec<String>,
+    /// What its next verification counts under.
+    trigger: Trigger,
     /// The hashes of the policies its names match: a verdict each.
     keys: Vec<MatchHash>,
     /// Whether its artifacts are recorded.
@@ -228,6 +230,25 @@ struct Root {
     asking: bool,
     /// Whether upstream was asked once more (D126).
     asked_again: bool,
+}
+
+/// What a verification counts under: what started it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Trigger {
+    /// The first of a root a manifest fetch made, even when listed since (D152).
+    Manifest,
+    /// Any other: a listing, a discovery or a retry (D151).
+    Event,
+}
+
+impl Root {
+    /// The `trigger` label of the verification under way; the next ones are events.
+    fn trigger(&mut self) -> &'static str {
+        match std::mem::replace(&mut self.trigger, Trigger::Event) {
+            Trigger::Manifest => "manifest",
+            Trigger::Event => "event",
+        }
+    }
 }
 
 /// What the engine asked of discovery.
@@ -300,7 +321,7 @@ impl<D: Discover> Engine<D> {
             let next = self.roots.values().filter_map(|root| root.retry_at).min();
             tokio::select! {
                 event = found.recv() => match event {
-                    Some(Found::Listed(roots)) => self.listed(roots).await,
+                    Some(Found::Roots { listed, fetched }) => self.roots(listed, fetched).await,
                     Some(Found::Ended { root, discovered }) => self.ended(&root, discovered).await,
                     None => break,
                 },
@@ -315,11 +336,12 @@ impl<D: Discover> Engine<D> {
         self.asks.abort_all();
     }
 
-    /// Follows the roots listed: forgets those that left, and keeps a pending verdict for each key of the others.
-    async fn listed(&mut self, listed: Roots) {
+    /// Follows the roots listed and fetched: forgets those that left, and keeps a pending verdict for each key of the
+    /// others.
+    async fn roots(&mut self, listed: Roots, fetched: Roots) {
         let verdicts = &self.verdicts;
         self.roots.retain(|root, _| {
-            let kept = listed.contains_key(root);
+            let kept = listed.contains_key(root) || fetched.contains_key(root);
             if !kept {
                 verdicts.retain(root, &[]);
             }
@@ -327,7 +349,13 @@ impl<D: Discover> Engine<D> {
         });
         let trust = self.trust_hash();
         let mut changed = Vec::new();
-        for (digest, names) in listed {
+        let listed = listed
+            .into_iter()
+            .map(|(digest, names)| (digest, names, Trigger::Event));
+        let fetched = fetched
+            .into_iter()
+            .map(|(digest, names)| (digest, names, Trigger::Manifest));
+        for (digest, names, trigger) in listed.chain(fetched) {
             let keys: Vec<MatchHash> = groups(&self.policies, &names)
                 .iter()
                 .map(|group| group.hash)
@@ -357,6 +385,7 @@ impl<D: Discover> Engine<D> {
                         digest,
                         Root {
                             names,
+                            trigger,
                             keys,
                             discovered: false,
                             failures: 0,
@@ -454,11 +483,11 @@ impl<D: Discover> Engine<D> {
         let Some(retry_at) = self.roots.get_mut(digest).and_then(|root| retry(root, at)) else {
             return;
         };
-        let groups = self
-            .roots
-            .get(digest)
-            .map(|root| groups(&self.policies, &root.names))
-            .unwrap_or_default();
+        let Some(root) = self.roots.get_mut(digest) else {
+            return;
+        };
+        let trigger = root.trigger();
+        let groups = groups(&self.policies, &root.names);
         let trust = self.trust_hash();
         for group in &groups {
             let verdict = Verdict::Unverifiable {
@@ -475,7 +504,7 @@ impl<D: Discover> Engine<D> {
                 &group.policies,
                 &verdict,
                 &[],
-                started,
+                (trigger, started),
             );
         }
     }
@@ -522,6 +551,7 @@ impl<D: Discover> Engine<D> {
         let Some(root) = self.roots.get_mut(digest) else {
             return;
         };
+        let trigger = root.trigger();
         let asking_again = failed && !root.asked_again;
         if asking_again {
             root.asked_again = true;
@@ -572,7 +602,7 @@ impl<D: Discover> Engine<D> {
                 &group.policies,
                 &verdict,
                 &signers,
-                started,
+                (trigger, started),
             );
         }
     }
@@ -705,16 +735,17 @@ async fn check(
     Outcome::Pass(signers)
 }
 
-/// Keeps `verdict` for `key`, counts the verification, and logs and audits it when it differs from the one kept (D37).
+/// Keeps `verdict` for `key`, counts the verification under the trigger that started it at the time given, and logs and
+/// audits it when it differs from the one kept (D37).
 fn decide(
     verdicts: &Verdicts,
     key: Key<'_>,
     policies: &[&Policy],
     verdict: &Verdict,
     signers: &[String],
-    started: Instant,
+    (trigger, started): (&'static str, Instant),
 ) {
-    metrics::verified(verdict.state(), "event", started.elapsed());
+    metrics::verified(verdict.state(), trigger, started.elapsed());
     let Some(before) = verdicts.keep(key, verdict.clone()) else {
         return;
     };

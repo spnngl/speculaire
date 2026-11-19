@@ -1,12 +1,14 @@
-//! The trigger of discovery at M4: every manifest digest the runtime's image list names is a root (D121). The store
-//! keeps only what the roots listed name (D131).
+//! The triggers of discovery: every manifest digest the runtime's image list names is a root (D121), and so is each
+//! manifest fetched through the mirror before it is listed (D152). The store keeps only what the roots listed name,
+//! and a root fetched for a grace (D131, D153).
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use speculaire_mirror::Fetched;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::images::{Images, List, Update};
 use tokio::sync::{mpsc, watch};
@@ -29,11 +31,16 @@ const TRIES: u8 = 3;
 /// The roots each listed manifest digest has, by root: the names the list gives it, once each, in the list's order.
 pub type Roots = HashMap<Digest, Vec<String>>;
 
-/// What discovery tells verification, in order (D20): each change of the roots listed, and how each discovery ends.
+/// What discovery tells verification, in order (D20): each change of the roots, and how each discovery ends.
 #[derive(Debug)]
 pub enum Found {
-    /// The roots listed now; a root it lacks left the list.
-    Listed(Roots),
+    /// The roots now; a root neither lists left.
+    Roots {
+        /// The roots listed.
+        listed: Roots,
+        /// The roots fetched through the mirror and not listed, with the names they were fetched under (D152).
+        fetched: Roots,
+    },
     /// The discovery of `root` ended, or found it recorded by an earlier run.
     Ended {
         /// The root.
@@ -65,12 +72,14 @@ struct Lane {
 }
 
 impl Lane {
-    /// Starts discovering the first root queued that is due, listed and not recorded, unless a discovery runs already.
-    /// A root that `elsewhere` discovers is dropped: that discovery records it. A root found recorded is told to `found`.
+    /// Starts discovering the first root queued that is due, listed or fetched, and not recorded, unless a discovery
+    /// runs already. A root that `elsewhere` discovers is dropped: that discovery records it. A root found recorded is
+    /// told to `found`.
     async fn start(
         &mut self,
         discovery: &Arc<Discovery>,
         listed: &Roots,
+        fetched: &Roots,
         done: &mut HashMap<Digest, Done>,
         elsewhere: Option<&Digest>,
         found: &mpsc::UnboundedSender<Found>,
@@ -84,7 +93,7 @@ impl Lane {
                 Some(Done::Discovered) => false,
                 Some(Done::Retry(at)) => *at <= Instant::now(),
             };
-            let Some(names) = listed.get(&root).cloned() else {
+            let Some(names) = listed.get(&root).or_else(|| fetched.get(&root)).cloned() else {
                 continue;
             };
             if !due || elsewhere == Some(&root) {
@@ -189,28 +198,96 @@ impl Soon {
     }
 }
 
-/// Discovers the artifacts of each root the image list of `images` names, once per run, until the list ends.
+/// The manifests fetched through the mirror, and how long the store keeps a root fetched and not listed (D152, D153).
+pub struct Fetching {
+    /// Each manifest fetched, as the mirror tells it.
+    pub fetched: mpsc::UnboundedReceiver<Fetched>,
+    /// How long after its fetch a root not listed keeps its artifacts.
+    pub grace: Duration,
+}
+
+/// The roots fetched through the mirror and not listed (D152).
+#[derive(Default)]
+struct Unlisted {
+    /// Each root, with the names it was fetched under.
+    roots: Roots,
+    /// When the first grace the store keeps ends (D153).
+    ends: Option<SystemTime>,
+    /// The manifests each root names, once read: those an index names are its own to discover (D22).
+    children: HashMap<Digest, Vec<Digest>>,
+}
+
+impl Unlisted {
+    /// Takes in `fetch`, marked in the store and kept for `grace`, and tells whether it is a root: one neither `listed`
+    /// nor fetched, that no root names.
+    async fn take(
+        &mut self,
+        discovery: &Discovery,
+        listed: &Roots,
+        grace: Duration,
+        fetch: Fetched,
+    ) -> bool {
+        let Fetched { digest, name } = fetch;
+        if listed.contains_key(&digest) || self.roots.contains_key(&digest) {
+            return false;
+        }
+        for root in listed.keys().chain(self.roots.keys()) {
+            if !self.children.contains_key(root)
+                && let Some(children) = discovery.children(root).await
+            {
+                self.children.insert(root.clone(), children);
+            }
+        }
+        if self
+            .children
+            .values()
+            .flatten()
+            .any(|child| *child == digest)
+        {
+            return false;
+        }
+        if let Err(e) = discovery.store().fetched(&digest).await {
+            warn!(root = %digest, error = %e, "a root fetched cannot be marked: its artifacts go at the next collection");
+        }
+        let ends = SystemTime::now() + grace;
+        self.ends = Some(self.ends.map_or(ends, |first| first.min(ends)));
+        self.roots.insert(digest, vec![name]);
+        true
+    }
+
+    /// Whether `root` is listed or fetched.
+    fn known(&self, listed: &Roots, root: &Digest) -> bool {
+        listed.contains_key(root) || self.roots.contains_key(root)
+    }
+}
+
+/// Discovers the artifacts of each root the image list of `images` names, and of each manifest `fetching` tells of
+/// that the list does not name, once per run, until the list ends.
 ///
-/// Discovery starts once `linked` completes. The store is collected at each listing and whenever a root leaves the
-/// list, from the first listing on, a discovery running or not (D144): it announces nothing until then.
+/// Discovery starts once `linked` completes. The store is collected at each listing, whenever a root leaves the list
+/// or a root fetched is listed, and as a root fetched ends its grace, from the first listing on, a discovery running or
+/// not (D144): it announces nothing until then.
 ///
 /// A root recorded by an earlier run is not discovered again; one whose discovery failed is tried again at the time
 /// its error gives, or after [`RETRY`] when the store failed. A root no source served, in a discovery that started at
 /// most 10 s after `last_up`, the time the latest reflector stream came up, is tried again 3 times 20 s apart first
 /// (D134): a reflector that just restarted names no holder until each agent's stream to it is back. A root that leaves the list loses its artifacts, and is discovered again if it comes back.
 ///
-/// The roots of an image just listed have a lane of their own, beside that of the roots a listing or a retry queued
-/// (D146): a pull waits at most for the discovery of another image just listed, not for a root that a listing found
-/// and whose sources do not answer.
+/// The roots of an image just listed or fetched have a lane of their own, beside that of the roots a listing or a
+/// retry queued (D146): a pull waits at most for the discovery of another image just listed, not for a root that a
+/// listing found and whose sources do not answer. A manifest fetched that is listed, fetched already, or named by an
+/// index root is no root (D152).
 ///
-/// `found` is told the roots listed as they change, then how each discovery ends, and each root found recorded.
+/// `found` is told the roots as they change, then how each discovery ends, and each root found recorded.
 pub async fn follow(
     discovery: Arc<Discovery>,
     images: Arc<dyn Images>,
+    fetching: Fetching,
     linked: impl Future<Output = ()> + Send,
     last_up: watch::Receiver<Option<Instant>>,
     found: mpsc::UnboundedSender<Found>,
 ) {
+    let Fetching { mut fetched, grace } = fetching;
     let (sender, mut updates) = mpsc::channel(16);
     let following = tokio::spawn(images.follow(sender));
     let mut linked = std::pin::pin!(linked);
@@ -222,41 +299,49 @@ pub async fn follow(
         last_up,
         left: HashMap::new(),
     };
-    // The roots listed, and whether the store may hold what they do not name: a listing came since the last
-    // collection, or a root that left was recorded.
+    // The roots listed and fetched, and whether the store may hold what they do not name: a listing came since the
+    // last collection, a root that left was recorded, or a grace ended.
     let mut listed = Roots::new();
+    let mut unlisted = Unlisted::default();
     let mut stale = false;
+    // A grace ending before the first listing collects nothing: the store would lose what the list names.
+    let mut listing_came = false;
     loop {
         while let Ok(update) = updates.try_recv() {
             stale |= enqueue(&mut list, &mut pulled.queue, &mut backlog.queue, update);
         }
+        listing_came |= stale;
         // The store is collected as a root leaves the list, discoveries running or not: one may wait on peers and
         // upstream for seconds (D144).
-        if roots_left(&list, &mut listed, &found) || stale {
-            collect(discovery.store(), &listed, &mut done, &mut soon).await;
+        if roots_left(&list, &mut listed, &mut unlisted, &found) || stale {
+            collect(
+                discovery.store(),
+                &listed,
+                &mut unlisted,
+                grace,
+                &mut done,
+                &mut soon,
+                &found,
+            )
+            .await;
             stale = false;
         }
         if is_linked {
-            pulled
-                .start(&discovery, &listed, &mut done, backlog.root(), &found)
-                .await;
-            backlog
-                .start(&discovery, &listed, &mut done, pulled.root(), &found)
-                .await;
+            let roots = (&listed, &unlisted.roots);
+            start(
+                &discovery,
+                &mut pulled,
+                &mut backlog,
+                roots,
+                &mut done,
+                &found,
+            )
+            .await;
         }
-        let next = done
-            .values()
-            .filter_map(|done| match done {
-                Done::Retry(at) => Some(*at),
-                Done::Discovered => None,
-            })
-            .min();
-        let wake = async {
-            match next {
-                Some(at) => sleep_until(at).await,
-                None => std::future::pending().await,
-            }
-        };
+        let graced = unlisted.ends.filter(|_| listing_came).map(|ends| {
+            Instant::now() + ends.duration_since(SystemTime::now()).unwrap_or_default()
+        });
+        let wake = wake(retry(&done).into_iter().chain(graced).min());
         let (root, started, discovered) = tokio::select! {
             ended = pulled.ended() => ended,
             ended = backlog.ended() => ended,
@@ -264,6 +349,14 @@ pub async fn follow(
                 match update {
                     Some(update) => stale |= enqueue(&mut list, &mut pulled.queue, &mut backlog.queue, update),
                     None => break,
+                }
+                continue;
+            }
+            Some(fetch) = fetched.recv() => {
+                let root = fetch.digest.clone();
+                if unlisted.take(&discovery, &listed, grace, fetch).await {
+                    pulled.queue.push_back(root);
+                    tell(&found, &listed, &unlisted);
                 }
                 continue;
             }
@@ -281,11 +374,12 @@ pub async fn follow(
                     }
                     Done::Retry(_) | Done::Discovered => true,
                 });
+                stale |= graced.is_some_and(|ends| ends <= now);
                 continue;
             }
         };
-        // Recorded after it left the list: collected at the next turn.
-        stale |= !listed.contains_key(&root);
+        // Recorded after it left the list or its grace: collected at the next turn.
+        stale |= !unlisted.known(&listed, &root);
         let ended = soon.ended(&root, started, &discovered);
         done.insert(root.clone(), ended);
         let _ = found.send(Found::Ended {
@@ -298,6 +392,42 @@ pub async fn follow(
 
 /// Applies `update` to `list` and queues its roots, and tells whether `update` is a listing.
 ///
+/// Starts the next root of each idle lane, the roots just listed or fetched first, each skipping the root under way in
+/// the other (D146). `roots` are the roots listed, then those fetched.
+async fn start(
+    discovery: &Arc<Discovery>,
+    pulled: &mut Lane,
+    backlog: &mut Lane,
+    (listed, fetched): (&Roots, &Roots),
+    done: &mut HashMap<Digest, Done>,
+    found: &mpsc::UnboundedSender<Found>,
+) {
+    pulled
+        .start(discovery, listed, fetched, done, backlog.root(), found)
+        .await;
+    backlog
+        .start(discovery, listed, fetched, done, pulled.root(), found)
+        .await;
+}
+
+/// The time of the first retry due.
+fn retry(done: &HashMap<Digest, Done>) -> Option<Instant> {
+    done.values()
+        .filter_map(|done| match done {
+            Done::Retry(at) => Some(*at),
+            Done::Discovered => None,
+        })
+        .min()
+}
+
+/// Wakes at `at`, or never.
+async fn wake(at: Option<Instant>) {
+    match at {
+        Some(at) => sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The roots of an image listed go in `pulled`, those of a listing in `backlog`.
 fn enqueue(
     list: &mut List,
@@ -328,31 +458,69 @@ fn enqueue(
     listing
 }
 
-/// Sets `listed` to the roots `list` names, telling `found` when they changed, and tells whether one it held left.
-fn roots_left(list: &List, listed: &mut Roots, found: &mpsc::UnboundedSender<Found>) -> bool {
+/// Sets `listed` to the roots `list` names, a root fetched then listed being listed alone from then on, telling `found`
+/// when they changed; tells whether one listed left or one fetched is listed now, which the store need not keep for its
+/// grace any more.
+fn roots_left(
+    list: &List,
+    listed: &mut Roots,
+    unlisted: &mut Unlisted,
+    found: &mpsc::UnboundedSender<Found>,
+) -> bool {
     let now = roots(list);
     if now == *listed {
         return false;
     }
     let left = listed.keys().any(|root| !now.contains_key(root));
-    let _ = found.send(Found::Listed(now.clone()));
+    let fetched = unlisted.roots.len();
+    unlisted.roots.retain(|root, _| !now.contains_key(root));
     *listed = now;
-    left
+    tell(found, listed, unlisted);
+    left || unlisted.roots.len() != fetched
 }
 
-/// Collects `store` down to what the roots `listed` name, and forgets the others in `done` and `soon`: a root collected
-/// is discovered again when it comes back.
+/// Tells `found` the roots listed and fetched.
+fn tell(found: &mpsc::UnboundedSender<Found>, listed: &Roots, unlisted: &Unlisted) {
+    // Nobody verifies when the receiver is gone.
+    let _ = found.send(Found::Roots {
+        listed: listed.clone(),
+        fetched: unlisted.roots.clone(),
+    });
+}
+
+/// Collects `store` down to what the roots `listed`, and those fetched within `grace`, name, and forgets the others in
+/// `unlisted`, `done` and `soon`, telling `found` of a root fetched that is gone: a root collected is discovered again
+/// when it comes back.
 async fn collect(
     store: &Arc<Store>,
     listed: &Roots,
+    unlisted: &mut Unlisted,
+    grace: Duration,
     done: &mut HashMap<Digest, Done>,
     soon: &mut Soon,
+    found: &mpsc::UnboundedSender<Found>,
 ) {
-    if let Err(e) = store.collect(listed.keys().cloned().collect()).await {
-        warn!(error = %e, "the artifact store cannot be collected: what it holds stays until the next listing");
+    match store.collect(listed.keys().cloned().collect(), grace).await {
+        Ok(graced) => {
+            unlisted.ends = graced.ends;
+            let fetched = unlisted.roots.len();
+            unlisted.roots.retain(|root, _| graced.roots.contains(root));
+            if unlisted.roots.len() != fetched {
+                tell(found, listed, unlisted);
+            }
+        }
+        Err(e) => {
+            // No wake for a grace until then: the next collection would fail alike.
+            unlisted.ends = None;
+            warn!(error = %e, "the artifact store cannot be collected: what it holds stays until the next listing");
+        }
     }
-    done.retain(|root, _| listed.contains_key(root));
-    soon.left.retain(|root, _| listed.contains_key(root));
+    done.retain(|root, _| unlisted.known(listed, root));
+    soon.left.retain(|root, _| unlisted.known(listed, root));
+    let Unlisted {
+        roots, children, ..
+    } = unlisted;
+    children.retain(|root, _| listed.contains_key(root) || roots.contains_key(root));
 }
 
 /// The roots `list` names, each with its names once each, in the list's order: on CRI-O, every repository of an image

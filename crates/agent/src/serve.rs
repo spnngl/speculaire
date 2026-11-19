@@ -7,14 +7,15 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
+use speculaire_artifacts::follow::Fetching;
 use speculaire_artifacts::{Discovery, Limits, Store};
-use speculaire_mirror::Local;
 use speculaire_mirror::cache::Cache;
 use speculaire_mirror::fetch::{self, Fetcher, Holder};
 use speculaire_mirror::listed::Listed;
 use speculaire_mirror::peer::Uploads;
 use speculaire_mirror::relay::Relay;
 use speculaire_mirror::tls::Tls;
+use speculaire_mirror::{Fetched, Local};
 use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
@@ -27,6 +28,7 @@ use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode};
 use speculaire_verify::{Engine, Policies, Signatures};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
 
@@ -142,7 +144,7 @@ async fn serve(
     // open either stops (D55).
     let registries = node.registries();
     report_registries(registries.reload());
-    let mirror = start_mirror(&config, &node, Arc::clone(&registries)).await?;
+    let (mirror, fetched) = start_mirror(&config, &node, Arc::clone(&registries)).await?;
     // Discovery waits for a reflector stream, so that it asks peers before upstream, and asks a root again soon when it
     // failed just after one came up (D126, D134). Without `reflector.url` the sender drops: discovery waits for none.
     let (up, last_up) = tokio::sync::watch::channel(None);
@@ -150,7 +152,7 @@ async fn serve(
     let store = start_discovery(
         &config,
         &node,
-        &mirror,
+        (&mirror, fetched),
         Arc::clone(&registries),
         last_up,
         policies,
@@ -390,12 +392,13 @@ impl Mirror {
 }
 
 /// Opens the mirror on `mirror.address` with the certificates of `configure` (D14, D55). On containerd it serves what
-/// the node holds; on CRI-O it relays pulls through the blob cache (D66, D67).
+/// the node holds; on CRI-O it relays pulls through the blob cache (D66, D67). The receiver hears of each manifest it
+/// is asked for (D152).
 async fn start_mirror(
     config: &Config,
     node: &RuntimeNode,
     registries: Arc<dyn Registries>,
-) -> anyhow::Result<Mirror> {
+) -> anyhow::Result<(Mirror, UnboundedReceiver<Fetched>)> {
     let directory = config.mirror.directory.get().get();
     let tls = Tls::load(directory).with_context(|| {
         format!(
@@ -421,12 +424,14 @@ async fn start_mirror(
     // On containerd, a blob from peers waits there until it is whole and checked (D102).
     let fetcher = Fetcher::new(blobs.join("staging"), fetch_settings(config));
     speculaire_mirror::metrics::describe_fetch();
+    let (tell, asked) = tokio::sync::mpsc::unbounded_channel();
     let (task, relay, listed) = match node.fallback() {
         Fallback::PerBlob => (
             tokio::spawn(speculaire_mirror::serve(
                 listener,
                 tls,
                 Arc::new(Local::new(node.content(), fetcher.clone())),
+                tell,
                 stopped,
             )),
             None,
@@ -450,6 +455,7 @@ async fn start_mirror(
                 listener,
                 tls,
                 Arc::clone(&relay),
+                tell,
                 stopped,
             ));
             let listed = relay.listed().clone();
@@ -457,14 +463,17 @@ async fn start_mirror(
         }
     };
     info!(%address, "mirror open");
-    Ok(Mirror {
-        stop,
-        task,
-        relay,
-        uploads,
-        fetcher,
-        listed,
-    })
+    Ok((
+        Mirror {
+            stop,
+            task,
+            relay,
+            uploads,
+            fetcher,
+            listed,
+        },
+        asked,
+    ))
 }
 
 /// How long discovery waits at startup for `last_up` to say a reflector stream is up, before it starts without peers.
@@ -475,14 +484,16 @@ const LINK_WAIT: Duration = Duration::from_secs(10);
 ///
 /// Discovery starts once `last_up` holds the time a reflector stream came up, or its sender drops, or after
 /// [`LINK_WAIT`]: a root it found unreachable waits [`speculaire_artifacts::discover::RETRY`], so its first pass asks
-/// peers when the node has any. The store is collected from the first listing on (D131).
+/// peers when the node has any. A manifest `fetched` through the mirror starts a discovery too, and the store keeps
+/// what it names for `artifacts.grace` unless it is listed (D152, D153). The store is collected from the first listing
+/// on (D131).
 ///
 /// The verdict engine verifies each root against `policies` and the trust root `trust` holds as its discovery ends,
 /// and paces the discoveries of the roots it waits on (D151).
 fn start_discovery(
     config: &Config,
     node: &RuntimeNode,
-    mirror: &Mirror,
+    (mirror, fetched): (&Mirror, UnboundedReceiver<Fetched>),
     registries: Arc<dyn Registries>,
     last_up: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
     policies: Policies,
@@ -511,6 +522,10 @@ fn start_discovery(
     tokio::spawn(speculaire_artifacts::follow(
         discovery,
         images,
+        Fetching {
+            fetched,
+            grace: config.artifacts.grace.get().get(),
+        },
         linked_or_after(last_up.clone(), LINK_WAIT),
         last_up,
         found,
