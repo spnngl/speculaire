@@ -15,7 +15,7 @@ pub mod signature;
 pub mod statement;
 pub mod trust;
 
-pub use engine::{Engine, Key, Verdict, Verdicts};
+pub use engine::{Engine, Key, Lookup, Verdict, Verdicts};
 pub use glob::Glob;
 pub use pattern::Pattern;
 pub use policy::{MatchHash, Policies, Policy};

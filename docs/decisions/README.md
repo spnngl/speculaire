@@ -28,7 +28,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D18 [gate](gate.md): `gate.exempt` is explicit and empty by default
 - D19 [build](build.md): the dev loop is Docker on macOS plus CI on native runners (amended by D57)
 - D20 [verification](verification.md): `Verdict` has four states; `Unverifiable` is retried, `Rejected` is final (amended by D31, D38, D65, D145, D151)
-- D21 [verification](verification.md): stale verdicts keep serving during re-verification, for up to `verify.stale_max` (amended by D31, D65)
+- D21 [verification](verification.md): stale verdicts keep serving during re-verification, for up to `verify.stale_max` (amended by D31, D65, D154)
 - D22 [verification](verification.md): verification starts at the manifest fetch (amended by D65, D66, D121, D152)
 - D23 [gate](gate.md): `gate.unmatched` (default `deny`) decides images that no policy matches
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100, D102)
@@ -37,7 +37,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104)
 - D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79)
-- D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93)
+- D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104)
@@ -150,7 +150,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D140 [build](build.md): the pinned nightly moves to `nightly-2026-11-17` and keeps the parallel frontend's default 2 threads; RAPx gets its own nightly, `rapx_nightly`; the check loop stays on stable (amends D57, D76, D77)
 - D141 [build](build.md): the recorded Sigstore fixtures live in `fixtures/sigstore/`, read by the crates' tests through `speculaire-artifacts`' `testing` feature and pushed by `just e2e-up` to zot and the plain upstream, with their trusted root pinned on every node; M5's `verify` e2e suite runs in the IPv4 pass only (amends D112, D130)
 - D142 [verification](verification.md): the policy file holds `ClusterImagePolicy` documents of a subset, any other field refusing it; globs match the repository name; a missing file is no policy (amends D11)
-- D143 [verification](verification.md): the trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h, served from cache while the repository fails; its hash is its file's SHA-256, its expiry the earliest of its TUF metadata or the latest end of its keys (amends D8; amended by D145)
+- D143 [verification](verification.md): the trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h, served from cache while the repository fails; its hash is its file's SHA-256, its expiry the earliest of its TUF metadata or the latest end of its keys (amends D8; amended by D145, D154)
 - D144 [verification](verification.md): the store is collected beside a discovery, which keeps from collection its root and every blob it finds held or keeps, until no discovery and no collection runs; a root that left the list while discovered is collected once its discovery ends (amends D131; amended by D146, D148)
 - D145 [verification](verification.md): a bundle naming the image, whatever its predicate type, is verified once per trust root with any identity, then its signer matched to each authority; an unknown CA is named before any crypto (amends D8, D20, D43, D143; amended by D147)
 - D146 [verification](verification.md): the roots of an image just listed have a discovery lane of their own, beside that of a listing's roots and retries; each lane discovers one root at a time, and a root under way in one is dropped by the other (amends D121, D144; amended by D148, D152)
@@ -158,8 +158,9 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D148 [verification](verification.md): each discovery holds its own root and blobs, released when it ends, or when the collection it ended during does (amends D144, D146)
 - D149 [verification](verification.md): an authority that requires attestations passes on bundles of each predicate type, compared exactly, by its signer; a cosign signature never counts; the first failing attestation names the reason (amends D11, D43)
 - D150 [verification](verification.md): an SBOM passes in an attestation of `https://spdx.dev/Document`, `/v2.3` or `https://cyclonedx.org/bom` by an authority's signer, or in a BuildKit layer of an index it signs, counted by our own parser; discovery records a blob listed over `sbom.max_size` unfetched and the verifier rejects it by its listed size (amends D12, D121)
-- D151 [verification](verification.md): the verdict engine follows discovery's roots, keys each root by the policies its names match, retries an `Unverifiable` key 10 s doubling to 5 min with its own discovery, asks upstream once before a first `Rejected`, and keeps verdicts in memory (amends D20, D121, D126; amended by D152)
+- D151 [verification](verification.md): the verdict engine follows discovery's roots, keys each root by the policies its names match, retries an `Unverifiable` key 10 s doubling to 5 min with its own discovery, asks upstream once before a first `Rejected`, and keeps verdicts in memory (amends D20, D121, D126; amended by D152, D154)
 - D152 [verification](verification.md): a `GET` of a manifest by digest, or by tag when the mirror serves it, makes its digest a discovery root before it is listed, unless listed, fetched or named by a known index; its first verification counts under `trigger="manifest"` (amends D22, D66, D121, D146, D151)
 - D153 [verification](verification.md): the store keeps what a root fetched and not listed names for `artifacts.grace` (600 s), marked on disk with its time so a restart keeps the grace (amends D131)
 
 Next free number: D154.
+- D154 [verification](verification.md): the policy file and a pinned trust root reload on SIGHUP or a changed stamp, a refused one keeping the previous; a changed key serves its previous verdict stale for up to `verify.stale_max` while its root is verified again under `trigger="reverify"` (amends D21, D30, D143, D151)

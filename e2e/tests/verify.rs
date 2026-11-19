@@ -719,3 +719,151 @@ fn a_manifest_fetched_and_never_pulled_keeps_its_artifacts_through_a_restart_unt
         after.as_secs_f64()
     );
 }
+
+/// Waits until the worker's journal since `since` holds an error `message` whose fields hold `reason`.
+fn logged_error(worker: &Worker, since: &str, message: &str, reason: &str) {
+    // `-o verbose` shows the fields.
+    let errors = || {
+        worker.sh(&format!(
+            "journalctl -u speculaire -p err --no-pager -o verbose --since '{since}'"
+        ))
+    };
+    until(&|| format!("no {reason:?} in:\n{}", errors()), &mut || {
+        let errors = errors();
+        errors.contains(&format!("MESSAGE={message}")) && errors.contains(reason)
+    });
+}
+
+/// Sets the worker's `config.poll_interval` to `secs` while it lives, the agent restarted or sent SIGHUP by the caller:
+/// dropping it sets the default back, for the [`Worker`] dropped after it to restart the agent.
+struct PollInterval<'a>(&'a Worker);
+
+impl<'a> PollInterval<'a> {
+    fn set(worker: &'a Worker, secs: u64) -> Self {
+        worker.sh(&format!(
+            "sed -i 's/^#\\{{0,1\\}}poll_interval = [0-9]*$/poll_interval = {secs}/' {CONFIG} && \
+             grep -q '^poll_interval = {secs}$' {CONFIG}"
+        ));
+        Self(worker)
+    }
+}
+
+impl Drop for PollInterval<'_> {
+    fn drop(&mut self) {
+        let script = format!("sed -i 's/^poll_interval = [0-9]*$/#poll_interval = 10/' {CONFIG}");
+        let _ = self
+            .0
+            .cluster
+            .exec_output(&self.0.name, &["sh", "-c", &script]);
+    }
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_changed_policy_verifies_again_on_sighup_or_a_poll_and_a_refused_one_keeps_the_verdicts() {
+    if Cluster::from_env().ip_family() == IpFamily::Dual {
+        return;
+    }
+    let worker = Worker::new();
+    let cluster = &worker.cluster;
+    let case = Case::pullable()
+        .into_iter()
+        .find(|case| case.name == "keyless")
+        .expect("the keyless fixture");
+    let root = case.layout.root().to_string();
+    let host = cluster.upstream(Kind::Referrers).address().to_owned();
+    let reference = format!("{host}/{FIXTURES}:keyless");
+    let signed = fixtures_policy(&host);
+    // The keyless fixture holds no provenance.
+    let attested = format!(
+        "{signed}    attestations:\n    - name: provenance\n      predicateType: https://slsa.dev/provenance/v1\n"
+    );
+    let refused = signed.replacen(
+        "  - keyless:\n",
+        "  - keyless:\n      url: https://fulcio.example\n",
+        1,
+    );
+    cluster.policy(&worker.name, &signed).unwrap();
+    // No poll until SIGHUP sets a shorter interval.
+    let poll = PollInterval::set(&worker, 3600);
+    worker.forget(std::slice::from_ref(&case));
+    cluster.wait_ready(&worker.name).unwrap();
+    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
+    let since = since.trim();
+    let verdicts = |verdict: &str| {
+        journal(&worker, since)
+            .matches(&format!("verdict of {root} under fixtures: {verdict}"))
+            .count()
+    };
+    let wait = |verdict: &str, count: usize| {
+        until(
+            &|| {
+                format!(
+                    "not {count} {verdict} verdicts in:\n{}",
+                    journal(&worker, since)
+                )
+            },
+            &mut || verdicts(verdict) == count,
+        )
+    };
+    let hangup = || worker.sh("systemctl kill -s HUP speculaire");
+    let reloaded = || {
+        cluster
+            .metrics(&worker.name)
+            .unwrap()
+            .get("speculaire_config_reload_failures_total")
+            .unwrap_or(0.0)
+    };
+    worker.sh(&format!("crictl pull {reference} >/dev/null"));
+    wait("allow", 1);
+
+    // SIGHUP alone.
+    cluster.policy(&worker.name, &attested).unwrap();
+    let changed = Instant::now();
+    hangup();
+    let rejected = wait("rejected", 1);
+    eprintln!(
+        "verify: rejected {:.1} s after SIGHUP",
+        (rejected - changed).as_secs_f64()
+    );
+    let reverified = cluster
+        .metrics(&worker.name)
+        .unwrap()
+        .get(r#"speculaire_verifications_total{result="rejected",trigger="reverify"}"#);
+    assert_eq!(reverified, Some(1.0));
+
+    // A refused file keeps the policy and the verdicts, and counts once.
+    let failures = reloaded();
+    drop(poll);
+    let poll = PollInterval::set(&worker, 1);
+    cluster.policy(&worker.name, &refused).unwrap();
+    hangup();
+    logged_error(
+        &worker,
+        since,
+        "the policy file reload failed; the previous one stays in use",
+        &format!(
+            "the policy file {POLICY}: document 1, spec.authorities[0].keyless.url: unknown field `url`"
+        ),
+    );
+    sleep(Duration::from_secs(3));
+    assert_eq!(reloaded(), failures + 1.0);
+    assert_eq!((verdicts("allow"), verdicts("rejected")), (1, 1));
+    let metrics = cluster.metrics(&worker.name).unwrap();
+    assert_eq!(
+        metrics.get(r#"speculaire_verdicts{state="rejected"}"#),
+        Some(1.0)
+    );
+
+    // A poll alone, each second now.
+    cluster.policy(&worker.name, &signed).unwrap();
+    wait("allow", 2);
+    cluster.policy(&worker.name, &attested).unwrap();
+    let changed = Instant::now();
+    let rejected = wait("rejected", 2);
+    eprintln!(
+        "verify: rejected {:.1} s after the write, polled each second",
+        (rejected - changed).as_secs_f64()
+    );
+    drop(poll);
+}

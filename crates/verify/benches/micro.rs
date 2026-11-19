@@ -54,6 +54,6 @@ fn lookup(bencher: Bencher<'_, '_>) {
             policies: *policies,
             root: None,
         };
-        verdicts.get(key)
+        verdicts.get(key).verdict
     });
 }

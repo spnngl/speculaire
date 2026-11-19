@@ -46,6 +46,8 @@ On CRI-O every pull of a mirrored registry goes through the agent, which fetches
 
 A policy file that does not parse stops both before any runtime check, with one line: `the policy file <path>: document <n>, <field>: <message>`, or the line and column of a YAML error. A field outside D142's subset, such as `keyless.url` or `key.kms`, is refused rather than ignored; `packaging/policy.yaml` shows the fields accepted. Without the file, no policy matches and `gate.unmatched` decides (D23).
 
+A running agent reads the policy file and a pinned trust root again on SIGHUP and when they change. One that does not parse logs `the policy file reload failed; the previous one stays in use` (or `the pinned trust root reload failed`) with the same line, and the previous one serves. A change logs `the policies or the trust root changed: verifying again`: each image keeps its previous verdict, marked stale, for up to `verify.stale_max`, until it is verified again under `trigger="reverify"` (D154).
+
 | Message | Meaning | Action |
 |---|---|---|
 | `cannot connect to <socket>` / `<socket> did not answer ...` | The runtime does not answer the CRI `Version` call within 5 s | Start the runtime, or set `runtime.containerd_socket` or `runtime.crio_socket` |
@@ -147,7 +149,7 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | `speculaire_tag_conflicts_total` | It increases: two peers resolved one tag to different manifests; the warning log `two peers resolved a tag to different digests` names it. Usually a tag moved while nodes still hold the old image; else a node may lie (D123) |
 | `speculaire_mirror_requests_total{result="error"}` | It increases: the mirror could not read content it may hold, and answered 404; the warning log names the error (D85) |
 | `speculaire_mirror_requests_total{result="refused"}` | It rises on CRI-O: a registry limits the node (429) or fails (502), and pulls wait or fail; the warning logs name the host (D129) |
-| `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, or on its previous registry config, or a registry config read left a credential, certificate or key file out, or the kubelet certificate or the cluster CA cannot be loaded and the previous one stays; the error log names the file and the line (D30, D91, D92, D95) |
+| `speculaire_config_reload_failures_total` | It increases: the agent is still on its previous config, registry config, policy file or pinned trust root, or a registry config read left a credential, certificate or key file out, or the kubelet certificate or the cluster CA cannot be loaded and the previous one stays; the error log names the file and the line (D30, D91, D92, D95, D154) |
 | `speculaire_identity_path{path="annotation"}` | It is 1: the node runs containerd 2.3, with its known identity gap (D15) |
 | `speculaire_trust_root_expiry_timestamp_seconds` | 0, or less than 3 days away: Sigstore re-signs its TUF timestamp each day for 7, so the agent cannot reach `verify.tuf_url` (the warning log `no trust root` says why) or a pinned root nears its end; once it passes, new verifications become `unverifiable`; cached verdicts keep serving (D143) |
 | `speculaire_p2p_enabled` | 0 for more than 10 min: the node has no usable kubelet certificate or cluster CA, or its certificate expired, and pulls only from upstream; the info log names an absent file, the error log a bad one (D16, D95) |

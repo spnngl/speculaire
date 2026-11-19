@@ -36,6 +36,12 @@ exclude_re = [
   # The engine's one-line calls into discovery: `crates/artifacts` tests `Discovery::discover` and `again`, the e2e test
   # of an unverifiable verdict sees the engine call `discover`, and an engine test of them would need a registry (D151).
   'engine\.rs:\d+:\d+: replace <impl Discover for Discovery>::(discover|again) -> Result<\(\), Error> with Ok\(\(\)\)$',
+  # A stale verdict read at the very nanosecond `verify.stale_max` ends: it is pending this lookup or the next.
+  'engine\.rs:\d+:\d+: replace < with <= in Verdicts::get$',
+  # The count of roots queued again, which only the log line of a change reads.
+  'engine\.rs:\d+:\d+: replace > with (==|<|>=) in Engine<D>::changed$',
+  # The log line and expiry gauge of a pinned trust root read again: the root it holds is the same either way.
+  'trust\.rs:\d+:\d+: replace Holding::read with \(\)$',
   # A target with exactly as many referrers as the cap: truncating to the cap keeps them all, only a warning differs.
   'discover\.rs:\d+:\d+: replace > with >= in Discovery::bundles$',
   'peers\.rs:\d+:\d+: replace > with >= in Discovery::listed$',

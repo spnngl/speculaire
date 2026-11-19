@@ -1,8 +1,9 @@
 //! The verdict engine: one verdict per key for each root listed, from the artifacts discovery keeps (D20, D151).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -101,35 +102,80 @@ pub struct Key<'a> {
     pub root: Option<RootHash>,
 }
 
+/// A verdict looked up: the one kept for the key, or, while the key is re-verified after a policy or trust-root change,
+/// the one kept before it, marked stale (D21). A pending verdict is never stale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lookup {
+    /// The verdict.
+    pub verdict: Verdict,
+    /// Whether it is the verdict of the key before the change.
+    pub stale: bool,
+}
+
+impl Lookup {
+    const PENDING: Self = Self {
+        verdict: Verdict::Pending,
+        stale: false,
+    };
+}
+
 /// A verdict kept, under the rest of its key.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Kept {
     policies: MatchHash,
     root: Option<RootHash>,
     verdict: Verdict,
+    /// When the change came that left `verdict` stale (D21).
+    stale_since: Option<Instant>,
 }
 
 /// The verdicts kept, in memory (D151), by image identity.
 #[derive(Debug, Default)]
 pub struct Verdicts {
     kept: RwLock<HashMap<Digest, Vec<Kept>>>,
+    /// `verify.stale_max`, in nanoseconds: none until [`Self::set_stale_max`].
+    stale_max: AtomicU64,
 }
 
 impl Verdicts {
-    /// The verdict kept for `key`, [`Verdict::Pending`] when none is.
-    #[must_use]
-    pub fn get(&self, key: Key<'_>) -> Verdict {
-        let kept = self.kept.read().unwrap_or_else(PoisonError::into_inner);
-        kept.get(key.image)
-            .and_then(|kept| {
-                kept.iter()
-                    .find(|kept| kept.policies == key.policies && kept.root == key.root)
-            })
-            .map_or(Verdict::Pending, |kept| kept.verdict.clone())
+    /// Sets how long a stale verdict answers after the change that left it stale, `verify.stale_max` (D21).
+    pub fn set_stale_max(&self, stale_max: Duration) {
+        let nanos = u64::try_from(stale_max.as_nanos()).unwrap_or(u64::MAX);
+        self.stale_max.store(nanos, Ordering::Relaxed);
     }
 
-    /// Keeps `verdict` for `key`, in place of one kept under an earlier trust root, and returns the verdict kept
-    /// before, unless a rejection is kept already: it is final (D20).
+    /// The verdict kept for `key`, stale while it is re-verified; [`Verdict::Pending`] when none is, or when it has
+    /// been stale longer than `verify.stale_max` (D21).
+    #[must_use]
+    pub fn get(&self, key: Key<'_>) -> Lookup {
+        let kept = self.kept.read().unwrap_or_else(PoisonError::into_inner);
+        let Some(kept) = kept.get(key.image).and_then(|kept| {
+            kept.iter()
+                .find(|kept| kept.policies == key.policies && kept.root == key.root)
+        }) else {
+            return Lookup::PENDING;
+        };
+        match kept.stale_since {
+            None => Lookup {
+                verdict: kept.verdict.clone(),
+                stale: false,
+            },
+            Some(since) => {
+                let stale_max = Duration::from_nanos(self.stale_max.load(Ordering::Relaxed));
+                if since.elapsed() < stale_max {
+                    Lookup {
+                        verdict: kept.verdict.clone(),
+                        stale: true,
+                    }
+                } else {
+                    Lookup::PENDING
+                }
+            }
+        }
+    }
+
+    /// Keeps `verdict` for `key`, in place of one kept under an earlier trust root or a stale one, and returns the
+    /// verdict kept before, unless a rejection is kept already: it is final (D20).
     pub fn keep(&self, key: Key<'_>, verdict: Verdict) -> Option<Verdict> {
         let mut kept = self.kept.write().unwrap_or_else(PoisonError::into_inner);
         let image = kept.entry(key.image.clone()).or_default();
@@ -137,10 +183,12 @@ impl Verdicts {
             Some(Kept {
                 verdict: Verdict::Rejected { .. },
                 root,
+                stale_since: None,
                 ..
             }) if *root == key.root => None,
             Some(kept) => {
                 kept.root = key.root;
+                kept.stale_since = None;
                 Some(std::mem::replace(&mut kept.verdict, verdict))
             }
             None => {
@@ -148,9 +196,47 @@ impl Verdicts {
                     policies: key.policies,
                     root: key.root,
                     verdict,
+                    stale_since: None,
                 });
                 Some(Verdict::Pending)
             }
+        }
+    }
+
+    /// Keeps for `image` a verdict under `root` and each hash of `keys`, and drops the others: one kept under both
+    /// stays; any other is the one kept under the hash paired with it, stale since `since` unless it was already, or
+    /// pending (D21).
+    fn rekey(
+        &self,
+        image: &Digest,
+        root: Option<RootHash>,
+        keys: &[(MatchHash, Option<MatchHash>)],
+        since: Instant,
+    ) {
+        let mut kept = self.kept.write().unwrap_or_else(PoisonError::into_inner);
+        let before = kept.remove(image).unwrap_or_default();
+        let after: Vec<Kept> = keys
+            .iter()
+            .map(|&(policies, previous)| {
+                if let Some(same) = before
+                    .iter()
+                    .find(|kept| kept.policies == policies && kept.root == root)
+                {
+                    return same.clone();
+                }
+                let previous = previous
+                    .and_then(|previous| before.iter().find(|kept| kept.policies == previous))
+                    .filter(|kept| kept.verdict != Verdict::Pending);
+                Kept {
+                    policies,
+                    root,
+                    verdict: previous.map_or(Verdict::Pending, |kept| kept.verdict.clone()),
+                    stale_since: previous.map(|kept| kept.stale_since.unwrap_or(since)),
+                }
+            })
+            .collect();
+        if !after.is_empty() {
+            kept.insert(image.clone(), after);
         }
     }
 
@@ -237,17 +323,27 @@ struct Root {
 enum Trigger {
     /// The first of a root a manifest fetch made, even when listed since (D152).
     Manifest,
+    /// The first after a policy or trust-root change changed a key of the root (D21).
+    Reverify,
     /// Any other: a listing, a discovery or a retry (D151).
     Event,
+}
+
+impl Trigger {
+    /// The `trigger` label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Manifest => "manifest",
+            Self::Reverify => "reverify",
+            Self::Event => "event",
+        }
+    }
 }
 
 impl Root {
     /// The `trigger` label of the verification under way; the next ones are events.
     fn trigger(&mut self) -> &'static str {
-        match std::mem::replace(&mut self.trigger, Trigger::Event) {
-            Trigger::Manifest => "manifest",
-            Trigger::Event => "event",
-        }
+        std::mem::replace(&mut self.trigger, Trigger::Event).label()
     }
 }
 
@@ -276,31 +372,43 @@ struct Group<'a> {
 /// Keeps a verdict for each key of each root discovery is told of.
 pub struct Engine<D> {
     discovery: Arc<D>,
-    policies: Policies,
+    /// The policies verified against, swapped as a whole when `policy_feed` changes (D21).
+    policies: Arc<Policies>,
+    policy_feed: watch::Receiver<Arc<Policies>>,
     signatures: Signatures,
+    /// The trust root verified against, swapped as a whole when `trust` changes (D21).
+    held: Held,
     trust: watch::Receiver<Held>,
     verdicts: Arc<Verdicts>,
     roots: HashMap<Digest, Root>,
     asks: JoinSet<(Digest, Ask, Result<(), Error>)>,
+    /// The roots to verify again after a change, in order.
+    reverify: VecDeque<Digest>,
 }
 
 impl<D: Discover> Engine<D> {
-    /// An engine verifying against `policies` and the trust root `trust` holds.
+    /// An engine verifying against the policies `policies` holds and the trust root `trust` holds, and again against
+    /// each change of them (D21).
     #[must_use]
     pub fn new(
         discovery: Arc<D>,
-        policies: Policies,
+        mut policies: watch::Receiver<Arc<Policies>>,
         signatures: Signatures,
-        trust: watch::Receiver<Held>,
+        mut trust: watch::Receiver<Held>,
     ) -> Self {
+        let held = trust.borrow_and_update().clone();
+        let current = Arc::clone(&policies.borrow_and_update());
         Self {
             discovery,
-            policies,
+            policies: current,
+            policy_feed: policies,
             signatures,
+            held,
             trust,
             verdicts: Arc::default(),
             roots: HashMap::new(),
             asks: JoinSet::new(),
+            reverify: VecDeque::new(),
         }
     }
 
@@ -316,6 +424,10 @@ impl<D: Discover> Engine<D> {
     /// discovery ends. An unverifiable key is verified again [`RETRY_FIRST`] later, then after twice the wait each
     /// time up to [`RETRY_MAX`], and discovery runs again first while the root's artifacts are not recorded. Before
     /// a rejection, upstream is asked once more (D126).
+    ///
+    /// A change of the policies or of the trust root's hash swaps them in, and verifies again, one root per turn of
+    /// the loop, each root a key of which it changed; until then the key answers the verdict kept under the key it
+    /// had, stale (D21).
     pub async fn run(mut self, mut found: mpsc::UnboundedReceiver<Found>) {
         loop {
             let next = self.roots.values().filter_map(|root| root.retry_at).min();
@@ -330,10 +442,72 @@ impl<D: Discover> Engine<D> {
                     Err(e) => warn!(error = %e, "a discovery for verification failed"),
                 },
                 () = sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => self.due().await,
+                // An error means the sender is gone: what it held stays.
+                Ok(()) = self.policy_feed.changed() => self.changed(),
+                Ok(()) = self.trust.changed() => self.changed(),
+                () = std::future::ready(()), if !self.reverify.is_empty() => self.reverify_next().await,
             }
             self.count();
         }
         self.asks.abort_all();
+    }
+
+    /// Swaps in the policies and the trust root held now, and queues each root a key of which changed, its verdicts
+    /// stale under their new keys (D21).
+    fn changed(&mut self) {
+        let policies = Arc::clone(&self.policy_feed.borrow_and_update());
+        let previous = std::mem::replace(&mut self.policies, policies);
+        let previous_root = self.trust_hash();
+        self.held.clone_from(&self.trust.borrow_and_update());
+        let trust = self.trust_hash();
+        let since = Instant::now();
+        let queued = self.reverify.len();
+        for (digest, root) in &mut self.roots {
+            let mut keys: Vec<(MatchHash, Option<MatchHash>)> = Vec::new();
+            for name in &root.names {
+                let Some(hash) = match_hash(&self.policies, name) else {
+                    continue;
+                };
+                if keys.iter().all(|(kept, _)| *kept != hash) {
+                    keys.push((hash, match_hash(&previous, name)));
+                }
+            }
+            if trust == previous_root && keys.iter().map(|(hash, _)| hash).eq(&root.keys) {
+                continue;
+            }
+            self.verdicts.rekey(digest, trust, &keys, since);
+            root.keys = keys.into_iter().map(|(hash, _)| hash).collect();
+            // A root asking verifies as discovery answers, and one not discovered as its discovery ends.
+            if root.discovered
+                && !root.asking
+                && !root.keys.is_empty()
+                && root.trigger != Trigger::Reverify
+            {
+                root.trigger = Trigger::Reverify;
+                root.asked_again = false;
+                self.reverify.push_back(digest.clone());
+            }
+        }
+        if self.reverify.len() > queued {
+            info!(
+                roots = self.reverify.len() - queued,
+                "the policies or the trust root changed: verifying again"
+            );
+        }
+    }
+
+    /// Verifies again the next root queued, unless it was verified since.
+    async fn reverify_next(&mut self) {
+        let Some(digest) = self.reverify.pop_front() else {
+            return;
+        };
+        if self
+            .roots
+            .get(&digest)
+            .is_some_and(|root| root.trigger == Trigger::Reverify)
+        {
+            self.verify(&digest).await;
+        }
     }
 
     /// Follows the roots listed and fetched: forgets those that left, and keeps a pending verdict for each key of the
@@ -366,7 +540,7 @@ impl<D: Discover> Engine<D> {
                     policies: *policies,
                     root: trust,
                 };
-                if self.verdicts.get(key) == Verdict::Pending {
+                if self.verdicts.get(key).verdict == Verdict::Pending {
                     self.verdicts.keep(key, Verdict::Pending);
                 }
             }
@@ -515,8 +689,8 @@ impl<D: Discover> Engine<D> {
             return;
         };
         let started = Instant::now();
-        let held = self.trust.borrow().clone();
-        let trust = held.as_ref().ok().map(|root| root.hash());
+        let held = self.held.clone();
+        let trust = self.trust_hash();
         let artifacts = match self.discovery.store().recorded(digest).await {
             Ok(Some(artifacts)) => Ok(artifacts),
             Ok(None) => Err("artifacts not recorded".to_owned()),
@@ -551,8 +725,13 @@ impl<D: Discover> Engine<D> {
         let Some(root) = self.roots.get_mut(digest) else {
             return;
         };
-        let trigger = root.trigger();
         let asking_again = failed && !root.asked_again;
+        // The verification after upstream answers counts under the same trigger.
+        let trigger = if asking_again {
+            root.trigger.label()
+        } else {
+            root.trigger()
+        };
         if asking_again {
             root.asked_again = true;
             root.asking = true;
@@ -607,9 +786,9 @@ impl<D: Discover> Engine<D> {
         }
     }
 
-    /// The hash of the trust root held, if one is.
+    /// The hash of the trust root verified against, if one is held.
     fn trust_hash(&self) -> Option<RootHash> {
-        self.trust.borrow().as_ref().ok().map(|root| root.hash())
+        self.held.as_ref().ok().map(|root| root.hash())
     }
 
     /// Sets the verdicts gauge.
@@ -648,15 +827,26 @@ async fn ask<D: Discover>(
     (root, ask, answer)
 }
 
+/// The policies `name` matches; none for a name that does not parse.
+fn matching<'a>(policies: &'a Policies, name: &str) -> Vec<&'a Policy> {
+    let Ok(reference) = Reference::parse_normalized_named(name) else {
+        warn!(%name, "an image name the runtime lists does not parse: no policy matches it");
+        return Vec::new();
+    };
+    policies.matching(&reference).collect()
+}
+
+/// The hash of the policies `name` matches; none when it matches none.
+fn match_hash(policies: &Policies, name: &str) -> Option<MatchHash> {
+    let matched = matching(policies, name);
+    (!matched.is_empty()).then(|| MatchHash::of(matched))
+}
+
 /// The groups of the policies `names` match, once per hash; a name no policy matches has none.
 fn groups<'a>(policies: &'a Policies, names: &[String]) -> Vec<Group<'a>> {
     let mut groups: Vec<Group<'a>> = Vec::new();
     for name in names {
-        let Ok(reference) = Reference::parse_normalized_named(name) else {
-            warn!(%name, "an image name the runtime lists does not parse: no policy matches it");
-            continue;
-        };
-        let matched: Vec<&Policy> = policies.matching(&reference).collect();
+        let matched = matching(policies, name);
         if matched.is_empty() {
             continue;
         }
@@ -825,11 +1015,49 @@ mod tests {
         );
 
         verdicts.retain(&image, &[one]);
-        assert!(matches!(verdicts.get(key(none)), Verdict::Pending));
-        assert!(matches!(verdicts.get(key(one)), Verdict::Rejected { .. }));
+        assert!(matches!(verdicts.get(key(none)).verdict, Verdict::Pending));
+        assert!(matches!(
+            verdicts.get(key(one)).verdict,
+            Verdict::Rejected { .. }
+        ));
         assert_eq!(verdicts.counts()["allow"], 0);
 
         verdicts.retain(&image, &[]);
         assert!(verdicts.kept.read().expect("not poisoned").is_empty());
+    }
+
+    #[test]
+    fn a_rekey_marks_a_verdict_stale_under_its_new_key_and_keeps_one_whose_key_stays() {
+        let path =
+            std::path::Path::new(speculaire_artifacts::testing::FIXTURES).join("trusted_root.json");
+        let root = Some(TrustRoot::load(&path).expect("the recorded root").hash());
+        let image = speculaire_oci::hash::of("sha256", b"image").expect("sha256 is an algorithm");
+        let policy = "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: a\nspec:\n  \
+                      images:\n  - glob: \"**\"\n  authorities:\n  - keyless:\n      identities:\n      - issuer: \
+                      https://issuer.test\n        subject: https://subject.test\n";
+        let policies = crate::Policies::parse(policy).expect("the test policy parses");
+        let (p, q) = (MatchHash::of([]), MatchHash::of(policies.iter()));
+        let key = |policies, root| Key {
+            image: &image,
+            policies,
+            root,
+        };
+        let verdicts = Verdicts::default();
+        verdicts.set_stale_max(Duration::from_secs(3600));
+        verdicts.keep(key(p, None), Verdict::Allow);
+        let stale = Lookup {
+            verdict: Verdict::Allow,
+            stale: true,
+        };
+
+        verdicts.rekey(&image, root, &[(p, Some(p))], Instant::now());
+        assert_eq!(verdicts.get(key(p, root)), stale);
+        assert_eq!(verdicts.get(key(p, None)), Lookup::PENDING);
+
+        verdicts.keep(key(q, root), Verdict::Allow);
+        verdicts.rekey(&image, root, &[(p, Some(p)), (q, Some(q))], Instant::now());
+        assert_eq!(verdicts.get(key(p, root)), stale);
+        assert_eq!(verdicts.get(key(q, root)).verdict, Verdict::Allow);
+        assert!(!verdicts.get(key(q, root)).stale, "an unchanged key stays");
     }
 }
