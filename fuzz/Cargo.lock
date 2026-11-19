@@ -2129,6 +2129,7 @@ dependencies = [
  "libfuzzer-sys",
  "prost",
  "secrecy",
+ "serde_json",
  "speculaire-agent",
  "speculaire-mirror",
  "speculaire-oci",

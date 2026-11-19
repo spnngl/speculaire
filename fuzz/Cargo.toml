@@ -34,6 +34,8 @@ speculaire-verify = { path = "../crates/verify" }
 prost = "0.14.5"
 # `token_answer` reads the token it parsed; the same version as the workspace's.
 secrecy = "0.10.3"
+# `statement` writes the statement it parsed back; the same version as the workspace's.
+serde_json = "1.0.154"
 # `containerd_config` reads files: it writes the input to a temporary directory.
 tempfile = "3.27.0"
 # The serializer of the round trip in `config`; the same version as the workspace's.
@@ -256,6 +258,13 @@ bench = false
 [[bin]]
 name = "simplesigning"
 path = "fuzz_targets/simplesigning.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "statement"
+path = "fuzz_targets/statement.rs"
 test = false
 doc = false
 bench = false

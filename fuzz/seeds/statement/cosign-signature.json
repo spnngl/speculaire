@@ -1,0 +1,1 @@
+{"_type":"https://in-toto.io/Statement/v1","subject":[{"digest":{"sha256":"32ee66583f82cd56da74ff4f6e85c4fd8f552c73dfa3a5d945cc5b201f8abcf0"},"annotations":{}}],"predicateType":"https://sigstore.dev/cosign/sign/v1","predicate":{}}
