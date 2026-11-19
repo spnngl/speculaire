@@ -1,4 +1,4 @@
-//! Files written whole, by temporary file and rename (D55).
+//! Files written whole, by temporary file and rename (D55), each change synced with its directory.
 
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -40,7 +40,7 @@ impl std::fmt::Display for Change {
 ///
 /// The contents go to a temporary file in the same directory, which gets `mode` and is renamed over `path`: a reader
 /// sees the old file or the new one whole, and a file that existed with a looser mode ends with `mode` (D55). Missing
-/// directories are made with mode 0755.
+/// directories are made with mode 0755. The file and the rename are on disk when this returns.
 ///
 /// # Errors
 ///
@@ -69,6 +69,7 @@ pub fn write(path: &Path, contents: &[u8], mode: u32) -> io::Result<Option<Chang
         .set_permissions(std::fs::Permissions::from_mode(mode))?;
     temporary.as_file().sync_all()?;
     temporary.persist(real).map_err(|e| e.error)?;
+    sync_parent(real)?;
     Ok(Some(if existing.is_some() {
         Change::Updated(path.to_owned())
     } else {
@@ -99,8 +100,19 @@ fn make_dir(dir: &Path) -> io::Result<()> {
     for path in missing.into_iter().rev() {
         std::fs::create_dir(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        sync_parent(path)?;
     }
     Ok(())
+}
+
+/// Puts the entry of `path` on disk, made, renamed or removed. Without it a crash can keep one file's change and lose
+/// another's: a `hosts.toml` naming a certificate whose file is gone, which containerd refuses to load.
+fn sync_parent(path: &Path) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(dir)?.sync_all()
 }
 
 /// Removes `path`, or reports that it was not there.
@@ -110,7 +122,10 @@ fn make_dir(dir: &Path) -> io::Result<()> {
 /// When the file exists and cannot be removed.
 pub fn remove(path: &Path) -> io::Result<Option<Change>> {
     match std::fs::remove_file(path) {
-        Ok(()) => Ok(Some(Change::Removed(path.to_owned()))),
+        Ok(()) => {
+            sync_parent(path)?;
+            Ok(Some(Change::Removed(path.to_owned())))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
@@ -258,6 +273,7 @@ mod tests {
         write(&dir.path().join("b/c/e"), b"x", 0o600).unwrap();
         // A relative path has a parent that is empty, and that is the working directory.
         assert_eq!(make_dir(Path::new("")).ok(), Some(()));
+        assert_eq!(sync_parent(Path::new("key")).ok(), Some(()));
     }
 
     #[test]
