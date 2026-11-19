@@ -8,7 +8,7 @@ use std::time::Duration;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use speculaire_artifacts::Store;
 use speculaire_artifacts::discover::{Error, Reason};
-use speculaire_artifacts::follow::{Found, roots};
+use speculaire_artifacts::follow::{Found, Roots, roots};
 use speculaire_artifacts::testing::{FIXTURES, Fixture};
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::images::{Image, List, RepoDigest, Update};
@@ -115,7 +115,10 @@ impl Run {
     /// Lists `list`, and tells that the discovery of `root` ended as `discovered` says.
     fn listed(&self, list: &List, root: &Digest, discovered: Result<(), Error>) {
         self.found
-            .send(Found::Listed(roots(list)))
+            .send(Found::Roots {
+                listed: roots(list),
+                fetched: Roots::new(),
+            })
             .expect("the engine runs");
         let root = root.clone();
         self.found
@@ -404,7 +407,10 @@ async fn a_key_follows_the_names_listed_and_its_verdict_leaves_with_its_root() {
         (&digest(2), &[("reg.test/c", &digest(20))]),
     ]);
     run.found
-        .send(Found::Listed(roots(&other)))
+        .send(Found::Roots {
+            listed: roots(&other),
+            fetched: Roots::new(),
+        })
         .expect("the engine runs");
     settle().await;
     assert_eq!(run.verdicts.get(key(&["a"])), Verdict::Allow);
@@ -413,13 +419,19 @@ async fn a_key_follows_the_names_listed_and_its_verdict_leaves_with_its_root() {
     // Listed under another name, the root has the key of the policies that name matches, and only that one.
     let renamed = list(&[(&digest(1), &[("reg.test/b", root)])]);
     run.found
-        .send(Found::Listed(roots(&renamed)))
+        .send(Found::Roots {
+            listed: roots(&renamed),
+            fetched: Roots::new(),
+        })
         .expect("the engine runs");
     assert_eq!(run.verdict(key(&["b"])).await, Verdict::Allow);
     assert_eq!(run.verdicts.get(key(&["a"])), Verdict::Pending);
 
     run.found
-        .send(Found::Listed(roots(&List::default())))
+        .send(Found::Roots {
+            listed: roots(&List::default()),
+            fetched: Roots::new(),
+        })
         .expect("the engine runs");
     settle().await;
     assert_eq!(run.verdicts.get(key(&["b"])), Verdict::Pending);
@@ -467,4 +479,59 @@ async fn a_rate_limit_sets_the_next_try_no_sooner_than_the_backoff_gives() {
             }
         );
     }
+}
+
+#[tokio::test]
+async fn the_first_verification_of_a_root_a_fetch_made_counts_under_the_trigger_manifest_even_once_listed()
+ {
+    let fixture = Fixture::load("keyless").await;
+    let root = &fixture.root;
+    let policies = policies(&[("a", "reg.test/a", SAN)]);
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // The engine runs on this thread: the test's runtime has one.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let run = Run::start(&fixture.store, policies.clone(), true, Ok(pinned()));
+    let key = Key {
+        image: root,
+        policies: hash(&policies, &["a"]),
+        root: Some(pinned().hash()),
+    };
+    let named = Roots::from([(root.clone(), vec!["reg.test/a".to_owned()])]);
+    let ended = || Found::Ended {
+        root: root.clone(),
+        discovered: Ok(()),
+    };
+
+    // Listed while the discovery the fetch started runs.
+    for found in [
+        Found::Roots {
+            listed: Roots::new(),
+            fetched: named.clone(),
+        },
+        Found::Roots {
+            listed: named,
+            fetched: Roots::new(),
+        },
+        ended(),
+    ] {
+        run.found.send(found).expect("the engine runs");
+    }
+    assert_eq!(run.verdict(key).await, Verdict::Allow);
+    let manifest = r#"speculaire_verifications_total{result="allow",trigger="manifest"} 1"#;
+    assert!(handle.render().contains(manifest), "{manifest}");
+
+    // A later verification counts as an event.
+    run.found.send(ended()).expect("the engine runs");
+    let event = r#"speculaire_verifications_total{result="allow",trigger="event"} 1"#;
+    for _ in 0..200 {
+        if handle.render().contains(event) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let rendered = handle.render();
+    assert!(rendered.contains(event), "{event} in {rendered}");
+    assert!(rendered.contains(manifest), "{manifest} in {rendered}");
+    assert_eq!(run.verdicts.get(key), Verdict::Allow);
 }

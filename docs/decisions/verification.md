@@ -64,7 +64,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Cost:** a tightened policy takes effect after re-verification (normally seconds), not instantly.
 - **Revisit when:** —
 
-## D22: Verification starts at the manifest fetch (amended by D65, D66, D121)
+## D22: Verification starts at the manifest fetch (amended by D65, D66, D121, D152)
 
 - **Decision:** triggers, earliest first:
   1. the mirror serving or forwarding `GET /v2/<repo>/manifests/<digest>` (containerd fetches manifests by digest through the mirror, even when it resolved the tag upstream, D6);
@@ -137,7 +137,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
 
-## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146, D150, D151)
+## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146, D150, D151, D152)
 
 - **Decision:**
   - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends, and read the list once more 1 s after a watch starts: no answer tells when containerd holds the subscription, and an image pulled in between waited 60 s in CI. Once the agent stops, a follower that loses the runtime ends without a warning: the agent's own teardown cut it. The CRI-O relay protects the listed images from eviction through it.
@@ -192,7 +192,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The verdict, and the reason in it, come at M5; a journal line in its words lets an operator see the limit today.
 - **Revisit when:** M5 produces verdicts, or a registry limits per image rather than per client.
 
-## D131: The artifact store keeps only what the listed roots name, collected at each listing and each removal (amends D121, D124; amended by D144)
+## D131: The artifact store keeps only what the listed roots name, collected at each listing and each removal (amends D121, D124; amended by D144, D153)
 
 - **Decision:**
   - **Kept:** a listed root's index blob (D126), and every artifact manifest and blob of a listed root's record. A blob two roots name stays while either is listed, such as the empty config every Sigstore bundle names (D124).
@@ -324,7 +324,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Measured:** 8 crates enter `Cargo.lock` (sigstore-verify, sigstore-bundle, sigstore-rekor, sigstore-tsa, sigstore-merkle, cms, serde_json_canonicalizer, ryu-js). One verification takes 1.2 ms for the keyless fixture and 0.65 ms for the key fixture (release, Apple M5); parsing the trusted root with its verifier takes 0.25 ms.
 - **Revisit when:** sigstore-verify matches identities by pattern, or cosign stops counting attestations as signatures.
 
-## D146: The roots of an image just listed have a discovery lane of their own (amends D121, D144; amended by D148)
+## D146: The roots of an image just listed have a discovery lane of their own (amends D121, D144; amended by D148, D152)
 
 - **Decision:**
   - **Lanes:** the follower of the image list runs two discoveries at most, one per lane, each one root at a time. The roots of an image just listed go in the pulled lane, in the order they come. Those a full listing queues, and those due again after a failure (D128, D134), go in the backlog lane.
@@ -393,7 +393,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Revisit when:** SPDX 3 or CycloneDX 2 JSON shows up in attestations, or content rules (D12's later) need the packages themselves.
 
 
-## D151: The engine keeps verdicts in memory, per listed root, retried 10 s doubling to 5 min by its own discovery (amends D20, D121, D126)
+## D151: The engine keeps verdicts in memory, per listed root, retried 10 s doubling to 5 min by its own discovery (amends D20, D121, D126; amended by D152)
 
 - **Decision:**
   - **Feed:** `speculaire_artifacts::follow` tells the engine, on an unbounded channel, each change of the listed roots and their names (`Found::Listed`) and the end of each discovery or a root found recorded (`Found::Ended`). The engine in `speculaire_verify::engine` verifies one root at a time in its own task.
@@ -410,3 +410,31 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - A lookup without allocation keeps the gate's hot path off the allocator (D107).
 - **Measured:** a lookup among 1 000 images' verdicts takes 29 ns, without allocation (`just bench-micro`, release, Apple M5).
 - **Revisit when:** a peer's announcement should end a wait early (D20), or the gate needs verdicts across restarts before M6.
+
+
+## D152: A manifest the mirror is asked for by digest, or serves by tag, is a discovery root before it is listed (amends D22, D66, D121, D146, D151)
+
+- **Decision:**
+  - **Requests:** the mirror tells discovery of each `GET` of a manifest by digest, before it answers and whatever it answers, and of each `GET` by tag it serves, under the digest it serves (`Docker-Content-Digest`). A `HEAD` never triggers. The name is the repository with its registry: containerd's `ns` before the path, CRI-O's path as it is. The mirror sends on an unbounded channel and never waits.
+  - **Roots:** a manifest fetched becomes a root unless it is listed, fetched already, or named by the index of a root listed or fetched, held in the artifact store or by the node (containerd fetches the index, then its platform manifest: spike 05). It joins the lane of the roots just listed (D146). Once listed, it is a listed root alone.
+  - **Verification:** `Found::Listed` becomes `Found::Roots { listed, fetched }`. The engine keys a root fetched by the name it was fetched under, as a listed one (D151). The first verification of a root a fetch made counts under `trigger="manifest"`, even when the root was listed during its discovery; later ones count under `event`.
+- **Because:**
+  - A pull's first manifest request comes seconds before the runtime lists the image: the verdict is there sooner, or already when the gate asks.
+  - containerd asks the mirror by digest even for what it pulls upstream, a 404 sending it on (D22); the request names the root.
+  - CRI-O asks by tag only, and the relay resolves it (D66): without the tag trigger, CRI-O would have none.
+  - A `HEAD` checks presence; the `GET` that follows, if any, triggers.
+  - A platform manifest as its own root would be discovered and verified a second time; the index's discovery covers it (D22).
+  - The label names what started the verification: a listing during the discovery a fetch started starts no other.
+- **Revisit when:** a platform manifest is fetched while its index is neither held nor fetched by this node, which makes it a root of its own.
+
+## D153: The store keeps what a root fetched and not listed names for `artifacts.grace`, marked on disk (amends D131)
+
+- **Decision:**
+  - A root fetched (D152) is marked in the store, under `fetched/<alg>/<hex>`, with the second it was fetched. A collection keeps what a marked root names, as it does a listed one's, until `artifacts.grace` (600 s, restart) has passed since its mark; then the mark goes and the root is collected as D131 says, its blobs withdrawn.
+  - A root listed loses its mark. A mark that names no time is spent.
+  - When the first grace ends, discovery collects the store, from the first listing on.
+- **Because:**
+  - A curl, a pull that fails or a pull the runtime never lists would otherwise keep its artifacts forever, or lose them at the next listing before the runtime lists the image.
+  - The mark on disk survives a restart, so a pull that spans one keeps its grace.
+  - 10 min covers a large image's pull before the runtime lists it.
+- **Revisit when:** pulls longer than the grace lose their artifacts before the runtime lists them.

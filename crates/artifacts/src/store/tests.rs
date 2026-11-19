@@ -167,7 +167,10 @@ async fn the_store_bytes_gauge_follows_each_blob_kept_and_deleted() {
     assert_eq!(gauge().as_deref(), Some("2"));
     store.keep(&digest_of(b"abc"), b"abc").await.unwrap();
     assert_eq!(gauge().as_deref(), Some("5"));
-    store.collect([digest_of(b"abc")].into()).await.unwrap();
+    store
+        .collect([digest_of(b"abc")].into(), Duration::ZERO)
+        .await
+        .unwrap();
     assert_eq!(gauge().as_deref(), Some("3"));
     assert_eq!(store.bytes(), 3);
 }
@@ -241,7 +244,7 @@ async fn the_store_serves_the_blobs_it_holds() {
 async fn a_follower_gets_the_blobs_held_then_each_blob_kept() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
-    store.collect(HashSet::new()).await.unwrap();
+    store.collect(HashSet::new(), Duration::ZERO).await.unwrap();
     let (first, second) = (digest_of(b"{}"), digest_of(b"abc"));
     store.keep(&first, b"{}").await.unwrap();
     // A file that is no digest is no blob.
@@ -270,7 +273,7 @@ async fn a_store_that_cannot_be_listed_announces_none_then_the_blobs_kept() {
     let store = Arc::new(Store::open(dir.path()).unwrap());
     std::fs::remove_dir_all(dir.path().join("blobs")).unwrap();
     // A collection that fails opens the inventory too.
-    assert!(store.collect(HashSet::new()).await.is_err());
+    assert!(store.collect(HashSet::new(), Duration::ZERO).await.is_err());
     let (updates, mut received) = mpsc::channel(8);
     let followed = tokio::spawn(Arc::clone(&store).follow(updates));
     assert_eq!(received.recv().await, Some(Update::Listing(HashSet::new())));
@@ -288,7 +291,7 @@ async fn a_store_that_cannot_be_listed_announces_none_then_the_blobs_kept() {
 async fn a_follower_that_missed_changes_gets_a_listing_again() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
-    store.collect(HashSet::new()).await.unwrap();
+    store.collect(HashSet::new(), Duration::ZERO).await.unwrap();
     let (updates, mut received) = mpsc::channel(1);
     let followed = tokio::spawn(Arc::clone(&store).follow(updates));
     assert_eq!(received.recv().await, Some(Update::Listing(HashSet::new())));
@@ -370,7 +373,10 @@ async fn a_collection_deletes_what_no_listed_root_names_and_keeps_a_blob_another
     std::fs::write(dir.path().join("roots/sha256/x.json"), "").unwrap();
     std::fs::write(dir.path().join("blobs/sha256/x"), "").unwrap();
 
-    store.collect([a.clone(), b.clone()].into()).await.unwrap();
+    store
+        .collect([a.clone(), b.clone()].into(), Duration::ZERO)
+        .await
+        .unwrap();
     assert!(!store.contains(&orphan));
     assert_eq!(store.bytes(), held_bytes(dir.path()));
     let (updates, mut received) = mpsc::channel(8);
@@ -383,7 +389,10 @@ async fn a_collection_deletes_what_no_listed_root_names_and_keeps_a_blob_another
         .join(format!("blobs/sha256/{}", digest_of(b"dir").encoded()));
     std::fs::create_dir(&directory).unwrap();
 
-    store.collect([a.clone()].into()).await.unwrap();
+    store
+        .collect([a.clone()].into(), Duration::ZERO)
+        .await
+        .unwrap();
     // b, its bundle and its own blob; not the empty config a names too.
     let mut removed = HashSet::new();
     for _ in 0..3 {
@@ -408,6 +417,52 @@ async fn a_collection_deletes_what_no_listed_root_names_and_keeps_a_blob_another
 }
 
 #[tokio::test]
+async fn a_root_fetched_and_not_listed_is_kept_for_its_grace_across_a_restart_then_collected() {
+    const GRACE: Duration = Duration::from_mins(10);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let (fetched, fetched_held) = signed(&store, "fetched").await;
+    store.fetched(&fetched).await.unwrap();
+    let (listed, _) = signed(&store, "listed").await;
+    store.fetched(&listed).await.unwrap();
+    // A mark that names no time keeps nothing.
+    let (spent, _) = signed(&store, "spent").await;
+    let mark = dir.path().join("fetched/sha256").join(spent.encoded());
+    std::fs::write(&mark, "").unwrap();
+
+    let graced = store.collect([listed.clone()].into(), GRACE).await.unwrap();
+    assert_eq!(graced.roots, HashSet::from([fetched.clone()]));
+    let ends = graced.ends.unwrap();
+    assert!(
+        ends > SystemTime::now() + GRACE - Duration::from_mins(1)
+            && ends <= SystemTime::now() + GRACE
+    );
+    assert!(store.recorded(&spent).await.unwrap().is_none());
+    assert!(!mark.exists());
+    drop(store);
+
+    // Restarted within the grace: still kept, even once listed then not.
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    let graced = store.collect(HashSet::new(), GRACE).await.unwrap();
+    assert_eq!(graced.roots, HashSet::from([fetched.clone()]));
+    assert!(store.recorded(&fetched).await.unwrap().is_some());
+    assert!(fetched_held.iter().all(|digest| store.contains(digest)));
+    assert!(store.recorded(&listed).await.unwrap().is_none());
+
+    // The grace over: collected as a root no longer listed.
+    let graced = store.collect(HashSet::new(), Duration::ZERO).await.unwrap();
+    assert_eq!(graced, Graced::default());
+    assert!(store.recorded(&fetched).await.unwrap().is_none());
+    assert_eq!(held(dir.path()), HashSet::new());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("fetched/sha256"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn a_collection_beside_a_discovery_keeps_its_root_and_what_it_held_until_it_ends() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
@@ -421,13 +476,13 @@ async fn a_collection_beside_a_discovery_keeps_its_root_and_what_it_held_until_i
     assert!(!discovering.hold(&other));
     store.record(&root, &[]).await.unwrap();
     // Neither `a` nor the root being discovered is listed.
-    store.collect(HashSet::new()).await.unwrap();
+    store.collect(HashSet::new(), Duration::ZERO).await.unwrap();
     assert_eq!(store.recorded(&a).await.unwrap(), None);
     assert!(store.contains(&kept) && store.contains(&empty));
     assert!(store.recorded(&root).await.unwrap().is_some());
 
     drop(discovering);
-    store.collect(HashSet::new()).await.unwrap();
+    store.collect(HashSet::new(), Duration::ZERO).await.unwrap();
     assert!(held(dir.path()).is_empty());
     assert_eq!(store.recorded(&root).await.unwrap(), None);
 }
@@ -446,7 +501,7 @@ async fn what_a_discovery_held_is_collected_once_it_ends_while_another_runs() {
     store.record(&running, &[]).await.unwrap();
     drop(discovering);
 
-    store.collect(HashSet::new()).await.unwrap();
+    store.collect(HashSet::new(), Duration::ZERO).await.unwrap();
     assert_eq!(store.recorded(&ended).await.unwrap(), None);
     assert!(!store.contains(&gone));
     assert!(store.recorded(&running).await.unwrap().is_some());
@@ -497,7 +552,7 @@ async fn after_a_crash_between_deletion_and_withdrawal_the_first_listing_is_what
         received.try_recv().is_err(),
         "nothing is announced before a collection"
     );
-    store.collect([a].into()).await.unwrap();
+    store.collect([a].into(), Duration::ZERO).await.unwrap();
     let mut expected: HashSet<Digest> = a_held.into_iter().collect();
     expected.remove(&gone);
     assert_eq!(

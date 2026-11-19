@@ -22,4 +22,4 @@ mod serve;
 pub mod tls;
 
 pub use pulls::{Answer, Body, Local, Pull, Pulls, Refusal};
-pub use serve::serve;
+pub use serve::{Fetched, serve};

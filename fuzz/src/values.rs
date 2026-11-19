@@ -117,6 +117,7 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
     ("nri.socket", PATHS),
     ("blob_cache.directory", PATHS),
     ("artifacts.directory", PATHS),
+    ("artifacts.grace", SPANS),
     ("verify.policy", PATHS),
     (
         "verify.trusted_root",

@@ -172,6 +172,17 @@ impl Discovery {
         &self.store
     }
 
+    /// The manifests the index `root` names, from the store else the node; none when `root` is no index, `None` when
+    /// neither holds it.
+    pub async fn children(&self, root: &Digest) -> Option<Vec<Digest>> {
+        let bytes = match self.store.read(root).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) | Err(_) => self.local.manifest(root, self.limits.manifest).await?,
+        };
+        let index = Index::parse(&bytes).ok();
+        Some(index.map_or_else(Vec::new, |index| index.manifests().cloned().collect()))
+    }
+
     /// Discovers the artifacts of `root`, which the image list names in each of `names`
     /// (`docker.io/library/busybox`), keeps them, and records them as the root's.
     ///

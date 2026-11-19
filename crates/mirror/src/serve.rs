@@ -24,13 +24,13 @@ use serde::de::IgnoredAny;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::content::{Blob, Error};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{Instrument as _, debug, debug_span, field, warn};
 
 use crate::metrics::{Outcome, PullSeries};
 use crate::pulls::{Answer, Body, Pull, Pulls};
-use crate::request::{Ranged, Route, Span, namespace, range, route};
+use crate::request::{Kind, Ranged, Reference, Route, Span, namespace, range, route};
 use crate::tls::Tls;
 
 /// The largest manifest the mirror reads, as containerd limits one (`core/remotes/docker/resolver.go`).
@@ -39,17 +39,28 @@ pub(crate) const MAX_MANIFEST: u64 = 4 * 1024 * 1024;
 /// How long a client may take to finish the TLS handshake, and to send a request's headers.
 const CLIENT_TIME: Duration = Duration::from_secs(10);
 
+/// A manifest the runtime fetched through the mirror, which starts its verification (D152).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fetched {
+    /// The manifest's digest.
+    pub digest: Digest,
+    /// The image name it was fetched under, registry first (`docker.io/library/busybox`).
+    pub name: String,
+}
+
 /// Serves the pull API on `listener` until `stop` completes, then until every connection has closed: an idle one at
-/// once, a busy one once it has sent its response (D39, D103).
+/// once, a busy one once it has sent its response (D39, D103). Each manifest fetched goes to `fetched`.
 pub async fn serve<P: Pulls>(
     listener: TcpListener,
     tls: Arc<Tls>,
     pulls: Arc<P>,
+    fetched: mpsc::UnboundedSender<Fetched>,
     stop: impl Future<Output = ()>,
 ) {
     let mirror = Arc::new(Mirror {
         pulls,
         series: PullSeries::new(),
+        fetched,
     });
     listen(listener, move || tls.config(), mirror, stop).await;
 }
@@ -60,15 +71,16 @@ pub(crate) trait Api: Send + Sync + 'static {
     fn answer(&self, request: &Request<Incoming>) -> impl Future<Output = Response<Body>> + Send;
 }
 
-/// The pull API: what `pulls` answers, measured into `series`.
+/// The pull API: what `pulls` answers, measured into `series`, each manifest fetched told to `fetched`.
 struct Mirror<P> {
     pulls: Arc<P>,
     series: PullSeries,
+    fetched: mpsc::UnboundedSender<Fetched>,
 }
 
 impl<P: Pulls> Api for Mirror<P> {
     fn answer(&self, request: &Request<Incoming>) -> impl Future<Output = Response<Body>> + Send {
-        handle(&*self.pulls, &self.series, request)
+        handle(self, request)
     }
 }
 
@@ -174,11 +186,12 @@ pub(crate) enum Miss {
     Failed(Error),
 }
 
-async fn handle<P: Pulls>(
-    pulls: &P,
-    series: &PullSeries,
-    request: &Request<Incoming>,
-) -> Response<Body> {
+async fn handle<P: Pulls>(mirror: &Mirror<P>, request: &Request<Incoming>) -> Response<Body> {
+    let Mirror {
+        pulls,
+        series,
+        fetched,
+    } = mirror;
     let started = Instant::now();
     let Some(route) = route(request.method(), request.uri().path()) else {
         return status(StatusCode::NOT_FOUND);
@@ -211,6 +224,20 @@ async fn handle<P: Pulls>(
     if let Some(digest) = reference.as_ref().and_then(|reference| reference.digest()) {
         span.record("digest", field::display(digest));
     }
+    // A name with its registry, as an image list names it: containerd sends the registry as `ns` (D22).
+    let image = || match &namespace {
+        Some(namespace) => format!("{namespace}/{name}"),
+        None => name.to_owned(),
+    };
+    let fetching = kind == Kind::Manifest && !head;
+    // A manifest asked by digest is fetched whoever answers: on a 404, containerd fetches it upstream (D152).
+    if fetching && let Some(Reference::Digest(digest)) = &reference {
+        // Nobody verifies when the receiver is gone.
+        let _ = fetched.send(Fetched {
+            digest: digest.clone(),
+            name: image(),
+        });
+    }
     let answered = pulls
         .pull(Pull {
             kind,
@@ -235,6 +262,20 @@ async fn handle<P: Pulls>(
     span.record("source", outcome.source());
     span.record("result", outcome.result());
     series.answered(kind, outcome, started);
+    // One asked by tag is fetched once served: CRI-O asks an image manifest by its tag alone (D66, D152).
+    if fetching
+        && let (Some(Reference::Tag(_)), Answer::Served(_, response)) = (&reference, &answered)
+        && let Some(digest) = response
+            .headers()
+            .get("Docker-Content-Digest")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|text| Digest::parse(text).ok())
+    {
+        let _ = fetched.send(Fetched {
+            digest,
+            name: image(),
+        });
+    }
     match answered {
         Answer::Served(source, response) => series.measure(kind, source, started, span, response),
         Answer::Missing | Answer::Failed(_) => status(StatusCode::NOT_FOUND),
