@@ -29,6 +29,9 @@ use crate::settings::chain;
 struct Snapshot {
     /// Who to be at each registry host: its `configs.<host>.auth` (D92).
     logins: BTreeMap<String, Credentials>,
+    /// `registry.headers`, sent to every host before its own `header` (D78; v2.3.7
+    /// `core/remotes/docker/resolver.go:550-558`).
+    headers: Headers,
     /// The `hosts.toml` trees of `config_path`; none under the deprecated `mirrors`.
     tree: Option<Tree>,
     certificates: Certificates,
@@ -146,6 +149,7 @@ fn read(config: &Path, problems: &mut Vec<String>) -> (Vec<PathBuf>, Result<Snap
         paths,
         Ok(Snapshot {
             logins,
+            headers: registry.headers,
             tree,
             certificates,
         }),
@@ -205,9 +209,10 @@ fn source(snapshot: &Snapshot, host: &str, repository: &str, endpoint: &Registry
         .unwrap_or(Credentials::Anonymous);
     let namespace = endpoint.is_proxy(host).then(|| host.to_owned());
     let trust = snapshot.certificates.trust(endpoint);
-    let headers: Vec<(String, SecretString)> = endpoint
-        .header
+    let headers: Vec<(String, SecretString)> = snapshot
+        .headers
         .iter()
+        .chain(&endpoint.header)
         .flat_map(|(name, values)| values.iter().map(|value| (name.clone(), value.clone())))
         .collect();
     let dial_timeout = match endpoint.dial_timeout {

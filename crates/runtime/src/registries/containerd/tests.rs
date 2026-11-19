@@ -118,6 +118,42 @@ fn the_hosts_of_a_host_directory_come_in_order_with_the_registry_last_and_mirror
     assert!(upstream.headers.is_empty());
 }
 
+/// The names and values an endpoint sends, in order.
+fn headers(endpoint: &Endpoint) -> Vec<(&str, &str)> {
+    endpoint
+        .headers
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.expose_secret()))
+        .collect()
+}
+
+#[test]
+fn the_headers_of_config_toml_go_to_every_host_before_its_own() {
+    let node = Node::new("headers = { \"X-Org\" = [\"a\", \"b\"] }\n");
+    node.hosts(
+        "docker.io",
+        "[host.\"https://mirror.corp\"]\n\
+         header = { \"X-Team\" = \"infra\" }\n",
+    );
+    let registries = node.registries();
+    let sources = registries
+        .sources("docker.io/library/busybox", tag("1.37"))
+        .unwrap();
+    assert_eq!(
+        headers(&sources[0].candidates[0]),
+        [("X-Org", "a"), ("X-Org", "b"), ("X-Team", "infra")]
+    );
+    assert_eq!(
+        headers(&sources[1].candidates[0]),
+        [("X-Org", "a"), ("X-Org", "b")]
+    );
+    let sources = registries.sources("quay.io/org/app", tag("1")).unwrap();
+    assert_eq!(
+        headers(&sources[0].candidates[0]),
+        [("X-Org", "a"), ("X-Org", "b")]
+    );
+}
+
 #[test]
 fn a_host_that_cannot_do_what_is_asked_is_skipped() {
     let node = Node::new("");
