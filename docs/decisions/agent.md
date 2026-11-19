@@ -2,7 +2,7 @@
 
 The agent process on a node: its settings, and how it installs into and leaves containerd's config. Index: `docs/decisions/README.md`.
 
-## D30: One strict config file, reloaded on SIGHUP and when a file changes (amended by D37, D47, D93)
+## D30: One strict config file, reloaded on SIGHUP and when a file changes (amended by D37, D47, D93, D154)
 
 - **Decision:**
   - Settings live in `/etc/speculaire/config.toml`, or the file given by `--config`. They parse into typed structs that reject unknown fields. An unknown key or a bad value stops startup, and the error names the key.

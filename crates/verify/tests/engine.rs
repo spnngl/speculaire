@@ -14,7 +14,8 @@ use speculaire_oci::reference::Digest;
 use speculaire_runtime::images::{Image, List, RepoDigest, Update};
 use speculaire_verify::engine::{Discover, RETRY_FIRST, RETRY_MAX};
 use speculaire_verify::{
-    Absent, Engine, Held, Key, MatchHash, Policies, Signatures, TrustRoot, Verdict, Verdicts,
+    Absent, Engine, Held, Key, Lookup, MatchHash, Policies, Signatures, TrustRoot, Verdict,
+    Verdicts,
 };
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::Instant;
@@ -84,6 +85,8 @@ struct Run {
     found: mpsc::UnboundedSender<Found>,
     verdicts: Arc<Verdicts>,
     discovery: Arc<Scripted>,
+    policies: watch::Sender<Arc<Policies>>,
+    trust: watch::Sender<Held>,
 }
 
 impl Run {
@@ -96,11 +99,13 @@ impl Run {
             upstream: Semaphore::new(0),
             reads: AtomicUsize::new(0),
         });
+        let (policies, policy_feed) = watch::channel(Arc::new(policies));
+        let (trust, held) = watch::channel(trust);
         let engine = Engine::new(
             Arc::clone(&discovery),
-            policies,
+            policy_feed,
             Signatures::new(MAX_SIZE),
-            watch::channel(trust).1,
+            held,
         );
         let verdicts = Arc::clone(engine.verdicts());
         let (found, told) = mpsc::unbounded_channel();
@@ -109,6 +114,8 @@ impl Run {
             found,
             verdicts,
             discovery,
+            policies,
+            trust,
         }
     }
 
@@ -129,7 +136,7 @@ impl Run {
     /// The verdict of `key` once it is no longer pending, waiting 10 s at most.
     async fn verdict(&self, key: Key<'_>) -> Verdict {
         for _ in 0..200 {
-            let verdict = self.verdicts.get(key);
+            let verdict = self.verdicts.get(key).verdict;
             if verdict != Verdict::Pending {
                 return verdict;
             }
@@ -222,7 +229,7 @@ async fn a_digest_under_two_names_has_a_verdict_per_hash_of_the_policies_each_na
             policies: hash(&policies, &["a", "b"]),
             root: Some(pinned().hash()),
         };
-        assert_eq!(run.verdicts.get(both), Verdict::Pending);
+        assert_eq!(run.verdicts.get(both).verdict, Verdict::Pending);
     }
 }
 
@@ -242,7 +249,7 @@ async fn a_rejection_asks_upstream_once_and_stays_when_upstream_adds_nothing() {
     run.listed(&list, root, Ok(()));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
-        run.verdicts.get(key),
+        run.verdicts.get(key).verdict,
         Verdict::Pending,
         "while upstream is asked"
     );
@@ -263,7 +270,7 @@ async fn a_rejection_asks_upstream_once_and_stays_when_upstream_adds_nothing() {
         &*reason,
         "identity mismatch: signed by https://github.com/spnngl/speculaire/.github/workflows/fixtures.yml@refs/heads/main (issuer https://token.actions.githubusercontent.com)"
     );
-    assert_eq!(run.verdicts.get(key), Verdict::Rejected { reason });
+    assert_eq!(run.verdicts.get(key).verdict, Verdict::Rejected { reason });
     assert_eq!(
         run.discovery
             .again
@@ -309,7 +316,7 @@ async fn an_unverifiable_key_is_tried_again_after_10_s_doubling_up_to_5_min() {
         policies: hash(&policies, &["a"]),
         root: Some(pinned().hash()),
     };
-    let Verdict::Unverifiable { reason, retry_at } = run.verdicts.get(key) else {
+    let Verdict::Unverifiable { reason, retry_at } = run.verdicts.get(key).verdict else {
         panic!("not unverifiable");
     };
     assert_eq!(&*reason, "artifacts unreachable");
@@ -360,11 +367,11 @@ fn a_rejection_is_final_for_its_key_and_a_verdict_under_another_root_replaces_it
 
     assert_eq!(verdicts.keep(key, rejected.clone()), Some(Verdict::Pending));
     assert_eq!(verdicts.keep(key, Verdict::Allow), None);
-    assert_eq!(verdicts.get(key), rejected);
+    assert_eq!(verdicts.get(key).verdict, rejected);
     let other = Key { root: None, ..key };
     assert_eq!(verdicts.keep(other, Verdict::Allow), Some(rejected));
-    assert_eq!(verdicts.get(key), Verdict::Pending);
-    assert_eq!(verdicts.get(other), Verdict::Allow);
+    assert_eq!(verdicts.get(key).verdict, Verdict::Pending);
+    assert_eq!(verdicts.get(other).verdict, Verdict::Allow);
 }
 
 #[tokio::test]
@@ -413,7 +420,7 @@ async fn a_key_follows_the_names_listed_and_its_verdict_leaves_with_its_root() {
         })
         .expect("the engine runs");
     settle().await;
-    assert_eq!(run.verdicts.get(key(&["a"])), Verdict::Allow);
+    assert_eq!(run.verdicts.get(key(&["a"])).verdict, Verdict::Allow);
     assert_eq!(reads(), before);
 
     // Listed under another name, the root has the key of the policies that name matches, and only that one.
@@ -425,7 +432,7 @@ async fn a_key_follows_the_names_listed_and_its_verdict_leaves_with_its_root() {
         })
         .expect("the engine runs");
     assert_eq!(run.verdict(key(&["b"])).await, Verdict::Allow);
-    assert_eq!(run.verdicts.get(key(&["a"])), Verdict::Pending);
+    assert_eq!(run.verdicts.get(key(&["a"])).verdict, Verdict::Pending);
 
     run.found
         .send(Found::Roots {
@@ -434,7 +441,7 @@ async fn a_key_follows_the_names_listed_and_its_verdict_leaves_with_its_root() {
         })
         .expect("the engine runs");
     settle().await;
-    assert_eq!(run.verdicts.get(key(&["b"])), Verdict::Pending);
+    assert_eq!(run.verdicts.get(key(&["b"])).verdict, Verdict::Pending);
 }
 
 #[tokio::test(start_paused = true)]
@@ -472,7 +479,7 @@ async fn a_rate_limit_sets_the_next_try_no_sooner_than_the_backoff_gives() {
             root: Some(pinned().hash()),
         };
         assert_eq!(
-            run.verdicts.get(key),
+            run.verdicts.get(key).verdict,
             Verdict::Unverifiable {
                 reason: "upstream rate limited: reg.test".into(),
                 retry_at: start + Duration::from_secs(after),
@@ -533,5 +540,205 @@ async fn the_first_verification_of_a_root_a_fetch_made_counts_under_the_trigger_
     let rendered = handle.render();
     assert!(rendered.contains(event), "{event} in {rendered}");
     assert!(rendered.contains(manifest), "{manifest} in {rendered}");
-    assert_eq!(run.verdicts.get(key), Verdict::Allow);
+    assert_eq!(run.verdicts.get(key).verdict, Verdict::Allow);
+}
+
+/// The lookup of `key` once `done` holds of it, waiting 10 s at most.
+async fn lookup_until(verdicts: &Verdicts, key: Key<'_>, done: impl Fn(&Lookup) -> bool) -> Lookup {
+    for _ in 0..200 {
+        let lookup = verdicts.get(key);
+        if done(&lookup) {
+            return lookup;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    verdicts.get(key)
+}
+
+#[tokio::test]
+async fn a_policy_change_answers_the_previous_verdict_stale_until_the_new_one_lands() {
+    let fixture = Fixture::load("keyless").await;
+    let root = &fixture.root;
+    // Only `a` changes: the root keeps its verdict under `b` as it is.
+    let before = policies(&[("a", "reg.test/a", SAN), ("b", "reg.test/b", SAN)]);
+    let after = policies(&[
+        ("a", "reg.test/a", "https://example.test/another"),
+        ("b", "reg.test/b", SAN),
+    ]);
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // The engine runs on this thread: the test's runtime has one.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let run = Run::start(&fixture.store, before.clone(), true, Ok(pinned()));
+    let hour = Duration::from_secs(3600);
+    run.verdicts.set_stale_max(hour);
+    let key = |policies: &Policies| Key {
+        image: root,
+        policies: hash(policies, &["a"]),
+        root: Some(pinned().hash()),
+    };
+    let unchanged = Key {
+        policies: hash(&before, &["b"]),
+        ..key(&before)
+    };
+    run.listed(
+        &list(&[(&digest(1), &[("reg.test/a", root), ("reg.test/b", root)])]),
+        root,
+        Ok(()),
+    );
+    assert_eq!(run.verdict(key(&before)).await, Verdict::Allow);
+
+    // The new policy fails: while upstream is asked once more (D126), the key answers the previous verdict, stale.
+    run.policies
+        .send(Arc::new(after.clone()))
+        .expect("the engine runs");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let stale = Lookup {
+        verdict: Verdict::Allow,
+        stale: true,
+    };
+    let pending = Lookup {
+        verdict: Verdict::Pending,
+        stale: false,
+    };
+    assert_eq!(run.verdicts.get(key(&after)), stale);
+    assert_eq!(run.verdicts.get(key(&before)), pending);
+    assert_eq!(
+        run.verdicts.get(unchanged),
+        Lookup {
+            verdict: Verdict::Allow,
+            stale: false
+        }
+    );
+    run.verdicts.set_stale_max(Duration::ZERO);
+    assert_eq!(run.verdicts.get(key(&after)), pending, "past stale_max");
+    run.verdicts.set_stale_max(hour);
+    assert_eq!(run.verdicts.get(key(&after)), stale);
+
+    run.discovery.upstream.add_permits(1);
+    let landed = lookup_until(&run.verdicts, key(&after), |lookup| !lookup.stale).await;
+    assert!(
+        matches!(
+            landed,
+            Lookup {
+                verdict: Verdict::Rejected { .. },
+                stale: false
+            }
+        ),
+        "{landed:?}"
+    );
+    let reverified = r#"speculaire_verifications_total{result="rejected",trigger="reverify"} 1"#;
+    let rendered = handle.render();
+    assert!(rendered.contains(reverified), "{reverified} in {rendered}");
+
+    // Then `b` changes alone: the root's key under it changes too.
+    let third = policies(&[
+        ("a", "reg.test/a", "https://example.test/another"),
+        ("b", "reg.test/b", "https://example.test/another"),
+    ]);
+    run.policies
+        .send(Arc::new(third.clone()))
+        .expect("the engine runs");
+    let b = Key {
+        policies: hash(&third, &["b"]),
+        ..key(&third)
+    };
+    let lookup = lookup_until(&run.verdicts, b, |lookup| {
+        !lookup.stale && lookup.verdict != Verdict::Pending
+    })
+    .await;
+    assert!(
+        matches!(lookup.verdict, Verdict::Rejected { .. }),
+        "{lookup:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_trust_root_change_verifies_again_under_the_new_root_hash() {
+    let fixture = Fixture::load("keyless").await;
+    let root = &fixture.root;
+    let policies = policies(&[("a", "reg.test/a", SAN)]);
+    let run = Run::start(&fixture.store, policies.clone(), true, Ok(pinned()));
+    run.verdicts.set_stale_max(Duration::from_secs(3600));
+    let key = |root_hash| Key {
+        image: root,
+        policies: hash(&policies, &["a"]),
+        root: root_hash,
+    };
+    run.listed(
+        &list(&[(&digest(1), &[("reg.test/a", root)])]),
+        root,
+        Ok(()),
+    );
+    assert_eq!(
+        run.verdict(key(Some(pinned().hash()))).await,
+        Verdict::Allow
+    );
+
+    // The same root again changes nothing.
+    run.trust.send(Ok(pinned())).expect("the engine runs");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        run.verdicts.get(key(Some(pinned().hash()))),
+        Lookup {
+            verdict: Verdict::Allow,
+            stale: false
+        }
+    );
+
+    run.trust
+        .send(Err(Absent::new("TUF unreachable")))
+        .expect("the engine runs");
+    let landed = lookup_until(&run.verdicts, key(None), |lookup| {
+        lookup.verdict != Verdict::Pending && !lookup.stale
+    })
+    .await;
+    assert_eq!(
+        landed.verdict.to_string(),
+        "unverifiable: trust root: TUF unreachable"
+    );
+    assert_eq!(
+        run.verdicts.get(key(Some(pinned().hash()))).verdict,
+        Verdict::Pending
+    );
+}
+
+#[tokio::test]
+async fn a_policy_change_leaves_a_root_whose_discovery_runs_to_its_end() {
+    let fixture = Fixture::load("keyless").await;
+    let root = &fixture.root;
+    let before = policies(&[("a", "reg.test/a", SAN)]);
+    let after = policies(&[("a", "reg.test/a", "https://example.test/another")]);
+    let run = Run::start(&fixture.store, before, true, Ok(pinned()));
+    let key = Key {
+        image: root,
+        policies: hash(&after, &["a"]),
+        root: Some(pinned().hash()),
+    };
+    run.found
+        .send(Found::Roots {
+            listed: roots(&list(&[(&digest(1), &[("reg.test/a", root)])])),
+            fetched: Roots::new(),
+        })
+        .expect("the engine runs");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    run.policies
+        .send(Arc::new(after.clone()))
+        .expect("the engine runs");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        run.discovery.reads.load(Ordering::Relaxed),
+        0,
+        "verified before its discovery ended"
+    );
+    assert_eq!(run.verdicts.get(key).verdict, Verdict::Pending);
+
+    run.discovery.upstream.add_permits(1);
+    run.found
+        .send(Found::Ended {
+            root: root.clone(),
+            discovered: Ok(()),
+        })
+        .expect("the engine runs");
+    assert!(matches!(run.verdict(key).await, Verdict::Rejected { .. }));
 }

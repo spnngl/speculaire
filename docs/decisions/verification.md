@@ -54,7 +54,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The policy is part of the key because one digest can match different policies under different names (D11).
 - **Revisit when:** —
 
-## D21: Old verdicts keep serving while the policy or trust root changes (amended by D31, D65)
+## D21: Old verdicts keep serving while the policy or trust root changes (amended by D31, D65, D154)
 
 - **Decision:**
   - When the policy file or the trust root changes, the agent re-verifies every image in containerd's store in the background, running containers first.
@@ -277,7 +277,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The bench (D106) and nodes without verification run with no file; a missing file is a choice, a broken one a mistake.
 - **Revisit when:** an admin needs `kms`, a second trust root or CEL conditions (D11).
 
-## D143: The trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h (amends D8; amended by D145)
+## D143: The trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h (amends D8; amended by D145, D154)
 
 - **Decision:**
   - A `verify.trusted_root` path pins a `trusted_root.json`, read at start: a missing or corrupt file stops the agent and makes `check-config` exit 1 (D30). No TUF runs then.
@@ -393,7 +393,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Revisit when:** SPDX 3 or CycloneDX 2 JSON shows up in attestations, or content rules (D12's later) need the packages themselves.
 
 
-## D151: The engine keeps verdicts in memory, per listed root, retried 10 s doubling to 5 min by its own discovery (amends D20, D121, D126; amended by D152)
+## D151: The engine keeps verdicts in memory, per listed root, retried 10 s doubling to 5 min by its own discovery (amends D20, D121, D126; amended by D152, D154)
 
 - **Decision:**
   - **Feed:** `speculaire_artifacts::follow` tells the engine, on an unbounded channel, each change of the listed roots and their names (`Found::Listed`) and the end of each discovery or a root found recorded (`Found::Ended`). The engine in `speculaire_verify::engine` verifies one root at a time in its own task.
@@ -438,3 +438,19 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mark on disk survives a restart, so a pull that spans one keeps its grace.
   - 10 min covers a large image's pull before the runtime lists it.
 - **Revisit when:** pulls longer than the grace lose their artifacts before the runtime lists them.
+
+
+## D154: The policy file and a pinned trust root reload as the config does; a changed key serves its previous verdict stale (amends D21, D30, D143, D151)
+
+- **Decision:**
+  - **Reload:** the policy file and a pinned `verify.trusted_root` are watched files (D93): SIGHUP reads them, a poll reads one whose stamp changed, or the policy file at a new `verify.policy`. A file refused keeps what was read before, is counted once in `speculaire_config_reload_failures_total` and logged with its reason. A TUF refresh that fails while a root is held keeps that root; one that brings the same hash is no change.
+  - **Re-key:** on a change the engine swaps in the new policies or root whole, then re-keys each root whose match hash or root hash changed: a new key starts with the verdict its name's previous key held, marked stale since the change (a key stale already keeps its first time), or `Pending`. Unchanged keys stay as they are.
+  - **Reverify:** each re-keyed root that discovery found is verified again, one per engine turn, under `trigger="reverify"`, asking upstream once more before a first `Rejected` (D151). A stale `Rejected` is not final: the new verdict replaces it.
+  - **Lookup:** `Verdicts::get` answers a `Lookup { verdict, stale }`. A stale verdict answers until `verify.stale_max` (3600 s, live) has passed since the change, then `Pending`.
+  - **Order:** roots go in the engine's order; running containers do not go first yet.
+- **Because:**
+  - The policy and the root are part of the key (D20): re-keying without the previous verdict would deny every new container until re-verification caught up (D21).
+  - The stamps and the single count make a reload of the policy and the root behave and fail as the config's (D30, D93).
+  - A failed TUF refresh, or the same root fetched again, should not make every verdict stale.
+  - One root per turn keeps the engine answering discovery and retries while it verifies a whole store again.
+- **Revisit when:** running containers must be verified first (D21): the engine needs the runtime's container list.
