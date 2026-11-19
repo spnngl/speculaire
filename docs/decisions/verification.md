@@ -23,7 +23,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - NRI's `image.name` (containerd ≥ 2.4) is the first reference in containerd's image store, not necessarily the one the pod used (`docs/research/nri-and-verifiers.md` §1.3). One digest can carry several names that match different policies.
 - **Revisit when:** —
 
-## D12: SBOM validation has three tiers
+## D12: SBOM validation has three tiers (amended by D150)
 
 - **Decision:**
   - **v1:** a policy can require an SBOM. It passes when either:
@@ -137,7 +137,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
 
-## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146)
+## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146, D150)
 
 - **Decision:**
   - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends, and read the list once more 1 s after a watch starts: no answer tells when containerd holds the subscription, and an image pulled in between waited 60 s in CI. Once the agent stops, a follower that loses the runtime ends without a warning: the agent's own teardown cut it. The CRI-O relay protects the listed images from eviction through it.
@@ -364,14 +364,30 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 ## D149: An authority that requires attestations passes on bundles attesting each predicate type by its signer (amends D11, D43)
 
 - **Decision:**
-  - An attestation is a bundle naming the image (D145) whose DSSE envelope signs an in-toto statement, `_type` `https://in-toto.io/Statement/v1` or `v0.1`, of the required `predicateType`, compared exactly: cosign'"'"'s short names, such as `slsaprovenance1`, are not read. The predicate type of a cosign signature, `https://sigstore.dev/cosign/sign/v1`, is never an attestation; a `.sig` layer never is.
-  - An authority that requires attestations passes on them alone, as policy-controller does (v0.15.1 `pkg/webhook/validator.go:530-535`): every one needs a bundle of its predicate type by the authority'"'"'s signer, and its signer is the authority'"'"'s result. Each such bundle is a signature of the image (D145), so the signature check would add nothing. An authority without attestations passes on its signature.
-  - The first attestation that fails gives the authority'"'"'s reason (D11'"'"'s all-of): `attestation <predicateType> missing (.att tags are not supported)` when no bundle attests it, whether or not a `.att` tag exists (D43), else `attestation <predicateType>: <reason>` with the reason of the bundle attesting it that came closest (D145'"'"'s order). `Signatures::check` returns `Unmet::{Signature, Attestation}` per authority.
+  - An attestation is a bundle naming the image (D145) whose DSSE envelope signs an in-toto statement, `_type` `https://in-toto.io/Statement/v1` or `v0.1`, of the required `predicateType`, compared exactly: cosign's short names, such as `slsaprovenance1`, are not read. The predicate type of a cosign signature, `https://sigstore.dev/cosign/sign/v1`, is never an attestation; a `.sig` layer never is.
+  - An authority that requires attestations passes on them alone, as policy-controller does (v0.15.1 `pkg/webhook/validator.go:530-535`): every one needs a bundle of its predicate type by the authority's signer, and its signer is the authority's result. Each such bundle is a signature of the image (D145), so the signature check would add nothing. An authority without attestations passes on its signature.
+  - The first attestation that fails gives the authority's reason (D11's all-of): `attestation <predicateType> missing (.att tags are not supported)` when no bundle attests it, whether or not a `.att` tag exists (D43), else `attestation <predicateType>: <reason>` with the reason of the bundle attesting it that came closest (D145's order). `Signatures::check` returns `Unmet::{Signature, Attestation}` per authority.
   - The predicate type is read from each bundle with its signature, kept beside its result (D145), whether or not the signature verifies: a tampered attestation names its predicate type.
-  - `speculaire_verify::statement::Statement` borrows the payload: `_type`, `predicateType` and the raw `predicate`. Subjects are sigstore-verify'"'"'s to bind (sigstore-verify v0.16.0 `crates/sigstore-verify/src/artifact.rs:50-101`). `Signatures::attested(store, target, artifacts, signer, root, predicate_type)` gives the attesting bundle'"'"'s digest, and the statement is read from it again when needed: predicates are never kept, as SBOMs may be large.
+  - `speculaire_verify::statement::Statement` borrows the payload: `_type`, `predicateType` and the raw `predicate`. Subjects are sigstore-verify's to bind (sigstore-verify v0.16.0 `crates/sigstore-verify/src/artifact.rs:50-101`). `Signatures::attested(store, target, artifacts, signer, root, predicate_type)` gives the attesting bundle's digest, and the statement is read from it again when needed: predicates are never kept, as SBOMs may be large.
 - **Because:**
-  - policy-controller'"'"'s `ClusterImagePolicy`, whose shape D11 takes, checks attestations instead of signatures for such an authority; cosign maps a short name to a URI before comparing (cosign v3.1.3 `pkg/policy/attestation.go:62-66`), but a predicate type is a URI, and an unread short name fails closed.
+  - policy-controller's `ClusterImagePolicy`, whose shape D11 takes, checks attestations instead of signatures for such an authority; cosign maps a short name to a URI before comparing (cosign v3.1.3 `pkg/policy/attestation.go:62-66`), but a predicate type is a URI, and an unread short name fails closed.
   - A cosign v3 signature is a DSSE statement too: counting it would pass an attestation requirement with a plain signature.
   - Reading the predicate type of a bundle that fails tells the admin which attestation is broken, where `missing` would send them to attest again.
-- **Measured:** `Statement::parse` takes 0.50 µs for the provenance fixture'"'"'s 1 031-byte statement and 0.12 µs for a cosign signature'"'"'s 230 bytes (release, Apple M5): beside a verification'"'"'s 1.2 ms (D145), the attestation check costs nothing more.
-- **Revisit when:** a policy needs a predicate'"'"'s content (`policy:` in `ClusterImagePolicy`), or users ask for cosign'"'"'s short names.
+- **Measured:** `Statement::parse` takes 0.50 µs for the provenance fixture's 1 031-byte statement and 0.12 µs for a cosign signature's 230 bytes (release, Apple M5): beside a verification's 1.2 ms (D145), the attestation check costs nothing more.
+- **Revisit when:** a policy needs a predicate's content (`policy:` in `ClusterImagePolicy`), or users ask for cosign's short names.
+
+## D150: An SBOM passes in a signed attestation of three predicate types or a signed index's BuildKit layer, counted, its size as listed (amends D12, D121)
+
+- **Decision:**
+  - **Predicate types:** `https://spdx.dev/Document` (cosign), `https://spdx.dev/Document/v2.3` (GitHub, `actions/attest` v4.2.2 `src/sbom.ts:85`) and `https://cyclonedx.org/bom`, compared exactly; the type names the format.
+  - **Tier (a):** the bundle `Signatures::attested` gives for an authority's signer and an SBOM predicate type (D149). **Tier (b):** a BuildKit attestation manifest (`Kind::Attestation`) the stored index lists; its in-toto layers are read unsigned (D49) and pass when an authority's signer signs the index. `Signatures::sbom(store, target, artifacts, policy, root)` gives `Listed { signed, packages }` or `speculaire_verify::sbom::Failure`.
+  - **Counting:** our own parser borrows the document and skips every other value (`serde::de::IgnoredAny`). SPDX needs `spdxVersion` `SPDX-2.3` and counts its packages but the ones the document describes (`documentDescribes`, `DESCRIBES` from `SPDXRef-DOCUMENT`, `DESCRIBED_BY` to it): syft lists the image itself. CycloneDX needs `bomFormat` `CycloneDX` and `specVersion` 1.4 or later, and counts its top-level `components`.
+  - **Reasons**, the closest of both tiers, in order: `SBOM missing`, `SBOM unsigned: <signature reason>`, `SBOM over sbom.max_size: <n> bytes`, `SBOM unparsable: <where>`, `SBOM without packages`. A `.sbom` tag alone is missing: discovery never fetches it (D121).
+  - **Size (amends D121):** discovery records an artifact without the blobs its manifest lists above `sbom.max_size`, unfetched; a blob streaming beyond the cap against its listing still drops its artifact. The verifier reads the listed size: such a bundle fails as `signature over sbom.max_size: <n> bytes`, attesting the predicate type its manifest's `dev.sigstore.bundle.predicateType` annotation names (unverified, it only picks the reason, D149), and such a layer as `SBOM over sbom.max_size`. `Signatures::new(max_size)` takes the cap discovery used.
+- **Because:**
+  - spdx-rs and cyclonedx-bom build the whole document; counting builds none of it, so a 64 MiB SBOM costs one pass.
+  - A dropped artifact reads as `SBOM missing` and sends the admin to attest again; the listed size names the cap. The manifest is under 4 MiB (D85), so recording it costs nothing.
+  - The `spdx-empty` fixture is syft's output for an image without packages: one package, the image.
+  - Only the signed index binds an attestation manifest; the record is untrusted.
+- **Measured:** counting an 11.5 MB SPDX document of 50 000 packages takes 13 ms, against 29 ms to build it as a `serde_json::Value` (release, Apple M5).
+- **Revisit when:** SPDX 3 or CycloneDX 2 JSON shows up in attestations, or content rules (D12's later) need the packages themselves.

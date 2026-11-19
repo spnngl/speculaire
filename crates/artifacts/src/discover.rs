@@ -513,7 +513,8 @@ impl Discovery {
     }
 
     /// Keeps `artifact`, `bytes` being its manifest, with its blobs: `None` when a blob cannot be had, which drops the
-    /// artifact.
+    /// artifact. A blob its manifest lists above `sbom.max_size` is left out unfetched, its artifact kept, for the
+    /// verifier to reject by that size (D150).
     async fn keep(
         &self,
         discovering: &Discovering<'_>,
@@ -521,7 +522,20 @@ impl Discovery {
         bytes: &[u8],
         artifact: Artifact,
     ) -> Result<Option<Artifact>, Error> {
+        let above: Vec<Digest> = Referrer::parse(bytes)
+            .map(|manifest| {
+                manifest
+                    .blobs()
+                    .filter(|blob| blob.size > self.limits.blob)
+                    .map(|blob| blob.digest.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         for blob in &artifact.blobs {
+            if above.contains(blob) {
+                warn!(%blob, max = self.limits.blob, "an artifact blob listed larger than sbom.max_size is left out");
+                continue;
+            }
             if discovering.hold(blob) {
                 continue;
             }

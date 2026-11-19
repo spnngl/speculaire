@@ -1,7 +1,9 @@
 //! The signature check over the recorded fixtures of step 01 (D139), offline: which authorities a bundle satisfies,
-//! with the attestations they require (D149).
+//! with the attestations they require (D149), and the SBOM a policy can require (D150).
 
 mod recorded;
+#[path = "signature/sbom.rs"]
+mod sbom;
 
 use std::path::Path;
 
@@ -17,6 +19,9 @@ use speculaire_verify::{Policies, Policy, TrustRoot};
 const SAN: &str =
     "https://github.com/spnngl/speculaire/.github/workflows/fixtures.yml@refs/heads/main";
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+/// `sbom.max_size`'s default (D12).
+const MAX_SIZE: u64 = 64 << 20;
 
 /// One policy over every image, with `authorities` (each a list item, indented as one) as its authorities.
 fn policy(authorities: &[String]) -> Policy {
@@ -72,7 +77,7 @@ async fn a_keyless_bundle_passes_the_policy_naming_its_workflow() {
     let fixture = Fixture::load("keyless").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(results, [Ok(workflow())]);
 }
@@ -82,7 +87,7 @@ async fn a_legacy_sig_with_its_set_passes_the_policy_naming_its_workflow() {
     let fixture = Fixture::load("legacy-sig").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(results, [Ok(workflow())]);
 }
@@ -93,7 +98,7 @@ async fn a_sig_served_for_another_image_names_the_image_it_signs() {
     let signed = Fixture::load("legacy-sig").await.root;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(
         results,
@@ -108,7 +113,7 @@ async fn a_sig_without_its_set_names_the_missing_set() {
     let fixture = Fixture::unlogged("legacy-sig").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(
         results,
@@ -123,7 +128,7 @@ async fn a_key_bundle_passes_the_policy_holding_its_key() {
     let fixture = Fixture::load("key").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}")), key()]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(
         results,
@@ -145,7 +150,7 @@ async fn another_workflow_or_a_pattern_over_part_of_the_san_fails_naming_the_sig
         key(),
     ]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     let mismatch = Err(Unmet::Signature(Failure::Mismatch(workflow())));
     assert_eq!(results, [mismatch.clone(), mismatch.clone(), mismatch]);
@@ -158,7 +163,7 @@ async fn a_tampered_bundle_has_an_invalid_signature() {
     let fixture = Fixture::flipped("keyless").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert!(
         matches!(&results[..], [Err(Unmet::Signature(Failure::Invalid(_)))]),
@@ -171,7 +176,7 @@ async fn a_bundle_of_githubs_private_instance_names_its_unknown_issuer() {
     let fixture = Fixture::bundled("keyless", GITHUB_PRIVATE).await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(
         results,
@@ -188,7 +193,7 @@ async fn an_image_without_a_bundle_has_no_signature() {
     let fixture = Fixture::load("unsigned").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(results, [Err(Unmet::Signature(Failure::Missing))]);
     assert_eq!(Failure::Missing.to_string(), "no signature");
@@ -200,7 +205,7 @@ async fn no_trust_root_leaves_the_check_unverifiable() {
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
     let absent = speculaire_verify::Absent::new("TUF: unreachable");
 
-    let unverifiable = Signatures::default()
+    let unverifiable = Signatures::new(MAX_SIZE)
         .check(
             &fixture.store,
             &fixture.root,
@@ -217,7 +222,7 @@ async fn no_trust_root_leaves_the_check_unverifiable() {
 #[tokio::test]
 async fn a_second_policy_over_the_same_bundle_reuses_its_verification() {
     let fixture = Fixture::load("keyless").await;
-    let signatures = Signatures::default();
+    let signatures = Signatures::new(MAX_SIZE);
     let first = policy(&[keyless(&format!("subject: {SAN}"))]);
     let second = policy(&[keyless(r"subjectRegExp: https://github\.com/spnngl/.+")]);
 
@@ -240,7 +245,7 @@ async fn an_expired_tuf_repository_leaves_the_check_unverifiable() {
         .await
         .expect_err("the recorded timestamp role has expired");
 
-    let unverifiable = Signatures::default()
+    let unverifiable = Signatures::new(MAX_SIZE)
         .check(
             &fixture.store,
             &fixture.root,
@@ -262,7 +267,7 @@ async fn an_expired_tuf_repository_leaves_the_check_unverifiable() {
 async fn another_trust_root_verifies_the_bundle_again() {
     let fixture = Fixture::load("keyless").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
-    let signatures = Signatures::default();
+    let signatures = Signatures::new(MAX_SIZE);
     let mut bytes =
         std::fs::read(Path::new(FIXTURES).join("trusted_root.json")).expect("the recorded root");
     bytes.push(b'\n');
@@ -306,7 +311,7 @@ async fn only_a_signature_of_the_image_counts() {
     }
 
     for artifacts in [attestation, elsewhere] {
-        let results = Signatures::default()
+        let results = Signatures::new(MAX_SIZE)
             .check(
                 &fixture.store,
                 &fixture.root,
@@ -328,7 +333,7 @@ async fn an_authority_fails_with_the_reason_of_the_closest_bundle() {
         "subject: https://github.com/spnngl/speculaire/.github/workflows/release.yml@refs/heads/main",
     )]);
 
-    let signatures = Signatures::default();
+    let signatures = Signatures::new(MAX_SIZE);
 
     for artifacts in [
         [intact[0].clone(), tampered.artifacts[0].clone()],
@@ -384,7 +389,7 @@ async fn a_github_provenance_passes_the_policy_requiring_it_from_its_workflow() 
         &[PROVENANCE],
     )]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(results, [Ok(workflow())]);
 }
@@ -399,7 +404,7 @@ async fn an_attestation_only_in_an_att_tag_or_absent_is_missing() {
     for case in ["att-only", "keyless", "legacy-sig", "unsigned"] {
         let fixture = Fixture::load(case).await;
 
-        let results = check(&Signatures::default(), &fixture, &policy).await;
+        let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
         assert_eq!(results, [missing(PROVENANCE)], "{case}");
         let reason = results[0].as_ref().expect_err("missing").to_string();
@@ -420,7 +425,7 @@ async fn an_attestation_by_another_identity_fails_naming_its_signer() {
         &[PROVENANCE],
     )]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(
         results,
@@ -447,7 +452,7 @@ async fn every_required_attestation_must_pass() {
         &[PROVENANCE, spdx],
     )]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(results, [missing(spdx)]);
 }
@@ -458,7 +463,7 @@ async fn a_cosign_signature_is_never_an_attestation() {
     let signature = "https://sigstore.dev/cosign/sign/v1";
     let policy = policy(&[attesting(keyless(&format!("subject: {SAN}")), &[signature])]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert_eq!(results, [missing(signature)]);
 }
@@ -471,7 +476,7 @@ async fn a_tampered_attestation_is_invalid() {
         &[PROVENANCE],
     )]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert!(
         matches!(
@@ -490,7 +495,7 @@ async fn an_attested_sbom_gives_its_bundle_whose_statement_holds_the_predicate()
         .signer
         .clone();
 
-    let attested = Signatures::default()
+    let attested = Signatures::new(MAX_SIZE)
         .attested(
             &fixture.store,
             &fixture.root,
@@ -523,7 +528,7 @@ async fn a_blob_that_is_no_bundle_is_an_invalid_signature() {
     let fixture = Fixture::bundled("keyless", "{}").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
 
-    let results = check(&Signatures::default(), &fixture, &policy).await;
+    let results = check(&Signatures::new(MAX_SIZE), &fixture, &policy).await;
 
     assert!(
         matches!(
@@ -531,5 +536,63 @@ async fn a_blob_that_is_no_bundle_is_an_invalid_signature() {
             [Err(Unmet::Signature(Failure::Invalid(reason)))] if reason.starts_with("not a Sigstore bundle: ")
         ),
         "{results:?}"
+    );
+}
+
+/// `spdx`'s SBOM bundle is 16 250 bytes and its signature bundle 10 702 (D150).
+#[tokio::test]
+async fn a_bundle_discovery_left_out_as_over_sbom_max_size_fails_as_over_it_and_attests_its_annotation()
+ {
+    let fixture = Fixture::capped("spdx", 12_000).await;
+    let spdx = "https://spdx.dev/Document";
+    let policy = policy(&[attesting(keyless(&format!("subject: {SAN}")), &[spdx])]);
+
+    let results = check(&Signatures::new(12_000), &fixture, &policy).await;
+
+    assert_eq!(
+        results,
+        [Err(Unmet::Attestation {
+            predicate_type: spdx.to_owned(),
+            failure: Failure::Oversize(16_250),
+        })]
+    );
+    assert_eq!(
+        results[0].as_ref().expect_err("over").to_string(),
+        "attestation https://spdx.dev/Document: signature over sbom.max_size: 16250 bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_sig_payload_discovery_left_out_as_over_sbom_max_size_fails_as_over_it() {
+    let fixture = Fixture::capped("legacy-sig", 100).await;
+    let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
+
+    let results = check(&Signatures::new(100), &fixture, &policy).await;
+
+    assert!(
+        matches!(results[..], [Err(Unmet::Signature(Failure::Oversize(size)))] if size > 100),
+        "{results:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_bundle_missing_from_the_store_below_sbom_max_size_is_unverifiable() {
+    let fixture = Fixture::capped("spdx", 12_000).await;
+    let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
+
+    let unverifiable = Signatures::new(MAX_SIZE)
+        .check(
+            &fixture.store,
+            &fixture.root,
+            &fixture.artifacts,
+            &policy,
+            Ok(&pinned()),
+        )
+        .await
+        .expect_err("the store lacks a bundle its manifest lists below the cap");
+
+    assert_eq!(
+        unverifiable.to_string(),
+        "sha256:91a29456c904110df51d06e019af70aafcf04838c47951760bb887232119d36a is not in the artifact store"
     );
 }

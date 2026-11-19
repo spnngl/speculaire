@@ -25,6 +25,7 @@ use speculaire_registry_config::containerd::config::{self as containerd_config_f
 use speculaire_registry_config::containerd::hosts;
 use speculaire_registry_config::crio::{auth, registries};
 use speculaire_verify::policy::{MatchHash, Policies, Policy, PublicKey, Signer};
+use speculaire_verify::sbom::{Failure, Format};
 use speculaire_verify::statement::Statement;
 use speculaire_verify::{TrustRoot, legacy, signature};
 
@@ -62,6 +63,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("bundle", bundle),
     ("simplesigning", simplesigning),
     ("statement", statement),
+    ("sbom", sbom),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -939,4 +941,27 @@ pub fn statement(data: &[u8]) {
         (again.predicate_type(), again.predicate()),
         (statement.predicate_type(), statement.predicate())
     );
+}
+
+/// An SBOM from an attestation or a BuildKit attestation layer, as SPDX and as CycloneDX JSON (D12, D150).
+///
+/// A document that counts, its unknown values skipped unbuilt, counts the same in compact JSON.
+///
+/// # Panics
+///
+/// When counting panics, or the document that counts written back compact counts otherwise.
+pub fn sbom(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let compact = serde_json::from_str::<serde_json::Value>(text).map(|value| value.to_string());
+    for format in [Format::Spdx, Format::CycloneDx] {
+        let packages = format.packages(text);
+        // An unparsable document may hold a duplicate key that compact JSON drops.
+        if let Ok(compact) = &compact
+            && !matches!(packages, Err(Failure::Unparsable(_)))
+        {
+            assert_eq!(packages, format.packages(compact), "{format:?}");
+        }
+    }
 }

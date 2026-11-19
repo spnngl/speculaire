@@ -268,3 +268,10 @@ path = "fuzz_targets/statement.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sbom"
+path = "fuzz_targets/sbom.rs"
+test = false
+doc = false
+bench = false
