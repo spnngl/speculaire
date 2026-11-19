@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 aws-lc-rs.workspace = true
 jiff.workspace = true
+metrics.workspace = true
 regex-automata.workspace = true
 regex-syntax.workspace = true
 serde.workspace = true
@@ -23,12 +24,21 @@ sigstore-verify.workspace = true
 speculaire-artifacts.workspace = true
 speculaire-oci.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]
+divan.workspace = true
+metrics-exporter-prometheus.workspace = true
 speculaire-artifacts = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+speculaire-runtime.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "micro"
+harness = false
 
 [lints]
 workspace = true

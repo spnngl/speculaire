@@ -102,7 +102,7 @@ impl Registries for Asked {
 }
 
 #[test]
-fn a_root_has_its_names_in_order_once_each_and_none_once_it_left_the_list() {
+fn each_root_has_the_names_the_list_gives_it_once_each() {
     let mut list = List::default();
     list.apply(Update::Listing(vec![image(
         1,
@@ -113,9 +113,10 @@ fn a_root_has_its_names_in_order_once_each_and_none_once_it_left_the_list() {
             ("reg.test/a", 11),
         ],
     )]));
-    assert_eq!(names(&list, &digest(10)), ["reg.test/a", "reg.test/b"]);
-    assert_eq!(names(&list, &digest(11)), ["reg.test/a"]);
-    assert_eq!(names(&list, &digest(12)), Vec::<String>::new());
+    let roots = roots(&list);
+    assert_eq!(roots[&digest(10)], ["reg.test/a", "reg.test/b"]);
+    assert_eq!(roots[&digest(11)], ["reg.test/a"]);
+    assert_eq!(roots.len(), 2);
 }
 
 /// Follows the list the returned sender scripts, with `store`, from `linked` on, the latest reflector stream up at
@@ -126,6 +127,21 @@ fn start(
     linked: impl Future<Output = ()> + Send + 'static,
     last_up: Option<Instant>,
 ) -> (mpsc::Sender<Update>, tokio::task::JoinHandle<()>) {
+    let (script, followed, _) = start_found(store, asked, linked, last_up);
+    (script, followed)
+}
+
+/// As [`start`], with what verification is told.
+fn start_found(
+    store: Arc<Store>,
+    asked: &Arc<Asked>,
+    linked: impl Future<Output = ()> + Send + 'static,
+    last_up: Option<Instant>,
+) -> (
+    mpsc::Sender<Update>,
+    tokio::task::JoinHandle<()>,
+    mpsc::UnboundedReceiver<Found>,
+) {
     let unlinked = speculaire_mirror::fetch::Fetcher::new(
         std::path::PathBuf::new(),
         speculaire_mirror::fetch::Settings {
@@ -144,13 +160,74 @@ fn start(
         Limits::new(1024),
     ));
     let (script, receiver) = mpsc::channel(4);
+    let (found, told) = mpsc::unbounded_channel();
     let followed = tokio::spawn(follow(
         discovery,
         Arc::new(Scripted(Mutex::new(Some(receiver)))),
         linked,
         watch::channel(last_up).1,
+        found,
     ));
-    (script, followed)
+    (script, followed, told)
+}
+
+#[tokio::test(start_paused = true)]
+async fn verification_is_told_the_roots_listed_then_each_discovery_and_each_root_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    store.record(&digest(10), &[]).await.unwrap();
+    let asked = Arc::new(Asked::default());
+    let (script, followed, mut told) = start_found(store, &asked, std::future::ready(()), None);
+    let listing = Update::Listing(vec![
+        image(1, &[("reg.test/old", 10)]),
+        image(2, &[("reg.test/new", 20)]),
+    ]);
+
+    let settle = || tokio::time::sleep(Duration::from_millis(10));
+
+    script.send(listing.clone()).await.unwrap();
+    settle().await;
+    script.send(listing).await.unwrap();
+    settle().await;
+    script
+        .send(Update::Listed(image(2, &[("reg.test/other", 20)])))
+        .await
+        .unwrap();
+    settle().await;
+    drop(script);
+    followed.await.unwrap();
+
+    let mut found = Vec::new();
+    while let Ok(event) = told.try_recv() {
+        found.push(match event {
+            Found::Listed(roots) => {
+                let mut roots: Vec<_> = roots.into_iter().collect();
+                roots.sort_by_key(|(root, _)| root.to_string());
+                format!("{roots:?}")
+            }
+            Found::Ended { root, discovered } => {
+                format!("{root} {:?}", discovered.map_err(|e| e.to_string()))
+            }
+        });
+    }
+    let listed = |names: [(u8, &str); 2]| {
+        format!(
+            "{:?}",
+            names.map(|(n, name)| (digest(n), vec![name.to_owned()]))
+        )
+    };
+    assert_eq!(
+        found,
+        [
+            listed([(10, "reg.test/old"), (20, "reg.test/new")]),
+            format!("{} Ok(())", digest(10)),
+            format!(
+                "{} Err(\"unverifiable: artifacts unreachable\")",
+                digest(20)
+            ),
+            listed([(10, "reg.test/old"), (20, "reg.test/other")]),
+        ]
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -382,6 +459,11 @@ async fn a_root_that_leaves_the_list_is_collected_and_discovered_again_when_it_c
     script.send(Update::Removed(digest(1))).await.unwrap();
     settle().await;
     assert_eq!(store.recorded(&digest(10)).await.unwrap(), None);
+
+    // The last root to leave is collected too.
+    script.send(Update::Removed(digest(2))).await.unwrap();
+    settle().await;
+    assert_eq!(store.recorded(&digest(20)).await.unwrap(), None);
 
     drop(script);
     followed.await.unwrap();

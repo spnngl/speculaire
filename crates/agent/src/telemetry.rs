@@ -178,6 +178,7 @@ mod tests {
             speculaire_mirror::metrics::describe_relay();
             speculaire_reflect::metrics::describe();
             speculaire_reflect::metrics::describe_client();
+            speculaire_verify::metrics::describe();
         });
         let described = names
             .0

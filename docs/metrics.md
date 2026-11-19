@@ -52,9 +52,9 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 
 | Metric | Type | Labels | Meaning | Planned |
 |---|---|---|---|---|
-| `speculaire_verifications_total` | counter | `result` = `allow`\|`rejected`\|`unverifiable`; `trigger` = `manifest`\|`event`\|`synchronize`\|`gate_miss`\|`reverify` | Completed verifications (D20, D22); `reverify` follows a policy or trust-root change (D21) | M5 |
-| `speculaire_verification_seconds` | histogram | — | Time from trigger to verdict | M5 |
-| `speculaire_verdicts` | gauge | `state` = `allow`\|`rejected`\|`unverifiable`\|`pending` | Verdicts in the cache | M5 |
+| `speculaire_verifications_total` | counter | `result` = `allow`\|`rejected`\|`unverifiable`; `trigger` = `manifest`\|`event`\|`synchronize`\|`gate_miss`\|`reverify` | Completed verifications (D20, D22); `event` follows a discovery or a retry (D151); `reverify` follows a policy or trust-root change (D21) | |
+| `speculaire_verification_seconds` | histogram | — | Time from trigger to verdict | |
+| `speculaire_verdicts` | gauge | `state` = `allow`\|`rejected`\|`unverifiable`\|`pending` | Verdicts in memory, one per key (D151) | |
 | `speculaire_artifact_fetches_total` | counter | `source` = `peer`\|`upstream`; `upstream`; `result` = `ok`\|`not_found`\|`digest_mismatch`\|`rate_limited`\|`error` | Artifact requests by outcome, one per request (D38, D121); `rate_limited` is a `429`, or a `503` with `Retry-After` (D128); `upstream` is a host with a `hosts.toml` directory, on CRI-O a `[[registry]]` table, else `other`, and empty for peer fetches (D50, D121); a peer fetch is one per manifest or blob asked of peers, `not_found` when none gave it, and a mismatch counts in `speculaire_peer_fetches_total` (D52, D126) | M4 |
 | `speculaire_artifact_store_bytes` | gauge | — | Size of the *artifact store* | M4 |
 | `speculaire_trust_root_expiry_timestamp_seconds` | gauge | — | When the trust root in use stops verifying, as a Unix time: the first expiry of its TUF metadata, or of a pinned root the latest end of its keys; 0 while none is held, absent for a pinned root whose keys have no end (D143) | |

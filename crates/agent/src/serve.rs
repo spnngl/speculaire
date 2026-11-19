@@ -25,7 +25,7 @@ use speculaire_runtime::inventory::{Change, Inventory, Update};
 use speculaire_runtime::registries::{self, Registries, Reloaded};
 use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode};
-use speculaire_verify::Policies;
+use speculaire_verify::{Engine, Policies, Signatures};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
@@ -47,20 +47,20 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     let watch = Watch::new(vec![path.to_owned()]);
     let config = config::load(path)?;
     let logs = log::install(&config.log, &config.audit)?;
-    check_policy(config.verify.policy.get())?;
+    let policies = read_policy(config.verify.policy.get())?;
     let trust = trust::Source::read(&config.verify)?;
     let node = Node::new(&config);
     let node = preflight(&node)?;
     tokio::runtime::Runtime::new()
         .context("starting the runtime")?
-        .block_on(serve(path, watch, config, logs, node, trust))
+        .block_on(serve(path, watch, config, logs, node, policies, trust))
 }
 
-/// Refuses to start on a policy file that does not parse (D30); a missing file is no policy (D142).
-fn check_policy(path: &Path) -> anyhow::Result<()> {
+/// Reads the policy file, refusing to start on one that does not parse (D30); a missing file is no policy (D142).
+fn read_policy(path: &Path) -> anyhow::Result<Policies> {
     let policies = Policies::load(path)?;
     info!(path = %path.display(), count = policies.iter().count(), "policy read");
-    Ok(())
+    Ok(policies)
 }
 
 /// Refuses to start on a node where the agent would mirror or gate wrongly (D86), naming each file and key; returns the
@@ -96,6 +96,7 @@ async fn serve(
     mut config: Config,
     logs: Logs,
     node: RuntimeNode,
+    policies: Policies,
     trust: trust::Source,
 ) -> anyhow::Result<()> {
     // Before any listener opens and before READY=1: a signal's default action would end the agent, and a signal that
@@ -134,7 +135,7 @@ async fn serve(
         }
     });
     info!(%address, "status listener open");
-    let _trust_root = trust.hold(); // Held while the agent serves; TUF refreshes it (D143).
+    let trust_root = trust.hold(); // Held while the agent serves; TUF refreshes it (D143).
     // P2P waits for the identity; readiness does not (D16, D45).
     let mut identity = Identity::load(&config.identity);
     // `/readyz` answers 503 until the mirror listens and the artifact store is open (D45, D121); an agent that cannot
@@ -146,7 +147,15 @@ async fn serve(
     // failed just after one came up (D126, D134). Without `reflector.url` the sender drops: discovery waits for none.
     let (up, last_up) = tokio::sync::watch::channel(None);
     let up = client_config(&config).map(|_| up);
-    let store = start_discovery(&config, &node, &mirror, Arc::clone(&registries), last_up)?;
+    let store = start_discovery(
+        &config,
+        &node,
+        &mirror,
+        Arc::clone(&registries),
+        last_up,
+        policies,
+        trust_root,
+    )?;
     status.mirror_listening();
     let mut reflector = None;
     open_reflector(&config, &identity, &mut reflector, &status).await;
@@ -467,19 +476,24 @@ const LINK_WAIT: Duration = Duration::from_secs(10);
 /// Discovery starts once `last_up` holds the time a reflector stream came up, or its sender drops, or after
 /// [`LINK_WAIT`]: a root it found unreachable waits [`speculaire_artifacts::discover::RETRY`], so its first pass asks
 /// peers when the node has any. The store is collected from the first listing on (D131).
+///
+/// The verdict engine verifies each root against `policies` and the trust root `trust` holds as its discovery ends,
+/// and paces the discoveries of the roots it waits on (D151).
 fn start_discovery(
     config: &Config,
     node: &RuntimeNode,
     mirror: &Mirror,
     registries: Arc<dyn Registries>,
     last_up: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+    policies: Policies,
+    trust: tokio::sync::watch::Receiver<trust::Held>,
 ) -> anyhow::Result<Arc<Store>> {
     let directory = config.artifacts.directory.get().get();
     let store = Store::open(directory)
         .with_context(|| format!("opening the artifact store {}", directory.display()))?;
     speculaire_artifacts::metrics::describe();
     let store = Arc::new(store);
-    let discovery = Discovery::new(
+    let discovery = Arc::new(Discovery::new(
         Arc::clone(&store),
         mirror.manifests(node),
         mirror.fetcher.clone(),
@@ -487,13 +501,19 @@ fn start_discovery(
         config.mirror.address.get().get().to_string(),
         Host::current(),
         Limits::new(config.sbom.max_size.get()),
-    );
+    ));
+    speculaire_verify::metrics::describe();
+    let signatures = Signatures::new(config.sbom.max_size.get());
+    let engine = Engine::new(Arc::clone(&discovery), policies, signatures, trust);
+    let (found, told) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(engine.run(told));
     let images = node.images();
     tokio::spawn(speculaire_artifacts::follow(
-        Arc::new(discovery),
+        discovery,
         images,
         linked_or_after(last_up.clone(), LINK_WAIT),
         last_up,
+        found,
     ));
     Ok(store)
 }

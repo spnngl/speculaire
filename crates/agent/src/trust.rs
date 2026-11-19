@@ -23,8 +23,7 @@ use crate::telemetry;
 /// How soon a failed TUF refresh is tried again, when it is sooner than `verify.tuf_refresh`.
 const RETRY: Duration = Duration::from_secs(60);
 
-/// The trust root in use, or why there is none: then every verification ends `unverifiable` (D20).
-pub type Held = Result<Arc<TrustRoot>, Absent>;
+pub use speculaire_verify::Held;
 
 /// Where the trust root comes from, read from `[verify]` and the pinned file.
 #[derive(Debug)]

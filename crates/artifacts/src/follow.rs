@@ -1,7 +1,7 @@
 //! The trigger of discovery at M4: every manifest digest the runtime's image list names is a root (D121). The store
 //! keeps only what the roots listed name (D131).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,6 +26,23 @@ const SOON: Duration = Duration::from_secs(20);
 /// How many times a root is asked again soon, before it waits [`RETRY`] (D134).
 const TRIES: u8 = 3;
 
+/// The roots each listed manifest digest has, by root: the names the list gives it, once each, in the list's order.
+pub type Roots = HashMap<Digest, Vec<String>>;
+
+/// What discovery tells verification, in order (D20): each change of the roots listed, and how each discovery ends.
+#[derive(Debug)]
+pub enum Found {
+    /// The roots listed now; a root it lacks left the list.
+    Listed(Roots),
+    /// The discovery of `root` ended, or found it recorded by an earlier run.
+    Ended {
+        /// The root.
+        root: Digest,
+        /// Whether its artifacts are recorded.
+        discovered: Result<(), Error>,
+    },
+}
+
 /// What discovery came to for a root this run.
 enum Done {
     Discovered,
@@ -49,13 +66,14 @@ struct Lane {
 
 impl Lane {
     /// Starts discovering the first root queued that is due, listed and not recorded, unless a discovery runs already.
-    /// A root that `elsewhere` discovers is dropped: that discovery records it.
+    /// A root that `elsewhere` discovers is dropped: that discovery records it. A root found recorded is told to `found`.
     async fn start(
         &mut self,
         discovery: &Arc<Discovery>,
-        list: &List,
+        listed: &Roots,
         done: &mut HashMap<Digest, Done>,
         elsewhere: Option<&Digest>,
+        found: &mpsc::UnboundedSender<Found>,
     ) {
         while self.running.is_none() {
             let Some(root) = self.queue.pop_front() else {
@@ -66,8 +84,10 @@ impl Lane {
                 Some(Done::Discovered) => false,
                 Some(Done::Retry(at)) => *at <= Instant::now(),
             };
-            let names = names(list, &root);
-            if !due || names.is_empty() || elsewhere == Some(&root) {
+            let Some(names) = listed.get(&root).cloned() else {
+                continue;
+            };
+            if !due || elsewhere == Some(&root) {
                 continue;
             }
             let recorded = match discovery.store().recorded(&root).await {
@@ -78,7 +98,12 @@ impl Lane {
                 }
             };
             if recorded {
-                done.insert(root, Done::Discovered);
+                done.insert(root.clone(), Done::Discovered);
+                // Nobody verifies when the receiver is gone.
+                let _ = found.send(Found::Ended {
+                    root,
+                    discovered: Ok(()),
+                });
                 continue;
             }
             let discovery = Arc::clone(discovery);
@@ -143,7 +168,7 @@ impl Soon {
         &mut self,
         root: &Digest,
         started: Instant,
-        discovered: Result<Vec<Artifact>, Error>,
+        discovered: &Result<Vec<Artifact>, Error>,
     ) -> Done {
         match discovered {
             Ok(artifacts) => {
@@ -154,7 +179,7 @@ impl Soon {
             // to set (D38): no warning.
             Err(e @ Error::Unverifiable { retry_at, .. }) => {
                 info!("discovery of {root}: {e}");
-                Done::Retry(self.next(root, started, &e).unwrap_or(retry_at))
+                Done::Retry(self.next(root, started, e).unwrap_or(*retry_at))
             }
             Err(e @ Error::Store(_)) => {
                 warn!(%root, error = %e, "artifacts not discovered");
@@ -177,11 +202,14 @@ impl Soon {
 /// The roots of an image just listed have a lane of their own, beside that of the roots a listing or a retry queued
 /// (D146): a pull waits at most for the discovery of another image just listed, not for a root that a listing found
 /// and whose sources do not answer.
+///
+/// `found` is told the roots listed as they change, then how each discovery ends, and each root found recorded.
 pub async fn follow(
     discovery: Arc<Discovery>,
     images: Arc<dyn Images>,
     linked: impl Future<Output = ()> + Send,
     last_up: watch::Receiver<Option<Instant>>,
+    found: mpsc::UnboundedSender<Found>,
 ) {
     let (sender, mut updates) = mpsc::channel(16);
     let following = tokio::spawn(images.follow(sender));
@@ -196,7 +224,7 @@ pub async fn follow(
     };
     // The roots listed, and whether the store may hold what they do not name: a listing came since the last
     // collection, or a root that left was recorded.
-    let mut listed = HashSet::new();
+    let mut listed = Roots::new();
     let mut stale = false;
     loop {
         while let Ok(update) = updates.try_recv() {
@@ -204,16 +232,16 @@ pub async fn follow(
         }
         // The store is collected as a root leaves the list, discoveries running or not: one may wait on peers and
         // upstream for seconds (D144).
-        if roots_left(&list, &mut listed) || stale {
+        if roots_left(&list, &mut listed, &found) || stale {
             collect(discovery.store(), &listed, &mut done, &mut soon).await;
             stale = false;
         }
         if is_linked {
             pulled
-                .start(&discovery, &list, &mut done, backlog.root())
+                .start(&discovery, &listed, &mut done, backlog.root(), &found)
                 .await;
             backlog
-                .start(&discovery, &list, &mut done, pulled.root())
+                .start(&discovery, &listed, &mut done, pulled.root(), &found)
                 .await;
         }
         let next = done
@@ -257,9 +285,13 @@ pub async fn follow(
             }
         };
         // Recorded after it left the list: collected at the next turn.
-        stale |= !listed.contains(&root);
-        let ended = soon.ended(&root, started, discovered);
-        done.insert(root, ended);
+        stale |= !listed.contains_key(&root);
+        let ended = soon.ended(&root, started, &discovered);
+        done.insert(root.clone(), ended);
+        let _ = found.send(Found::Ended {
+            root,
+            discovered: discovered.map(drop),
+        });
     }
     following.abort();
 }
@@ -296,14 +328,14 @@ fn enqueue(
     listing
 }
 
-/// Sets `listed` to the roots `list` names, and tells whether one it held left.
-fn roots_left(list: &List, listed: &mut HashSet<Digest>) -> bool {
-    let now: HashSet<Digest> = list
-        .images()
-        .flat_map(|image| &image.repo_digests)
-        .map(|repo_digest| repo_digest.digest.clone())
-        .collect();
-    let left = !listed.is_subset(&now);
+/// Sets `listed` to the roots `list` names, telling `found` when they changed, and tells whether one it held left.
+fn roots_left(list: &List, listed: &mut Roots, found: &mpsc::UnboundedSender<Found>) -> bool {
+    let now = roots(list);
+    if now == *listed {
+        return false;
+    }
+    let left = listed.keys().any(|root| !now.contains_key(root));
+    let _ = found.send(Found::Listed(now.clone()));
     *listed = now;
     left
 }
@@ -312,27 +344,29 @@ fn roots_left(list: &List, listed: &mut HashSet<Digest>) -> bool {
 /// is discovered again when it comes back.
 async fn collect(
     store: &Arc<Store>,
-    listed: &HashSet<Digest>,
+    listed: &Roots,
     done: &mut HashMap<Digest, Done>,
     soon: &mut Soon,
 ) {
-    if let Err(e) = store.collect(listed.clone()).await {
+    if let Err(e) = store.collect(listed.keys().cloned().collect()).await {
         warn!(error = %e, "the artifact store cannot be collected: what it holds stays until the next listing");
     }
-    done.retain(|root, _| listed.contains(root));
-    soon.left.retain(|root, _| listed.contains(root));
+    done.retain(|root, _| listed.contains_key(root));
+    soon.left.retain(|root, _| listed.contains_key(root));
 }
 
-/// The names the list gives the manifest digest `root`, once each, in the list's order; none once it left the list.
-fn names(list: &List, root: &Digest) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    let listed = list.images().flat_map(|image| &image.repo_digests);
-    for repo_digest in listed.filter(|repo_digest| repo_digest.digest == *root) {
+/// The roots `list` names, each with its names once each, in the list's order: on CRI-O, every repository of an image
+/// with every digest it was pulled by (D65).
+#[must_use]
+pub fn roots(list: &List) -> Roots {
+    let mut roots = Roots::new();
+    for repo_digest in list.images().flat_map(|image| &image.repo_digests) {
+        let names = roots.entry(repo_digest.digest.clone()).or_default();
         if !names.contains(&repo_digest.repository) {
             names.push(repo_digest.repository.clone());
         }
     }
-    names
+    roots
 }
 
 #[cfg(test)]
