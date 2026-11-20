@@ -244,7 +244,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Rust's `\d`, `\w` and `\s` take Unicode classes where Go's take ASCII; on a SAN, which X.509 encodes as ASCII (`IA5String`), they match the same.
 - **Revisit when:** sigstore-rust gains regex identity matching (D8), or admins need partial matches, then as an explicit setting.
 
-## D139: Sigstore fixtures are recorded from public-good Sigstore (amends D8)
+## D139: Sigstore fixtures are recorded from public-good Sigstore (amends D8; amended by D164)
 
 - **Decision:**
   - The gate's Sigstore fixtures come from public-good Sigstore. `.github/workflows/fixtures.yml` builds one `FROM scratch` image per case into `ghcr.io/spnngl/speculaire-fixtures:<case>`, signs and attests it the way the case names (cosign v3.1.3, `actions/attest-build-provenance`, `actions/attest-sbom`, syft, BuildKit's SBOM scanner), and exports each with its tags and referrers as an OCI layout. Beside them: the public key of the `key` case, the `trusted_root.json`, and a TUF snapshot of `tuf-repo-cdn.sigstore.dev` (the root chain, the top-level metadata and the trusted root target) in the repository's layout.

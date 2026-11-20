@@ -4,6 +4,8 @@
 use std::path::Path;
 use std::time::Instant;
 
+use speculaire_artifacts::testing::{Expected, Signer};
+
 use super::{Kind, Upstream};
 use crate::registry::{
     self, Access, COPY_IMAGE, COSIGN_IMAGE, Certificates, Container, LABEL, NETWORK, PASSWORD,
@@ -12,7 +14,8 @@ use crate::registry::{
 use crate::{Cluster, Failure, Runtime, TEST_IMAGE, hub};
 
 /// The signed test image on every upstream: a Sigstore bundle signature, a SLSA provenance and an SPDX attestation as
-/// referrers, and a legacy `.sig` and `.att` tag (D112).
+/// referrers, and a legacy `.sig` and `.att` tag (D112). For discovery tests only: signed with no transparency log
+/// entry, it never verifies (D142); a test that needs an allowed image runs [`RUNNABLE`].
 pub const SIGNED: &str = "e2e/signed:1";
 /// [`TEST_IMAGE`] with another annotation, so another digest, and nothing that refers to it.
 pub const UNSIGNED: &str = "e2e/unsigned:1";
@@ -22,6 +25,28 @@ pub const COSIGN_PUBLIC_KEY: &str = "/etc/speculaire-e2e/cosign.pub";
 pub const CRIO_AUTH_FILE: &str = "/etc/crio/e2e-auth.json";
 /// The repository of the recorded Sigstore fixtures (D141) on zot and on the plain upstream, one tag per case.
 pub const FIXTURES: &str = "e2e/fixtures";
+/// The fixture case a pod runs, a tag of [`FIXTURES`]: [`TEST_IMAGE`] with a file of its own, for `linux/amd64` and
+/// `linux/arm64`, signed keyless by the recording workflow (D164). [`runnable_policy`] allows it.
+pub const RUNNABLE: &str = "runnable";
+
+/// A `ClusterImagePolicy` that allows [`RUNNABLE`] from the upstream at `host` by the identity the recording names.
+///
+/// # Panics
+///
+/// When the recording names no keyless signer for [`RUNNABLE`].
+#[must_use]
+pub fn runnable_policy(host: &str) -> String {
+    let (san, issuer) = match Expected::of(RUNNABLE).signer {
+        Some(Signer::Keyless { san, issuer }) => Some((san, issuer)),
+        Some(Signer::Key { .. }) | None => None,
+    }
+    .expect("the recording names the runnable case's keyless signer");
+    format!(
+        "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: {RUNNABLE}\nspec:\n  \
+         images:\n  - glob: {host}/{FIXTURES}\n  authorities:\n  - keyless:\n      identities:\n      - issuer: {issuer}\n        \
+         subject: {san}\n"
+    )
+}
 
 /// The fixtures' OCI layouts, one directory per case.
 const LAYOUTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/sigstore/layouts");

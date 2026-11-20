@@ -2,10 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use sigstore_tuf::Repository;
 use sigstore_tuf::transport::FetchFuture;
-use speculaire_artifacts::testing::FIXTURES;
+use speculaire_artifacts::testing::{FIXTURES, tuf_expiry};
 use speculaire_verify::TrustRoot;
 
 /// The recorded repository, read from `fixtures/sigstore/tuf/`.
@@ -31,8 +31,20 @@ fn read(path: &Path) -> Option<Vec<u8>> {
 }
 
 /// `time`, an RFC 3339 timestamp.
-pub(crate) fn at(time: &str) -> Timestamp {
+fn at(time: &str) -> Timestamp {
     time.parse().expect("the test times are RFC 3339")
+}
+
+/// When the recorded timestamp metadata expires, the first of the repository's roles to.
+pub(crate) fn expiry() -> Timestamp {
+    at(&tuf_expiry())
+}
+
+/// A day after [`expiry`].
+pub(crate) fn expired() -> Timestamp {
+    expiry()
+        .checked_add(SignedDuration::from_hours(24))
+        .expect("in range")
 }
 
 /// The recorded trusted root, pinned.

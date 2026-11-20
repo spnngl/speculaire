@@ -5,6 +5,12 @@ name: fixtures
 # By hand only: each run writes entries to the public Rekor log.
 on:
   workflow_dispatch:
+    inputs:
+      cases:
+        description: "`all` records every case; `runnable` records it alone, beside the recorded cases (D164)"
+        type: choice
+        options: [all, runnable]
+        default: all
 
 # Each job grants only what it needs.
 permissions: {}
@@ -26,6 +32,9 @@ jobs:
     env:
       REPOSITORY: ghcr.io/${{ github.repository }}-fixtures
       ISSUER: https://token.actions.githubusercontent.com
+      CASES: ${{ inputs.cases }}
+      # The e2e suites' test image (D112), which the runnable case adds a file to.
+      BUSYBOX_IMAGE: "docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
       # The e2e suites' cosign (D112) and regctl.
       COSIGN_IMAGE: "ghcr.io/sigstore/cosign/cosign:v3.1.3@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8"
       REGCTL_IMAGE: "ghcr.io/regclient/regctl:v0.8.3-alpine@sha256:e50f92394d7826dde8f6558511178988b4ce64267519b8b0a9c6c47fbeae6a16"
@@ -71,13 +80,17 @@ jobs:
           docker buildx create --name fixtures --driver docker-container \
             --driver-opt "image=$(just hub-pull "$BUILDKIT_IMAGE")" --buildkitd-config "$RUNNER_TEMP/buildkitd.toml"
       # One `FROM scratch` image per case, each with one file of its own, so each has its own digest. The file is an
-      # npm `package.json`, a package for syft to find; spdx-empty's is a plain file, which gives no package.
+      # npm `package.json`, a package for syft to find; spdx-empty's is a plain file, which gives no package. runnable
+      # is busybox for both platforms the nodes run, with its file: a pod runs it. COPY needs no emulator.
       - id: build
         name: Build
         run: |
           build() {
-            local case=$1 context="$RUNNER_TEMP/contexts/$1"
+            local case=$1 context="$RUNNER_TEMP/contexts/$1" from=scratch platform=linux/amd64
             shift
+            if [[ $case == runnable ]]; then
+              from=$BUSYBOX_IMAGE platform=linux/amd64,linux/arm64
+            fi
             if [[ $case == spdx-empty ]]; then
               mkdir -p "$context/fixture"
               echo "$case" > "$context/fixture/$case"
@@ -86,28 +99,36 @@ jobs:
               printf '{"name":"speculaire-fixture","version":"1.0.0","description":"%s"}\n' "$case" \
                 > "$context/fixture/node_modules/speculaire-fixture/package.json"
             fi
-            printf 'FROM scratch\nCOPY fixture /\n' > "$context/Dockerfile"
-            docker buildx build --builder fixtures --platform linux/amd64 --provenance=false "$@" \
+            printf 'FROM %s\nCOPY fixture /\n' "$from" > "$context/Dockerfile"
+            docker buildx build --builder fixtures --platform "$platform" --provenance=false "$@" \
               --output "type=image,name=$REPOSITORY:$case,push=true,oci-mediatypes=true" \
               --metadata-file "$context/metadata.json" "$context"
             jq -r '."containerimage.digest"' "$context/metadata.json" > "$RUNNER_TEMP/digests/$case"
           }
-          for case in keyless key legacy-sig att-only provenance spdx cyclonedx spdx-empty attest-sbom sbom-tag unsigned; do
-            build "$case" --sbom=false
-          done
-          # An index of the image and BuildKit's SPDX attestation manifest.
-          for case in buildkit-signed buildkit-unsigned; do
-            build "$case" "--sbom=generator=$SCANNER_IMAGE"
-          done
+          if [[ $CASES == all ]]; then
+            for case in keyless key legacy-sig att-only provenance spdx cyclonedx spdx-empty attest-sbom sbom-tag unsigned; do
+              build "$case" --sbom=false
+            done
+            # An index of the image and BuildKit's SPDX attestation manifest.
+            for case in buildkit-signed buildkit-unsigned; do
+              build "$case" "--sbom=generator=$SCANNER_IMAGE"
+            done
+            echo "provenance=$(cat "$RUNNER_TEMP/digests/provenance")" >> "$GITHUB_OUTPUT"
+            echo "attest-sbom=$(cat "$RUNNER_TEMP/digests/attest-sbom")" >> "$GITHUB_OUTPUT"
+          fi
+          build runnable --sbom=false
           if [[ $(sort -u "$RUNNER_TEMP"/digests/* | wc -l) -ne $(find "$RUNNER_TEMP/digests" -type f | wc -l) ]]; then
             echo "::error::two cases share a digest"
             exit 1
           fi
-          echo "provenance=$(cat "$RUNNER_TEMP/digests/provenance")" >> "$GITHUB_OUTPUT"
-          echo "attest-sbom=$(cat "$RUNNER_TEMP/digests/attest-sbom")" >> "$GITHUB_OUTPUT"
       - name: Sign
         run: |
           ref() { echo "$REPOSITORY@$(cat "$RUNNER_TEMP/digests/$1")"; }
+          # runnable's index alone, as buildkit-signed's: discovery looks for the root's signature on any platform.
+          cosign sign "$(ref runnable)"
+          if [[ $CASES != all ]]; then
+            exit 0
+          fi
           cosign sign "$(ref keyless)"
           cosign generate-key-pair --output-key-prefix "$RUNNER_TEMP/cosign"
           cosign sign --key "$RUNNER_TEMP/cosign.key" "$(ref key)"
@@ -129,12 +150,14 @@ jobs:
           cosign sign "$(ref sbom-tag)"
           cosign attach sbom --type spdx --input-format json --sbom "$RUNNER_TEMP/sboms/sbom-tag.json" "$(ref sbom-tag)"
           cosign sign "$(ref buildkit-signed)"
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      - if: inputs.cases == 'all'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.REPOSITORY }}
           subject-digest: ${{ steps.build.outputs.provenance }}
           push-to-registry: true
-      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+      - if: inputs.cases == 'all'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-name: ${{ env.REPOSITORY }}
           subject-digest: ${{ steps.build.outputs.attest-sbom }}
@@ -151,7 +174,9 @@ jobs:
             case=$(basename "$file")
             regctl image copy --referrers --digest-tags "$REPOSITORY@$(cat "$file")" "ocidir://$out/layouts/$case:$case"
           done
-          cp "$RUNNER_TEMP/cosign.pub" "$out/"
+          if [[ $CASES == all ]]; then
+            cp "$RUNNER_TEMP/cosign.pub" "$out/"
+          fi
           TUF_ROOT="$RUNNER_TEMP/tuf" cosign initialize
           cdn=https://tuf-repo-cdn.sigstore.dev
           metadata="$RUNNER_TEMP/tuf/${cdn#https://}"
@@ -213,8 +238,10 @@ jobs:
             esac
           }
 
-          spdx_version=$(jq -r .spdxVersion "$RUNNER_TEMP/sboms/attest-sbom.json")
-          attest_sbom="https://spdx.dev/Document/v${spdx_version#SPDX-}"
+          if [[ $CASES == all ]]; then
+            spdx_version=$(jq -r .spdxVersion "$RUNNER_TEMP/sboms/attest-sbom.json")
+            attest_sbom="https://spdx.dev/Document/v${spdx_version#SPDX-}"
+          fi
           slsa=https://slsa.dev/provenance/v1
           spdx=https://spdx.dev/Document
           # case|signer|predicate types attached|checks|the outcome its name promises
@@ -232,10 +259,14 @@ jobs:
             "buildkit-unsigned|none|$spdx|signature|fail"
             "sbom-tag|keyless||signature attestation:spdxjson|fail"
             "unsigned|none||signature|fail"
+            "runnable|keyless||signature|pass"
           )
           mismatch=0
           for row in "${cases[@]}"; do
             IFS='|' read -r case signer types checks promised <<< "$row"
+            if [[ ! -f $RUNNER_TEMP/digests/$case ]]; then
+              continue
+            fi
             digest=$(cat "$RUNNER_TEMP/digests/$case")
             outcome=pass
             results=()
@@ -259,7 +290,14 @@ jobs:
               mismatch=1
             fi
           done
-          jq -s . "$RUNNER_TEMP/expected.jsonl" > "$out/expected.json"
+          if [[ $CASES == all ]]; then
+            jq -s . "$RUNNER_TEMP/expected.jsonl" > "$out/expected.json"
+          else
+            # The recorded cases keep their rows; the ones this run recorded replace theirs, at the end.
+            jq -s '(.[1] | map(.case)) as $new | (.[0] | map(select(.case | IN($new[]) | not))) + .[1]' \
+              "$GITHUB_WORKSPACE/fixtures/sigstore/expected.json" <(jq -s . "$RUNNER_TEMP/expected.jsonl") \
+              > "$out/expected.json"
+          fi
           exit "$mismatch"
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
