@@ -8,9 +8,10 @@ on:
       - main
   pull_request:
 
-# A new push to a pull request cancels its running checks; each commit on main gets its own run.
+# A new push to a pull request cancels its running checks. On main one run goes on and the newest push waits behind
+# it; a newer push replaces the waiting one (D160).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Each job grants only what it needs.
