@@ -71,6 +71,15 @@ enum Algorithm {
 }
 
 impl Algorithm {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "sha256" => Some(Self::Sha256),
+            "sha384" => Some(Self::Sha384),
+            "sha512" => Some(Self::Sha512),
+            _ => None,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Sha256 => "sha256",
@@ -103,12 +112,7 @@ impl Digest {
             }
             _ => return Err(ReferenceError::DigestFormat),
         };
-        let algorithm = match algorithm {
-            "sha256" => Algorithm::Sha256,
-            "sha384" => Algorithm::Sha384,
-            "sha512" => Algorithm::Sha512,
-            _ => return Err(ReferenceError::DigestUnsupported),
-        };
+        let algorithm = Algorithm::parse(algorithm).ok_or(ReferenceError::DigestUnsupported)?;
         if !encoded
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -121,6 +125,22 @@ impl Digest {
         let mut hex = [0; HEX_MAX];
         hex[..encoded.len()].copy_from_slice(encoded.as_bytes());
         Ok(Self { algorithm, hex })
+    }
+
+    /// The digest of `hash`, made by the algorithm `name`; `None` when go-digest does not register `name` or `hash`
+    /// is not its size.
+    pub(crate) fn from_hash(name: &str, hash: &[u8]) -> Option<Self> {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let algorithm = Algorithm::parse(name)?;
+        if hash.len() * 2 != algorithm.size() {
+            return None;
+        }
+        let mut hex = [0; HEX_MAX];
+        for ([high, low], byte) in hex.as_chunks_mut::<2>().0.iter_mut().zip(hash) {
+            *high = DIGITS[usize::from(byte >> 4)];
+            *low = DIGITS[usize::from(byte & 0xf)];
+        }
+        Some(Self { algorithm, hex })
     }
 
     /// The algorithm, such as `sha256`.
@@ -169,11 +189,16 @@ impl fmt::Debug for Digest {
 /// The repository is `domain/path`. The domain is empty for the one name the library cannot split, a first segment
 /// that is not a valid domain but is a valid path component (`my_registry.example/app`): the whole name is then the
 /// path, as in the library.
+///
+/// The name and tag share one string, so parsing allocates once and [`Reference::name`] borrows (D107).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Reference {
-    domain: String,
-    path: String,
-    tag: Option<String>,
+    /// `domain/path`, then `:tag` when there is one.
+    text: String,
+    /// The length of the domain, zero when there is none.
+    domain: usize,
+    /// The length of the name, where the tag's colon is.
+    name: usize,
     digest: Option<Digest>,
 }
 
@@ -189,9 +214,10 @@ impl Reference {
     pub fn parse_docker_ref(text: &str) -> Result<Self, ReferenceError> {
         let mut named = Self::parse_normalized_named(text)?;
         if named.digest.is_some() {
-            named.tag = None;
-        } else if named.tag.is_none() {
-            named.tag = Some(DEFAULT_TAG.to_owned());
+            named.text.truncate(named.name);
+        } else if named.tag().is_none() {
+            named.text.push(':');
+            named.text.push_str(DEFAULT_TAG);
         }
         Ok(named)
     }
@@ -205,19 +231,26 @@ impl Reference {
         if is_image_id(text) {
             return Err(ReferenceError::ImageId);
         }
-        let (domain, remainder) = split_docker_domain(text);
-        let remote = remainder.split(':').next().unwrap_or(&remainder);
-        if crate::has_upper(remote) {
+        let (domain, prefix, remote) = split_docker_domain(text);
+        if crate::has_upper(remote.split(':').next().unwrap_or(remote)) {
             return Err(ReferenceError::Uppercase);
         }
-        Self::parse(&format!("{domain}/{remainder}"))
+        // Room for `parse_docker_ref`'s default tag, so that it does not grow the string again.
+        let mut normalized = String::with_capacity(
+            domain.len() + 1 + prefix.len() + remote.len() + 1 + DEFAULT_TAG.len(),
+        );
+        normalized.push_str(domain);
+        normalized.push('/');
+        normalized.push_str(prefix);
+        normalized.push_str(remote);
+        Self::parse(normalized)
     }
 
     /// `Parse`: the reference as written, without normalization. Its `ErrNameEmpty` is left out: the text always has
     /// a domain and a slash.
-    fn parse(text: &str) -> Result<Self, ReferenceError> {
-        let Some((name, tag, digest)) = split_reference(text) else {
-            return Err(if split_reference(&crate::go_lower(text)).is_some() {
+    fn parse(mut text: String) -> Result<Self, ReferenceError> {
+        let Some((name, tag, digest)) = split_reference(&text) else {
+            return Err(if split_reference(&crate::go_lower(&text)).is_some() {
                 ReferenceError::Uppercase
             } else {
                 ReferenceError::InvalidFormat
@@ -227,40 +260,44 @@ impl Reference {
         if path.len() > PATH_LENGTH_MAX {
             return Err(ReferenceError::TooLong);
         }
+        let (domain, name, end) = (
+            domain.len(),
+            name.len(),
+            name.len() + tag.map_or(0, |tag| 1 + tag.len()),
+        );
+        let digest = digest.map(Digest::parse).transpose()?;
+        text.truncate(end);
         Ok(Self {
-            domain: domain.to_owned(),
-            path: path.to_owned(),
-            tag: tag.map(str::to_owned),
-            digest: digest.map(Digest::parse).transpose()?,
+            text,
+            domain,
+            name,
+            digest,
         })
     }
 
     /// The registry, such as `docker.io` or `registry.example:5000`.
     #[must_use]
     pub fn domain(&self) -> &str {
-        &self.domain
+        &self.text[..self.domain]
     }
 
     /// The repository below the registry, such as `library/nginx`.
     #[must_use]
     pub fn path(&self) -> &str {
-        &self.path
+        let start = if self.domain == 0 { 0 } else { self.domain + 1 };
+        &self.text[start..self.name]
     }
 
     /// The repository name, `domain/path`: what policies match (D11).
     #[must_use]
-    pub fn name(&self) -> String {
-        if self.domain.is_empty() {
-            self.path.clone()
-        } else {
-            format!("{}/{}", self.domain, self.path)
-        }
+    pub fn name(&self) -> &str {
+        &self.text[..self.name]
     }
 
     /// The tag, if the reference has one.
     #[must_use]
     pub fn tag(&self) -> Option<&str> {
-        self.tag.as_deref()
+        self.text.get(self.name + 1..)
     }
 
     /// The digest, if the reference has one.
@@ -272,10 +309,7 @@ impl Reference {
 
 impl fmt::Display for Reference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.name())?;
-        if let Some(tag) = &self.tag {
-            write!(f, ":{tag}")?;
-        }
+        f.write_str(&self.text)?;
         if let Some(digest) = &self.digest {
             write!(f, "@{digest}")?;
         }
@@ -283,15 +317,12 @@ impl fmt::Display for Reference {
     }
 }
 
-/// `splitDockerDomain`: the registry of a name, and the repository below it. A first segment is a registry when it
-/// has a `.` or `:`, is `localhost`, or has an upper-case letter; any other name is on Docker Hub, where
-/// `nginx` is `library/nginx`.
-fn split_docker_domain(name: &str) -> (String, String) {
+/// `splitDockerDomain`: the registry of a name, and the repository below it, as a prefix and the rest of the name. A
+/// first segment is a registry when it has a `.` or `:`, is `localhost`, or has an upper-case letter; any other name
+/// is on Docker Hub, where `nginx` is `library/nginx`.
+fn split_docker_domain(name: &str) -> (&str, &'static str, &str) {
     let Some((maybe_domain, maybe_remote)) = name.split_once('/') else {
-        return (
-            DEFAULT_DOMAIN.to_owned(),
-            format!("{OFFICIAL_REPO_PREFIX}{name}"),
-        );
+        return (DEFAULT_DOMAIN, OFFICIAL_REPO_PREFIX, name);
     };
     let (domain, remote) = if maybe_domain == "localhost" {
         (maybe_domain, maybe_remote)
@@ -303,9 +334,9 @@ fn split_docker_domain(name: &str) -> (String, String) {
         (DEFAULT_DOMAIN, name)
     };
     if domain == DEFAULT_DOMAIN && !remote.contains('/') {
-        (domain.to_owned(), format!("{OFFICIAL_REPO_PREFIX}{remote}"))
+        (domain, OFFICIAL_REPO_PREFIX, remote)
     } else {
-        (domain.to_owned(), remote.to_owned())
+        (domain, "", remote)
     }
 }
 

@@ -30,7 +30,11 @@ impl Hash {
     /// Whether what has arrived is the content of the digest.
     #[must_use]
     pub fn matches(&self) -> bool {
-        to_digest(self.expected.algorithm(), &self.context.clone().finish()).as_ref()
+        Digest::from_hash(
+            self.expected.algorithm(),
+            self.context.clone().finish().as_ref(),
+        )
+        .as_ref()
             == Some(&self.expected)
     }
 }
@@ -47,19 +51,16 @@ fn algorithm(name: &str) -> Option<&'static digest::Algorithm> {
 /// The digest of `bytes` under the algorithm `name`.
 #[must_use]
 pub fn of(name: &str, bytes: &[u8]) -> Option<Digest> {
-    let mut context = Context::new(algorithm(name)?);
-    context.update(bytes);
-    to_digest(name, &context.finish())
+    of_parts(name, &[bytes])
 }
 
-fn to_digest(name: &str, hashed: &digest::Digest) -> Option<Digest> {
-    use std::fmt::Write as _;
-    let hex = hashed.as_ref().iter().fold(String::new(), |mut out, byte| {
-        // Writing to a string cannot fail.
-        let _ = write!(out, "{byte:02x}");
-        out
-    });
-    Digest::parse(&format!("{name}:{hex}")).ok()
+/// The digest of `parts`, one after the other, under the algorithm `name`.
+pub(crate) fn of_parts(name: &str, parts: &[&[u8]]) -> Option<Digest> {
+    let mut context = Context::new(algorithm(name)?);
+    for part in parts {
+        context.update(part);
+    }
+    Digest::from_hash(name, context.finish().as_ref())
 }
 
 #[cfg(test)]

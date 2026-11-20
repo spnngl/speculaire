@@ -10,8 +10,8 @@ const DOMAIN: &[u8] = b"speculaire tag\0";
 /// A normalized repository with a tag and no digest, `docker.io/library/nginx:1.27`, and its key.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Tagged {
-    name: String,
-    tag: String,
+    /// A reference with a tag and no digest.
+    reference: Reference,
     key: Digest,
 }
 
@@ -26,26 +26,30 @@ impl Tagged {
         if reference.digest().is_some() {
             return None;
         }
-        let (name, tag) = (reference.name(), reference.tag()?.to_owned());
-        let mut bytes = Vec::with_capacity(DOMAIN.len() + name.len() + 1 + tag.len());
-        bytes.extend_from_slice(DOMAIN);
-        bytes.extend_from_slice(name.as_bytes());
-        bytes.push(b':');
-        bytes.extend_from_slice(tag.as_bytes());
-        let key = crate::hash::of("sha256", &bytes)?;
-        Some(Self { name, tag, key })
+        let tag = reference.tag()?;
+        let key = crate::hash::of_parts(
+            "sha256",
+            &[DOMAIN, reference.name().as_bytes(), b":", tag.as_bytes()],
+        )?;
+        Some(Self { reference, key })
     }
 
     /// The repository, `domain/path`.
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        self.reference.name()
     }
 
     /// The tag.
+    ///
+    /// # Panics
+    ///
+    /// Never: `parse` keeps only a reference with a tag.
     #[must_use]
     pub fn tag(&self) -> &str {
-        &self.tag
+        self.reference
+            .tag()
+            .expect("`parse` keeps only a reference with a tag")
     }
 
     /// The key a node announces the tag under: the SHA-256 of a domain prefix and the name with its tag.
@@ -57,7 +61,7 @@ impl Tagged {
 
 impl fmt::Display for Tagged {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.name, self.tag)
+        self.reference.fmt(f)
     }
 }
 
