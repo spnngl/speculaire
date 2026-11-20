@@ -31,11 +31,6 @@ WORKDIR /src
 
 FROM build AS dev
 
-# The justfile's `nightly`, passed by `just dev`: rustfmt.toml uses unstable options, and `just minimal-versions` a
-# `-Z` flag.
-ARG NIGHTLY
-RUN rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt
-
 # renovate: datasource=crate depName=just
 ARG JUST_VERSION=1.59.0
 # renovate: datasource=crate depName=taplo-cli
@@ -64,6 +59,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         cargo-vet@"$CARGO_VET_VERSION" cargo-nextest@"$CARGO_NEXTEST_VERSION" \
         cargo-llvm-cov@"$CARGO_LLVM_COV_VERSION" cargo-mutants@"$CARGO_MUTANTS_VERSION"
 
+# The justfile's `nightly`, passed by `just dev`: rustfmt.toml uses unstable options, and `just minimal-versions` a
+# `-Z` flag. Last, after the tools: a build argument changes the cache key of every later `RUN`, so a nightly bump
+# reinstalls only this toolchain.
+ARG NIGHTLY
+RUN rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt
 
 # perf and Valgrind follow glibc's allocator and the frame pointers of a glibc build, where Valgrind does not follow the
 # static musl binary's (D46). The tag is rust-toolchain.toml's channel; Renovate keeps the digest.
