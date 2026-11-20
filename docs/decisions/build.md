@@ -549,7 +549,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** two more images from ghcr.io, and 10 to 20 s for the test images, in each `just e2e-up`.
 - **Revisit when:** registry:3 gains the referrers API, or cosign drops the legacy `.sig` and `.att` formats.
 
-## D113: Pull requests run the newest containerd and CRI-O legs; main runs all 14 (amends D63, D94)
+## D113: Pull requests run the newest containerd and CRI-O legs; main runs all 14 (amends D63, D94; amended by D160)
 
 - **Decision:**
   - On a pull request, `ci.yml`'s `e2e` runs 4 of D63's 14 legs: containerd 2.4 and CRI-O 1.37, both on Kubernetes 1.37, on both architectures, each with both of D94's passes. A push to `main` runs all 14.
@@ -730,6 +730,16 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - In CI, the four PR legs (PR #219 then PR #227, minutes): CRI-O 1.37 x86_64 21.3 then 12.4, arm64 17.7 then 12.8; containerd 2.4 x86_64 16.6 then 11.2, arm64 15.6 then 12.4. On CRI-O x86_64 the IPv4 pass took 8.5 min and the dual-stack pass 3.6 (job 136183276120): relay 93 s, limits 55 s, fetch 34 s, outage 37 s, reflector 2 s.
   - Locally on Docker Desktop arm64 with kind, CRI-O 1.37, one test at a time, before then after: the corrupted-blob test 60 s then 21 to 24 s; the relay login test 21 s then 9 s; the relay kill test 19 s then 12 s; the rotated-certificate test about 18 s then 3 s; the late-certificate test 20.5 s then 10.4 s; each other relay test about 1 s less, as its end restarts the agent once, not twice.
 - **Revisit when:** a PR leg passes 18 min again (then the dual-stack pass and the slowest peer suites move to main, D94), or the dual-stack pass gives the relay an IPv6 path (a node's upstream over IPv6).
+
+
+## D160: `main` runs CI on its newest commit only (amends D113)
+
+- **Decision:**
+  - `ci.yml`'s runs on `main` share one concurrency group without cancelling: one run goes on, the newest push waits behind it, and a newer push replaces the waiting one. A run in progress is never cancelled.
+  - Pull requests keep their own group and still cancel their previous run on a new push.
+- **Because:** on 2026-11-20 about 10 merges in a morning queued 11 runs on `main`, each with D113's 14 legs. The run of a 06:39 merge started its last legs at 10:30, so a failure on `main` showed 4 hours late, and pull requests waited behind the same runners.
+- **Cost:** a commit merged while a run waits gets no run of its own. When `main` fails, the cause is any commit since the last green run, not one.
+- **Revisit when:** merges to `main` are rare enough that runs no longer queue, or a failure on `main` takes a bisection between skipped commits more than once in a milestone.
 
 
 ## D162: `nri-runtime` is a session on `pkg/adaptation` and NRI's own stub, with a raw mode for the frames NRI never writes (amends D29, D70)
