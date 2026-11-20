@@ -2,6 +2,7 @@
 
 pub mod config;
 mod followed;
+pub mod gate;
 mod identity;
 mod listen;
 pub mod log;

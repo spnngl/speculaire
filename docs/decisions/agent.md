@@ -84,7 +84,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The catalog holds no secret and no per-pod or per-image label (D34), so the endpoints reveal only counts.
 - **Revisit when:** a user needs the endpoints behind TLS; then serve them with the peer API's certificate and verifier (D16).
 
-## D45: The health and metrics listener binds `[::]:7482` from startup (amends D42; amended by D161)
+## D45: The health and metrics listener binds `[::]:7482` from startup (amends D42; amended by D161, D168)
 
 - **Decision:** `metrics.address` defaults to `"[::]:7482"`. The listener opens before NRI registration and before any reflector connection. `/livez` answers 200 once it listens. `/readyz` answers 200 once every component the agent has started is ready: the config is loaded, the mirror listens, the artifact store is open (D121), the gate is registered with NRI (D41), and on a reflector the reflector API listens, which waits for the node identity (D16). It answers 503 while stopping (D39). A component that a build doesn't have yet adds no condition.
 - **Because:**

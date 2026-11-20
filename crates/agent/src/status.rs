@@ -22,6 +22,7 @@ pub struct Status {
     stopping: AtomicBool,
     mirror: AtomicBool,
     reflector: AtomicBool,
+    nri: AtomicBool,
     metrics: PrometheusHandle,
     runtime: Runtime,
 }
@@ -35,6 +36,7 @@ impl Status {
             stopping: AtomicBool::new(false),
             mirror: AtomicBool::new(false),
             reflector: AtomicBool::new(!reflector),
+            nri: AtomicBool::new(false),
             metrics,
             runtime: Runtime::new(),
         }
@@ -48,6 +50,21 @@ impl Status {
     /// The reflector listens: `/readyz` no longer waits for it.
     pub fn reflector_listening(&self) {
         self.reflector.store(true, Ordering::Relaxed);
+    }
+
+    /// The gate is registered with the runtime's NRI, its `Configure` answered, or no longer is: `/readyz` waits for
+    /// it (D41, D45, D168).
+    pub fn nri_registered(&self, registered: bool) {
+        self.nri.store(registered, Ordering::Relaxed);
+    }
+
+    /// Whether `/readyz` answers 200.
+    #[must_use]
+    pub fn ready(&self) -> bool {
+        !self.stopping.load(Ordering::Relaxed)
+            && self.mirror.load(Ordering::Relaxed)
+            && self.reflector.load(Ordering::Relaxed)
+            && self.nri.load(Ordering::Relaxed)
     }
 
     /// Makes `/readyz` answer 503 from now on (D39).
@@ -66,11 +83,10 @@ pub fn router(status: Arc<Status>) -> Router {
 }
 
 async fn readyz(State(status): State<Arc<Status>>) -> StatusCode {
-    let ready = status.mirror.load(Ordering::Relaxed) && status.reflector.load(Ordering::Relaxed);
-    if status.stopping.load(Ordering::Relaxed) || !ready {
-        StatusCode::SERVICE_UNAVAILABLE
-    } else {
+    if status.ready() {
         StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
     }
 }
 
@@ -170,6 +186,7 @@ mod tests {
     async fn readyz_of_a_reflector_waits_for_the_mirror_and_the_reflector() {
         let status = status(true);
         status.mirror_listening();
+        status.nri_registered(true);
         assert_eq!(
             get(&status, "/readyz").await,
             StatusCode::SERVICE_UNAVAILABLE
@@ -186,6 +203,7 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(get(&status, "/livez").await, StatusCode::OK);
+        status.nri_registered(true);
         status.mirror_listening();
         assert_eq!(get(&status, "/readyz").await, StatusCode::OK);
         status.stop();
@@ -194,5 +212,22 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(get(&status, "/livez").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_is_503_until_the_gate_registers_and_while_it_registers_again() {
+        let status = status(false);
+        status.mirror_listening();
+        assert_eq!(
+            get(&status, "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        status.nri_registered(true);
+        assert_eq!(get(&status, "/readyz").await, StatusCode::OK);
+        status.nri_registered(false);
+        assert_eq!(
+            get(&status, "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }

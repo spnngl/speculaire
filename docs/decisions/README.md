@@ -48,11 +48,11 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D38 [verification](verification.md): upstream `429` pauses discovery to that host until `Retry-After`; fallback and `.sig` tags are probed with `HEAD` (amends D20; amended by D43, D128)
 - D39 [agent](agent.md): shutdown withdraws from reflectors, drains for 10 s, saves the cache, and leaves NRI last (amended by D69, D103)
 - D40 [build](build.md): SemVer, `0.x` until `enforce` ships; fixes for the latest minor only; containerd minors from 2.3 while upstream supports them (amended by D63)
-- D41 [gate](gate.md): `gate.wait` stays under half of containerd's `plugin_request_timeout`; a closed NRI connection re-registers at once (amended by D64)
+- D41 [gate](gate.md): `gate.wait` stays under half of containerd's `plugin_request_timeout`; a closed NRI connection re-registers at once (amended by D64, D168)
 - D42 [agent](agent.md): `/metrics`, `/readyz` and `/livez` listen on `metrics.address`, port 7482, plain HTTP (amended by D45)
 - D43 [verification](verification.md): attestations count only as Sigstore bundles found as OCI referrers; `.att` tags and private GitHub attestations are not supported; `.sig` stays (amends D8, D38; amended by D49, D145, D149)
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation
-- D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror, artifact store, a reflector's API and NRI registration (amends D42; amended by D161)
+- D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror, artifact store, a reflector's API and NRI registration (amends D42; amended by D161, D168)
 - D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13)
 - D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60, D91)
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29; amended by D72)
@@ -68,14 +68,14 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D58 [build](build.md): CI runs the check on the runner with prebuilt tools, and the musl build in the build image; `ci` jobs land with their content (amends D27, D57)
 - D59 [build](build.md): e2e is a Rust test crate of `#[ignore]`d suites on a kind cluster managed by `just e2e <minor>`, with pinned containerd, kind and kubectl (amends D27; amended by D63)
 - D60 [agent](agent.md): config values parse into types that print back canonically; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47; amended by D87, D135, D137, D138)
-- D61 [build](build.md): `speculaire_build_info` exists from startup with empty runtime versions; every build has `protoc` (amends D34; amended by D68)
+- D61 [build](build.md): `speculaire_build_info` exists from startup with empty runtime versions; every build has `protoc` (amends D34; amended by D68, D168)
 - D62 [build](build.md): binaries in `apps/`, libraries in `crates/` as `speculaire-<name>` (amends D57; amended by D156)
 - D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59; amended by D94, D113, D120, D130)
 - D64 [gate](gate.md): the same NRI plugin gates CRI-O; the agent finds its runtime by probing both sockets, and reads CRI-O's NRI keys from `GET /config` on `crio.sock` (amends D9, D41, D54; amended by D84, D86, D90)
 - D65 [gate](gate.md): on CRI-O the image identity is the `ImageRef` annotation (the config digest), policies match every name of the image, and `images.json` changes trigger verification; no pinning (amends D11, D15, D20, D21, D22)
 - D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32; amended by D80, D83, D102, D123, D152)
 - D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7; amended by D88, D102)
-- D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61)
+- D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61; amended by D168)
 - D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53)
 - D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29; amended by D79, D80, D81, D162)
 - D71 [build](build.md): cargo-vet holds every crate version of `Cargo.lock` to an imported audit, a trusted publisher or an exemption, in `deps (deny)` inside `required`; bumps of exempted crates are renewed by hand (amends D27)
@@ -174,5 +174,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D165 [verification](verification.md): `cache.bin` is a versioned, sized, SHA-256-checksummed binary of sorted entries read in place; `load` names why it refuses a file, and a verdict saved under other policies or another trust root loads stale from load under the current ones (amends D31)
 - D166 [gate](gate.md): `speculaire-nri` serves NRI's plugin protocol on its own ttrpc unary subset, answers CreateContainer concurrently up to 256 in flight through a `Handler`, and infers the NRI version as NRI does (amends D9)
 - D167 [gate](gate.md): containerd's `k8s.io` image store is an `ArcSwap` copy kept by `/images/*` events and relists; the snapshot check follows a remapped parent only where the container's snapshot names ID mappings; the chain ID lives in `speculaire-oci` (amends D15)
+- D168 [gate](gate.md): the gate connects to NRI once the verdicts are loaded, reconnects at once then every second, is ready once `Configure` names the node's runtime, stays away from a runtime that is not the node's until restart, and sets the replaced `speculaire_build_info` series to 0 (amends D41, D45, D61, D68)
 
-Next free number: D168.
+Next free number: D169.

@@ -1,7 +1,8 @@
 //! A fake containerd or CRI-O, for tests that run where there is no runtime (the CI runner, macOS): it answers the CRI's
 //! `Version`, `ListImages` and `ListContainers`, containerd's introspection `Plugins`, content `List` and `Info`, images
 //! `List` and `Get`, snapshots `Stat` and events `Subscribe`, and CRI-O's `GET /config` on a Unix socket, which is all
-//! preflight, the registry config, the inventory, the image store, the mirror and the engine ask (D86, D99).
+//! preflight, the registry config, the inventory, the image store, the mirror and the engine ask (D86, D99). On its NRI
+//! socket, it registers the plugin that connects (D168).
 
 use std::convert::Infallible;
 use std::io;
@@ -11,6 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use bytes::Bytes;
 use containerd_client::services::v1::snapshots::{self, StatSnapshotRequest, StatSnapshotResponse};
@@ -139,6 +141,8 @@ pub struct Answers {
     /// The digests of containerd's content `List`, whatever the namespace; `Info` finds nothing: the fake holds no
     /// bytes.
     pub content: Vec<String>,
+    /// `NRI_version` of NRI's `Configure`, empty for none.
+    pub nri_version: String,
     /// The images of containerd's images `List` and `Get`, whatever the namespace: name and target digest. Each target
     /// is an OCI index.
     pub image_store: Vec<(String, String)>,
@@ -175,6 +179,7 @@ impl Answers {
             image_get_unavailable: false,
             snapshots: Vec::new(),
             crio_config: None,
+            nri_version: "v0.12.3".to_owned(),
         }
     }
 
@@ -195,6 +200,7 @@ impl Answers {
             crio_config: Some(
                 "[crio.nri]\nenable_nri = true\nnri_disable_connections = false\n".to_owned(),
             ),
+            nri_version: "v0.12.2".to_owned(),
         }
     }
 }
@@ -226,11 +232,21 @@ impl Fake {
     ///
     /// When the socket cannot be bound.
     pub fn start(socket: &Path, answers: Answers) -> io::Result<Self> {
-        Self::serve(UnixListener::bind(socket)?, answers)
+        Self::serve(UnixListener::bind(socket)?, answers, Protocol::Runtime)
+    }
+
+    /// Listens on `socket` as the runtime's NRI, which exists once this returns: it registers each plugin that
+    /// connects, with the runtime name and version of `answers` at that moment, and holds it until it disconnects.
+    ///
+    /// # Errors
+    ///
+    /// When the socket cannot be bound.
+    pub fn start_nri(socket: &Path, answers: Answers) -> io::Result<Self> {
+        Self::serve(UnixListener::bind(socket)?, answers, Protocol::Nri)
     }
 
     /// Answers on `listener` until dropped.
-    fn serve(listener: UnixListener, answers: Answers) -> io::Result<Self> {
+    fn serve(listener: UnixListener, answers: Answers, protocol: Protocol) -> io::Result<Self> {
         listener.set_nonblocking(true)?;
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let shared = Arc::new(Shared {
@@ -251,8 +267,14 @@ impl Fake {
                 let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
                     return;
                 };
+                let accept = async {
+                    match protocol {
+                        Protocol::Runtime => accept(&listener, served).await,
+                        Protocol::Nri => accept_nri(&listener, &served).await,
+                    }
+                };
                 tokio::select! {
-                    () = accept(&listener, served) => {}
+                    () = accept => {}
                     _ = stopped => {}
                 }
                 // A process another test spawns holds a copy of the socket until it execs, and the socket listens
@@ -315,6 +337,41 @@ impl Drop for Fake {
             // A panic in the fake has no one to tell.
             let _ = thread.join();
         }
+    }
+}
+
+/// What a fake speaks on its socket.
+#[derive(Clone, Copy)]
+enum Protocol {
+    /// The CRI, containerd's services and CRI-O's inspect API.
+    Runtime,
+    /// NRI's runtime side.
+    Nri,
+}
+
+/// Registers each plugin that connects until it disconnects; one that breaks the protocol is dropped.
+async fn accept_nri(listener: &tokio::net::UnixListener, shared: &Shared) {
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let runtime = {
+            let answers = shared
+                .answers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            speculaire_nri::testing::Runtime {
+                name: answers.runtime_name.clone(),
+                version: answers.runtime_version.clone(),
+                nri_version: answers.nri_version.clone(),
+                request_timeout: Duration::from_secs(2),
+            }
+        };
+        tokio::spawn(async move {
+            let (reader, writer) = stream.into_split();
+            // A plugin that breaks the protocol has the test that runs it to tell.
+            let _ = runtime.serve(reader, writer).await;
+        });
     }
 }
 

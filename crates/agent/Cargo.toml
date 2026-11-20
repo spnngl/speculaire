@@ -25,6 +25,7 @@ socket2.workspace = true
 speculaire-artifacts.workspace = true
 speculaire-configure.workspace = true
 speculaire-mirror.workspace = true
+speculaire-nri.workspace = true
 speculaire-oci.workspace = true
 speculaire-pki.workspace = true
 speculaire-reflect.workspace = true
@@ -42,6 +43,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 speculaire-artifacts = { workspace = true, features = ["testing"] }
+speculaire-oracle-harness.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }
 tower.workspace = true
 

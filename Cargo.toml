@@ -18,6 +18,7 @@ speculaire-artifacts = { path = "crates/artifacts" }
 speculaire-fake-runtime = { path = "crates/fake-runtime" }
 speculaire-load = { path = "crates/load" }
 speculaire-mirror = { path = "crates/mirror" }
+speculaire-nri = { path = "crates/nri" }
 speculaire-oci = { path = "crates/oci" }
 speculaire-oracle-harness = { path = "crates/oracle-harness" }
 speculaire-pki = { path = "crates/pki" }

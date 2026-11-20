@@ -1,7 +1,9 @@
-//! The gate on the nodes' real runtimes (D15).
+//! The gate on the nodes' real runtimes (D9, D15, D41, D64, D168): containerd's image store and snapshots, the gate's
+//! registration with the runtime's NRI, and from M6's later steps its decisions.
 //!
 //! containerd's socket of a worker is relayed to this host, one `docker exec` per connection, so the runtime crate's
-//! clients run here against it.
+//! clients run here against it. The tests that restart a worker's runtime or agent run one at a time, on the IPv4 pass
+//! only: nothing in them depends on the family.
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -11,9 +13,10 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use e2e::{Cluster, Runtime};
+use e2e::{Cluster, IpFamily, Runtime};
 use speculaire_oci::chain::of_config;
 use speculaire_oci::index::Index;
 use speculaire_oci::manifest::{Children, children};
@@ -201,4 +204,198 @@ async fn the_image_store_and_the_chain_ids_match_containerds() {
     }
     assert!(checked > 0, "no running container on {node}");
     keeper.abort();
+}
+
+static SERIAL: Mutex<()> = Mutex::new(());
+
+const CONFIG: &str = "/etc/speculaire/config.toml";
+const NRI_SOCKET: &str = "/var/run/nri/nri.sock";
+/// Where a test points `nri.socket`, to hold the agent before its registration.
+const HELD: &str = "/run/speculaire-e2e/nri.sock";
+/// The agent's `/readyz` and `speculaire_nri_connected`, as one line: `200 1` when registered.
+const STATE: &str = "state() { echo \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7482/readyz) \
+                     $(curl -s http://127.0.0.1:7482/metrics | sed -n 's/^speculaire_nri_connected //p')\"; }";
+
+/// A worker that is not a reflector, whose readiness waits for the gate alone, on the IPv4 pass.
+struct Worker {
+    cluster: Cluster,
+    node: String,
+    _serial: MutexGuard<'static, ()>,
+}
+
+impl Worker {
+    fn new() -> Option<Self> {
+        let cluster = Cluster::from_env();
+        if cluster.ip_family() == IpFamily::Dual {
+            return None;
+        }
+        let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let reflectors = cluster.reflectors();
+        let node = cluster
+            .nodes()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .find(|name| !name.contains("control-plane") && !reflectors.contains(name))
+            .unwrap();
+        Some(Self {
+            cluster,
+            node,
+            _serial: serial,
+        })
+    }
+
+    fn sh(&self, script: &str) -> String {
+        self.cluster
+            .exec(&self.node, &["sh", "-c", script])
+            .unwrap()
+    }
+
+    /// Restarts the node's runtime, and returns each change of the agent's state from before the restart until the
+    /// agent is registered again, as `<ms since the restart> <readyz> <speculaire_nri_connected>`.
+    fn restart_runtime(&self) -> Vec<String> {
+        let service = match self.cluster.runtime() {
+            Runtime::Containerd => "containerd",
+            Runtime::Crio => "crio",
+        };
+        // Polled on the node: a registration takes milliseconds, less than an exec from the host.
+        let changes = self.sh(&format!(
+            "{STATE}
+             last=$(state); echo \"0 $last\"; away=0
+             start=$(date +%s%N); end=$((start + 30000000000))
+             systemctl restart {service} &
+             while [ \"$(date +%s%N)\" -lt \"$end\" ]; do
+                 s=$(state)
+                 if [ \"$s\" != \"$last\" ]; then echo \"$((($(date +%s%N) - start) / 1000000)) $s\"; last=$s; fi
+                 if [ \"$s\" = '200 1' ]; then [ $away = 1 ] && break; else away=1; fi
+                 sleep 0.02
+             done
+             wait"
+        ));
+        self.wait_runtime();
+        changes.lines().map(str::to_owned).collect()
+    }
+
+    /// Waits until the runtime answers, so that kubelet and the next suite find it.
+    fn wait_runtime(&self) {
+        let check = match self.cluster.runtime() {
+            Runtime::Containerd => "crictl version",
+            Runtime::Crio => "crictl version && crio status config | grep -q nri",
+        };
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while !self
+            .cluster
+            .exec_output(&self.node, &["sh", "-c", check])
+            .is_ok_and(|o| o.success)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{}: the runtime is not back",
+                self.node
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    /// The agent's `speculaire_build_info` series, each as its labels and value.
+    fn build_info(&self) -> Vec<String> {
+        self.cluster
+            .exec(
+                &self.node,
+                &["curl", "-sf", "http://127.0.0.1:7482/metrics"],
+            )
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("speculaire_build_info{"))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// Puts `nri.socket` back and restarts the agent with an empty journal, even when the test fails.
+struct Held<'a>(&'a Worker);
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let worker = self.0;
+        worker.sh(&format!(
+            "sed -i 's|^socket = \"{HELD}\"$|#socket = \"{NRI_SOCKET}\"|' {CONFIG}; rm -rf {}",
+            parent(HELD)
+        ));
+        worker.cluster.reset_agent(&worker.node).unwrap();
+    }
+}
+
+fn parent(path: &str) -> &str {
+    path.rsplit_once('/').unwrap().0
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn the_gate_registers_again_after_the_runtime_restarts() {
+    let Some(worker) = Worker::new() else { return };
+    let changes = worker.restart_runtime();
+    eprintln!("{}: {changes:?}", worker.node);
+    let states: Vec<&str> = changes
+        .iter()
+        .map(|c| c.split_once(' ').unwrap().1)
+        .collect();
+    assert_eq!(states.first(), Some(&"200 1"), "{changes:?}");
+    assert_eq!(states.last(), Some(&"200 1"), "{changes:?}");
+    // A state is two requests, which a change can fall between: only the states either side are sure.
+    assert!(states.contains(&"503 0"), "{changes:?}");
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn readyz_is_503_until_the_gate_registers_and_build_info_names_the_runtime() {
+    let Some(worker) = Worker::new() else { return };
+    // The agent starts on a socket nothing listens on yet, which the test then links to NRI's.
+    worker.sh(&format!(
+        "mkdir -p {dir} && sed -i 's|^#socket = \"{NRI_SOCKET}\"$|socket = \"{HELD}\"|' {CONFIG} && \
+         grep -q '^socket = \"{HELD}\"$' {CONFIG}",
+        dir = parent(HELD)
+    ));
+    let held = Held(&worker);
+    worker.sh("systemctl restart speculaire");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(worker.sh(&format!("{STATE}; state")).trim(), "503 0");
+    let version = env!("CARGO_PKG_VERSION");
+    let empty = format!(r#"version="{version}",runtime="",runtime_version="",nri_version=""}}"#);
+    assert_eq!(worker.build_info(), [format!("{empty} 1")]);
+
+    worker.sh(&format!("ln -s {NRI_SOCKET} {HELD}"));
+    let start = Instant::now();
+    worker.cluster.wait_ready(&worker.node).unwrap();
+    eprintln!(
+        "{}: ready {:?} after NRI's socket appeared",
+        worker.node,
+        start.elapsed()
+    );
+    assert_eq!(worker.sh(&format!("{STATE}; state")).trim(), "200 1");
+    let release = worker.cluster.release();
+    let runtime = worker.cluster.runtime();
+    let info = worker.build_info();
+    assert!(info.contains(&format!("{empty} 0")), "{info:?}");
+    let named: Vec<&String> = info.iter().filter(|s| s.ends_with(" 1")).collect();
+    let [named] = named.as_slice() else {
+        panic!("not one series at 1: {info:?}")
+    };
+    let prefix = format!(
+        r#"version="{version}",runtime="{}",runtime_version=""#,
+        runtime.scheme()
+    );
+    let rest = named
+        .strip_prefix(&prefix)
+        .unwrap_or_else(|| panic!("{named}"));
+    let (runtime_version, nri_version) = rest
+        .strip_suffix("\"} 1")
+        .and_then(|r| r.split_once(r#"",nri_version=""#))
+        .unwrap_or_else(|| panic!("{named}"));
+    assert_eq!(runtime_version.trim_start_matches('v'), release, "{named}");
+    // CRI-O 1.35 and 1.36 announce no NRI version, and NRI infers none from a version without a `v` (D64, D166).
+    let unknown =
+        runtime == Runtime::Crio && (release.starts_with("1.35.") || release.starts_with("1.36."));
+    assert_eq!(nri_version.is_empty(), unknown, "{named}");
+    drop(held);
 }

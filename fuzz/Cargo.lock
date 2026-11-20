@@ -2080,6 +2080,7 @@ dependencies = [
  "speculaire-artifacts",
  "speculaire-configure",
  "speculaire-mirror",
+ "speculaire-nri",
  "speculaire-oci",
  "speculaire-pki",
  "speculaire-reflect",

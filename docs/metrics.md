@@ -67,13 +67,13 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 | `speculaire_gate_total` | counter | `mode` = `audit`\|`enforce`; `result` = `allow`\|`rejected`\|`unverifiable`\|`pending`\|`unmatched`\|`exempt`; `stale` = `true`\|`false` | Gate decisions (D18, D21, D23) | M6 |
 | `speculaire_gate_seconds` | histogram | `path` = `nri`\|`annotation` | `CreateContainer` handling time (target: p99 under 5 ms on a cached verdict) | M6 |
 | `speculaire_identity_path` | gauge | `path` = `nri`\|`annotation` | 1 for the image-identity path in use (D15) | M6 |
-| `speculaire_nri_connected` | gauge | — | 1 while registered with the runtime's NRI (D41, D64) | M6 |
+| `speculaire_nri_connected` | gauge | — | 1 while registered with the runtime's NRI: from its `Configure` until the connection ends (D41, D64, D168) | |
 
 ## Process
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `speculaire_build_info` | gauge | `version`, `runtime` = `containerd`\|`cri-o`, `runtime_version`, `nri_version` | Always 1; the last three are empty until NRI's `Configure` (D68) |
+| `speculaire_build_info` | gauge | `version`, `runtime` = `containerd`\|`cri-o`, `runtime_version`, `nri_version` | 1 for the versions in use; the last three are empty until NRI's `Configure`, and a series a later `Configure` replaced is 0 (D68, D168); `nri_version` stays empty when NRI gives none and infers none, as on CRI-O 1.35 and 1.36 |
 | `speculaire_runtime_alive_tasks` | gauge | — | Tasks alive in the agent's async runtime, read at each scrape |
 | `speculaire_runtime_global_queue_depth` | gauge | — | Tasks waiting in the async runtime's global queue, read at each scrape: above zero for long, the workers cannot keep up |
 | `speculaire_config_reload_failures_total` | counter | — | Reloads rejected, of the agent's config or of the node's registry config, which the previous one then serves, and registry config reloads that left a credential, certificate or key file out, once per reload, and reads of the kubelet certificate or the cluster CA that failed, once per file (D30, D91, D92, D95, D154) |

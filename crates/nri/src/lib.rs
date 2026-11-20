@@ -6,6 +6,8 @@ mod mux;
 mod plugin;
 mod queue;
 mod sync;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod ttrpc;
 pub mod version;
 

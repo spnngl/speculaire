@@ -221,3 +221,23 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - On the fake containerd, a create, a retag and a delete each showed in the store within 12 ms; an image created while the event stream was cut was found after it returned.
   - On kind with containerd 2.3.7 (overlayfs), the store listed the worker's 28 images as `ctr -n k8s.io images ls` does, and each running container's snapshot parent equalled its image's chain ID with one `Stat`; the suite took 0.8 s. The configs of `kindnetd` (an OCI index, 4 layers) and `kube-proxy-arm64` (a Docker manifest, 3 layers) are recorded in `fuzz/seeds/image_config/` with their parents.
 - **Revisit when:** containerd 2.3 reaches end of life (D15), or containerd's image events carry the target.
+
+## D168: The gate registers once the verdicts are loaded, is ready once `Configure` names the node's runtime, and keeps one `speculaire_build_info` series at 1 (amends D41, D45, D61, D68)
+
+- **Decision:**
+  - **Connection:** once the verdicts are loaded and the mirror listens, `crates/agent/src/gate.rs` connects to `nri.socket` and plays `speculaire_nri::serve` on it. When the session ends, it connects again at once if the session lasted 1 s or more, else 1 s after the last attempt, until it succeeds (D41). A socket that refuses warns once, then logs at debug until it accepts. On SIGTERM the gate disconnects last (D39 step 6).
+  - **Ready:** `/readyz` counts the gate as ready from the moment it answers a `Configure` that names the node's runtime, without waiting for `Synchronize`, and as not ready from the moment the session ends. `speculaire_nri_connected` follows the same state.
+  - **Runtime mismatch (D64):** a `Configure` whose `runtime_name` is not the detected runtime's (`containerd` or `cri-o`, as `speculaire_runtime::detect::Runtime::name` gives them) logs an error naming both, closes the connection, and the gate does not connect again until the agent restarts.
+  - **Request timeout:** a `Configure` whose request timeout is at most twice `gate.wait` logs an error naming both values and keeps the connection. Preflight and `check-config` stay the check that refuses (D41, D64); `Configure` reports what the runtime actually gives, which can differ when the runtime's config changed after the agent started.
+  - **`speculaire_build_info`:** each `Configure` sets the series with the runtime, `runtime_version` and `nri_version` it carries to 1, and the series it named before, first the empty one of D61, to 0. `nri_version` is Configure's, else the one NRI's inference gives (D166), else empty, as on CRI-O 1.35 and 1.36. Queries select the series at 1.
+  - Until the gate checks images, it allows every container.
+  - Where no runtime runs (`apps/speculaire/tests/agent.rs`, `just load`, `just conformance`), the fake runtime's NRI registers the gate: `Fake::start_nri` plays NRI's runtime side with `speculaire_nri::testing`, behind the crate's `testing` feature (D86, D87).
+- **Because:**
+  - The recorder cannot drop a series once registered (`metrics-exporter-prometheus` 0.18.3 keeps every key it has seen), so D61's empty series could only stay at 1 or go to 0; a value of 0 keeps `speculaire_build_info == 1` true for one series per agent.
+  - `Synchronize` came tens of seconds after `Configure` after a containerd restart (D9); waiting for it would hold `/readyz` at 503 for no gate decision, since CreateContainer reaches a configured plugin.
+  - Retrying a runtime that names another runtime would retry forever against a node whose detection already disagrees with NRI; a restart redoes the detection.
+- **Measured (M6 step 05, arm64):**
+  - Against `speculaire-oracle nri-runtime` (NRI v0.12.3), the gate registered again 459 to 468 ms after a runtime came back, and within the 2 s the test allows after the oracle closed its plugins.
+  - On kind, `/readyz` and `speculaire_nri_connected` read every 20 ms on a worker: `systemctl restart containerd` (2.4) gave 503 from 36 ms and 200 again at 894 ms; `systemctl restart crio` (1.37) 503 from 68 ms and 200 again at 878 ms. An agent held from its NRI socket answered 503, then 200 about 630 ms after the socket appeared, on both.
+  - The gate is 205 lines besides tests, `speculaire_nri::testing` 102.
+- **Revisit when:** the recorder can remove a series, or NRI makes plugins wait for `Synchronize` before CreateContainer.

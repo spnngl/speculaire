@@ -35,6 +35,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{self, Config, PeerAddress, Role};
 use crate::followed::Followed;
+use crate::gate::Gate;
 use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
@@ -163,6 +164,13 @@ async fn serve(
         (policy.subscribe(), trust.subscribe()),
     )?;
     status.mirror_listening();
+    // The gate registers once the verdicts are loaded; `/readyz` waits for it (D41, D45).
+    let gate = Gate::start(
+        config.nri.socket.get().get().to_owned(),
+        node.runtime(),
+        config.gate.wait.get(),
+        Arc::clone(&status),
+    );
     let mut reflector = None;
     open_reflector(&config, &identity, &mut reflector, &status).await;
     let mut sharing = None;
@@ -213,6 +221,7 @@ async fn serve(
             }
         }
         verdicts.set_stale_max(config.verify.stale_max.get());
+        gate.set_wait(config.gate.wait.get());
         if config.config.poll_interval.get() != period {
             period = config.config.poll_interval.get();
             poll = polls(period);
@@ -226,6 +235,8 @@ async fn serve(
     // The runtime's followers end as the teardown cuts them, without a warning.
     node.stop();
     shut_down(&config, mirror, sharing, reflector).await;
+    // D39, step 6.
+    gate.stop().await;
     // An error means the server already ended; its result says why.
     let _ = stop.send(());
     server
@@ -235,7 +246,7 @@ async fn serve(
 }
 
 /// D39, steps 2 to 4 for peers, and a stopping reflector closes the streams of its agents. The mirror's part of steps 2
-/// and 4, and steps 5 and 6, arrive with the cache and the gate.
+/// and 4, and step 5, arrive with the cache.
 async fn shut_down(
     config: &Config,
     mirror: Mirror,
