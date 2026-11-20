@@ -2099,6 +2099,7 @@ dependencies = [
 name = "speculaire-artifacts"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "http",
  "http-body-util",
  "hyper",

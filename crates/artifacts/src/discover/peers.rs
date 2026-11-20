@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use bytes::Bytes;
 use speculaire_mirror::request::Kind as Wanted;
 use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::reference::Digest;
@@ -26,7 +27,7 @@ pub trait Local: Send + Sync {
         &'a self,
         digest: &'a Digest,
         max: u64,
-    ) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Option<Bytes>> + Send + 'a>>;
 }
 
 impl<C: Content> Local for C {
@@ -34,17 +35,17 @@ impl<C: Content> Local for C {
         &'a self,
         digest: &'a Digest,
         max: u64,
-    ) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Option<Bytes>> + Send + 'a>> {
         Box::pin(async move {
             let blob = self.open(digest).await.ok().flatten()?;
-            blob.read_all(max).await.ok().map(|bytes| bytes.to_vec())
+            blob.read_all(max).await.ok()
         })
     }
 }
 
 impl Discovery {
     /// The manifest of `root` from the node's content, else the store or peers.
-    pub(super) async fn held(&self, root: &Digest) -> Result<Option<Vec<u8>>, Error> {
+    pub(super) async fn held(&self, root: &Digest) -> Result<Option<Bytes>, Error> {
         if let Some(bytes) = self.local.manifest(root, self.limits.manifest).await {
             return Ok(Some(bytes));
         }
@@ -168,9 +169,9 @@ impl Discovery {
         wanted: Wanted,
         digest: &Digest,
         max: u64,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    ) -> Result<Option<Bytes>, Error> {
         if let Some(bytes) = self.store.read(digest).await? {
-            return Ok(Some(bytes));
+            return Ok(Some(bytes.into()));
         }
         let Some(blob) = self.peers.whole_up_to(wanted, digest, max).await else {
             metrics::fetched_from_peers(Outcome::NotFound);
@@ -179,7 +180,7 @@ impl Discovery {
         match blob.read_all(max).await {
             Ok(bytes) => {
                 metrics::fetched_from_peers(Outcome::Ok);
-                Ok(Some(bytes.to_vec()))
+                Ok(Some(bytes))
             }
             Err(e) => {
                 warn!(%digest, error = %e, "content from peers cannot be read");

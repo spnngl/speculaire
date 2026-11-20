@@ -14,6 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use http::header::{ACCEPT, CONTENT_TYPE, LINK};
 use http::{HeaderValue, Method, StatusCode};
 use http_body_util::{BodyExt as _, Limited};
@@ -176,7 +177,7 @@ impl Discovery {
     /// neither holds it.
     pub async fn children(&self, root: &Digest) -> Option<Vec<Digest>> {
         let bytes = match self.store.read(root).await {
-            Ok(Some(bytes)) => bytes,
+            Ok(Some(bytes)) => bytes.into(),
             Ok(None) | Err(_) => self.local.manifest(root, self.limits.manifest).await?,
         };
         let index = Index::parse(&bytes).ok();
@@ -219,7 +220,7 @@ impl Discovery {
             self.nearby(&discovering, root, index.as_deref()).await?
         };
         if artifacts.is_empty() {
-            let (upstream, fetched) = self.root(root, names, index.as_deref()).await?;
+            let (upstream, fetched) = self.root(root, names, index.as_ref()).await?;
             index = fetched;
             artifacts = self
                 .upstream(&discovering, &upstream, root, index.as_deref())
@@ -291,8 +292,8 @@ impl Discovery {
         &self,
         root: &Digest,
         names: &[String],
-        held: Option<&[u8]>,
-    ) -> Result<(Upstream, Option<Vec<u8>>), Error> {
+        held: Option<&Bytes>,
+    ) -> Result<(Upstream, Option<Bytes>), Error> {
         let text = root.to_string();
         let mut limited: Option<Paused> = None;
         for name in names {
@@ -348,8 +349,8 @@ impl Discovery {
         upstream: &Upstream,
         path: String,
         root: &Digest,
-        held: Option<&[u8]>,
-    ) -> Result<Fetched<Option<Vec<u8>>>, Paused> {
+        held: Option<&Bytes>,
+    ) -> Result<Fetched<Option<Bytes>>, Paused> {
         let Some(response) = self.send(upstream, Method::HEAD, &path, MANIFESTS).await? else {
             return Ok(Fetched::Failed);
         };
@@ -368,7 +369,7 @@ impl Discovery {
             return Ok(Fetched::Got(None));
         }
         if let Some(bytes) = held {
-            return Ok(Fetched::Got(Some(bytes.to_vec())));
+            return Ok(Fetched::Got(Some(bytes.clone())));
         }
         Ok(match self.manifest(upstream, path, Some(root)).await? {
             Fetched::Got(bytes) => Fetched::Got(Some(bytes)),
@@ -648,7 +649,7 @@ impl Discovery {
     }
 
     /// The tag at `path`, asked by `HEAD` and fetched only when it exists (D38).
-    async fn tag(&self, upstream: &Upstream, path: String) -> Result<Fetched<Vec<u8>>, Paused> {
+    async fn tag(&self, upstream: &Upstream, path: String) -> Result<Fetched<Bytes>, Paused> {
         let Some(response) = self.send(upstream, Method::HEAD, &path, MANIFESTS).await? else {
             return Ok(Fetched::Failed);
         };
@@ -667,7 +668,7 @@ impl Discovery {
         upstream: &Upstream,
         path: String,
         digest: Option<&Digest>,
-    ) -> Result<Fetched<Vec<u8>>, Paused> {
+    ) -> Result<Fetched<Bytes>, Paused> {
         let Some(response) = self.send(upstream, Method::GET, &path, MANIFESTS).await? else {
             return Ok(Fetched::Failed);
         };
@@ -694,7 +695,7 @@ impl Discovery {
         upstream: &Upstream,
         response: Response,
         digest: Option<&Digest>,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Bytes> {
         if response.status != StatusCode::OK {
             metrics::fetched(&upstream.label, outcome(response.status));
             return None;
@@ -809,10 +810,10 @@ fn outcome(status: StatusCode) -> Outcome {
     }
 }
 
-async fn read(body: Incoming, max: u64) -> Option<Vec<u8>> {
+async fn read(body: Incoming, max: u64) -> Option<Bytes> {
     let max = usize::try_from(max).unwrap_or(usize::MAX);
     let collected = Limited::new(body, max).collect().await.ok()?;
-    Some(collected.to_bytes().to_vec())
+    Some(collected.to_bytes())
 }
 
 /// The path below the API root `root` of a link to the next page, relative or absolute.
