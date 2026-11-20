@@ -1,0 +1,155 @@
+{
+  "images": [
+    {
+      "id": "8e13ccc0aaa682502a49e5f98b88acf75fbf5f724875058b3e7a78b1f38a11e7",
+      "repoTags": [
+        "docker.io/kindest/kindnetd:v20260820-69b56db7"
+      ],
+      "repoDigests": [
+        "docker.io/kindest/kindnetd@sha256:526969f0a1a7a788a7a96f53a4ad3b51607bde7bb2841edf52a02916e8d52650",
+        "docker.io/kindest/kindnetd@sha256:aa67f22ca96113af6eb1c0ddbd2856c6ec6cd2c9f60e7250bb73befac593e372"
+      ],
+      "size": "99659645",
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "0771a8a05619f4bb6f4c8484f942f509b21a04ebe56ee26d17a3006e250bfd46",
+      "repoTags": [
+        "docker.io/kindest/local-path-provisioner:v20260820-69b56db7"
+      ],
+      "repoDigests": [
+        "docker.io/kindest/local-path-provisioner@sha256:7f1d529e9b269bbde7e1f0c233cf1e49abaa8fd4e8e8304f551cfbf812c0f6d8",
+        "docker.io/kindest/local-path-provisioner@sha256:fdb5360219dcca6acc7967326f9e04c89b038e2c1e924463b2a41cad2dc752ab"
+      ],
+      "size": "52958553",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "ad4f11f7c85f87c0a6d6c0fe492ad53f9cdcff6e8c88b881360c70eff701c67b",
+      "repoTags": [
+        "docker.io/library/busybox:1.37",
+        "mirror.gcr.io/library/busybox:1.37"
+      ],
+      "repoDigests": [
+        "docker.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec",
+        "docker.io/library/busybox@sha256:d82c2ab94640ded77cf76514ce6a84870761105058a4a9e51b05a8a79be97a6c",
+        "mirror.gcr.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec",
+        "mirror.gcr.io/library/busybox@sha256:d82c2ab94640ded77cf76514ce6a84870761105058a4a9e51b05a8a79be97a6c"
+      ],
+      "size": "4352992",
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "fbccbf70a429fb9ce1cdb13a40ed96b16272ef763dafe050b2c0d121dd29811b",
+      "repoTags": [
+        "registry.k8s.io/coredns/coredns:v1.14.6"
+      ],
+      "repoDigests": [
+        "registry.k8s.io/coredns/coredns@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea",
+        "registry.k8s.io/coredns/coredns@sha256:d5cc132a34e034ecfd2d4c73c5bf341e5d8af9a0ba46bd7619d9448beb27e7a2"
+      ],
+      "size": "73021099",
+      "username": "nonroot",
+      "pinned": false
+    },
+    {
+      "id": "c2e426bbd1cd63b4d1cbdca2eba371a0a2e64b6934dcc48c51a62d488fe64fe8",
+      "repoTags": [
+        "registry.k8s.io/etcd:3.7.0-0"
+      ],
+      "repoDigests": [
+        "registry.k8s.io/etcd@sha256:141de174189a9097c2c75c51cb64b4a4d3d2fcb43e5115b854243611ebd0212c",
+        "registry.k8s.io/etcd@sha256:6ecefbe2510c4a30573a62a4d6dd175acf881ca67003fcd91849a16df7a724d5"
+      ],
+      "size": "57633745",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "6003d52023b9d748f6ec86cbb10510432b2b73245bfc88b2e481739017f52ac9",
+      "repoTags": [
+        "registry.k8s.io/kube-apiserver:v1.37.0"
+      ],
+      "repoDigests": [
+        "registry.k8s.io/kube-apiserver@sha256:75f6e9a3a617c74c3974865d0803770d05925cfde413fb473817c791bb5713ac",
+        "registry.k8s.io/kube-apiserver@sha256:d1045e5c6d2f016797d22143eba7502e1bb712a4681836a7c35763a9c192dd70"
+      ],
+      "size": "97079663",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "b1ad0e33c901244c9636e4bff3a6a22a18a7a2a12012a38e4c91930b673b0a01",
+      "repoTags": [
+        "registry.k8s.io/kube-controller-manager:v1.37.0"
+      ],
+      "repoDigests": [
+        "registry.k8s.io/kube-controller-manager@sha256:601d0b50a3793f2e583adaa770697786360e648acb234274c511b59e60f681d6",
+        "registry.k8s.io/kube-controller-manager@sha256:997c997924eb8574f63f204a0b0af133aaf33c10df84009c32d34037f4e0e077"
+      ],
+      "size": "85087448",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "550b682d81d4146e574fda7df56840e8deb14fab18cf1b96734259888944e1a0",
+      "repoTags": [
+        "registry.k8s.io/kube-proxy:v1.37.0"
+      ],
+      "repoDigests": [
+        "registry.k8s.io/kube-proxy@sha256:12095938d8aae34229c2d41c7b9fa584a6c56cf27072d1d96856ecd5e3b2acdf",
+        "registry.k8s.io/kube-proxy@sha256:77bf2b08ff8ac1a4a446cffaa85e79e87379c8cb54fcf60f2cb6c62c966829c8"
+      ],
+      "size": "84535484",
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "384eabc4fe526377d6dc985f482a20bb1b00f40948361bbac1eb163424996121",
+      "repoTags": [
+        "registry.k8s.io/kube-scheduler:v1.37.0"
+      ],
+      "repoDigests": [
+        "registry.k8s.io/kube-scheduler@sha256:174e5f607a6fb2c9446391143dd133b9d9cddbd3962dea826505d02c5a9d5783",
+        "registry.k8s.io/kube-scheduler@sha256:a27622f132aa09cf2461ba077894a070c0186ec607366d14e805912d4804d11f"
+      ],
+      "size": "59135192",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "3884a337192318652b28de0de1aeb07f446a14f220feb5066f03e93f23ea3b60",
+      "repoTags": [
+        "registry.k8s.io/pause:3.10.2"
+      ],
+      "repoDigests": [
+        "registry.k8s.io/pause@sha256:a433214620b407678934ebd69690a9ed6066247231eacfba181fab20dbc3dbf1",
+        "registry.k8s.io/pause@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+      ],
+      "size": "520240",
+      "uid": {
+        "value": "65535"
+      },
+      "username": "",
+      "pinned": true
+    }
+  ]
+}

@@ -36,7 +36,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** CRI silently bypasses it through the local-pull fallback, through imports, and through `IfNotPresent` when the image is cached. The gate covers all of these cases.
 - **Revisit when:** users want unsigned images rejected before download.
 
-## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65, D81, D86, D167)
+## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65, D81, D86, D167, D169)
 
 - **Decision:**
   - containerd 2.3 is the minimum. 2.4+ is the main target, and new features land there first.
@@ -109,7 +109,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** a node that mirrors but never gates looks protected and is not. `audit` keeps the mirror and the verdicts, and the gap stays visible in `speculaire_gate_total{mode="audit"}`.
 - **Revisit when:** users ask for a mirror-only deployment; then add an explicit `gate.enabled = false` that logs a warning at startup and sets a metric.
 
-## D64: The same NRI plugin gates CRI-O; the agent finds its runtime by its socket (amends D9, D41, D54; amended by D84, D86, D90)
+## D64: The same NRI plugin gates CRI-O; the agent finds its runtime by its socket (amends D9, D41, D54; amended by D84, D86, D90, D169)
 
 - **Decision:**
   - **One plugin:** D9's `nri` crate serves containerd and CRI-O with no runtime-specific code in the NRI path. `Configure.NRI_version` may be empty.
@@ -127,7 +127,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Revisit when:** CRI-O fills `Container.image`, or a node runs both runtimes.
 
 
-## D65: On CRI-O the image identity is CRI-O's image ID, read from its annotations (amends D11, D15, D20, D21, D22)
+## D65: On CRI-O the image identity is CRI-O's image ID, read from its annotations (amends D11, D15, D20, D21, D22; amended by D169)
 
 - **Decision:**
   - **Identity:** in `CreateContainer` on CRI-O, the *image identity* is the `io.kubernetes.cri-o.ImageRef` annotation, CRI-O's image ID, which is the config digest of the platform manifest the image was pulled by. The gate reads it from the NRI request and makes no lookup.
@@ -241,3 +241,20 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - On kind, `/readyz` and `speculaire_nri_connected` read every 20 ms on a worker: `systemctl restart containerd` (2.4) gave 503 from 36 ms and 200 again at 894 ms; `systemctl restart crio` (1.37) 503 from 68 ms and 200 again at 878 ms. An agent held from its NRI socket answered 503, then 200 about 630 ms after the socket appeared, on both.
   - The gate is 205 lines besides tests, `speculaire_nri::testing` 102.
 - **Revisit when:** the recorder can remove a series, or NRI makes plugins wait for `Synchronize` before CreateContainer.
+
+## D169: The gate reads the image identity through one `Identity`, chosen by the runtime at `Configure`; on CRI-O it maps the image ID to the image's listed manifests (amends D15, D64, D65)
+
+- **Decision:**
+  - **Trait:** `speculaire_runtime::identity::Identity::identify(&Container)` gives an `Identified`: `Listed { digest, name }`, `Image(Arc<Image>)` or `Unknown(reason)`. `NodeIdentity::of(runtime)` gives one enum, as `NodeContent` is, because the trait is async for step 07's `annotation` path and so has no `dyn` form (D90). The gate builds it once, so its copy of the image list outlives a connection, and sets `speculaire_identity_path{path}` to 1 at `Configure`, with `path` `nri` or `image_id` from `NodeIdentity::path()`. CRI-O logs no identity warning.
+  - **Choice:** by runtime name, not NRI version: containerd gets `nri`, CRI-O gets `image_id` whatever NRI version it announces. Step 07 adds `annotation`, for containerd below NRI v0.12.2, and with it the version check at `Configure`.
+  - **`nri`:** the identity is `Container.image.digest`, the image's target digest, and the name is `Container.image.name`. A request without both is `Unknown("no image identity in the request")`.
+  - **`image_id`:** the image ID of `io.kubernetes.cri-o.ImageRef` selects the image in a copy of CRI-O's image list, an `ArcSwap` map that `NodeIdentity::keep(&List)` replaces at each list change; the lookup allocates nothing. The identity is every repository digest of the image, each digest once; the names are every repository it has by a repository digest or a tag. An image ID the list lacks is `Unknown("image ID is not a config digest")`. The verifier records no config digest: CRI-O's own list stands for D65's "platform manifest has that config digest".
+  - **Verdict:** `Verdicts::identified(&identified, &policies, root)` gives each listed manifest the worst verdict of the names' policy groups (D151). The image is `Allow` when one manifest is; otherwise it has the first of `Pending`, `Rejected`, `Unverifiable` that a manifest has. No manifest, or no identity, is `Unverifiable` with the reason above. Names no policy matches give no verdict, which step 08 decides on.
+- **Because:**
+  - **Measured** (M6 step 06, arm64, kind, requests recorded by an NRI plugin into `crates/runtime/tests/recorded/`): containerd 2.4.2 announced NRI v0.12.3. For a pod by `busybox:1.37` and one by its linux/arm64 manifest digest, `Container.image` carried the same `digest`, the index `sha256:a7dbc319…`, and the same `name`, `docker.io/library/busybox:1.37`, with `config_digest` the image ID. containerd fills them from the image the CRI image's first reference names (v2.4.2 `internal/cri/server/container_create.go:329-331`, `helpers.go:169-175`), so the digest is the index of a multi-platform image and the name a tag where one exists, not the pod's string. The index is a repository digest containerd lists for that image, so the engine keys verdicts by it (D151).
+  - CRI-O 1.37.2 announced NRI v0.12.2, which has `Container.image`, but left it empty (v1.37.2 `internal/nri/container.go:53-76`). CRI-O 1.35 and 1.36 announce no version that NRI's inference reads (D166). The NRI version tells neither apart; the runtime name tells both.
+  - On CRI-O, busybox pulled by `docker.io/library/busybox:1.37` and `mirror.gcr.io/library/busybox:1.37` was one image ID with four repository digests over two digests, and two names. Each pod's request named the same `ImageRef`.
+  - Any manifest of the image yields the same root filesystem (D65), so an `Allow` on one allows the image. A rejection is final and tells its reason, so it comes before an unverifiable verdict that retries.
+  - The runtime already decides what runs; its image list is no wider trust than the image it runs.
+- **Cost:** with `insecure_allow_unpredictable_image_contents = "true"`, an image ID that is a TOC digest still maps to the image's manifests, so the gate no longer makes that image `Unverifiable` as D65 did (`docs/security.md`, `docs/TODECIDE.md`). `Verdicts::identified` parses each name and allocates; step 08 measures it.
+- **Revisit when:** CRI-O fills `Container.image`, or containerd names the platform manifest in `Container.image.digest`.

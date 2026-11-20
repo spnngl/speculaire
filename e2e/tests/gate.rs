@@ -238,6 +238,8 @@ impl Worker {
             .map(|n| n.name)
             .find(|name| !name.contains("control-plane") && !reflectors.contains(name))
             .unwrap();
+        // A suite run first, right after the cluster came up, may find the agent not yet registered.
+        cluster.wait_ready(&node).unwrap();
         Some(Self {
             cluster,
             node,
@@ -299,6 +301,12 @@ impl Worker {
 
     /// The agent's `speculaire_build_info` series, each as its labels and value.
     fn build_info(&self) -> Vec<String> {
+        self.series("speculaire_build_info")
+    }
+
+    /// The agent's series of metric `name`, each as its labels and value.
+    fn series(&self, name: &str) -> Vec<String> {
+        let prefix = format!("{name}{{");
         self.cluster
             .exec(
                 &self.node,
@@ -306,7 +314,7 @@ impl Worker {
             )
             .unwrap()
             .lines()
-            .filter_map(|line| line.strip_prefix("speculaire_build_info{"))
+            .filter_map(|line| line.strip_prefix(&prefix))
             .map(str::to_owned)
             .collect()
     }
@@ -398,4 +406,27 @@ fn readyz_is_503_until_the_gate_registers_and_build_info_names_the_runtime() {
         runtime == Runtime::Crio && (release.starts_with("1.35.") || release.starts_with("1.36."));
     assert_eq!(nri_version.is_empty(), unknown, "{named}");
     drop(held);
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn the_gate_reads_the_image_identity_from_nri_on_containerd_and_from_the_image_id_on_cri_o() {
+    let Some(worker) = Worker::new() else { return };
+    // containerd 2.3 takes step 07's `annotation` path.
+    let release = worker.cluster.release();
+    let path = match worker.cluster.runtime() {
+        Runtime::Containerd if release.starts_with("2.3.") => return,
+        Runtime::Containerd => "nri",
+        Runtime::Crio => "image_id",
+    };
+    assert_eq!(
+        worker.series("speculaire_identity_path"),
+        [format!(r#"path="{path}"}} 1"#)]
+    );
+    // No warning of an identity gap, which the `annotation` path alone has (D15, D169).
+    let warnings = worker.sh("journalctl -u speculaire -p warning -o cat --no-pager");
+    assert!(
+        !warnings.to_lowercase().contains("image identity"),
+        "{warnings}"
+    );
 }

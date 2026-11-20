@@ -29,9 +29,9 @@ impl Listed {
 
     /// Gives `apply` the keys of the tags listed with a repository digest in their repository, which the peer API
     /// resolves (D123, D127), then again at each change, until the runtime's list ends.
-    pub async fn tag_keys(mut self, mut apply: impl FnMut(HashSet<Digest>)) {
-        loop {
-            let keys = self.borrow().as_ref().map_or_else(HashSet::new, |list| {
+    pub async fn tag_keys(self, mut apply: impl FnMut(HashSet<Digest>)) {
+        self.each(|list| {
+            apply(list.map_or_else(HashSet::new, |list| {
                 list.images()
                     .flat_map(|image| {
                         image
@@ -42,8 +42,15 @@ impl Listed {
                             .cloned()
                     })
                     .collect()
-            });
-            apply(keys);
+            }));
+        })
+        .await;
+    }
+
+    /// Gives `apply` the list, `None` until it is first read, then again at each change, until the runtime's list ends.
+    pub async fn each(mut self, mut apply: impl FnMut(Option<&List>)) {
+        loop {
+            apply(self.borrow().as_ref());
             if self.0.changed().await.is_err() {
                 return;
             }

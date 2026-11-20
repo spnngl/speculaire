@@ -1,0 +1,150 @@
+{
+  "images": [
+    {
+      "id": "sha256:8e13ccc0aaa682502a49e5f98b88acf75fbf5f724875058b3e7a78b1f38a11e7",
+      "repoTags": [
+        "docker.io/kindest/kindnetd:v20260820-69b56db7"
+      ],
+      "repoDigests": [],
+      "size": "35652389",
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "sha256:8f375e9f935137d1f92bd9bbfb860bbb6862a90c54e086f2696ce2385d0a5b78",
+      "repoTags": [
+        "docker.io/kindest/local-path-helper:v20260131-7181c60a"
+      ],
+      "repoDigests": [],
+      "size": "2740462",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "sha256:0771a8a05619f4bb6f4c8484f942f509b21a04ebe56ee26d17a3006e250bfd46",
+      "repoTags": [
+        "docker.io/kindest/local-path-provisioner:v20260820-69b56db7"
+      ],
+      "repoDigests": [],
+      "size": "14217939",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "sha256:ad4f11f7c85f87c0a6d6c0fe492ad53f9cdcff6e8c88b881360c70eff701c67b",
+      "repoTags": [
+        "docker.io/library/busybox:1.37"
+      ],
+      "repoDigests": [
+        "docker.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec",
+        "docker.io/library/busybox@sha256:d82c2ab94640ded77cf76514ce6a84870761105058a4a9e51b05a8a79be97a6c"
+      ],
+      "size": "1911395",
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "sha256:fbccbf70a429fb9ce1cdb13a40ed96b16272ef763dafe050b2c0d121dd29811b",
+      "repoTags": [
+        "registry.k8s.io/coredns/coredns:v1.14.6"
+      ],
+      "repoDigests": [],
+      "size": "21239459",
+      "username": "nonroot",
+      "pinned": false
+    },
+    {
+      "id": "sha256:c2e426bbd1cd63b4d1cbdca2eba371a0a2e64b6934dcc48c51a62d488fe64fe8",
+      "repoTags": [
+        "registry.k8s.io/etcd:3.7.0-0"
+      ],
+      "repoDigests": [],
+      "size": "20455189",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": false
+    },
+    {
+      "id": "sha256:6003d52023b9d748f6ec86cbb10510432b2b73245bfc88b2e481739017f52ac9",
+      "repoTags": [
+        "registry.k8s.io/kube-apiserver-arm64:v1.37.0",
+        "registry.k8s.io/kube-apiserver:v1.37.0"
+      ],
+      "repoDigests": [
+        "docker.io/library/import-2026-08-26@sha256:4fbbef5581e6ed60b96426e3786371b57da07f66e350b4ff2b0077413c2b0444"
+      ],
+      "size": "97074036",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": true
+    },
+    {
+      "id": "sha256:b1ad0e33c901244c9636e4bff3a6a22a18a7a2a12012a38e4c91930b673b0a01",
+      "repoTags": [
+        "registry.k8s.io/kube-controller-manager-arm64:v1.37.0",
+        "registry.k8s.io/kube-controller-manager:v1.37.0"
+      ],
+      "repoDigests": [
+        "docker.io/library/import-2026-08-26@sha256:dda35f6553455c1dde75aebfbb20759d24b7de776b884eb06415f242f276200c"
+      ],
+      "size": "85082212",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": true
+    },
+    {
+      "id": "sha256:550b682d81d4146e574fda7df56840e8deb14fab18cf1b96734259888944e1a0",
+      "repoTags": [
+        "registry.k8s.io/kube-proxy-arm64:v1.37.0",
+        "registry.k8s.io/kube-proxy:v1.37.0"
+      ],
+      "repoDigests": [
+        "docker.io/library/import-2026-08-26@sha256:d5e740cce95911da5590b633aae2f7f7e3370ec9d212d4dbbbf3bf19fa07551f"
+      ],
+      "size": "84532964",
+      "username": "",
+      "pinned": true
+    },
+    {
+      "id": "sha256:384eabc4fe526377d6dc985f482a20bb1b00f40948361bbac1eb163424996121",
+      "repoTags": [
+        "registry.k8s.io/kube-scheduler-arm64:v1.37.0",
+        "registry.k8s.io/kube-scheduler:v1.37.0"
+      ],
+      "repoDigests": [
+        "docker.io/library/import-2026-08-26@sha256:2aa78b45454b3df79d15bf6a57b4f9871f11ce16c8b645109ba2310076d228dd"
+      ],
+      "size": "59129565",
+      "uid": {
+        "value": "0"
+      },
+      "username": "",
+      "pinned": true
+    },
+    {
+      "id": "sha256:afb61768ce381961ca0beff95337601f29dc70ff3ed14e5e4b3e5699057e6aa8",
+      "repoTags": [
+        "registry.k8s.io/pause:3.10"
+      ],
+      "repoDigests": [],
+      "size": "267933",
+      "uid": {
+        "value": "65535"
+      },
+      "username": "",
+      "pinned": true
+    }
+  ]
+}
