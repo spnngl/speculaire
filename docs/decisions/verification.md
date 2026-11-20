@@ -467,3 +467,18 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Both runtimes fill `image_id` with the ID `ListImages` lists: containerd its config digest (`internal/cri/server/container_list.go:53-66` at v2.3.0), CRI-O its storage ID (`internal/oci/container.go:181-199` at v1.37.2), whose `image_ref` may be a `repository@digest` no registry served.
   - One CRI call per change, not per root, and none while nothing changed.
 - **Revisit when:** the gate (M6) holds the running containers from NRI `Synchronize`.
+
+## D156: `speculaire verify` prints one image's verdict and each check's reason, without the agent (amends D62)
+
+- **Decision:**
+  - `speculaire verify [--config <path>] [--runtime <runtime>] [--json] <name>@<digest>` reads the config, the policy file and the trust root as the agent does, a TUF one through one refresh into `verify.tuf_cache` with the cache as fallback (D143). It matches the policies on the name, discovers the image's artifacts upstream through the runtime's registry config (D17) into an artifact store in a temporary directory, never a peer's nor the agent's, and checks them as the engine does.
+  - It prints the verdict first, in the gate's words: `allow`, `rejected: <reason>`, `unverifiable: <reason>`, or `unmatched` when no policy matches. Then one line per matched policy, its authorities (by name, else by place from 1), the attestations each requires, and the SBOM when the policy requires one, each `pass`, `fail`, `unverifiable` or `not checked`, with its reason. An authority's attestations after the first that fails are not checked (D149), nor is the SBOM until an authority passes (D150). `--json` prints the same content as one object.
+  - It exits 0 when the image is allowed, 1 otherwise, `unmatched` included, and 2 when it cannot verify as asked: arguments, the config, the policy file, a pinned trust root, the registry config, or a name without digest.
+  - `speculaire_verify::report` holds each policy's per-check results, and the engine's verdict is computed from them, so the command and the agent cannot disagree over the same artifacts. The engine now checks every policy of a key rather than stopping at the first that fails; the verdict is the same.
+  - D62 holds: the work is in `speculaire_agent::verify` and `speculaire_verify::Report`; the binary picks the exit code and the format.
+- **Because:**
+  - The agent's store is the agent's: `Store::open` clears its `tmp/`, where the agent writes, and the records the agent holds in memory are not re-read from disk. Upstream serves the artifacts discovery would fetch, and no connection to the agent is needed.
+  - No peers: the command needs no node identity, and asking upstream shows what the node's registry config reaches.
+  - The TUF cache writes atomically, each file renamed into place, so the agent and the command may refresh it at once (sigstore-tuf v0.16.0 `src/cache.rs:91-119`).
+  - Text reads in a terminal and JSON in a script. Exit 2 apart from 1 tells a script "not allowed" from "could not verify".
+- **Revisit when:** the agent serves its verdicts over the status listener, or peers hold artifacts upstream lacks.

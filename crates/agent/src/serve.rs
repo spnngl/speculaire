@@ -577,7 +577,7 @@ async fn linked_or_after(
 }
 
 /// The fetcher's live keys in `config`.
-fn fetch_settings(config: &Config) -> fetch::Settings {
+pub(crate) fn fetch_settings(config: &Config) -> fetch::Settings {
     fetch::Settings {
         stall_timeout: config.peer.stall_timeout.get(),
         deny_ttl: config.peer.deny_ttl.get(),

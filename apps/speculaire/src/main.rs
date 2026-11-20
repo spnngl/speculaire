@@ -71,6 +71,21 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Verify one image as the agent would, asking upstream for its artifacts, and print the verdict, then each
+    /// policy, authority, attestation and SBOM check with its result and reason: exit 0 when the image is allowed, 1
+    /// when not, 2 when it cannot be verified as asked (D156).
+    Verify {
+        /// The config file.
+        #[arg(long, default_value = config::DEFAULT_PATH)]
+        config: PathBuf,
+        #[command(flatten)]
+        runtime: RuntimeArg,
+        /// Print the same content as one JSON object.
+        #[arg(long)]
+        json: bool,
+        /// The image, by digest: `<name>@sha256:<hex>`.
+        image: String,
+    },
 }
 
 /// Which runtime the node runs, when the command may not ask its sockets.
@@ -100,16 +115,23 @@ impl RuntimeArg {
 }
 
 fn main() -> ExitCode {
-    match run(Cli::parse().command) {
-        Ok(()) => ExitCode::SUCCESS,
+    let command = Cli::parse().command;
+    // `verify` exits 1 on an image not allowed, so it cannot on its own errors.
+    let failure = if matches!(command, Command::Verify { .. }) {
+        ExitCode::from(2)
+    } else {
+        ExitCode::FAILURE
+    };
+    match run(command) {
+        Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err:#}");
-            ExitCode::FAILURE
+            failure
         }
     }
 }
 
-fn run(command: Command) -> anyhow::Result<()> {
+fn run(command: Command) -> anyhow::Result<ExitCode> {
     match command {
         Command::Agent { config } => speculaire_agent::run(&config)?,
         Command::Version => writeln!(std::io::stdout().lock(), "{}", version())?,
@@ -144,8 +166,29 @@ fn run(command: Command) -> anyhow::Result<()> {
                 &report,
             )?;
         }
+        Command::Verify {
+            config,
+            runtime,
+            json,
+            image,
+        } => {
+            let config = config::load(&config)?;
+            let node = Node::new(&config);
+            let runtime = runtime.resolve(&node.sockets)?;
+            let report = speculaire_agent::verify::verify(&config, &node.on(runtime), &image)?;
+            let mut out = std::io::stdout().lock();
+            if json {
+                serde_json::to_writer(&mut out, &report)?;
+                writeln!(out)?;
+            } else {
+                write!(out, "{report}")?;
+            }
+            if !report.allowed() {
+                return Ok(ExitCode::FAILURE);
+            }
+        }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The node the agent's config file names.

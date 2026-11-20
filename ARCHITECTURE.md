@@ -109,9 +109,9 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 
 | Path | Role |
 |---|---|
-| `apps/speculaire` | The binary: `version`, `check-config`, `configure`, `unconfigure` and `agent` today; `verify` (planned) (D62) |
+| `apps/speculaire` | The binary: `version`, `check-config`, `configure`, `unconfigure`, `verify` and `agent` (D62, D156) |
 | `apps/loadgen` | `speculaire-loadgen`, test only and never packaged: D33's load against one reflector, `just load` (D104), and a pull from a peer, `just profile peer` (D116) |
-| `crates/agent` | The agent: config (D60), the node its config names (D87), preflight at startup (D86), the mirror that `Node::fallback` calls for (D90), logs (D37), metrics (D34) and status listener (D42, D45) |
+| `crates/agent` | The agent: config (D60), the node its config names (D87), preflight at startup (D86), the mirror that `Node::fallback` calls for (D90), logs (D37), metrics (D34), status listener (D42, D45), and the discovery `verify` runs on its own (D156) |
 | `crates/registry-config` | The *registry config* parsers, a module per runtime: containerd's `config.toml` and `hosts.toml` (D17, D78); CRI-O's `registries.conf`, `certs.d` and credential files (D66, D80) |
 | `crates/oracle-harness` | Test helper: runs `speculaire-oracle` and reads its answers; the differential tests of the parsers use it (D70, D79) |
 | `crates/mirror` | The local mirror: the pull half of the distribution API over TLS 1.3 with a client certificate, from the runtime's `Content`, or the relay and the *blob cache* where the runtime keeps none (D5, D66, D67, D85, D88, D90); the peer API, which serves the same, and the artifact store with its referrers, to other nodes (D100, D124) |
@@ -125,7 +125,7 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 | `crates/load` | The load scenario `speculaire-loadgen` runs: simulated agents on `crates/reflect`'s client, the reflector's targets measured from `/proc` and `/metrics` (D33, D104) |
 | `crates/reflect` | Protobuf frames over TLS (D105), the reflector's server and index (D97), and the agent's client: `Members`, one `Announce` stream per member carrying its numbered `Lookup`s, hedged (D2, D98) |
 | `crates/artifacts` | Discovery of each listed or fetched image's artifacts from the *artifact store*, then peers through the mirror's fetcher, then upstream through the runtime's `Registries`, into the store, which the peer API serves and which keeps only what listed images name, and fetched ones for a grace (D17, D43, D121, D124, D126, D131, D152, D153) |
-| `crates/verify` | Sigstore glue, policy, SBOM checks and verdict cache, over `crates/artifacts`; the policy file and its globs, the trust root, the signature, attestation and SBOM checks, and the verdict engine with its in-memory verdicts so far |
+| `crates/verify` | Sigstore glue, policy, SBOM checks and verdict cache, over `crates/artifacts`; the policy file and its globs, the trust root, the signature, attestation and SBOM checks, the verdict engine with its in-memory verdicts so far, and the report of each check that `verify` prints (D156) |
 | `crates/nri` | NRI multiplexer and ttrpc plugin API (D9); publishable on its own (planned) |
 | `fuzz/` | cargo-fuzz targets of the parsers of outside data, a workspace of its own, run by `just fuzz <target>` and nightly; `just check` replays their seeds on stable (D27). `config` takes raw bytes and `config_values` a config file written from the keys (D75) |
 | `fixtures/` | `sigstore/`: Sigstore fixtures recorded from public-good by `fixtures.yml`, one OCI layout per case with its trusted root, read by the crates' tests through `crates/artifacts`' `testing` feature and pushed to e2e's upstreams (D139, D141) |

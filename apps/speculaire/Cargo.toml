@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+serde_json.workspace = true
 speculaire-agent.workspace = true
 speculaire-configure.workspace = true
 speculaire-runtime.workspace = true
@@ -19,6 +20,7 @@ speculaire-verify.workspace = true
 [dev-dependencies]
 rustls.workspace = true
 secrecy.workspace = true
+speculaire-artifacts = { workspace = true, features = ["testing"] }
 speculaire-fake-runtime.workspace = true
 speculaire-load.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }

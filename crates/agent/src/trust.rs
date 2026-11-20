@@ -111,6 +111,24 @@ impl Source {
             }
         }
     }
+
+    /// The trust root once, as `speculaire verify` needs it (D156): the pinned one, or the one a TUF refresh into
+    /// `verify.tuf_cache` gives, the cache answering when the refresh fails. The cache's writes are atomic, so the
+    /// agent may refresh it at the same time.
+    ///
+    /// # Errors
+    ///
+    /// When no trust root is valid now: verification is unverifiable then, not refused.
+    pub async fn once(self) -> Held {
+        match self.0 {
+            Kind::Pinned { file, .. } => file.subscribe().borrow().clone(),
+            Kind::Tuf {
+                repository, cache, ..
+            } => TrustRoot::fetch(Cdn::new(repository), &cache, Timestamp::now())
+                .await
+                .map(Arc::new),
+        }
+    }
 }
 
 /// The trust root held, with the pinned file it is read from, if one is.
