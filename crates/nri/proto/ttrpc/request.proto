@@ -1,0 +1,23 @@
+// Copied from containerd/ttrpc v1.2.7 `request.proto`, Copyright The containerd Authors, Apache License 2.0 (D25),
+// and `google.rpc.Status` from `proto/status.proto`: only the fields a unary call carries (D166). A decoder skips the
+// fields left out (`metadata`, `details`).
+syntax = "proto3";
+
+package ttrpc;
+
+message Request {
+  string service = 1;
+  string method = 2;
+  bytes payload = 3;
+  int64 timeout_nano = 4;
+}
+
+message Response {
+  Status status = 1;
+  bytes payload = 2;
+}
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+}

@@ -95,6 +95,9 @@ jobs:
       # Its bundle pins its own nightly, which `cargo kani setup` installs.
       # renovate: datasource=crate depName=kani-verifier
       KANI_VERSION: "0.68.0"
+      # protoc: crates/nri compiles NRI's and ttrpc's .proto at build time (D166).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,6 +110,9 @@ jobs:
       - run: rustup toolchain install
       - run: cargo install --locked kani-verifier@"$KANI_VERSION"
       - run: cargo kani setup
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
       - run: just kani
 
   # In the profile image of build/Containerfile, which has protoc and Valgrind (D116); the build starts cold each run.

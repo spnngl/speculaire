@@ -55,6 +55,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("reflect", reflect),
     ("reflect_frame", reflect_frame),
     ("nri_mux", nri_mux),
+    ("nri_request", nri_request),
     ("containerd_event", containerd_event),
     ("referrers", referrers),
     ("link", link),
@@ -689,6 +690,43 @@ pub fn nri_mux(data: &[u8]) {
         };
         assert_eq!(read, payloads);
         assert_eq!(ended.is_ok(), end == End::Clean, "{ended:?}");
+    }
+}
+
+/// The ttrpc messages of NRI's plugin connection: each a 10-byte header, the big-endian length, stream ID, kind and
+/// flags, then a protobuf `Request` whose payload is that of the method it names (D166).
+///
+/// Reading never panics or waits, and refuses a length over the maximum before reading its body. Each request read
+/// encodes back to what decodes to it again.
+///
+/// # Panics
+///
+/// When reading panics or waits, refuses a length within the maximum, or a request read does not round-trip.
+pub fn nri_request(data: &[u8]) {
+    use prost::Message;
+    use speculaire_nri::ttrpc::{Call, MAX_MESSAGE, RequestError, read_request};
+
+    fn round_trips<M: Message + Default + PartialEq>(message: &M) {
+        assert!(M::decode(message.encode_to_vec().as_slice()).as_ref() == Ok(message));
+    }
+
+    let mut reader = data;
+    let mut body = Vec::new();
+    loop {
+        match ready(read_request(&mut reader, &mut body)) {
+            Ok(request) => match request.call {
+                Call::Configure(request) => round_trips(&request),
+                Call::Synchronize(request) => round_trips(&request),
+                Call::CreateContainer(request) => round_trips(&*request),
+                Call::Shutdown | Call::Other { .. } => {}
+            },
+            Err(RequestError::Oversize { length }) => {
+                assert!(length > MAX_MESSAGE);
+                break;
+            }
+            Err(RequestError::Decode { .. }) => {}
+            Err(RequestError::Io(_)) => break,
+        }
     }
 }
 

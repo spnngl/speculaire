@@ -1,0 +1,106 @@
+// Copied from containerd/nri v0.12.3 `pkg/api/api.proto`, Copyright The containerd Authors, Apache License 2.0 (D25):
+// the messages of D9's subset, each field with its upstream number. A decoder skips the fields left out, so a newer
+// runtime's messages still decode (D166).
+//
+// The services, which ttrpc names `nri.pkg.api.v1alpha1.<service>`:
+//   Runtime: RegisterPlugin(RegisterPluginRequest) returns (Empty)
+//   Plugin: Configure(ConfigureRequest) returns (ConfigureResponse)
+//           Synchronize(SynchronizeRequest) returns (SynchronizeResponse)
+//           Shutdown(Empty) returns (Empty)
+//           CreateContainer(CreateContainerRequest) returns (CreateContainerResponse)
+syntax = "proto3";
+
+package nri.pkg.api.v1alpha1;
+
+message RegisterPluginRequest {
+  // Name of the plugin to register.
+  string plugin_name = 1;
+  // Plugin invocation index. Plugins are called in ascending index order.
+  string plugin_idx = 2;
+  // NRI (module) version used by plugin, if known.
+  string NRI_version = 3;
+}
+
+message ConfigureRequest {
+  // Name of the runtime NRI is running in.
+  string runtime_name = 2;
+  // Version of the runtime NRI is running in.
+  string runtime_version = 3;
+  // Configured registration timeout in milliseconds.
+  int64 registration_timeout = 4;
+  // Configured request processing timeout in milliseconds.
+  int64 request_timeout = 5;
+  // Version of NRI used by the runtime.
+  string NRI_version = 6;
+}
+
+message ConfigureResponse {
+  // Events to subscribe the plugin for. Each bit set corresponds to an
+  // enumerated Event.
+  int32 events = 2;
+}
+
+message SynchronizeRequest {
+  // Pods known to the runtime.
+  repeated PodSandbox pods = 1;
+  // Containers known to the runtime.
+  repeated Container containers = 2;
+  // Whether there are more pods and containers to follow.
+  bool more = 3;
+}
+
+message SynchronizeResponse {
+  // Whether the client is able to handle more advertised pods and containers.
+  bool more = 2;
+}
+
+message CreateContainerRequest {
+  // Pod of container being created.
+  PodSandbox pod = 1;
+  // Container being created.
+  Container container = 2;
+}
+
+message CreateContainerResponse {}
+
+message Empty {}
+
+// Pod metadata that is considered relevant for a plugin.
+message PodSandbox {
+  string id = 1;
+  string name = 2;
+  string uid = 3;
+  string namespace = 4;
+  map<string, string> labels = 5;
+  map<string, string> annotations = 6;
+}
+
+// Container metadata that is considered relevant for a plugin.
+message Container {
+  string id = 1;
+  string pod_sandbox_id = 2;
+  string name = 3;
+  ContainerState state = 4;
+  map<string, string> labels = 5;
+  map<string, string> annotations = 6;
+  Image image = 22;
+}
+
+// Image identifies the container's image.
+message Image {
+  // image reference, e.g. "registry.k8s.io/pause:3.10"
+  string name = 1;
+  // image index digest or manifest digest, e.g. "sha256:..."
+  string digest = 2;
+  // image config digest (platform-specific), e.g. "sha256:..."
+  string config_digest = 3;
+}
+
+// Possible container states.
+enum ContainerState {
+  CONTAINER_UNKNOWN = 0;
+  CONTAINER_CREATED = 1;
+  CONTAINER_PAUSED = 2;
+  CONTAINER_RUNNING = 3;
+  CONTAINER_STOPPED = 4;
+}
