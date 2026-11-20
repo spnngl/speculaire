@@ -43,6 +43,11 @@ impl Fleet {
         ca: &Path,
         dir: &Path,
     ) -> anyhow::Result<Self> {
+        // The lookups draw an agent and a pool digest at random: an empty range has none to draw.
+        anyhow::ensure!(
+            scenario.agents > 0 && scenario.pool > 0,
+            "a load needs at least one agent and one pool digest"
+        );
         anyhow::ensure!(
             scenario.blobs <= scenario.pool,
             "each agent's {} blobs must come from a pool of at least as many digests",
@@ -206,6 +211,82 @@ pub(crate) async fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fleet of `agents` with `blobs` digests each from a pool of `pool`, drawn with `seed`.
+    fn fleet(agents: usize, blobs: usize, pool: usize, seed: u64) -> anyhow::Result<Fleet> {
+        let scenario = Scenario {
+            agents,
+            blobs,
+            pool,
+            seed,
+            ..Scenario::D33
+        };
+        let cluster = Cluster::new("speculaire-load");
+        let dir = tempfile::tempdir()?;
+        let ca = dir.path().join("ca.crt");
+        std::fs::write(&ca, cluster.ca())?;
+        Fleet::new(&scenario, &cluster, &ca, dir.path())
+    }
+
+    /// Each agent's digests as sorted indices into the pool.
+    fn held(fleet: &Fleet) -> Vec<Vec<usize>> {
+        let sorted = |agent: &Agent| {
+            let mut held = agent
+                .held
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            held.sort_unstable();
+            held
+        };
+        fleet.agents.iter().map(sorted).collect()
+    }
+
+    #[test]
+    fn a_seed_draws_the_same_distinct_digests_again() {
+        let drawn = fleet(3, 5, 20, 7).expect("the scenario is valid");
+        let held = held(&drawn);
+        for digests in &held {
+            assert_eq!(digests.len(), 5);
+            assert!(digests.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(digests.iter().all(|&i| i < 20));
+        }
+        let again = fleet(3, 5, 20, 7).expect("the scenario is valid");
+        assert_eq!(drawn.pool, again.pool);
+        assert_eq!(held, self::held(&again));
+        let other = fleet(3, 5, 20, 8).expect("the scenario is valid");
+        assert_ne!(drawn.pool, other.pool);
+    }
+
+    #[test]
+    fn a_fleet_needs_an_agent_and_a_pool_as_large_as_each_agents_blobs() {
+        assert!(fleet(0, 1, 1, 7).is_err());
+        assert!(fleet(1, 0, 0, 7).is_err());
+        assert!(fleet(1, 3, 2, 7).is_err());
+        assert!(fleet(1, 2, 2, 7).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_swap_keeps_each_agent_holding_as_many_distinct_digests() {
+        let fleet = fleet(2, 5, 20, 7).expect("the scenario is valid");
+        let before = held(&fleet);
+        let connected = Connected {
+            fleet: Arc::new(fleet),
+            clients: Vec::new(),
+        };
+        let counts = Arc::new(Counts::default());
+        let swapping = connected.swap(2_000, fastrand::Rng::with_seed(7), &counts);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        swapping.abort();
+        let after = held(&connected.fleet);
+        assert_ne!(before, after);
+        for digests in &after {
+            assert_eq!(digests.len(), 5);
+            assert!(digests.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+        let deltas = counts.deltas.load(Ordering::Relaxed);
+        assert!(deltas > 0 && deltas.is_multiple_of(2), "{deltas} deltas");
+    }
 
     #[test]
     fn names_sort_in_index_order() {
