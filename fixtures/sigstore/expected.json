@@ -235,5 +235,21 @@
       }
     ],
     "outcome": "fail"
+  },
+  {
+    "case": "runnable",
+    "digest": "sha256:bc0b4127281dcbd8be7a40ea2fa9f390fbda314910373ce6973fbc0a7c01f9f5",
+    "signer": {
+      "san": "https://github.com/spnngl/speculaire/.github/workflows/fixtures.yml@refs/heads/m6/04-runnable-fixture",
+      "issuer": "https://token.actions.githubusercontent.com"
+    },
+    "predicateTypes": [],
+    "checks": [
+      {
+        "check": "signature",
+        "ok": true
+      }
+    ],
+    "outcome": "pass"
   }
 ]

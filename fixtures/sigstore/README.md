@@ -2,7 +2,9 @@
 
 The gate's Sigstore fixtures (D139, D141), recorded from public-good Sigstore by `.github/workflows/fixtures.yml` in
 run [44142408768](https://github.com/spnngl/speculaire/actions/runs/44142408768) on 2026-11-17, from commit `dd52dab`.
-The files are its artifact `fixtures` as uploaded, byte for byte (`.gitattributes`).
+`runnable` was recorded alone in run [44767333052](https://github.com/spnngl/speculaire/actions/runs/44767333052) on
+2026-11-20, from commit `0920f78` of branch `m6/04-runnable-fixture`, which also wrote `expected.json`,
+`trusted_root.json` and `tuf/`. The files are the artifacts `fixtures` as uploaded, byte for byte (`.gitattributes`).
 
 - `layouts/<case>/`: one OCI layout per case, the image with its tags and referrers. The images are
   `ghcr.io/spnngl/speculaire-fixtures:<case>`, `linux/amd64` only, but `runnable`: busybox 1.37.0 with a file of its
