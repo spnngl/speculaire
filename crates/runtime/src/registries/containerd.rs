@@ -9,7 +9,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use bytes::Bytes;
 use secrecy::SecretString;
 use speculaire_registry_config::Headers;
 use speculaire_registry_config::containerd::config::{self, Auth, Hosts, Login, Registry};
@@ -41,9 +43,9 @@ struct Snapshot {
 /// could not be used is held as none, so that it is reported once.
 #[derive(Default)]
 struct Certificates {
-    ca: BTreeMap<PathBuf, Option<Vec<u8>>>,
+    ca: BTreeMap<PathBuf, Option<Bytes>>,
     /// By certificate file and key file; the key is the certificate file when it holds both.
-    clients: BTreeMap<(PathBuf, PathBuf), Option<ClientCert>>,
+    clients: BTreeMap<(PathBuf, PathBuf), Option<Arc<ClientCert>>>,
 }
 
 impl Certificates {

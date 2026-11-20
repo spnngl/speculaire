@@ -12,8 +12,10 @@ pub mod containerd;
 pub mod crio;
 mod live;
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 pub use containerd::ContainerdRegistries;
 pub use crio::CrioRegistries;
 use rustls_pki_types::pem::PemObject as _;
@@ -30,13 +32,14 @@ pub struct ClientCert {
     pub key: SecretString,
 }
 
-/// How an endpoint is trusted.
+/// How an endpoint is trusted. The certificates are read at reload and shared by every endpoint given out, not copied
+/// per request (D107).
 #[derive(Clone, Debug, Default)]
 pub struct Tls {
     /// CA certificates (PEM) to trust besides the system's.
-    pub roots: Vec<Vec<u8>>,
+    pub roots: Vec<Bytes>,
     /// A certificate to present.
-    pub client: Option<ClientCert>,
+    pub client: Option<Arc<ClientCert>>,
     /// The server's certificate is not checked at all (`insecure`, `skip_verify`).
     pub skip_verify: bool,
 }
@@ -184,8 +187,9 @@ fn read_chain(path: &std::path::Path) -> Result<Vec<u8>, String> {
 
 /// A CA file (D92): read and checked now, so that no request reads it. One that cannot be used is noted in `problems`
 /// and left out.
-pub(crate) fn read_ca(path: &std::path::Path, problems: &mut Vec<String>) -> Option<Vec<u8>> {
+pub(crate) fn read_ca(path: &std::path::Path, problems: &mut Vec<String>) -> Option<Bytes> {
     read_chain(path)
+        .map(Bytes::from)
         .map_err(|why| problems.push(format!("a CA file is not used: {why}")))
         .ok()
 }
@@ -196,7 +200,7 @@ pub(crate) fn read_client(
     cert: &std::path::Path,
     key: &std::path::Path,
     problems: &mut Vec<String>,
-) -> Option<ClientCert> {
+) -> Option<Arc<ClientCert>> {
     let read = || -> Result<ClientCert, String> {
         let certificate = read_chain(cert)?;
         let pem =
@@ -209,6 +213,7 @@ pub(crate) fn read_client(
         })
     };
     read()
+        .map(Arc::new)
         .map_err(|why| problems.push(format!("a client certificate is not used: {why}")))
         .ok()
 }
