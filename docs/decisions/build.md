@@ -448,7 +448,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
 
 
-## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130)
+## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159)
 
 - **Decision:**
   - **Reflectors:** the agents of the control plane and of the first worker run `role = "reflector"` (D2 puts reflectors on control-plane nodes; kind's second control plane would add an etcd member and kind's own balancer for nothing the peer suites test). Both are in every agent's `reflector.members`, by node name and kind-network address, port 7483; the second worker is the client no reflector runs on.
@@ -657,7 +657,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** a run off Linux needs a container engine; mutants of code built only off Linux, such as `crio/images.rs`'s stand-in `watch`, go untested, as on CI. Each worktree's mutants build stays in its directory of the volume (D118).
 - **Revisit when:** speculaire runs on an OS other than Linux, or a contributor builds without a container engine (D57).
 
-## D130: The rate-limit suite runs in the IPv4 pass only (amends D63, D94; amended by D141)
+## D130: The rate-limit suite runs in the IPv4 pass only (amends D63, D94; amended by D141, D159)
 
 - **Decision:** `e2e/tests/limits.rs` returns at once in the dual-stack pass (D94): its test runs once per leg, in the IPv4 pass, on both runtimes. Every other suite runs in both passes.
 - **Because:** the test waits out a 120 s `Retry-After`, and what it checks, a host paused and taken up again, does not depend on the address family. Twice per leg would add 2 min to each of the 14.
@@ -715,3 +715,18 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The `verify` job checks what a node pulls: the pushed index, anonymously, with the public trust root. An e2e test would check a local build under a pinned root instead.
   - **Measured** (locally, before the first run): `syft` lists 461 packages for the two binaries. `speculaire verify` in a container without a runtime, with this policy pointed at the fixtures' recorded provenance and `attest-sbom` cases, prints `allow`, with the provenance and SBOM checks passing.
 - **Revisit when:** the tag's run gains packages, tarballs or the reproducible double build; GitHub's attestations leave the public-good Sigstore instance; a node needs an image that runs without root.
+
+## D159: The e2e suites wait less, CRI-O's relay suite runs in the IPv4 pass only, and the suites build while the cluster comes up (amends D94, D130)
+
+- **Decision:**
+  - **Shorter waits:** the rate-limit suite's window is 45 s, not 120 s: still longer than discovery's first backoff step, 30 s (D128), so a pause that ignored `Retry-After` still shows. A test that waits for an agent to read a changed file sets that node's `config.poll_interval` to 1 s while it lives: the relay suite on CRI-O, the reflector's rotated certificate, the outage suite's late certificate. The corrupted-blob test of `fetch.rs` delays C by 300 ms, not 1 s; the relay's kill test throttles its proxy to 5 MB/s, not 2. Each still checks what it did.
+  - **Passes:** on CRI-O the relay suite runs in the IPv4 pass alone, as D130's and D141's do. Every other suite runs in both passes.
+  - **Bring-up:** `just e2e-up` builds the suites, `cargo test -p e2e --no-run`, in the background while it builds the node image and kind creates the cluster, and waits for that build before the upstreams start.
+- **Because:**
+  - PR #219's CRI-O legs took 17.7 min (arm64) and 21.3 min (x86_64), past D94's 20 min. Before moving suites to main or nightly (D94's revisit), the time went to fixed waits: the rate-limit window (2.2 min), the default 10 s poll (two per reflector rotation, one per relay login and late certificate), a 1 s netem delay on every packet of a TLS fetch, and the relay suite twice on CRI-O (2.4 min each pass against 15 s on containerd).
+  - On CRI-O the relay suite turns peers off (`url = ""`), and the dual-stack pass changes only the balancer's and the reflectors' addresses (D94): its second run checks nothing the first did not.
+  - The suites' build, about 50 s on a runner without a cache, needs nothing from the cluster.
+- **Measured:**
+  - In CI, the four PR legs (PR #219 then PR #227, minutes): CRI-O 1.37 x86_64 21.3 then 12.4, arm64 17.7 then 12.8; containerd 2.4 x86_64 16.6 then 11.2, arm64 15.6 then 12.4. On CRI-O x86_64 the IPv4 pass took 8.5 min and the dual-stack pass 3.6 (job 136183276120): relay 93 s, limits 55 s, fetch 34 s, outage 37 s, reflector 2 s.
+  - Locally on Docker Desktop arm64 with kind, CRI-O 1.37, one test at a time, before then after: the corrupted-blob test 60 s then 21 to 24 s; the relay login test 21 s then 9 s; the relay kill test 19 s then 12 s; the rotated-certificate test about 18 s then 3 s; the late-certificate test 20.5 s then 10.4 s; each other relay test about 1 s less, as its end restarts the agent once, not twice.
+- **Revisit when:** a PR leg passes 18 min again (then the dual-stack pass and the slowest peer suites move to main, D94), or the dual-stack pass gives the relay an IPv6 path (a node's upstream over IPv6).
