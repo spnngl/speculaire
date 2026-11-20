@@ -13,13 +13,25 @@ pub struct Hash {
 }
 
 impl Hash {
-    /// A hash of nothing yet, or `None` when `expected` is not sha256, sha384 or sha512.
+    /// A hash of nothing yet.
+    ///
+    /// # Panics
+    ///
+    /// Never: a digest parses only for an algorithm this hashes.
     #[must_use]
-    pub fn new(expected: &Digest) -> Option<Self> {
-        Some(Self {
-            context: Context::new(algorithm(expected.algorithm())?),
+    pub fn new(expected: &Digest) -> Self {
+        let algorithm = algorithm(expected.algorithm())
+            .expect("a digest parses only for sha256, sha384 or sha512");
+        Self {
+            context: Context::new(algorithm),
             expected: expected.clone(),
-        })
+        }
+    }
+
+    /// The digest the content has to hash to.
+    #[must_use]
+    pub const fn expected(&self) -> &Digest {
+        &self.expected
     }
 
     /// Adds `data` to what has arrived.

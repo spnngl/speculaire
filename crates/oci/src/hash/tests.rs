@@ -25,7 +25,7 @@ fn every_algorithm_a_digest_may_name_hashes_to_its_known_value() {
 #[test]
 fn a_hash_matches_only_the_content_of_its_digest() {
     let expected = of("sha256", b"abc").expect("a known algorithm");
-    let mut hash = Hash::new(&expected).expect("a known algorithm");
+    let mut hash = Hash::new(&expected);
     hash.update(b"ab");
     assert!(!hash.matches());
     hash.update(b"c");
