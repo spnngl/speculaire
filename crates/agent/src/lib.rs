@@ -10,5 +10,6 @@ pub mod status;
 mod systemd;
 pub mod telemetry;
 pub mod trust;
+pub mod verify;
 
 pub use serve::run;

@@ -260,7 +260,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** once `Configure` fills the versions, the series with empty labels stays exported; the recorder has no call that removes a series.
 - **Revisit when:** M6 sets the versions: drop the empty series, or move the runtime versions to a series of their own.
 
-## D62: Binaries live in `apps/`, libraries in `crates/` (amends D57)
+## D62: Binaries live in `apps/`, libraries in `crates/` (amends D57; amended by D156)
 
 - **Decision:**
   - `apps/<name>` holds each binary package: `apps/speculaire` (package `speculaire`, the shipped binary) and, later, `apps/loadgen`. A binary package parses arguments and calls libraries; it holds no other logic.

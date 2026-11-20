@@ -80,7 +80,7 @@ Work through these steps in order, and stop at the first one that helps.
 
 ## Rejection reasons
 
-Shown in `kubectl describe pod` under `CreateContainerError`.
+Shown in `kubectl describe pod` under `CreateContainerError`. On a node, `speculaire verify <name>@<digest>` gives an image's verdict in these words, then each matched policy, authority, attestation and SBOM check with its result and reason; `--json` gives the same as one object. It asks upstream through the runtime's registry config, never a peer, and exits 0 when the image is allowed, 1 when not, 2 when the config cannot be used (D156).
 
 | Reason | Meaning | Action |
 |---|---|---|

@@ -2086,6 +2086,7 @@ dependencies = [
  "speculaire-runtime",
  "speculaire-time",
  "speculaire-verify",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml",

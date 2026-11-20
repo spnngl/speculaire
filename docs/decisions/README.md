@@ -69,7 +69,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D59 [build](build.md): e2e is a Rust test crate of `#[ignore]`d suites on a kind cluster managed by `just e2e <minor>`, with pinned containerd, kind and kubectl (amends D27; amended by D63)
 - D60 [agent](agent.md): config values parse into types that print back canonically; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47; amended by D87, D135, D137, D138)
 - D61 [build](build.md): `speculaire_build_info` exists from startup with empty runtime versions; every build has `protoc` (amends D34; amended by D68)
-- D62 [build](build.md): binaries in `apps/`, libraries in `crates/` as `speculaire-<name>` (amends D57)
+- D62 [build](build.md): binaries in `apps/`, libraries in `crates/` as `speculaire-<name>` (amends D57; amended by D156)
 - D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59; amended by D94, D113, D120, D130)
 - D64 [gate](gate.md): the same NRI plugin gates CRI-O; the agent finds its runtime by probing both sockets, and reads CRI-O's NRI keys from `GET /config` on `crio.sock` (amends D9, D41, D54; amended by D84, D86, D90)
 - D65 [gate](gate.md): on CRI-O the image identity is the `ImageRef` annotation (the config digest), policies match every name of the image, and `images.json` changes trigger verification; no pinning (amends D11, D15, D20, D21, D22)
@@ -163,5 +163,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D153 [verification](verification.md): the store keeps what a root fetched and not listed names for `artifacts.grace` (600 s), marked on disk with its time so a restart keeps the grace (amends D131)
 - D154 [verification](verification.md): the policy file and a pinned trust root reload on SIGHUP or a changed stamp, a refused one keeping the previous; a changed key serves its previous verdict stale for up to `verify.stale_max` while its root is verified again under `trigger="reverify"` (amends D21, D30, D143, D151; amended by D155)
 - D155 [verification](verification.md): after a change, the roots the runtime's running containers run, from CRI `ListContainers` and `ListImages`, are verified again first (amends D154)
+- D156 [verification](verification.md): `speculaire verify <name>@<digest>` prints one image's verdict, then each matched policy, authority, attestation and SBOM check with its reason, as text or `--json`, exit 0 allowed, 1 not, 2 unusable config; it discovers upstream into a store of its own, without the agent or peers, and the engine's verdict derives from the same per-check results (amends D62)
 
-Next free number: D156.
+Next free number: D157.

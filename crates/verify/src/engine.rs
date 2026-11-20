@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until};
 use tracing::{info, warn};
 
-use crate::policy::Sbom;
+use crate::report::{Checked, Outcome, undiscovered};
 use crate::signature::Signatures;
 use crate::trust::{Absent, Held, RootHash, TrustRoot};
 use crate::{MatchHash, Policies, Policy, metrics};
@@ -355,15 +355,6 @@ enum Ask {
     Again,
 }
 
-/// What a policy, or the policies of a key, came to.
-#[derive(Debug)]
-enum Outcome {
-    /// Passed, with the identities that satisfied each authority.
-    Pass(Vec<String>),
-    Fail(String),
-    Unverifiable(String),
-}
-
 /// The policies an image's names match, one group per hash.
 struct Group<'a> {
     hash: MatchHash,
@@ -660,13 +651,14 @@ impl<D: Discover> Engine<D> {
 
     /// Keeps each key of `digest` unverifiable as its discovery failed, and schedules the next try.
     fn unverified(&mut self, digest: &Digest, error: &Error) {
-        let (reason, at) = match error {
-            Error::Unverifiable { reason, retry_at } => (
-                reason.to_string(),
-                // A rate limit is upstream's to set (D38).
-                matches!(reason, Reason::RateLimited { .. }).then_some(*retry_at),
-            ),
-            Error::Store(e) => (format!("artifact store: {e}"), None),
+        let reason = undiscovered(error);
+        let at = match error {
+            // A rate limit is upstream's to set (D38).
+            Error::Unverifiable {
+                reason: Reason::RateLimited { .. },
+                retry_at,
+            } => Some(*retry_at),
+            _ => None,
         };
         let started = Instant::now();
         let Some(retry_at) = self.roots.get_mut(digest).and_then(|root| retry(root, at)) else {
@@ -876,7 +868,7 @@ fn groups<'a>(policies: &'a Policies, names: &[String]) -> Vec<Group<'a>> {
     groups
 }
 
-/// What `policies` come to over `artifacts`: each must pass (D11); a failure counts before an unverifiable check.
+/// What `policies` come to over `artifacts`: each must pass (D11).
 async fn combine(
     signatures: &Signatures,
     store: &Store,
@@ -885,59 +877,12 @@ async fn combine(
     policies: &[&Policy],
     root: Result<&TrustRoot, &Absent>,
 ) -> Outcome {
-    let mut signers = Vec::new();
-    let mut unverifiable = None;
+    let mut outcomes = Vec::with_capacity(policies.len());
     for policy in policies {
-        match check(signatures, store, target, artifacts, policy, root).await {
-            Outcome::Pass(passed) => signers.extend(passed),
-            fail @ Outcome::Fail(_) => return fail,
-            Outcome::Unverifiable(reason) => {
-                unverifiable.get_or_insert(reason);
-            }
-        }
+        let checked = Checked::new(signatures, store, target, artifacts, policy, root).await;
+        outcomes.push(checked.outcome());
     }
-    unverifiable.map_or(Outcome::Pass(signers), Outcome::Unverifiable)
-}
-
-/// What `policy` comes to over `artifacts`: one authority passes, and the SBOM it requires is there (D145, D150).
-async fn check(
-    signatures: &Signatures,
-    store: &Store,
-    target: &Digest,
-    artifacts: &[Artifact],
-    policy: &Policy,
-    root: Result<&TrustRoot, &Absent>,
-) -> Outcome {
-    let name = policy.name();
-    let results = match signatures
-        .check(store, target, artifacts, policy, root)
-        .await
-    {
-        Ok(results) => results,
-        Err(e) => return Outcome::Unverifiable(e.to_string()),
-    };
-    let signers: Vec<String> = results
-        .iter()
-        .filter_map(|result| result.as_ref().ok())
-        .map(|signed| format!("{name}: {signed}"))
-        .collect();
-    if signers.is_empty() {
-        // A policy has an authority at least, so it has an unmet one here.
-        let unmet = results.iter().find_map(|result| result.as_ref().err());
-        return Outcome::Fail(unmet.map_or_else(|| format!("policy {name}"), ToString::to_string));
-    }
-    // Without a trust root, the signature check is unverifiable already (D145).
-    if let (Sbom::Required, Ok(root)) = (policy.sbom(), root) {
-        match signatures
-            .sbom(store, target, artifacts, policy, root)
-            .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(failure)) => return Outcome::Fail(failure.to_string()),
-            Err(e) => return Outcome::Unverifiable(e.to_string()),
-        }
-    }
-    Outcome::Pass(signers)
+    Outcome::all(outcomes)
 }
 
 /// Keeps `verdict` for `key`, counts the verification under the trigger that started it at the time given, and logs and

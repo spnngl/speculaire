@@ -13,7 +13,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::node::{POLICY, Rules, TRUSTED_ROOT};
-use e2e::upstream::{FIXTURES, Kind, Upstream};
+use e2e::upstream::{FIXTURES, Kind, UNSIGNED, Upstream};
 use e2e::{Cluster, IpFamily, Runtime};
 use serde_json::Value;
 use speculaire_artifacts::store::Artifact;
@@ -866,4 +866,44 @@ fn a_changed_policy_verifies_again_on_sighup_or_a_poll_and_a_refused_one_keeps_t
         (rejected - changed).as_secs_f64()
     );
     drop(poll);
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn speculaire_verify_on_a_node_allows_a_signed_fixture_and_exits_1_for_an_unsigned_image() {
+    if Cluster::from_env().ip_family() == IpFamily::Dual {
+        return;
+    }
+    let worker = Worker::new();
+    let cluster = &worker.cluster;
+    let zot = cluster.upstream(Kind::Referrers);
+    let host = zot.address().to_owned();
+    let keyless = Case::pullable()
+        .into_iter()
+        .find(|case| case.name == "keyless")
+        .expect("the keyless fixture");
+    let unsigned = zot.digest(UNSIGNED).unwrap();
+    let name = UNSIGNED.split_once(':').expect("a tag").0;
+    let policy = fixtures_policy(&host).replace(
+        &format!("  - glob: {host}/{FIXTURES}\n"),
+        &format!("  - glob: {host}/{FIXTURES}\n  - glob: {host}/{name}\n"),
+    );
+    cluster.policy(&worker.name, &policy).unwrap();
+    // The agent is not asked: the command discovers on its own (D156).
+    let verify = |image: String| worker.sh(&format!("speculaire verify {image}; echo \"exit $?\""));
+
+    let allowed = verify(format!("{host}/{FIXTURES}@{}", keyless.layout.root()));
+    assert!(allowed.starts_with("allow\n"), "{allowed}");
+    assert!(
+        allowed.contains(&format!("pass: {SAN} (issuer ")),
+        "{allowed}"
+    );
+    assert!(allowed.ends_with("exit 0\n"), "{allowed}");
+
+    let rejected = verify(format!("{host}/{name}@{unsigned}"));
+    assert!(
+        rejected.starts_with("rejected: no signature\n"),
+        "{rejected}"
+    );
+    assert!(rejected.ends_with("exit 1\n"), "{rejected}");
 }
