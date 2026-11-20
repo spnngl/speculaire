@@ -14,6 +14,7 @@ import (
 
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
+	"github.com/pelletier/go-toml/v2"
 	"github.com/sirupsen/logrus"
 
 	srvconfig "github.com/containerd/containerd/v2/cmd/containerd/server/config"
@@ -114,15 +115,20 @@ func configCase(line []byte) (any, error) {
 	if err := materialise(c.Root, c.Files); err != nil {
 		return nil, err
 	}
-	// containerd's v1 migration renames the plugins through a map, so two sections that get the same name merge in a
-	// random order: a case whose answer changes between runs is unstable and no answer to compare with.
 	path := filepath.Join(c.Root, c.Entry)
 	first := loadRegistry(context.Background(), path)
+	if !sectionsMerge(c.Files) {
+		return first, nil
+	}
+	// The two sections merge in map order: a case whose answer changes between runs is unstable and no answer to
+	// compare with. A small map starts at a random one of eight slots (go1.26.1
+	// src/internal/runtime/maps/table.go:694,826), so each section comes first with a chance of at least 1/8: 512 runs
+	// miss the other answer once in 10^29, as the CRI-O auth case does.
 	want, err := json.Marshal(first)
 	if err != nil {
 		return nil, err
 	}
-	for range 64 {
+	for range 512 {
 		got, err := json.Marshal(loadRegistry(context.Background(), path))
 		if err != nil {
 			return nil, err
@@ -132,6 +138,26 @@ func configCase(line []byte) (any, error) {
 		}
 	}
 	return first, nil
+}
+
+// sectionsMerge tells whether containerd's v1 migration renames two plugin sections of a file to one name, merging
+// them through a map (containerd v2.4.2 cmd/containerd/server/config/config.go:203-207): the only part of loading
+// whose answer can change between runs. A file that does not decode is refused whole, the same each run.
+func sectionsMerge(files map[string]string) bool {
+	for _, text := range files {
+		var file struct {
+			Version int            `toml:"version"`
+			Plugins map[string]any `toml:"plugins"`
+		}
+		if toml.Unmarshal([]byte(text), &file) != nil || file.Version > 1 {
+			continue
+		}
+		migrated := srvconfig.Config{Version: 1, Plugins: file.Plugins}
+		if migrated.MigrateConfigTo(context.Background(), 2) != nil || len(migrated.Plugins) < len(file.Plugins) {
+			return true
+		}
+	}
+	return false
 }
 
 // loadRegistry does what `containerd --config path` does to the registry section: it loads the file and its imports

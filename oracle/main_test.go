@@ -52,6 +52,21 @@ func TestNRIIsTheVersionContainerdRequires(t *testing.T) {
 	}
 }
 
+// Only a version 1 file whose sections the migration renames to one name merges them in map order.
+func TestSectionsMergeOnlyWhenTheMigrationRenamesTwoToOne(t *testing.T) {
+	for text, want := range map[string]bool{
+		"[plugins.cri.registry]\n[plugins.\"io.containerd.grpc.v1.cri\".registry]\n":                true,
+		"version = 1\n[plugins.cri]\n[plugins.\"io.containerd.grpc.v1.cri\"]\n":                     true,
+		"version = 2\n[plugins.cri]\n[plugins.\"io.containerd.grpc.v1.cri\"]\n":                     false,
+		"version = 1\n[plugins.cri.registry]\n[plugins.\"io.containerd.cri.v1.images\".registry]\n": false,
+		"version = 1\n[plugins.cri\n": false,
+	} {
+		if got := sectionsMerge(map[string]string{"config.toml": text}); got != want {
+			t.Errorf("%q: got %v, want %v", text, got, want)
+		}
+	}
+}
+
 func TestUsageExitsTwo(t *testing.T) {
 	for _, args := range [][]string{nil, {"versions"}, {"version", "extra"}} {
 		var stdout, stderr bytes.Buffer
