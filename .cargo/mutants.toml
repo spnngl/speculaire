@@ -56,6 +56,10 @@ exclude_re = [
   'follow\.rs:\d+:\d+: replace \|\| with && in collect$',
   # A grace that ends at the very nanosecond of a collection: the mark goes at this one or the next.
   'store\.rs:\d+:\d+: replace > with >= in Store::graced$',
+  # A duplex stream's flush does nothing: the multiplexer flushes the trunk after each frame (D163).
+  'mux\.rs:\d+:\d+: replace <impl AsyncWrite for Connection>::poll_flush -> Poll<io::Result<\(\)>> with Poll::from\(Ok\(\(\)\)\)$',
+  # Kani's proofs, which `just kani` runs and nextest does not (D163).
+  '\.rs:\d+:\d+: replace proofs::',
 ]
 # `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/`,
 # `crates/pki/src/testing.rs` and `crates/reflect/src/bench.rs` are test and benchmark support (D87, D95, D104).

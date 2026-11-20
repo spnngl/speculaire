@@ -22,6 +22,7 @@ http = "1.5.0"
 libfuzzer-sys = "0.4.13"
 speculaire-agent = { path = "../crates/agent" }
 speculaire-mirror = { path = "../crates/mirror" }
+speculaire-nri = { path = "../crates/nri" }
 speculaire-oci = { path = "../crates/oci" }
 speculaire-pki = { path = "../crates/pki" }
 speculaire-reflect = { path = "../crates/reflect" }
@@ -32,6 +33,8 @@ speculaire-time = { path = "../crates/time" }
 speculaire-verify = { path = "../crates/verify" }
 # `reflect` decodes protobuf; the same version as the workspace's.
 prost = "0.14.5"
+# `nri_mux` reads the multiplexer's connections; the same version as the workspace's.
+tokio = { version = "1.54.1", features = ["io-util"] }
 # `token_answer` reads the token it parsed; the same version as the workspace's.
 secrecy = "0.10.3"
 # `statement` writes the statement it parsed back; the same version as the workspace's.
@@ -188,6 +191,13 @@ bench = false
 [[bin]]
 name = "reflect_frame"
 path = "fuzz_targets/reflect_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nri_mux"
+path = "fuzz_targets/nri_mux.rs"
 test = false
 doc = false
 bench = false

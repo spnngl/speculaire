@@ -828,10 +828,15 @@ fuzz-all seconds="60":
         just fuzz "$target" {{ seconds }}
     done
 
-# The reflector's index under Shuttle's randomised schedules (D97), in its own target directory: `--cfg shuttle`
-# rebuilds every crate.
+# The reflector's index and the NRI multiplexer's queues under Shuttle's randomised schedules (D97, D163), in their own
+# target directory: `--cfg shuttle` rebuilds every crate.
 shuttle:
-    RUSTFLAGS='--cfg shuttle' CARGO_TARGET_DIR=target/shuttle cargo test -p speculaire-reflect --lib --locked schedules
+    RUSTFLAGS='--cfg shuttle' CARGO_TARGET_DIR=target/shuttle cargo test -p speculaire-reflect -p speculaire-nri --lib --locked schedules
+
+# Kani's proofs (D163): the NRI multiplexer's frame decoder, over every 8-byte header. Needs `cargo install --locked
+# kani-verifier@0.68.0` then `cargo kani setup`, whose bundle is Linux's only: the `kani` job of `deep.yml` runs it.
+kani:
+    cargo kani -p speculaire-nri
 
 # Replay every target's seeds, their truncations and bit flips on stable (part of `just check`).
 fuzz-smoke:

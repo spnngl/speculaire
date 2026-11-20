@@ -2,13 +2,13 @@
 
 The NRI enforcement point. Index: `docs/decisions/README.md`.
 
-## D9: Enforcement lives in an NRI external plugin (amended by D64)
+## D9: Enforcement lives in an NRI external plugin (amended by D64, D163)
 
 - **Decision:** the agent connects to `/var/run/nri/nri.sock` as an external NRI plugin. We write our own `nri` workspace crate on `ttrpc` 0.10 plus the NRI multiplexer (8-byte header: ConnID + length).
   - Each ConnID is an in-memory `tokio::io::duplex` wrapped by `ttrpc`'s `Socket::new`: ConnID 1 feeds a `Listener::new` stream, ConnID 2 feeds `Client::new`. There is no file descriptor and no `socketpair`.
   - Codegen is `ttrpc` features `async` and `prost` (prost 0.13) with `ttrpc-codegen-prost` 0.1, from NRI v0.12.3's `api.proto`; it serves both containerd 2.3 and 2.4.
   - The multiplexer writes frames of at most 4096 payload bytes, because the Go side reads a frame through a 4096-byte buffer and fails with `ENOMEM` on a larger one (`mux.go` `conn.Read`).
-  - It reads like Go's multiplexer at v0.12.3: it closes the trunk on a header length above `maxPayloadSize` (`pkg/net/multiplex/mux.go:141`), and gives each ConnID its own bounded queue, so a stalled connection cannot block the other (`:349-355`).
+  - It reads like Go's multiplexer at v0.12.5: it closes the trunk on a header length above `maxPayloadSize` (`pkg/net/multiplex/mux.go:325-336`), and gives each ConnID its own bounded queue, so a stalled connection cannot block the other (`:360-367`). D163 holds the details.
 - **Because:**
   - No Rust NRI crate exists.
   - An external plugin survives restarts; containerd never restarts a crashed pre-installed plugin.
@@ -168,3 +168,22 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - kindest/node ships `/etc/containerd` as `0644`, a directory root without capabilities (D53) cannot enter: the agent's first start on containerd 2.3.7 failed with `Permission denied` on `config.toml`. The e2e node image sets `0755`.
   - `fuzz runtime_version` (60 s budget, 20 s run): 135953 runs, no finding; `containerd_config`, now also through `load_plugins`: 91091 runs in 60 s, no finding.
 - **Revisit when:** containerd 2.3 reaches end of life (then drop the config-file path of the image settings), or CRI-O reports its version in another form.
+
+## D163: The NRI multiplexer is `speculaire-nri`'s `Mux`, which closes the trunk as NRI v0.12.5 does (amends D9)
+
+- **Decision:**
+  - **Crate:** `crates/nri` (`speculaire-nri`) speaks NRI's protocol and knows no runtime. `Mux::new(reader, writer)` returns the multiplexer and its `Connections`: `plugin_service` (ConnID 1) and `runtime_service` (ConnID 2), each `AsyncRead + AsyncWrite` for ttrpc. `Mux::run` carries frames until the trunk ends and returns why (`MuxError`); the caller spawns it, the crate spawns nothing.
+  - **Reading,** as `pkg/net/multiplex/mux.go` at v0.12.5 reads: the 8-byte header is read in place (D107). A length over `maxPayloadSize`, 10 bytes plus 4 MiB, closes the trunk with `Oversize { conn, length }` before anything is allocated for it (`mux.go:325-336`). Each ConnID has a queue of 256 payloads (`readQueueLen`, `:138`), and the reader never waits for one: a frame for a full queue closes the trunk with `QueueFull { conn, length, capacity }` (`:360-367`). A frame for another ConnID, or for a dropped `Connection`, is read and dropped (`:357-368`).
+  - **Ending:** a connection reads the payloads queued, then the end of file if the trunk ended between two frames, else `ConnectionAborted`, also when `run`'s future is dropped. It skips an empty payload, which would read as the end of file. Its writes fail once the trunk is closed.
+  - **Writing:** a connection's writes go out in frames of at most 4096 payload bytes (D9), each written whole, through one heap buffer per connection.
+  - **Checks:** the fuzz target `nri_mux` reads the trunk and compares the end and each connection's bytes with a plain model of the frames. Kani proves, for every 8-byte header, that the decoder reads both fields big-endian and yields no length over the maximum (`just kani`, the `kani` job of `deep.yml`, Kani 0.68.0, Linux only). Shuttle runs a stalled ConnID 2 beside a reading ConnID 1 over 2000 random schedules (`just shuttle`).
+- **Because:**
+  - D9 cited `mux.go:141` at v0.12.3 for the close on an oversize header, but v0.12.3 has no such check: it allocates `make([]byte, int(cnt))` for any length (`:325`). The check landed in v0.12.5, so a runtime on NRI v0.12.0 to v0.12.4 still allocates what its plugin claims; ours refuses whichever the peer.
+  - The trunk's peer is the runtime, root on the node: the limits stop a broken frame from taking memory, not a hostile runtime. 256 payloads of up to 4 MiB per queue is Go's own bound.
+  - Draining the queue before the end gives a connection every answer that came before a close; Go's `conn.Read` picks between the two at random.
+  - A future, not a task, keeps the crate off any runtime, and lets Shuttle and the fuzz target drive it.
+- **Measured (M6 step 01, arm64):**
+  - Kani: 1 harness, 100 checks, 0.15 to 0.4 s. With the check moved one byte up it fails on `claimed <= MAX_PAYLOAD`.
+  - Shuttle: 2000 schedules in 0.2 s; with the queue unbounded it reports a deadlock. A 4104-byte array inside `run`'s future overflowed Shuttle's 32 KiB task stack, which is why the write buffer is on the heap.
+  - `just fuzz nri_mux 120`: 365924 runs in 121 s, 305 edges, no finding.
+- **Revisit when:** NRI changes its framing, `readQueueLen` or `maxPayloadSize`, or ttrpc needs a half-closed connection.
