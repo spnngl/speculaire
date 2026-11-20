@@ -443,11 +443,6 @@ impl Relay {
         digest: &Digest,
         name: &str,
     ) -> Answer {
-        let Some(hash) = Hash::new(digest) else {
-            return Answer::Failed(Error::Relay(format!(
-                "{digest}: the relay hashes only sha256, sha384 and sha512"
-            )));
-        };
         let writer = self
             .cache
             .writer()
@@ -460,8 +455,7 @@ impl Relay {
         };
         let relaying = Relaying {
             feed: Some(feed),
-            hash,
-            expected: digest.clone(),
+            hash: Hash::new(digest),
             writer,
             cache: Arc::clone(&self.cache),
             over: Arc::clone(&self.over),
@@ -666,7 +660,6 @@ struct Relaying {
     /// Where the blob comes from, until it ends.
     feed: Option<Feed>,
     hash: Hash,
-    expected: Digest,
     writer: Option<Writer>,
     cache: Arc<Cache>,
     over: Arc<Notify>,
@@ -711,7 +704,7 @@ impl Relaying {
             match feed {
                 Some(Feed::Peers(download)) => download.finish(false),
                 _ => {
-                    warn!(expected = %self.expected, name = %self.name, "upstream sent a blob that is not its digest: nothing is kept, and the last chunk is not sent");
+                    warn!(expected = %self.hash.expected(), name = %self.name, "upstream sent a blob that is not its digest: nothing is kept, and the last chunk is not sent");
                 }
             }
             return Err(io::Error::other("the blob does not match its digest"));
@@ -720,14 +713,14 @@ impl Relaying {
             download.finish(true);
         }
         if let Some(writer) = self.writer.take() {
-            match writer.commit(&self.cache, &self.expected).await {
+            match writer.commit(&self.cache, self.hash.expected()).await {
                 Ok(()) => {
                     if self.cache.over() {
                         self.over.notify_one();
                     }
                 }
                 Err(err) => {
-                    warn!(error = %err, digest = %self.expected, "the blob cache could not keep a blob");
+                    warn!(error = %err, digest = %self.hash.expected(), "the blob cache could not keep a blob");
                 }
             }
         }

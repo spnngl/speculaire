@@ -255,13 +255,8 @@ impl Store {
     /// # Errors
     ///
     /// When the file cannot be created.
-    ///
-    /// # Panics
-    ///
-    /// Never: every algorithm a digest parses is one the store hashes.
     pub async fn writer(&self, digest: &Digest) -> Result<Writer, Error> {
-        let hash =
-            Hash::new(digest).expect("every algorithm a digest parses is one the store hashes");
+        let hash = Hash::new(digest);
         let n = self.parts.fetch_add(1, Ordering::Relaxed);
         let path = self
             .directory

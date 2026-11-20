@@ -161,7 +161,7 @@ impl Fetcher {
                 debug!(%digest, size = download.size, max, "content from peers is larger than wanted: it is not fetched");
                 return None;
             }
-            let mut hash = Hash::new(digest)?;
+            let mut hash = Hash::new(digest);
             let staged = self.stage(&mut download, &mut hash).await?;
             if hash.matches() {
                 download.finish(true);
