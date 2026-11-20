@@ -3,8 +3,9 @@ name: deep
 
 # The slow checks of each pull request, informational and outside `required` as `mutants.yml` is (D48): `careful` runs
 # the tests on a checked standard library under AddressSanitizer (`just careful address`, D76); `shuttle` runs the
-# reflector's index under Shuttle's random schedules (`just shuttle`, D97); `valgrind` runs the reflector under a short
-# load in Valgrind's memcheck and DHAT, then a peer pull in DHAT (`just valgrind`, D104, D116).
+# reflector's index and the NRI multiplexer's queues under Shuttle's random schedules (`just shuttle`, D97, D163); `kani`
+# proves the NRI multiplexer's frame decoder (`just kani`, D163); `valgrind` runs the reflector under a short load in
+# Valgrind's memcheck and DHAT, then a peer pull in DHAT (`just valgrind`, D104, D116).
 on:
   pull_request:
     # Only what can change what the tests do.
@@ -84,6 +85,29 @@ jobs:
         with:
           tool: protoc@3.${{ env.PROTOC_VERSION }}
       - run: just shuttle
+
+  kani:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # Its bundle pins its own nightly, which `cargo kani setup` installs.
+      # renovate: datasource=crate depName=kani-verifier
+      KANI_VERSION: "0.68.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      # The stable of rust-toolchain.toml, which builds Kani's driver.
+      - run: rustup toolchain install
+      - run: cargo install --locked kani-verifier@"$KANI_VERSION"
+      - run: cargo kani setup
+      - run: just kani
 
   # In the profile image of build/Containerfile, which has protoc and Valgrind (D116); the build starts cold each run.
   valgrind:

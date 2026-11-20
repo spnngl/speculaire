@@ -1,0 +1,26 @@
+[package]
+name = "speculaire-nri"
+description = "The NRI multiplexer: two ttrpc connections over the one socket between a runtime and a plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "sync"] }
+# D107: the frame header, read in place.
+zerocopy = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "time"] }
+
+# D163: the queues' lock in the tests of `just shuttle`.
+[target.'cfg(shuttle)'.dev-dependencies]
+shuttle.workspace = true
+
+[lints]
+workspace = true

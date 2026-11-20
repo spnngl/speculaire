@@ -53,6 +53,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("node_subject", node_subject),
     ("reflect", reflect),
     ("reflect_frame", reflect_frame),
+    ("nri_mux", nri_mux),
     ("containerd_event", containerd_event),
     ("referrers", referrers),
     ("link", link),
@@ -557,21 +558,22 @@ pub fn reflect_frame(data: &[u8]) {
     frames::<ReflectorMessage>(data);
 }
 
-/// Reads every frame of `data` as `M`, with a 1 KiB limit so that lengths over it come by often.
-fn frames<M: prost::Message + Default + PartialEq>(data: &[u8]) {
+/// The output of `future`, which reading a slice or writing a `Vec` completes at its first poll.
+fn ready<T>(future: impl Future<Output = T>) -> T {
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
 
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("reading or writing memory waited"),
+    }
+}
+
+/// Reads every frame of `data` as `M`, with a 1 KiB limit so that lengths over it come by often.
+fn frames<M: prost::Message + Default + PartialEq>(data: &[u8]) {
     use speculaire_reflect::frame::{self, FrameError, Reader};
 
     const LIMIT: usize = 1024;
-    /// The output of `future`, which a slice or a `Vec` completes at its first poll.
-    fn ready<T>(future: impl Future<Output = T>) -> T {
-        match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
-            Poll::Ready(output) => output,
-            Poll::Pending => panic!("reading or writing memory waited"),
-        }
-    }
     let mut rest = data;
     let mut reader = Reader::<M>::new(LIMIT);
     loop {
@@ -595,6 +597,96 @@ fn frames<M: prost::Message + Default + PartialEq>(data: &[u8]) {
             }
             Ok(None) | Err(_) => break,
         }
+    }
+}
+
+/// The trunk of an NRI socket as frames: each an 8-byte header, a big-endian ConnID then a big-endian payload length,
+/// then the payload (D9, D163). The multiplexer reads them into its two connections.
+///
+/// Reading never panics or waits, and refuses a length over the maximum before reading its payload. It ends as the
+/// frames say, and each connection reads its frames' payloads, in order.
+///
+/// # Panics
+///
+/// When reading panics or waits, or how it ends or what a connection reads is not what the frames say.
+pub fn nri_mux(data: &[u8]) {
+    use speculaire_nri::{MAX_PAYLOAD, Mux, MuxError, Oversize};
+    use tokio::io::AsyncReadExt as _;
+
+    /// How reading the frames ends.
+    #[derive(Debug, PartialEq, Eq)]
+    enum End {
+        Clean,
+        Short,
+        Oversize(Oversize),
+        Full { conn: u32 },
+    }
+    /// A connection's queue, in frames.
+    const QUEUE: usize = 256;
+
+    // What the frames say, read with plain slices.
+    let mut payloads = [Vec::new(), Vec::new()];
+    let mut queued = [0; 2];
+    let mut rest = data;
+    let end = loop {
+        let Some(([c0, c1, c2, c3, l0, l1, l2, l3], body)) = rest.split_first_chunk::<8>() else {
+            break if rest.is_empty() {
+                End::Clean
+            } else {
+                End::Short
+            };
+        };
+        let conn = u32::from_be_bytes([*c0, *c1, *c2, *c3]);
+        let length = u32::from_be_bytes([*l0, *l1, *l2, *l3]);
+        if length > MAX_PAYLOAD {
+            break End::Oversize(Oversize { conn, length });
+        }
+        let Some((payload, after)) = usize::try_from(length)
+            .ok()
+            .and_then(|length| body.split_at_checked(length))
+        else {
+            break End::Short;
+        };
+        let index = match conn {
+            1 => Some(0),
+            2 => Some(1),
+            _ => None,
+        };
+        if let Some(index) = index {
+            if queued[index] == QUEUE {
+                break End::Full { conn };
+            }
+            queued[index] += 1;
+            payloads[index].extend_from_slice(payload);
+        }
+        rest = after;
+    };
+
+    let (mux, mut connections) = Mux::new(data, Vec::new());
+    let ended = match ready(mux.run()) {
+        Ok(()) => End::Clean,
+        Err(MuxError::Io(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => End::Short,
+        Err(MuxError::Oversize(oversize)) => End::Oversize(oversize),
+        Err(MuxError::QueueFull { conn, .. }) => End::Full { conn: conn.id() },
+        Err(err) => panic!("the trunk closed on {err}"),
+    };
+    assert_eq!(ended, end);
+    let connections = [
+        &mut connections.plugin_service,
+        &mut connections.runtime_service,
+    ];
+    for (connection, payloads) in connections.into_iter().zip(payloads) {
+        let mut read = Vec::new();
+        let mut buf = [0; 4096];
+        let ended = loop {
+            match ready(connection.read(&mut buf)) {
+                Ok(0) => break Ok(()),
+                Ok(length) => read.extend_from_slice(&buf[..length]),
+                Err(err) => break Err(err),
+            }
+        };
+        assert_eq!(read, payloads);
+        assert_eq!(ended.is_ok(), end == End::Clean, "{ended:?}");
     }
 }
 

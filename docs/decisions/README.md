@@ -16,7 +16,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66, D123)
 - D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73, D102)
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136, D139, D143, D145, D147)
-- D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64)
+- D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64, D163)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136, D142, D149)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node (amended by D150)
@@ -169,5 +169,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D159 [build](build.md): the e2e suites wait on 1 s polls, a 45 s rate-limit window and a 300 ms netem delay instead of longer fixed waits, CRI-O's relay suite runs in the IPv4 pass only, and `just e2e-up` builds the suites while the cluster comes up (amends D94, D130)
 - D161 [agent](agent.md): a listener on `[::]` clears `IPV6_V6ONLY` to take IPv4 too, and is `0.0.0.0` on a kernel without IPv6 (amends D45)
 - D162 [build](build.md): `nri-runtime` is a JSON-lines session on `pkg/adaptation`, reflecting into its unexported plugins, with NRI's `pkg/stub` as a plugin and a raw mode that writes an oversized frame and stalls ConnID 2 (amends D29, D70)
+- D163 [gate](gate.md): the NRI multiplexer is `speculaire-nri`'s `Mux`, closes the trunk on an oversize frame or a full queue as NRI v0.12.5 does, and is checked by Kani, Shuttle and `nri_mux` (amends D9)
 
-Next free number: D163.
+Next free number: D164.

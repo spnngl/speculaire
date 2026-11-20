@@ -2135,6 +2135,7 @@ dependencies = [
  "serde_json",
  "speculaire-agent",
  "speculaire-mirror",
+ "speculaire-nri",
  "speculaire-oci",
  "speculaire-pki",
  "speculaire-reflect",
@@ -2144,6 +2145,7 @@ dependencies = [
  "speculaire-time",
  "speculaire-verify",
  "tempfile",
+ "tokio",
  "toml",
  "x509-parser",
 ]
@@ -2174,6 +2176,16 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+]
+
+[[package]]
+name = "speculaire-nri"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "thiserror",
+ "tokio",
+ "zerocopy",
 ]
 
 [[package]]
