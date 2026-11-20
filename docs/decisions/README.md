@@ -16,7 +16,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66, D123)
 - D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73, D102)
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136, D139, D143, D145, D147)
-- D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64, D163)
+- D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64, D163, D166)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136, D142, D149)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node (amended by D150)
@@ -172,5 +172,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D163 [gate](gate.md): the NRI multiplexer is `speculaire-nri`'s `Mux`, closes the trunk on an oversize frame or a full queue as NRI v0.12.5 does, and is checked by Kani, Shuttle and `nri_mux` (amends D9)
 - D164 [build](build.md): the `runnable` fixture is busybox for amd64 and arm64, signed keyless, recordable alone by `fixtures.yml -f cases=runnable`; the newest recording's trusted root and TUF snapshot are pinned; the fixtures stay under 6 MB (amends D112, D139, D141)
 - D165 [verification](verification.md): `cache.bin` is a versioned, sized, SHA-256-checksummed binary of sorted entries read in place; `load` names why it refuses a file, and a verdict saved under other policies or another trust root loads stale from load under the current ones (amends D31)
+- D166 [gate](gate.md): `speculaire-nri` serves NRI's plugin protocol on its own ttrpc unary subset, answers CreateContainer concurrently up to 256 in flight through a `Handler`, and infers the NRI version as NRI does (amends D9)
 
-Next free number: D166.
+Next free number: D167.

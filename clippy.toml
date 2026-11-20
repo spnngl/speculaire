@@ -5,5 +5,5 @@ allow-panic-in-tests = true
 allow-print-in-tests = true
 allow-dbg-in-tests = true
 
-# Product names and NRI'"'"'s `ConnID`, not code (D150, D163).
-doc-valid-idents = ["BuildKit", "CycloneDX", "ConnID", ".."]
+# Product names and NRI's `ConnID` and `CreateContainer`, not code (D150, D163, D166).
+doc-valid-idents = ["BuildKit", "CycloneDX", "ConnID", "CreateContainer", ".."]

@@ -1,0 +1,47 @@
+# Every containerd tag v2.3.0-beta.0…v2.4.2 and CRI-O tag v1.35.0…v1.37.2 as of 2026-11-20 (M6 step 02), one per line:
+# the runtime, then the tag. `tests/oracle.rs` checks `speculaire_nri::version::infer` against NRI's on each, and
+# fails when a `justfile` runtime pin is missing, so Renovate's bumps extend the list.
+containerd v2.3.0-beta.0
+containerd v2.3.0-beta.1
+containerd v2.3.0-beta.2
+containerd v2.3.0-rc.0
+containerd v2.3.0-rc.1
+containerd v2.3.0
+containerd v2.3.1
+containerd v2.3.2
+containerd v2.3.3
+containerd v2.3.4
+containerd v2.3.5
+containerd v2.3.6
+containerd v2.3.7
+containerd v2.4.0-beta.0
+containerd v2.4.0-rc.0
+containerd v2.4.0
+containerd v2.4.1
+containerd v2.4.2
+cri-o v1.35.0
+cri-o v1.35.1
+cri-o v1.35.2
+cri-o v1.35.3
+cri-o v1.35.4
+cri-o v1.35.5
+cri-o v1.35.6
+cri-o v1.35.7
+cri-o v1.35.8
+cri-o v1.35.9
+cri-o v1.35.10
+cri-o v1.35.11
+cri-o v1.35.12
+cri-o v1.36.0
+cri-o v1.36.1
+cri-o v1.36.2
+cri-o v1.36.3
+cri-o v1.36.4
+cri-o v1.36.5
+cri-o v1.36.6
+cri-o v1.36.7
+cri-o v1.36.8
+cri-o v1.36.9
+cri-o v1.37.0
+cri-o v1.37.1
+cri-o v1.37.2

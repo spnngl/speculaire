@@ -7,6 +7,9 @@ Copyright 2026 Lola Delannoy, licensed under the Apache License, Version 2.0.
 This product includes software ported from containerd (https://github.com/containerd/containerd),
 Copyright The containerd Authors, licensed under the Apache License, Version 2.0.
 
+This product includes software ported from containerd/nri (https://github.com/containerd/nri) and containerd/ttrpc
+(https://github.com/containerd/ttrpc), Copyright The containerd Authors, licensed under the Apache License, Version 2.0.
+
 This product includes software ported from containers/image (go.podman.io/image, https://github.com/containers/container-libs),
 Copyright The containers/image Authors, licensed under the Apache License, Version 2.0.
 
@@ -23,8 +26,8 @@ Copyright The Sigstore Authors, licensed under the Apache License, Version 2.0.
 This product includes software ported from sigstore policy-controller (https://github.com/sigstore/policy-controller),
 Copyright 2022 The Sigstore Authors, licensed under the Apache License, Version 2.0.
 
-This product includes software ported from the Go standard library (https://go.dev),
-Copyright 2009 The Go Authors, licensed under the BSD 3-Clause License, reproduced below.
+This product includes software ported from the Go standard library (https://go.dev) and golang.org/x/mod
+(https://go.googlesource.com/mod), Copyright 2009 The Go Authors, licensed under the BSD 3-Clause License, reproduced below.
 
 Copyright 2009 The Go Authors.
 

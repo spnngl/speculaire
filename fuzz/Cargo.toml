@@ -204,6 +204,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "nri_request"
+path = "fuzz_targets/nri_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "peer_response"
 path = "fuzz_targets/peer_response.rs"
 test = false
