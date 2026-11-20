@@ -144,7 +144,7 @@ impl Index {
             inner.holders_of(number).staging -= 1;
         }
         for number in &fresh {
-            inner.holders_of(number).nodes.insert(slot);
+            inner.holders_of(number).add(slot);
         }
         for number in &gone {
             inner.unhold(slot, number);
@@ -278,7 +278,7 @@ impl Inner {
     fn hold(&mut self, slot: u32, key: Key) {
         let number = self.number(key);
         if self.agent(slot).digests.insert(number) {
-            self.holders_of(number).nodes.insert(slot);
+            self.holders_of(number).add(slot);
             self.pairs += 1;
         }
     }
@@ -369,6 +369,18 @@ impl Inner {
 
     fn publish(&self, series: &IndexSeries) {
         series.set(self.nodes.len(), self.digests.len(), self.pairs);
+    }
+}
+
+impl Holders {
+    /// Adds node `slot`. A bitmap's first insert gives it room for four containers of 40 bytes, while one serves every
+    /// node number below 65,536: building the first container from bytes sizes the room for one, 120 bytes less a digest.
+    fn add(&mut self, slot: u32) {
+        if self.nodes.is_empty() {
+            self.nodes = RoaringBitmap::from_lsb0_bytes(slot & !7, &[1 << (slot & 7)]);
+        } else {
+            self.nodes.insert(slot);
+        }
     }
 }
 
@@ -473,6 +485,21 @@ mod tests {
                 ((*node).to_owned(), digests)
             })
             .collect()
+    }
+
+    #[test]
+    fn a_digests_first_holder_may_have_any_node_number() {
+        for first in [0, 3, 7, 8, 13, 65_535, 65_536, u32::MAX] {
+            let mut holders = Holders {
+                key: digest(1),
+                nodes: RoaringBitmap::new(),
+                staging: 0,
+            };
+            holders.add(first);
+            holders.add(3);
+            let expected = BTreeSet::from([first, 3]);
+            assert!(holders.nodes.iter().eq(expected), "first holder {first}");
+        }
     }
 
     #[test]
