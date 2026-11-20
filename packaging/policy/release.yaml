@@ -1,0 +1,20 @@
+# The policy speculaire's own images pass (D28, D157): signed by spnngl/speculaire's `release` workflow, run on a
+# version tag or dispatched from main, with its SLSA build provenance and its SBOM. The workflow's `verify` job checks
+# each image it pushes with it; docs/operations.md § Install shows how to check one you pull.
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: speculaire-release
+spec:
+  images:
+  - glob: ghcr.io/spnngl/speculaire
+  authorities:
+  - name: release-workflow
+    keyless:
+      identities:
+      - issuer: https://token.actions.githubusercontent.com
+        subjectRegExp: https://github\.com/spnngl/speculaire/\.github/workflows/release\.yml@refs/(heads/main|tags/v.+)
+    attestations:
+    - name: provenance
+      predicateType: https://slsa.dev/provenance/v1
+  sbom: required

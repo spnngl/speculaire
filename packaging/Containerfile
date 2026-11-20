@@ -1,0 +1,8 @@
+# speculaire's release image (D157): the static musl binary of `just musl` and nothing else, run as root (D27).
+# `release.yml` builds one per architecture into one index, from a context holding `speculaire-<arch>/speculaire`; no
+# `RUN`, so neither architecture needs an emulator.
+FROM scratch
+LABEL org.opencontainers.image.source=https://github.com/spnngl/speculaire
+ARG TARGETARCH
+COPY --chmod=0755 speculaire-${TARGETARCH}/speculaire /usr/bin/speculaire
+ENTRYPOINT ["/usr/bin/speculaire"]

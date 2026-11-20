@@ -551,6 +551,57 @@ mod tests {
     }
 
     #[test]
+    fn the_release_policy_holds_speculaire_to_its_release_workflow() {
+        let policies =
+            Policies::parse(include_str!("../../../packaging/policy/release.yaml")).unwrap();
+        let digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        for (image, want) in [
+            (format!("ghcr.io/spnngl/speculaire@{digest}"), true),
+            (
+                format!("ghcr.io/spnngl/speculaire-fixtures@{digest}"),
+                false,
+            ),
+            (format!("ghcr.io/spnngl/speculaire/other@{digest}"), false),
+        ] {
+            assert_eq!(
+                policies.matching(&reference(&image)).count() == 1,
+                want,
+                "{image}"
+            );
+        }
+        let [release] = &policies.policies[..] else {
+            panic!("one policy");
+        };
+        assert_eq!(release.sbom(), Sbom::Required);
+        let authority = &release.authorities()[0];
+        assert_eq!(
+            authority.attestations[0].predicate_type,
+            "https://slsa.dev/provenance/v1"
+        );
+        let Signer::Keyless { identities } = &authority.signer else {
+            panic!("keyless");
+        };
+        let workflow = "https://github.com/spnngl/speculaire/.github/workflows/release.yml@";
+        for (git_ref, want) in [
+            ("refs/heads/main", true),
+            ("refs/tags/v0.1.0", true),
+            ("refs/heads/feature", false),
+            ("refs/tags/0.1.0", false),
+        ] {
+            assert_eq!(
+                identities[0]
+                    .subject
+                    .matches(&format!("{workflow}{git_ref}")),
+                want,
+                "{git_ref}"
+            );
+        }
+        assert!(!identities[0].subject.matches(
+            "https://github.com/spnngl/speculaire/.github/workflows/fixtures.yml@refs/heads/main"
+        ));
+    }
+
+    #[test]
     fn a_subject_pattern_matches_the_whole_san() {
         let policies = Policies::parse(&policy("p", "**", KEYLESS, "")).unwrap();
         let Signer::Keyless { identities } = &policies.policies[0].authorities()[0].signer else {

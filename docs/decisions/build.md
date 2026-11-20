@@ -113,7 +113,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Measured in CI** (M0 spike workflow, run 42925541544): the same harness, with spikes 01 and 04, passes on `ubuntu-26.04` and `ubuntu-26.04-arm` against containerd 2.3.7 and 2.4.2, with Docker 29.4.2, 4 CPUs and 15 GiB per runner, in 5 to 7 minutes per leg including the Rust build. Each leg pulls about 8 Docker Hub images anonymously without hitting a rate limit.
 - **Revisit when:** —
 
-## D28: Dogfood: releases carry what the gate checks
+## D28: Dogfood: releases carry what the gate checks (amended by D157)
 
 - **Decision:**
   - Each release image gets SLSA build provenance (`attest-build-provenance`) and an SPDX SBOM (`syft`, which reads the `cargo auditable` data) attached with `actions/attest-sbom`.
@@ -699,3 +699,19 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The verification suites (M5) assert outcomes, so they run once per leg; the address family changes nothing they check.
 - **Measured:** the fixtures are 154 files, 345 kB. Locally on Docker Desktop arm64 with kind, the harness's test images took 6.9 s without the fixtures and 7.9 s with them (containerd 2.4); the verify suite's test, 11 cases each from zot then the plain upstream, took 18.8 s on containerd 2.4 and 7.2 s on CRI-O 1.37. The unit test takes 7.6 s on macOS.
 - **Revisit when:** the fixtures near 2 MB; the recording's certificates or TUF metadata expire for a test that cannot pin its time; a multi-platform recording lets arm64 pull the BuildKit cases.
+
+
+## D157: `release` builds one scratch image index, attests it and runs `speculaire verify` on it (amends D27, D28)
+
+- **Decision:**
+  - **Triggers:** a version tag `v*`, and `workflow_dispatch` from main. A dispatch pushes the tag `dispatch-<run id>`, with no GitHub release and no version tag; a version tag pushes `<version>`. Later milestones add the rest of D27's release list to the tag's run.
+  - **Binaries:** `release` runs `just musl` on each architecture's runner, as ci's `musl` job does, and does not reuse `ci`.
+  - **Image:** `packaging/Containerfile` copies the static binary into `scratch` and runs it as root (D27). One `docker buildx build` of both architectures pushes one OCI index of two images to `ghcr.io/spnngl/speculaire`. It has no `RUN`, so no emulator. BuildKit's own provenance and SBOM are off.
+  - **Attestations:** on the index digest, `actions/attest-build-provenance` (`https://slsa.dev/provenance/v1`) and `actions/attest-sbom` with an SPDX SBOM that `syft` reads from both binaries' `cargo auditable` data. Both are pushed as referrers and logged in the public-good Rekor.
+  - **Check:** the `verify` job runs `speculaire verify` on the index under `packaging/policy/release.yaml`. That policy requires a signature by `release.yml` at `refs/heads/main` or `refs/tags/v…`, the provenance and an SBOM. The job asks ghcr.io anonymously and fetches the public-good TUF root. The runner has no runtime, so it gives `--runtime containerd` and a containerd config without registry config, which sends ghcr.io's requests to ghcr.io (D17). This job replaces D28's e2e test.
+- **Because:**
+  - `ci` already gated each commit on main. Reusing it would add its e2e matrix to every dispatch.
+  - One binary per architecture and no `RUN` give one index from one job, with no QEMU.
+  - The `verify` job checks what a node pulls: the pushed index, anonymously, with the public trust root. An e2e test would check a local build under a pinned root instead.
+  - **Measured** (locally, before the first run): `syft` lists 461 packages for the two binaries. `speculaire verify` in a container without a runtime, with this policy pointed at the fixtures' recorded provenance and `attest-sbom` cases, prints `allow`, with the provenance and SBOM checks passing.
+- **Revisit when:** the tag's run gains packages, tarballs or the reproducible double build; GitHub's attestations leave the public-good Sigstore instance; a node needs an image that runs without root.
