@@ -163,8 +163,17 @@ async fn a_blob_over_the_limit_is_not_read_whole_and_an_empty_one_is_empty() {
         collect(open.stream(80, 10).await.unwrap()).await,
         pattern(100).slice(80..90)
     );
-    let whole = Blob::from_open(file_again, 90).read_all(90).await.unwrap();
+    let whole = Blob::from_open(file_again.try_clone().unwrap(), 90)
+        .read_all(90)
+        .await
+        .unwrap();
     assert_eq!(whole, pattern(100).slice(..90));
+    // A file shorter than its span ends the stream where it ends.
+    let short = Blob::from_open(file_again, 200)
+        .stream(90, 50)
+        .await
+        .unwrap();
+    assert_eq!(collect(short).await, pattern(100).slice(90..));
 }
 
 // ---- a fake of containerd's content service ----

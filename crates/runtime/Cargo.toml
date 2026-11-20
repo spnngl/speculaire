@@ -22,8 +22,7 @@ speculaire-pki.workspace = true
 speculaire-registry-config.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
-tokio-util.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 toml.workspace = true
 toml_edit.workspace = true
 tonic-prost.workspace = true

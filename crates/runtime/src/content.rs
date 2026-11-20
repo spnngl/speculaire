@@ -14,20 +14,18 @@ use containerd_client::services::v1::ReadContentRequest;
 use containerd_client::services::v1::content_client::ContentClient;
 use containerd_client::tonic::transport::Channel;
 use containerd_client::tonic::{Request, Status};
-use futures_util::{Stream, StreamExt as _, TryStreamExt as _};
+use futures_util::{Stream, StreamExt as _};
 use speculaire_oci::reference::Digest;
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
-use tokio_util::io::ReaderStream;
 
 use crate::containerd::with_namespace;
 
 /// The size of a read from a file, at most.
-const CHUNK: usize = 256 * 1024;
+const CHUNK: u64 = 256 * 1024;
 
-/// The size of the reads of a span of `length` bytes from a file: the span, when shorter than [`CHUNK`], so that a small
-/// blob such as a manifest holds no more memory than its own length.
-fn chunk(length: u64) -> usize {
-    usize::try_from(length).map_or(CHUNK, |length| length.min(CHUNK))
+/// The size of the next read of a span with `left` bytes to go: what is left, when shorter than [`CHUNK`], so that a
+/// small blob such as a manifest holds no more memory than its own length.
+fn chunk(left: u64) -> u64 {
+    left.min(CHUNK)
 }
 
 /// A chunk of a blob.
@@ -120,7 +118,11 @@ impl Blob {
     ///
     /// # Errors
     ///
-    /// When the file cannot be sought in, or containerd refuses the read.
+    /// When containerd refuses the read.
+    ///
+    /// # Panics
+    ///
+    /// Never: reading a file does not panic.
     pub async fn stream(self, first: u64, length: u64) -> Result<Chunks, Error> {
         match self.source {
             Source::Memory(bytes) => {
@@ -131,14 +133,29 @@ impl Blob {
                     async move { Ok(part) },
                 )))
             }
-            Source::File(file) => {
-                let mut file = tokio::fs::File::from_std(file);
-                file.seek(io::SeekFrom::Start(first)).await?;
-                Ok(Box::pin(
-                    ReaderStream::with_capacity(file.take(length), chunk(length))
-                        .map_err(Error::Io),
-                ))
-            }
+            // A blocking read per chunk straight into the buffer the chunk is sent in: tokio's `File` reads into a
+            // buffer of its own and copies out of it.
+            Source::File(file) => Ok(Box::pin(futures_util::stream::try_unfold(
+                (file, first, length),
+                |(file, first, left)| async move {
+                    if left == 0 {
+                        return Ok(None);
+                    }
+                    let (file, read) = tokio::task::spawn_blocking(move || {
+                        let read = read_span(&file, first, chunk(left));
+                        (file, read)
+                    })
+                    .await
+                    .expect("reading a file does not panic");
+                    let read = read?;
+                    // The file ends before the span: the reader sees the length short.
+                    if read.is_empty() {
+                        return Ok(None);
+                    }
+                    let size = read.len() as u64;
+                    Ok(Some((Bytes::from(read), (file, first + size, left - size))))
+                },
+            ))),
             Source::Grpc { channel, digest } => {
                 let mut client = ContentClient::new(channel);
                 let mut request = Request::new(ReadContentRequest {
@@ -179,7 +196,7 @@ impl Blob {
             Source::Memory(bytes) => return Ok(bytes),
             // One blocking read into a buffer of the blob's size: no chunks to join, nor tokio's buffer to copy from.
             Source::File(file) => {
-                return tokio::task::spawn_blocking(move || read_whole(&file, size))
+                return tokio::task::spawn_blocking(move || read_span(&file, 0, size))
                     .await
                     .expect("reading a file does not panic")
                     .map(Bytes::from)
@@ -196,12 +213,12 @@ impl Blob {
     }
 }
 
-/// The first `size` bytes of `file`, wherever its offset was.
-fn read_whole(mut file: &std::fs::File, size: u64) -> io::Result<Vec<u8>> {
-    file.seek(io::SeekFrom::Start(0))?;
-    let mut all = Vec::with_capacity(usize::try_from(size).unwrap_or_default());
-    file.take(size).read_to_end(&mut all)?;
-    Ok(all)
+/// `length` bytes of `file` from offset `first`, wherever its offset was, or fewer where the file ends.
+fn read_span(mut file: &std::fs::File, first: u64, length: u64) -> io::Result<Vec<u8>> {
+    file.seek(io::SeekFrom::Start(first))?;
+    let mut read = Vec::with_capacity(usize::try_from(length).unwrap_or_default());
+    file.take(length).read_to_end(&mut read)?;
+    Ok(read)
 }
 
 /// A place the mirror reads blobs from.
