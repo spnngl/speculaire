@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use speculaire_oci::platform::Host;
 use speculaire_runtime::images::{Image, RepoDigest, Update};
@@ -67,7 +68,7 @@ impl Local for Asked {
         &'a self,
         root: &'a Digest,
         _: u64,
-    ) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Option<Bytes>> + Send + 'a>> {
         self.1.fetch_add(1, Ordering::Relaxed);
         let mut stalled = self.2.lock().unwrap();
         if stalled.as_ref().is_some_and(|(stalled, _)| stalled == root)

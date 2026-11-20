@@ -13,6 +13,7 @@ publish.workspace = true
 testing = ["dep:tempfile"]
 
 [dependencies]
+bytes.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
@@ -29,7 +30,6 @@ tokio = { workspace = true, features = ["fs", "io-util"] }
 tracing.workspace = true
 
 [dev-dependencies]
-bytes.workspace = true
 futures-util.workspace = true
 hyper = { workspace = true, features = ["server"] }
 hyper-util.workspace = true
