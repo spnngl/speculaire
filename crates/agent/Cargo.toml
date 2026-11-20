@@ -21,6 +21,7 @@ sd-notify.workspace = true
 serde.workspace = true
 serde_path_to_error.workspace = true
 sigstore-tuf.workspace = true
+socket2.workspace = true
 speculaire-artifacts.workspace = true
 speculaire-configure.workspace = true
 speculaire-mirror.workspace = true

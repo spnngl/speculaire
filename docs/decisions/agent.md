@@ -84,7 +84,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The catalog holds no secret and no per-pod or per-image label (D34), so the endpoints reveal only counts.
 - **Revisit when:** a user needs the endpoints behind TLS; then serve them with the peer API's certificate and verifier (D16).
 
-## D45: The health and metrics listener binds `[::]:7482` from startup (amends D42)
+## D45: The health and metrics listener binds `[::]:7482` from startup (amends D42; amended by D161)
 
 - **Decision:** `metrics.address` defaults to `"[::]:7482"`. The listener opens before NRI registration and before any reflector connection. `/livez` answers 200 once it listens. `/readyz` answers 200 once every component the agent has started is ready: the config is loaded, the mirror listens, the artifact store is open (D121), the gate is registered with NRI (D41), and on a reflector the reflector API listens, which waits for the node identity (D16). It answers 503 while stopping (D39). A component that a build doesn't have yet adds no condition.
 - **Because:**
@@ -369,3 +369,11 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Every config written for D135 is refused. No release has shipped, so none is installed.
   - `speculaire-loadgen --lookup-p99` cannot be given D33's 500 µs; it stays the default.
 - **Revisit when:** a key needs less than a millisecond, or admins ask for units.
+
+## D161: A listener on `[::]` takes every address, IPv4 included (amends D45)
+
+- **Decision:** `metrics.address` and `reflector.listen` set to `[::]:port` listen on every address: the socket clears `IPV6_V6ONLY`, so IPv4 reaches it whatever `net.ipv6.bindv6only` says, and a kernel without IPv6 (`ipv6.disable=1`), which refuses the socket, gets `0.0.0.0:port` instead. Any other address is bound as written. `crates/agent/src/listen.rs` holds the rule.
+- **Because:**
+  - With the default `[::]`, an IPv6-disabled node could not start: the status listener opens first (D45), and its socket failed. A node with `bindv6only = 1` served IPv4 neither metrics nor reflectors.
+  - Go's `net.Listen("tcp", ":port")`, which node-exporter uses (D45), does the same (go1.26.1 `src/net/ipsock_posix.go:142-150`, `src/net/sockopt_linux.go:17`).
+- **Revisit when:** an admin needs `[::]` to mean IPv6 only; an IPv6 address such as `[fe80::1]` still listens on IPv6 alone.
