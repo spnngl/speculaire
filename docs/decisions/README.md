@@ -36,7 +36,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
 - D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157)
 - D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate (amended by D157)
-- D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79)
+- D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79, D162)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
@@ -77,7 +77,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7; amended by D88, D102)
 - D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61)
 - D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53)
-- D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29; amended by D79, D80, D81)
+- D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29; amended by D79, D80, D81, D162)
 - D71 [build](build.md): cargo-vet holds every crate version of `Cargo.lock` to an imported audit, a trusted publisher or an exemption, in `deps (deny)` inside `required`; bumps of exempted crates are renewed by hand (amends D27)
 - D72 [build](build.md): the `coverage` job uploads line coverage for the ruleset's `code_coverage` rule and `required` needs it; cargo-nextest runs the tests of `just check` and `just cov`, killing hung tests (amends D27, D48)
 - D73 [distribution](distribution.md): a peer fetch silent for `peer.stall_timeout` moves to the next peer or falls through, without denying the peer (amends D7; amended by D102)
@@ -168,5 +168,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D158 [distribution](distribution.md): a file in a `hosts.toml` root is left out of the tree, though containerd fails every pull of its host (amends D78)
 - D159 [build](build.md): the e2e suites wait on 1 s polls, a 45 s rate-limit window and a 300 ms netem delay instead of longer fixed waits, CRI-O's relay suite runs in the IPv4 pass only, and `just e2e-up` builds the suites while the cluster comes up (amends D94, D130)
 - D161 [agent](agent.md): a listener on `[::]` clears `IPV6_V6ONLY` to take IPv4 too, and is `0.0.0.0` on a kernel without IPv6 (amends D45)
+- D162 [build](build.md): `nri-runtime` is a JSON-lines session on `pkg/adaptation`, reflecting into its unexported plugins, with NRI's `pkg/stub` as a plugin and a raw mode that writes an oversized frame and stalls ConnID 2 (amends D29, D70)
 
-Next free number: D162.
+Next free number: D163.

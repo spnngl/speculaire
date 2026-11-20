@@ -6,6 +6,11 @@
 //! The tests find the binary through [`ENV`]: `just oracle` builds it and sets the variable. Without the variable
 //! [`Oracle::from_env`] returns `None`, and the test skips, as it does in `just check`; with the variable and no
 //! binary, it is an error, so a test cannot pass by skipping in the `oracle` job.
+//!
+//! `nri-runtime` is a session rather than a batch: [`Oracle::nri_runtime`] starts it, and [`nri::Runtime`] writes
+//! one command at a time and reads its answer.
+
+pub mod nri;
 
 use std::io::{Read, Write as _};
 use std::path::PathBuf;

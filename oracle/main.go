@@ -4,7 +4,10 @@
 // `version` reads nothing and prints the containerd and NRI versions the oracle links. Every other subcommand reads
 // cases as JSON lines on stdin and prints one JSON line per case on stdout (D70): `hosts` and `config` run containerd's
 // registry configuration code, `registries`, `certs` and `auth` that of go.podman.io/image, which CRI-O links; `reference` and `platform` run the image reference and platform
-// parsers of containerd's CRI plugin.
+// parsers of containerd's CRI plugin; `nri-version` runs NRI's inference of a runtime's NRI version.
+//
+// `nri-runtime` is a session: each JSON line is a command to an NRI runtime on pkg/adaptation, which drives plugins
+// as containerd and CRI-O do, or to its raw mode, which writes frames pkg/adaptation never sends (nri.go, nriraw.go).
 package main
 
 import (
@@ -16,10 +19,10 @@ import (
 	"os"
 	"runtime/debug"
 
+	"github.com/sirupsen/logrus"
+
 	// The plugins the daemon registers: `config` runs their configuration migrations, in the daemon's order.
 	_ "github.com/containerd/containerd/v2/cmd/containerd/builtins"
-	// Linked so that the build info records the NRI version; the subcommands of M6 call into it.
-	_ "github.com/containerd/nri/pkg/api"
 )
 
 const (
@@ -42,13 +45,14 @@ func main() {
 
 // subcommands maps a name to the function that answers one case.
 var subcommands = map[string]func(line []byte) (any, error){
-	"hosts":      hostsCase,
-	"config":     configCase,
-	"registries": registriesCase,
-	"certs":      certsCase,
-	"auth":       authCase,
-	"reference":  referenceCase,
-	"platform":   platformCase,
+	"hosts":       hostsCase,
+	"config":      configCase,
+	"registries":  registriesCase,
+	"certs":       certsCase,
+	"auth":        authCase,
+	"reference":   referenceCase,
+	"platform":    platformCase,
+	"nri-version": nriVersionCase,
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -58,6 +62,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if args[0] == "version" {
 		return printVersions(stdout, stderr)
 	}
+	if args[0] == "nri-runtime" {
+		// NRI logs each registration, split and close: the test's stderr is where to read them.
+		logrus.SetOutput(stderr)
+		return answerLines(newNRISession().answer, stdin, stdout, stderr)
+	}
 	answer, ok := subcommands[args[0]]
 	if !ok {
 		return usage(stderr)
@@ -66,7 +75,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func usage(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "usage: speculaire-oracle version | hosts | config | registries | certs | auth | reference | platform")
+	fmt.Fprintln(stderr, "usage: speculaire-oracle version | hosts | config | registries | certs | auth | reference | platform | nri-version | nri-runtime")
 	return 2
 }
 
