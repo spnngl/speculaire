@@ -2,6 +2,7 @@
 
 use std::num::NonZeroUsize;
 
+use speculaire_artifacts::Artifact;
 use speculaire_artifacts::testing::Layout;
 use speculaire_verify::policy::Sbom;
 use speculaire_verify::sbom::{Failure, Listed};
@@ -141,6 +142,29 @@ async fn a_buildkit_sbom_the_signed_index_does_not_list_is_missing() {
     let result = sbom(&fixture, &required(SAN), MAX_SIZE).await;
 
     assert_eq!(result, Err(Failure::Missing));
+}
+
+/// The search ends at the first BuildKit SBOM that passes: a later attestation manifest, listed but not stored, is
+/// never read (D150).
+#[tokio::test]
+async fn a_buildkit_sbom_that_passes_ends_the_search() {
+    let mut fixture = Fixture::load("buildkit-signed").await;
+    let attestation = fixture
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == Kind::Attestation)
+        .cloned()
+        .expect("a BuildKit case records its attestation manifest");
+    // The platform manifest the attestation describes: the signed index lists it, the store does not hold it.
+    fixture.artifacts.push(Artifact {
+        manifest: attestation.target.clone(),
+        blobs: Vec::new(),
+        ..attestation
+    });
+
+    let result = sbom(&fixture, &required(SAN), MAX_SIZE).await;
+
+    assert_eq!(result, Ok(listed(1)));
 }
 
 /// `buildkit-signed` without its in-toto layer, 3 472 bytes, and with the index's signature bundle, 10 792.

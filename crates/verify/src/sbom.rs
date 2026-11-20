@@ -300,37 +300,7 @@ impl Signatures {
         policy: &Policy,
         root: &TrustRoot,
     ) -> Result<SbomResult, Unverifiable> {
-        let attestations: Vec<&Artifact> = artifacts
-            .iter()
-            .filter(|artifact| artifact.kind == Kind::Attestation)
-            .collect();
-        if attestations.is_empty() {
-            return Ok(Err(Failure::Missing));
-        }
-        // A record is untrusted: only what the signed index lists counts.
-        let listed = referrers::index(&read(store, target).await?).unwrap_or_default();
-        let mut found = Err(Failure::Missing);
-        for attestation in attestations
-            .into_iter()
-            .filter(|attestation| listed.iter().any(|d| d.digest == attestation.manifest))
-        {
-            let Ok(manifest) = Referrer::parse(&read(store, &attestation.manifest).await?) else {
-                continue;
-            };
-            for layer in manifest.layers.iter().filter(|l| l.media_type == IN_TOTO) {
-                let result =
-                    match blob(store, &attestation.manifest, &layer.digest, self.max_size()).await?
-                    {
-                        Blob::Kept(bytes) => statement(&bytes),
-                        // An oversize layer may be any statement: it counts only when nothing comes closer.
-                        Blob::Oversize { size, .. } => Err(Failure::Oversize(size)),
-                    };
-                found = match (found, result) {
-                    (Ok(packages), _) | (Err(_), Ok(packages)) => Ok(packages),
-                    (Err(closest), Err(failure)) => Err(closer(closest, failure)),
-                };
-            }
-        }
+        let found = layers(store, target, artifacts, self.max_size()).await?;
         if found == Err(Failure::Missing) {
             return Ok(Err(Failure::Missing));
         }
@@ -347,6 +317,46 @@ impl Signatures {
         }
         Ok(Err(Failure::Unsigned(unsigned)))
     }
+}
+
+/// The packages of the first SBOM that passes in the in-toto layers of the BuildKit attestation manifests among
+/// `artifacts` that the index `target` lists, read unsigned: the layers after it are neither read nor parsed.
+async fn layers(
+    store: &Store,
+    target: &Digest,
+    artifacts: &[Artifact],
+    max_size: u64,
+) -> Result<Result<NonZeroUsize, Failure>, Unverifiable> {
+    let attestations: Vec<&Artifact> = artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == Kind::Attestation)
+        .collect();
+    if attestations.is_empty() {
+        return Ok(Err(Failure::Missing));
+    }
+    // A record is untrusted: only what the signed index lists counts.
+    let listed = referrers::index(&read(store, target).await?).unwrap_or_default();
+    let mut closest = Failure::Missing;
+    for attestation in attestations
+        .into_iter()
+        .filter(|attestation| listed.iter().any(|d| d.digest == attestation.manifest))
+    {
+        let Ok(manifest) = Referrer::parse(&read(store, &attestation.manifest).await?) else {
+            continue;
+        };
+        for layer in manifest.layers.iter().filter(|l| l.media_type == IN_TOTO) {
+            let result = match blob(store, &attestation.manifest, &layer.digest, max_size).await? {
+                Blob::Kept(bytes) => statement(&bytes),
+                // An oversize layer may be any statement: it counts only when nothing comes closer.
+                Blob::Oversize { size, .. } => Err(Failure::Oversize(size)),
+            };
+            match result {
+                Ok(packages) => return Ok(Ok(packages)),
+                Err(failure) => closest = closer(closest, failure),
+            }
+        }
+    }
+    Ok(Err(closest))
 }
 
 /// The packages of the `format` SBOM the verified bundle `bundle` attests.
