@@ -17,6 +17,9 @@ use crate::wiring::{Error, Problem, Report, Target};
 
 const NOW: Duration = Duration::from_hours(500_000);
 
+/// The default `gate.wait`.
+pub(crate) const WAIT: Duration = Duration::from_millis(300);
+
 /// The time the tests make certificates at.
 pub(crate) fn now() -> SystemTime {
     SystemTime::UNIX_EPOCH + NOW
@@ -151,10 +154,15 @@ impl Tree {
         Ok(problems)
     }
 
-    /// What preflight finds, the certificates included, with the root of the node taken out of the paths and the
-    /// directory of the sockets named `/run`.
+    /// What preflight finds with the default `gate.wait`, as [`Self::preflight_waiting`].
     pub(crate) fn preflight(&self) -> Vec<String> {
-        let mut problems = self.node.settings().preflight();
+        self.preflight_waiting(WAIT)
+    }
+
+    /// What preflight finds when the gate waits `wait`, the certificates included, with the root of the node taken
+    /// out of the paths and the directory of the sockets named `/run`.
+    pub(crate) fn preflight_waiting(&self, wait: Duration) -> Vec<String> {
+        let mut problems = self.node.settings().preflight(wait);
         problems.extend(certificates::check(&self.target, now()));
         self.problems(&problems)
     }

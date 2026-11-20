@@ -5,6 +5,9 @@
 //! starting it. Every problem names the file or socket it comes from, the key to change, and what to set.
 
 use std::path::Path;
+use std::time::Duration;
+
+use speculaire_registry_config::nri::RequestTimeout;
 
 use crate::cri;
 use crate::detect::Runtime;
@@ -33,8 +36,33 @@ pub trait Settings: Send + Sync {
     fn required_plugins(&self) -> Result<Required, Error>;
 
     /// What is wrong on the node that would make the agent mirror or gate wrongly, so that it must not start: nothing
-    /// when it may.
-    fn preflight(&self) -> Vec<Problem>;
+    /// when it may. `wait` is the agent's `gate.wait`, which must fit in the runtime's NRI request timeout (D41, D64).
+    fn preflight(&self, wait: Duration) -> Vec<Problem>;
+}
+
+/// What is wrong with `gate.wait` against the runtime's NRI request timeout, `key` in `section` (D41, D64).
+///
+/// The runtime gives up on the gate's answer at the timeout, and fails the container; the gate answers by `gate.wait`
+/// at the latest, and the other half of the timeout is left to the rest of the request.
+pub(crate) fn wait(
+    wait: Duration,
+    runtime: &str,
+    key: &str,
+    section: &str,
+    timeout: RequestTimeout,
+) -> Option<String> {
+    if wait.saturating_mul(2) < timeout.get() {
+        return None;
+    }
+    let unset = if timeout == RequestTimeout::Default {
+        ", NRI's default when unset,"
+    } else {
+        ""
+    };
+    Some(format!(
+        "`gate.wait = {} s` is not below half of `{key} = {timeout}`{unset} in {section}: {runtime} gives up on the gate's answer after `{key}`, and the gate may wait `gate.wait` before it answers (D41, D64); lower `gate.wait` in the agent's config, or raise `{key}` and restart {runtime}",
+        wait.as_secs_f64()
+    ))
 }
 
 /// What the runtime says over the CRI about its version: its release when it is one the agent supports, and the

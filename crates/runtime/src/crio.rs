@@ -19,6 +19,7 @@ use futures_util::future::BoxFuture;
 use serde::Deserialize;
 pub use settings::MINIMUM;
 use speculaire_registry_config::crio::Context;
+use speculaire_registry_config::nri::RequestTimeout;
 use tokio::sync::mpsc;
 
 use crate::content::{Blob, Content};
@@ -120,6 +121,8 @@ pub struct Nri {
     /// `nri_validator_required_plugins`, under `[crio.nri.default_validator]`: the plugins CRI-O refuses containers
     /// without.
     pub required_plugins: Vec<String>,
+    /// `nri_plugin_request_timeout`: how long CRI-O waits for the gate's answer (D64).
+    pub request_timeout: RequestTimeout,
 }
 
 /// Why CRI-O's config could not be read.
@@ -215,7 +218,7 @@ pub fn body(response: &[u8]) -> Result<&str, Error> {
 
 impl Nri {
     /// The NRI settings in the text of CRI-O's config; a missing key has CRI-O's default (NRI on, connections open, no
-    /// required plugin).
+    /// required plugin, NRI's request timeout).
     ///
     /// # Errors
     ///
@@ -236,6 +239,7 @@ impl Nri {
         struct Section {
             enable_nri: bool,
             nri_disable_connections: bool,
+            nri_plugin_request_timeout: RequestTimeout,
             default_validator: Validator,
         }
         impl Default for Section {
@@ -243,6 +247,7 @@ impl Nri {
                 Self {
                     enable_nri: true,
                     nri_disable_connections: false,
+                    nri_plugin_request_timeout: RequestTimeout::Default,
                     default_validator: Validator::default(),
                 }
             }
@@ -257,6 +262,7 @@ impl Nri {
             enabled: nri.enable_nri,
             disable_connections: nri.nri_disable_connections,
             required_plugins: nri.default_validator.nri_validator_required_plugins,
+            request_timeout: nri.nri_plugin_request_timeout,
         })
     }
 }
@@ -358,7 +364,7 @@ mod tests {
 
     use super::*;
 
-    const CONFIG: &str = "[crio]\nroot = \"/var/lib/containers/storage\"\n\n[crio.nri]\nenable_nri = true\nnri_disable_connections = false\n\n[crio.nri.default_validator]\nnri_enable_default_validator = true\nnri_validator_required_plugins = [\"speculaire\", \"other\"]\n";
+    const CONFIG: &str = "[crio]\nroot = \"/var/lib/containers/storage\"\n\n[crio.nri]\nenable_nri = true\nnri_disable_connections = false\nnri_plugin_request_timeout = \"500ms\"\n\n[crio.nri.default_validator]\nnri_enable_default_validator = true\nnri_validator_required_plugins = [\"speculaire\", \"other\"]\n";
 
     fn response(status: &str, headers: &str, body: &str) -> Vec<u8> {
         format!("HTTP/1.0 {status}\r\n{headers}\r\n{body}").into_bytes()
@@ -372,6 +378,7 @@ mod tests {
                 enabled: true,
                 disable_connections: false,
                 required_plugins: vec!["speculaire".to_owned(), "other".to_owned()],
+                request_timeout: RequestTimeout::Set(Duration::from_millis(500)),
             }
         );
         let off = "[crio.nri]\nenable_nri = false\nnri_disable_connections = true\n";
@@ -388,11 +395,13 @@ mod tests {
                     enabled: true,
                     disable_connections: false,
                     required_plugins: Vec::new(),
+                    request_timeout: RequestTimeout::Default,
                 },
                 "{text:?}"
             );
         }
         assert!(Nri::parse("[crio.nri]\nenable_nri = \"yes\"\n").is_err());
+        assert!(Nri::parse("[crio.nri]\nnri_plugin_request_timeout = \"2\"\n").is_err());
         assert!(Nri::parse("[crio.nri\n").is_err());
     }
 

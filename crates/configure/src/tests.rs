@@ -14,6 +14,9 @@ use speculaire_runtime::wiring::{Error, Problem, Report, Target, Wiring};
 
 use super::*;
 
+/// The default `gate.wait`.
+const WAIT: Duration = Duration::from_millis(300);
+
 fn now() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_hours(500_000)
 }
@@ -101,7 +104,7 @@ impl Settings for FakeSettings {
         }
     }
 
-    fn preflight(&self) -> Vec<Problem> {
+    fn preflight(&self, _wait: Duration) -> Vec<Problem> {
         self.problems.clone()
     }
 }
@@ -196,7 +199,7 @@ fn preflight_adds_the_certificates_after_what_the_settings_find() {
         problems: vec![problem("/fake/socket", "too old")],
         ..FakeSettings::requiring(&[])
     };
-    let problems = preflight(&settings, &target(), now());
+    let problems = preflight(&settings, &target(), WAIT, now());
     assert_eq!(problems.len(), 2, "{problems:?}");
     assert_eq!(problems[0], problem("/fake/socket", "too old"));
     assert!(problems[1].to_string().contains("ca.crt"), "{problems:?}");
@@ -213,7 +216,7 @@ fn check_all_reports_what_check_and_preflight_both_find_once() {
         problems: vec![problem("/fake/socket", "too old"), both.clone()],
         ..FakeSettings::requiring(&[])
     };
-    let all = check_all(&wiring, &settings, &target(), now()).unwrap();
+    let all = check_all(&wiring, &settings, &target(), WAIT, now()).unwrap();
     let lines: Vec<String> = all.iter().map(ToString::to_string).collect();
     // Preflight first, then what only `check` finds; the certificates, which both find, once.
     assert_eq!(lines.len(), 4, "{lines:?}");

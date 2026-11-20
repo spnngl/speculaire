@@ -1,5 +1,7 @@
 //! What preflight and the required plugins say of a containerd on a temporary tree.
 
+use std::time::Duration;
+
 use crate::detect::Runtime;
 use crate::fixture::{Tree, has, put};
 use crate::wiring::Error;
@@ -207,4 +209,72 @@ fn nri_that_is_off_or_closed_is_refused_naming_each_key() {
         "version = 3\ndisabled_plugins = ['io.containerd.nri.v1.nri']\n[plugins.'io.containerd.nri.v1.nri']\ndisable = true\ndisable_connections = true\n",
     );
     assert_eq!(node.preflight().len(), 3);
+}
+
+#[test]
+fn gate_wait_must_be_below_half_of_containerds_request_timeout() {
+    let node = configured();
+    let config = node.containerd_config();
+    let text = std::fs::read_to_string(&config).unwrap();
+    let wait = |millis| node.preflight_waiting(Duration::from_millis(millis));
+    // Unset, the timeout is NRI's default of 2 s.
+    assert_eq!(wait(300), Vec::<String>::new());
+    let problems = wait(1000);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        has(
+            &problems,
+            &[
+                "/etc/containerd/config.toml: `gate.wait = 1 s` is not below half of `plugin_request_timeout = 2s`, NRI's default when unset, in [plugins.'io.containerd.nri.v1.nri']",
+                "(D41, D64)",
+                "lower `gate.wait`",
+                "raise `plugin_request_timeout` and restart containerd"
+            ]
+        ),
+        "{problems:?}"
+    );
+    let set = |timeout: &str| {
+        put(
+            &config,
+            &format!(
+                "{text}\n[plugins.'io.containerd.nri.v1.nri']\nplugin_request_timeout = {timeout}\n"
+            ),
+        );
+    };
+    set("\"500ms\"");
+    assert!(has(
+        &wait(300),
+        &[
+            "`gate.wait = 0.3 s` is not below half of `plugin_request_timeout = 500ms` in [plugins.'io.containerd.nri.v1.nri']"
+        ]
+    ));
+    assert_eq!(wait(200), Vec::<String>::new());
+    // Zero keeps NRI's default; a negative timeout fails every request.
+    set("\"0s\"");
+    assert_eq!(wait(300), Vec::<String>::new());
+    set("\"-1s\"");
+    assert!(has(
+        &wait(1),
+        &["`plugin_request_timeout = a negative duration`"]
+    ));
+    set("\"2\"");
+    assert!(has(
+        &wait(300),
+        &["cannot read containerd's config", "missing unit"]
+    ));
+    // A timeout set in an imported file counts.
+    let import = node.at("/etc/containerd/nri.toml");
+    let imported = |timeout: &str| {
+        put(
+            &import,
+            &format!(
+                "version = 3\n[plugins.'io.containerd.nri.v1.nri']\nplugin_request_timeout = {timeout}\n"
+            ),
+        );
+    };
+    put(&config, &format!("imports = [\"nri.toml\"]\n{text}"));
+    imported("\"500ms\"");
+    assert!(has(&wait(300), &["`plugin_request_timeout = 500ms`"]));
+    imported("\"5s\"");
+    assert_eq!(wait(1000), Vec::<String>::new());
 }

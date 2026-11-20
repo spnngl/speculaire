@@ -5,7 +5,7 @@
 //! the refusal to unconfigure while the runtime requires the plugin, the certificates, and the order in which
 //! problems are reported.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use speculaire_runtime::certificates;
 use speculaire_runtime::settings::Settings;
@@ -63,10 +63,15 @@ pub fn check(wiring: &dyn Wiring, target: &Target, now: SystemTime) -> Result<Ve
 }
 
 /// What is wrong on the node that would make the agent mirror or gate wrongly, so that it must not start: nothing
-/// when it may.
+/// when it may. `wait` is the agent's `gate.wait` (D41, D64).
 #[must_use]
-pub fn preflight(settings: &dyn Settings, target: &Target, now: SystemTime) -> Vec<Problem> {
-    let mut problems = settings.preflight();
+pub fn preflight(
+    settings: &dyn Settings,
+    target: &Target,
+    wait: Duration,
+    now: SystemTime,
+) -> Vec<Problem> {
+    let mut problems = settings.preflight(wait);
     problems.extend(certificates::check(target, now));
     problems
 }
@@ -80,10 +85,11 @@ pub fn check_all(
     wiring: &dyn Wiring,
     settings: &dyn Settings,
     target: &Target,
+    wait: Duration,
     now: SystemTime,
 ) -> Result<Vec<Problem>, Error> {
     // The certificates are in preflight's problems already: they are read once.
-    let mut problems = preflight(settings, target, now);
+    let mut problems = preflight(settings, target, wait, now);
     for problem in wiring.check(target)? {
         if !problems.contains(&problem) {
             problems.push(problem);

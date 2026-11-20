@@ -22,6 +22,7 @@ use crate::error::{from_toml, from_value};
 use crate::fold::{fold_fields, fold_value_fields, go_toml, value_table_at, value_tables_in};
 use crate::go::{clean_path, glob, parse_url};
 use crate::header::Headers;
+use crate::nri::RequestTimeout;
 
 /// Where containerd reads its config unless told otherwise.
 pub const DEFAULT_PATH: &str = "/etc/containerd/config.toml";
@@ -343,14 +344,16 @@ struct Images {
     discard_unpacked_layers: bool,
 }
 
-/// The NRI plugin's section, of which only `disable`, `disable_connections` and the default validator's
-/// `required_plugins` are read.
+/// The NRI plugin's section, of which only `disable`, `disable_connections`, `plugin_request_timeout` and the default
+/// validator's `required_plugins` are read.
 #[derive(Deserialize, Default)]
 struct RawNri {
     #[serde(default)]
     disable: bool,
     #[serde(default)]
     disable_connections: bool,
+    #[serde(default)]
+    plugin_request_timeout: RequestTimeout,
     #[serde(default)]
     default_validator: DefaultValidator,
 }
@@ -366,6 +369,8 @@ pub struct Nri {
     pub plugin_disabled: bool,
     /// `required_plugins` of `default_validator`: the plugins containerd refuses containers without.
     pub required_plugins: Vec<String>,
+    /// `plugin_request_timeout`: how long containerd waits for the gate's answer (D41).
+    pub request_timeout: RequestTimeout,
 }
 
 impl Nri {
@@ -467,7 +472,12 @@ pub fn load_plugins(path: &Path) -> Result<Plugins, LoadError> {
     };
     fold_value_fields(
         &mut nri,
-        &["disable", "disable_connections", "default_validator"],
+        &[
+            "disable",
+            "disable_connections",
+            "plugin_request_timeout",
+            "default_validator",
+        ],
     );
     if let Some(validator) = value_table_at(&mut nri, "default_validator") {
         fold_value_fields(validator, &["required_plugins"]);
@@ -480,6 +490,7 @@ pub fn load_plugins(path: &Path) -> Result<Plugins, LoadError> {
             disable_connections: nri.disable_connections,
             plugin_disabled: merged.disabled.iter().any(|name| name == NRI_PLUGIN),
             required_plugins: nri.default_validator.required_plugins,
+            request_timeout: nri.plugin_request_timeout,
         },
     })
 }

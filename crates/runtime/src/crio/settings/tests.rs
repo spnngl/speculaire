@@ -1,5 +1,7 @@
 //! What preflight and the required plugins say of a CRI-O on a temporary tree.
 
+use std::time::Duration;
+
 use crate::crio::CriO;
 use crate::detect::Runtime;
 use crate::fixture::{Tree, has};
@@ -110,7 +112,7 @@ fn a_problem_that_check_and_preflight_both_find_is_the_same_problem() {
     assert!(
         node.node
             .settings()
-            .preflight()
+            .preflight(crate::fixture::WAIT)
             .iter()
             .all(|p| !p.message.contains("differs from what")),
     );
@@ -125,4 +127,50 @@ fn crios_inspect_api_that_does_not_exist_is_an_error() {
         "systemctl",
     );
     assert!(crio.nri().is_err());
+}
+
+#[test]
+fn gate_wait_must_be_below_half_of_crios_request_timeout() {
+    let node = Tree::configured(Runtime::CriO);
+    let wait = |millis| node.preflight_waiting(Duration::from_millis(millis));
+    let set = |timeout: &str| {
+        node.update(|answers| {
+            answers.crio_config = Some(format!(
+                "[crio.nri]\nnri_plugin_request_timeout = {timeout}\n"
+            ));
+        });
+    };
+    // Unset, the timeout is NRI's default of 2 s.
+    assert_eq!(wait(300), Vec::<String>::new());
+    let problems = wait(1000);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        has(
+            &problems,
+            &[
+                "/run/cri-o.sock: `gate.wait = 1 s` is not below half of `nri_plugin_request_timeout = 2s`, NRI's default when unset, in [crio.nri]",
+                "(D41, D64)",
+                "lower `gate.wait`",
+                "raise `nri_plugin_request_timeout` and restart CRI-O"
+            ]
+        ),
+        "{problems:?}"
+    );
+    // CRI-O's inspect API writes the duration as Go prints it.
+    set("\"2s\"");
+    assert_eq!(wait(300), Vec::<String>::new());
+    assert!(has(
+        &wait(1000),
+        &["`nri_plugin_request_timeout = 2s` in [crio.nri]"]
+    ));
+    set("\"500ms\"");
+    assert!(has(
+        &wait(300),
+        &[
+            "`gate.wait = 0.3 s` is not below half of `nri_plugin_request_timeout = 500ms` in [crio.nri]"
+        ]
+    ));
+    assert_eq!(wait(200), Vec::<String>::new());
+    set("\"2\"");
+    assert!(has(&wait(300), &["/run/cri-o.sock", "missing unit"]));
 }
