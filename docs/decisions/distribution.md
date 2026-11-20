@@ -64,7 +64,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Pull secrets travel with each CRI request (`image_pull.go:105-114`) and never reach a file the agent could read.
 - **Revisit when:** users need pull-secret-only images verified. Then add kubelet credential-provider support.
 
-## D78: One `registry-config` crate holds both runtimes' parsers, and reads what containerd reads (amends D17; amended by D115, D119)
+## D78: One `registry-config` crate holds both runtimes' parsers, and reads what containerd reads (amends D17; amended by D115, D119, D158)
 
 - **Decision:**
   - The *registry config* parsers are one crate, `crates/registry-config` (`speculaire-registry-config`), a module per runtime: `containerd::config` for `config.toml`, `containerd::hosts` for `hosts.toml` and the host directories, and `crio` for CRI-O's files (D80).
@@ -440,3 +440,11 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - D85's "no status of the mirror's can start a retry on the same host" held for a mirror that has no upstream; the relay is CRI-O's upstream, and the retry is what the registry asked for.
 - **Measured (M4 step 02, locally on Docker Desktop arm64, kind, CRI-O 1.37):** behind a proxy that answers `429` with `Retry-After: 5` to the first manifest request, `crictl pull` of a tag succeeds on CRI-O's retry, after at least 5 s; the proxy saw one `429`, `speculaire_mirror_requests_total{kind="manifest",result="refused"}` rose by 1, and the `warn` line named the proxy's host, the status, the name and the tag. The test took 11.2 s.
 - **Revisit when:** containers/image falls back to another source for the platform manifest, or CRI-O pulls by itself on a `502`.
+
+## D158: A file in a `hosts.toml` root is left out of the tree, though containerd fails its host (amends D78)
+
+- **Decision:** `hosts::Tree::load` leaves out an entry of a root that is not a directory, a link to one followed. A file named as a host, `docker.io` or `_default`, gives that host no directory, and the host resolves through the next name, as when nothing is there.
+- **Because:**
+  - containerd stats a host path of any kind (v2.4.2 `core/remotes/docker/config/hosts.go:293-304`), then fails reading `hosts.toml` under the file (`:315-318`): every pull of that host fails, and the kubelet reports it. No pull depends on the sources the agent gives that host.
+  - Refusing the tree, as an invalid `hosts.toml` does (D91), would keep the previous registry config for every host because of one stray file, such as a `README` named after a host.
+- **Revisit when:** containerd skips such a file or reads a host from it, or the agent must refuse what containerd refuses.
