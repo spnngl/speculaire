@@ -306,14 +306,19 @@ pub async fn follow(
     let mut stale = false;
     // A grace ending before the first listing collects nothing: the store would lose what the list names.
     let mut listing_came = false;
+    // Whether an update came since the roots were last taken from the list: until one does, they are the same.
+    let mut list_changed = false;
     loop {
         while let Ok(update) = updates.try_recv() {
             stale |= enqueue(&mut list, &mut pulled.queue, &mut backlog.queue, update);
+            list_changed = true;
         }
         listing_came |= stale;
         // The store is collected as a root leaves the list, discoveries running or not: one may wait on peers and
         // upstream for seconds (D144).
-        if roots_left(&list, &mut listed, &mut unlisted, &found) || stale {
+        let left = std::mem::take(&mut list_changed)
+            && roots_left(&list, &mut listed, &mut unlisted, &found);
+        if left || stale {
             collect(
                 discovery.store(),
                 &listed,
@@ -346,10 +351,9 @@ pub async fn follow(
             ended = pulled.ended() => ended,
             ended = backlog.ended() => ended,
             update = updates.recv() => {
-                match update {
-                    Some(update) => stale |= enqueue(&mut list, &mut pulled.queue, &mut backlog.queue, update),
-                    None => break,
-                }
+                let Some(update) = update else { break };
+                stale |= enqueue(&mut list, &mut pulled.queue, &mut backlog.queue, update);
+                list_changed = true;
                 continue;
             }
             Some(fetch) = fetched.recv() => {
