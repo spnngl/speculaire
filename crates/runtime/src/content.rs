@@ -6,7 +6,7 @@
 //! serves what its own blob cache holds (D67), which the mirror makes into [`Blob`]s.
 
 use std::future::Future;
-use std::io;
+use std::io::{self, Read as _, Seek as _};
 use std::pin::Pin;
 
 use bytes::Bytes;
@@ -160,6 +160,10 @@ impl Blob {
     /// # Errors
     ///
     /// When the blob is longer, or cannot be read.
+    ///
+    /// # Panics
+    ///
+    /// Never: reading a file does not panic.
     pub async fn read_all(self, limit: u64) -> Result<Bytes, Error> {
         if self.size > limit {
             return Err(Error::TooLarge {
@@ -171,13 +175,33 @@ impl Blob {
             return Ok(Bytes::new());
         }
         let size = self.size;
-        let mut chunks = self.stream(0, size).await?;
+        let source = match self.source {
+            Source::Memory(bytes) => return Ok(bytes),
+            // One blocking read into a buffer of the blob's size: no chunks to join, nor tokio's buffer to copy from.
+            Source::File(file) => {
+                return tokio::task::spawn_blocking(move || read_whole(&file, size))
+                    .await
+                    .expect("reading a file does not panic")
+                    .map(Bytes::from)
+                    .map_err(Error::Io);
+            }
+            source @ Source::Grpc { .. } => source,
+        };
+        let mut chunks = Self { size, source }.stream(0, size).await?;
         let mut all = Vec::with_capacity(usize::try_from(size).unwrap_or_default());
         while let Some(chunk) = chunks.next().await {
             all.extend_from_slice(&chunk?);
         }
         Ok(Bytes::from(all))
     }
+}
+
+/// The first `size` bytes of `file`, wherever its offset was.
+fn read_whole(mut file: &std::fs::File, size: u64) -> io::Result<Vec<u8>> {
+    file.seek(io::SeekFrom::Start(0))?;
+    let mut all = Vec::with_capacity(usize::try_from(size).unwrap_or_default());
+    file.take(size).read_to_end(&mut all)?;
+    Ok(all)
 }
 
 /// A place the mirror reads blobs from.
