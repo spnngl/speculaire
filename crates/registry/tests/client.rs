@@ -711,7 +711,7 @@ async fn a_dial_timeout_bounds_the_connects_even_when_the_trust_has_a_client() {
 struct Pki {
     ca_pem: String,
     server: Arc<ServerConfig>,
-    client: ClientCert,
+    client: Arc<ClientCert>,
 }
 
 /// A CA, a server certificate for 127.0.0.1 and a client certificate, and a server config that asks for a client
@@ -766,10 +766,10 @@ fn pki(require_client: bool, versions: &[&'static rustls::SupportedProtocolVersi
     Pki {
         ca_pem: ca.pem(),
         server: Arc::new(server),
-        client: ClientCert {
+        client: Arc::new(ClientCert {
             certificate: client_cert.pem().into_bytes(),
             key: SecretString::from(client_key.serialize_pem()),
-        },
+        }),
     }
 }
 
@@ -860,7 +860,7 @@ async fn an_endpoint_is_trusted_by_its_ca_or_not_at_all_unless_it_is_insecure() 
     let trusted = tls_endpoint(
         &fake,
         Tls {
-            roots: vec![pki.ca_pem.clone().into_bytes()],
+            roots: vec![pki.ca_pem.clone().into()],
             ..Tls::default()
         },
     );
@@ -895,9 +895,9 @@ async fn an_endpoint_is_trusted_by_its_ca_or_not_at_all_unless_it_is_insecure() 
     let broken = tls_endpoint(
         &fake,
         Tls {
-            roots: vec![
-                b"-----BEGIN CERTIFICATE-----\nnot base64!\n-----END CERTIFICATE-----\n".to_vec(),
-            ],
+            roots: vec![Bytes::from_static(
+                b"-----BEGIN CERTIFICATE-----\nnot base64!\n-----END CERTIFICATE-----\n",
+            )],
             ..Tls::default()
         },
     );
@@ -921,7 +921,7 @@ async fn a_registry_that_wants_a_client_certificate_gets_the_one_of_the_endpoint
     let without = tls_endpoint(
         &fake,
         Tls {
-            roots: vec![pki.ca_pem.clone().into_bytes()],
+            roots: vec![pki.ca_pem.clone().into()],
             ..Tls::default()
         },
     );
@@ -934,8 +934,8 @@ async fn a_registry_that_wants_a_client_certificate_gets_the_one_of_the_endpoint
     let with = tls_endpoint(
         &fake,
         Tls {
-            roots: vec![pki.ca_pem.clone().into_bytes()],
-            client: Some(pki.client.clone()),
+            roots: vec![pki.ca_pem.clone().into()],
+            client: Some(Arc::clone(&pki.client)),
             skip_verify: false,
         },
     );
@@ -953,11 +953,11 @@ async fn a_registry_that_wants_a_client_certificate_gets_the_one_of_the_endpoint
     let broken = tls_endpoint(
         &fake,
         Tls {
-            roots: vec![pki.ca_pem.into_bytes()],
-            client: Some(ClientCert {
-                certificate: pki.client.certificate,
+            roots: vec![pki.ca_pem.into()],
+            client: Some(Arc::new(ClientCert {
+                certificate: pki.client.certificate.clone(),
                 key: SecretString::from("no key".to_owned()),
-            }),
+            })),
             skip_verify: false,
         },
     );
@@ -979,7 +979,7 @@ async fn a_registry_that_speaks_tls_1_2_only_is_reached() {
     let endpoint = tls_endpoint(
         &fake,
         Tls {
-            roots: vec![pki.ca_pem.into_bytes()],
+            roots: vec![pki.ca_pem.into()],
             ..Tls::default()
         },
     );
