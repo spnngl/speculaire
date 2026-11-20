@@ -275,7 +275,7 @@ mod tests {
 
     use axum::Router;
     use axum::http::Uri;
-    use speculaire_artifacts::testing::FIXTURES;
+    use speculaire_artifacts::testing::{FIXTURES, tuf_expiry};
 
     use super::*;
 
@@ -367,7 +367,10 @@ mod tests {
     async fn the_cdn_serves_the_recorded_trust_root() {
         let cdn = Cdn::new(recorded().await);
         let cache = tempfile::tempdir().expect("a temporary directory");
-        let valid = "2026-11-20T00:00:00Z".parse().expect("RFC 3339");
+        let expiry: Timestamp = tuf_expiry().parse().expect("RFC 3339");
+        let valid = expiry
+            .checked_sub(jiff::SignedDuration::from_hours(24))
+            .expect("in range");
 
         let root = TrustRoot::fetch(cdn, cache.path(), valid)
             .await
@@ -383,7 +386,7 @@ mod tests {
         let cdn = Cdn::new(recorded().await);
 
         assert_eq!(
-            cdn.fetch_metadata("17.root.json", 1 << 20)
+            cdn.fetch_metadata("missing.json", 1 << 20)
                 .await
                 .expect("a 404 is no error"),
             None

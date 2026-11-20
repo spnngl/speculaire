@@ -1,12 +1,14 @@
 //! The recorded Sigstore fixtures (D139, D141), loaded into an artifact store as discovery records them, for the tests
 //! of any crate.
 //!
-//! Each case of `expected.json` is an OCI layout, read by [`Layout`]. [`Fixture::load`] keeps a case's artifacts in a
-//! store of its own; [`Fixture::signature_of`] and [`Fixture::flipped`] build the negative cases no recording holds.
+//! Each case of `expected.json`, read by [`Expected`], is an OCI layout, read by [`Layout`]. [`Fixture::load`] keeps a
+//! case's artifacts in a store of its own; [`Fixture::signature_of`] and [`Fixture::flipped`] build the negative cases
+//! no recording holds.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::Deserialize;
 use serde_json::Value;
 use speculaire_oci::index::Index;
 use speculaire_oci::platform::Host;
@@ -32,22 +34,120 @@ const TAG: &str = "org.opencontainers.image.ref.name";
 ///
 /// # Panics
 ///
-/// When `expected.json` cannot be read.
+/// As [`Expected::all`].
 #[must_use]
 pub fn cases() -> Vec<String> {
-    let expected: Value = serde_json::from_slice(&read(&Path::new(FIXTURES).join("expected.json")))
-        .expect("expected.json is JSON");
-    expected
-        .as_array()
-        .expect("expected.json lists the cases")
-        .iter()
-        .map(|case| {
-            case["case"]
-                .as_str()
-                .expect("each case has a name")
-                .to_owned()
-        })
-        .collect()
+    Expected::all().into_iter().map(|case| case.case).collect()
+}
+
+/// A case as the recording workflow's oracle left it in `expected.json`: who signed it, and what cosign and gh found.
+#[derive(Debug, Deserialize)]
+pub struct Expected {
+    /// The case's name, which tags its image.
+    pub case: String,
+    /// Who signed the image, or `None` when no one did.
+    pub signer: Option<Signer>,
+    /// Each check the oracle ran, in its order.
+    pub checks: Vec<Checked>,
+}
+
+impl Expected {
+    /// Every case, in the order `expected.json` lists them.
+    ///
+    /// # Panics
+    ///
+    /// When `expected.json` cannot be read or parsed.
+    #[must_use]
+    pub fn all() -> Vec<Self> {
+        serde_json::from_slice(&read(&Path::new(FIXTURES).join("expected.json")))
+            .expect("expected.json lists the cases as the oracle writes them")
+    }
+
+    /// The case named `case`.
+    ///
+    /// # Panics
+    ///
+    /// When `expected.json` does not list it, or as [`Expected::all`].
+    #[must_use]
+    pub fn of(case: &str) -> Self {
+        Self::all()
+            .into_iter()
+            .find(|expected| expected.case == case)
+            .expect("expected.json lists the case")
+    }
+}
+
+/// Who signed a case.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum Signer {
+    /// A certificate from Fulcio for the workflow `san`, whose OIDC token `issuer` issued.
+    Keyless {
+        /// The certificate's subject alternative name: the signing workflow's URL at its ref.
+        san: String,
+        /// The OIDC issuer: GitHub Actions'.
+        issuer: String,
+    },
+    /// The key pair whose public key is the file `key`, beside `expected.json`.
+    Key {
+        /// The file's name.
+        key: String,
+    },
+}
+
+/// A check the oracle ran, and whether it passed.
+#[derive(Debug, Deserialize)]
+pub struct Checked {
+    /// What it ran.
+    pub check: Check,
+    /// Whether cosign or gh accepted the image.
+    pub ok: bool,
+}
+
+/// A check of the oracle: a cosign or gh command, against the case's signer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub enum Check {
+    /// `signature`: `cosign verify`.
+    Signature,
+    /// `signature-legacy`: `cosign verify --new-bundle-format=false`, which reads `.sig` tags.
+    SignatureLegacy,
+    /// `attestation:<type>`: `cosign verify-attestation --type <type>`, `<type>` in cosign's names such as `spdxjson`.
+    Attestation(String),
+    /// `attestation-legacy:<type>`: as [`Check::Attestation`], from `.att` tags.
+    AttestationLegacy(String),
+    /// `github:<predicate type>`: `gh attestation verify --predicate-type <predicate type>`.
+    Github(String),
+}
+
+impl TryFrom<String> for Check {
+    type Error = String;
+
+    fn try_from(check: String) -> Result<Self, String> {
+        match check.split_once(':') {
+            None if check == "signature" => Ok(Self::Signature),
+            None if check == "signature-legacy" => Ok(Self::SignatureLegacy),
+            Some(("attestation", kind)) => Ok(Self::Attestation(kind.to_owned())),
+            Some(("attestation-legacy", kind)) => Ok(Self::AttestationLegacy(kind.to_owned())),
+            Some(("github", predicate_type)) => Ok(Self::Github(predicate_type.to_owned())),
+            _ => Err(format!("no check {check:?}")),
+        }
+    }
+}
+
+/// When the recorded TUF repository's timestamp metadata expires, in RFC 3339: the first of its roles to.
+///
+/// # Panics
+///
+/// When `tuf/timestamp.json` cannot be read or names no expiry.
+#[must_use]
+pub fn tuf_expiry() -> String {
+    let path = Path::new(FIXTURES).join("tuf").join("timestamp.json");
+    let timestamp: Value = serde_json::from_slice(&read(&path)).expect("TUF metadata is JSON");
+    timestamp["signed"]["expires"]
+        .as_str()
+        .expect("TUF metadata names its expiry")
+        .to_owned()
 }
 
 /// The platform the fixtures were built for: discovery picks its manifest from an image index.
@@ -153,18 +253,35 @@ impl Layout {
             .collect()
     }
 
-    /// What discovery records of the root on the fixtures' platform, in its order: the attestation manifests of an
-    /// image index's platform manifest, then for each target its Sigstore bundle referrers and its `.sig` (D121).
+    /// What discovery records of the root on the fixtures' [`platform`].
+    ///
+    /// # Panics
+    ///
+    /// As [`Layout::artifacts_on`].
+    #[must_use]
+    pub fn artifacts(&self) -> Vec<Artifact> {
+        self.artifacts_on(&platform())
+    }
+
+    /// Whether a node on `host` can pull the root: an image, or an image index holding a manifest for `host`.
+    #[must_use]
+    pub fn runs_on(&self, host: &Host) -> bool {
+        self.index()
+            .is_none_or(|index| index.platform_manifest(host).is_some())
+    }
+
+    /// What discovery records of the root on `host`, in its order: the attestation manifests of an image index's
+    /// platform manifest, then for each target its Sigstore bundle referrers and its `.sig` (D121).
     ///
     /// # Panics
     ///
     /// When a manifest the layout tags cannot be parsed.
     #[must_use]
-    pub fn artifacts(&self) -> Vec<Artifact> {
+    pub fn artifacts_on(&self, host: &Host) -> Vec<Artifact> {
         let mut targets = vec![self.root.clone()];
         let mut artifacts = Vec::new();
         if let Some(index) = self.index()
-            && let Some(platform) = index.platform_manifest(&platform())
+            && let Some(platform) = index.platform_manifest(host)
         {
             targets.push(platform.clone());
             for attestation in index.attestations(platform) {
@@ -256,6 +373,15 @@ impl Fixture {
         Self::capped(case, u64::MAX).await
     }
 
+    /// As [`Fixture::load`], as discovery records it on `host`.
+    ///
+    /// # Panics
+    ///
+    /// As [`Fixture::load`].
+    pub async fn on(case: &str, host: &Host) -> Self {
+        Self::kept(case, host, u64::MAX).await
+    }
+
     /// As [`Fixture::load`], with `sbom.max_size` at `max_size`: as discovery does, a blob larger stays named by its
     /// artifact and out of the store (D150).
     ///
@@ -263,6 +389,11 @@ impl Fixture {
     ///
     /// As [`Fixture::load`].
     pub async fn capped(case: &str, max_size: u64) -> Self {
+        Self::kept(case, &platform(), max_size).await
+    }
+
+    /// The artifacts of `case` that discovery records on `host`, kept with each blob up to `max_size` bytes.
+    async fn kept(case: &str, host: &Host, max_size: u64) -> Self {
         let layout = Layout::open(case);
         let dir = tempfile::tempdir().expect("a temporary directory");
         let store = Store::open(dir.path().join("store")).expect("a new store opens");
@@ -275,7 +406,7 @@ impl Fixture {
         if layout.index().is_some() {
             fixture.keep(&layout.root, &layout.blob(&layout.root)).await;
         }
-        for artifact in layout.artifacts() {
+        for artifact in layout.artifacts_on(host) {
             fixture.add(&layout, artifact, max_size).await;
         }
         fixture.record().await;

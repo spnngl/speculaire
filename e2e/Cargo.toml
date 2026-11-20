@@ -15,10 +15,12 @@ prost.workspace = true
 rcgen.workspace = true
 # The manifests the harness pushes to its upstreams, and zot'"'"'s access log.
 serde_json.workspace = true
+# The recorded Sigstore fixtures (D141), read as discovery records them, and their signers.
+speculaire-artifacts = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-# The recorded Sigstore fixtures (D141), read as discovery records them.
-speculaire-artifacts = { workspace = true, features = ["testing"] }
+# The platform of the nodes, whose manifest a pull picks from an image index.
+speculaire-oci.workspace = true

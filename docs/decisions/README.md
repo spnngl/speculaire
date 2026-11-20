@@ -119,7 +119,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34)
 - D110 [distribution](distribution.md): the content directory is `io.containerd.content.v1.content` below the `root` of containerd's config, `/var/lib/containerd` when it names none; an agent test serves a blob from a temporary root (amends D5, D85)
 - D111 [distribution](distribution.md): every request of the upstream client carries `User-Agent: speculaire/<version>` (amends D88)
-- D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94; amended by D120, D141)
+- D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94; amended by D120, D141, D164)
 - D113 [build](build.md): pull requests run 4 e2e legs, the newest containerd and CRI-O on both architectures; `main` runs all 14 (amends D63, D94)
 - D114 [build](build.md): the bench samples the agent's cgroup `anon` and `file` every second; peak memory, and so the release bar, is the peak of `anon` (amends D35, D106)
 - D115 [distribution](distribution.md): a negative `dial_timeout` in a `hosts.toml` is parsed, and the host is left out of the registry's sources, as containerd cannot dial it (amends D78; amended by D119)
@@ -146,9 +146,9 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D136 [verification](verification.md): `subjectRegExp` and `issuerRegExp` match the whole SAN and issuer, the parsed pattern wrapped in `\A` and `\z`, where cosign, policy-controller and sigstore-go match a substring (amends D8, D11)
 - D137 [agent](agent.md): `log.filter` refuses whitespace around a directive, which tracing-subscriber 0.3.23 misreads or panics on (amends D60)
 - D138 [agent](agent.md): durations are numbers of seconds to the millisecond, TOML integers or floats, printed as the shortest decimal; strings are refused (amends D60, D135)
-- D139 [verification](verification.md): Sigstore fixtures are recorded from public-good Sigstore by the hand-run `fixtures.yml`, as OCI layouts with a TUF snapshot, checked offline by cosign and gh (amends D8)
+- D139 [verification](verification.md): Sigstore fixtures are recorded from public-good Sigstore by the hand-run `fixtures.yml`, as OCI layouts with a TUF snapshot, checked offline by cosign and gh (amends D8; amended by D164)
 - D140 [build](build.md): the pinned nightly moves to `nightly-2026-11-17` and keeps the parallel frontend's default 2 threads; RAPx gets its own nightly, `rapx_nightly`; the check loop stays on stable (amends D57, D76, D77)
-- D141 [build](build.md): the recorded Sigstore fixtures live in `fixtures/sigstore/`, read by the crates' tests through `speculaire-artifacts`' `testing` feature and pushed by `just e2e-up` to zot and the plain upstream, with their trusted root pinned on every node; M5's `verify` e2e suite runs in the IPv4 pass only (amends D112, D130)
+- D141 [build](build.md): the recorded Sigstore fixtures live in `fixtures/sigstore/`, read by the crates' tests through `speculaire-artifacts`' `testing` feature and pushed by `just e2e-up` to zot and the plain upstream, with their trusted root pinned on every node; M5's `verify` e2e suite runs in the IPv4 pass only (amends D112, D130; amended by D164)
 - D142 [verification](verification.md): the policy file holds `ClusterImagePolicy` documents of a subset, any other field refusing it; globs match the repository name; a missing file is no policy (amends D11)
 - D143 [verification](verification.md): the trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h, served from cache while the repository fails; its hash is its file's SHA-256, its expiry the earliest of its TUF metadata or the latest end of its keys (amends D8; amended by D145, D154)
 - D144 [verification](verification.md): the store is collected beside a discovery, which keeps from collection its root and every blob it finds held or keeps, until no discovery and no collection runs; a root that left the list while discovered is collected once its discovery ends (amends D131; amended by D146, D148)
@@ -170,5 +170,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D161 [agent](agent.md): a listener on `[::]` clears `IPV6_V6ONLY` to take IPv4 too, and is `0.0.0.0` on a kernel without IPv6 (amends D45)
 - D162 [build](build.md): `nri-runtime` is a JSON-lines session on `pkg/adaptation`, reflecting into its unexported plugins, with NRI's `pkg/stub` as a plugin and a raw mode that writes an oversized frame and stalls ConnID 2 (amends D29, D70)
 - D163 [gate](gate.md): the NRI multiplexer is `speculaire-nri`'s `Mux`, closes the trunk on an oversize frame or a full queue as NRI v0.12.5 does, and is checked by Kani, Shuttle and `nri_mux` (amends D9)
+- D164 [build](build.md): the `runnable` fixture is busybox for amd64 and arm64, signed keyless, recordable alone by `fixtures.yml -f cases=runnable`; the newest recording's trusted root and TUF snapshot are pinned; the fixtures stay under 6 MB (amends D112, D139, D141)
 
-Next free number: D164.
+Next free number: D165.

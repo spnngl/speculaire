@@ -4,17 +4,20 @@ mod recorded;
 
 use std::path::Path;
 
-use recorded::{Recorded, at, pinned};
+use jiff::{SignedDuration, Timestamp};
+use recorded::{Recorded, expired, expiry, pinned};
 use sigstore_tuf::Repository;
 use sigstore_tuf::transport::FetchFuture;
 use speculaire_artifacts::testing::FIXTURES;
 use speculaire_verify::TrustRoot;
 use speculaire_verify::trust::{LoadError, ParseError};
 
-/// A time the recorded TUF metadata is valid at: before the timestamp role's expiry.
-const VALID: &str = "2026-11-20T00:00:00Z";
-/// The recorded timestamp role's expiry, the first of the recorded metadata.
-const TIMESTAMP_EXPIRY: &str = "2026-11-24T13:19:56Z";
+/// A time the recorded TUF metadata is valid at: a day before the timestamp role's expiry.
+fn valid() -> Timestamp {
+    expiry()
+        .checked_sub(SignedDuration::from_hours(24))
+        .expect("in range")
+}
 
 /// A repository whose every fetch fails, as when the CDN is unreachable.
 struct Unreachable;
@@ -33,14 +36,14 @@ impl Repository for Unreachable {
 async fn tuf_loads_the_recorded_root_and_serves_it_from_the_cache_when_every_fetch_fails() {
     let cache = tempfile::tempdir().expect("a temporary directory");
 
-    let fetched = TrustRoot::fetch(Recorded, cache.path(), at(VALID))
+    let fetched = TrustRoot::fetch(Recorded, cache.path(), valid())
         .await
         .expect("the recorded repository serves a trusted root");
     assert_eq!(fetched.hash(), pinned().hash());
-    assert_eq!(fetched.expiry(), Some(at(TIMESTAMP_EXPIRY)));
+    assert_eq!(fetched.expiry(), Some(expiry()));
     assert!(cache.path().join("timestamp.json").is_file());
 
-    let cached = TrustRoot::fetch(Unreachable, cache.path(), at(VALID))
+    let cached = TrustRoot::fetch(Unreachable, cache.path(), valid())
         .await
         .expect("the cache serves the trusted root");
     assert_eq!(cached.hash(), fetched.hash());
@@ -50,7 +53,7 @@ async fn tuf_loads_the_recorded_root_and_serves_it_from_the_cache_when_every_fet
 #[tokio::test]
 async fn tuf_metadata_past_its_expiry_leaves_no_trust_root_and_names_the_expiry() {
     let cache = tempfile::tempdir().expect("a temporary directory");
-    let after = at("2026-11-25T00:00:00Z");
+    let after = expired();
 
     let absent = TrustRoot::fetch(Recorded, cache.path(), after)
         .await
@@ -60,7 +63,7 @@ async fn tuf_metadata_past_its_expiry_leaves_no_trust_root_and_names_the_expiry(
         "{absent}"
     );
 
-    TrustRoot::fetch(Recorded, cache.path(), at(VALID))
+    TrustRoot::fetch(Recorded, cache.path(), valid())
         .await
         .expect("the recorded repository serves a trusted root");
     let absent = TrustRoot::fetch(Unreachable, cache.path(), after)
@@ -81,9 +84,13 @@ fn a_pinned_root_loads_with_its_hash_and_the_latest_end_of_its_keys() {
     let root = pinned();
 
     // The SHA-256 that names the target in the recorded TUF repository.
-    assert_eq!(
-        root.hash().to_string(),
-        "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66"
+    let target = format!("{}.trusted_root.json", root.hash());
+    assert!(
+        Path::new(FIXTURES)
+            .join("tuf/targets")
+            .join(&target)
+            .is_file(),
+        "{target}"
     );
     assert!(
         format!("{root:?}").starts_with("TrustRoot { hash: "),
@@ -97,8 +104,8 @@ fn a_pinned_root_loads_with_its_hash_and_the_latest_end_of_its_keys() {
         root.root().tlogs.len(),
         TrustRoot::parse(&bytes).expect("parses").root().tlogs.len()
     );
-    let expiry = root.expiry().expect("the recorded root's certificates end");
-    assert!(expiry > at(TIMESTAMP_EXPIRY), "{expiry}");
+    let end = root.expiry().expect("the recorded root's certificates end");
+    assert!(end > expiry(), "{end}");
 }
 
 #[test]

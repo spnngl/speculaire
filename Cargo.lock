@@ -667,6 +667,7 @@ dependencies = [
  "rcgen",
  "serde_json",
  "speculaire-artifacts",
+ "speculaire-oci",
 ]
 
 [[package]]

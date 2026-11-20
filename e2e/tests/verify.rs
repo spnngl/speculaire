@@ -13,11 +13,12 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::node::{POLICY, Rules, TRUSTED_ROOT};
-use e2e::upstream::{FIXTURES, Kind, UNSIGNED, Upstream};
+use e2e::upstream::{FIXTURES, Kind, RUNNABLE, UNSIGNED, Upstream, runnable_policy};
 use e2e::{Cluster, IpFamily, Runtime};
 use serde_json::Value;
 use speculaire_artifacts::store::Artifact;
 use speculaire_artifacts::testing::{self, Layout};
+use speculaire_oci::platform::Host;
 
 const STORE: &str = "/var/lib/speculaire/artifacts";
 
@@ -45,7 +46,7 @@ struct Case {
 }
 
 impl Case {
-    /// Every case, but the image indexes on an arm64 node: they hold `linux/amd64` alone.
+    /// Every case a node can pull: an image index of BuildKit's holds `linux/amd64` alone.
     fn pullable() -> Vec<Self> {
         testing::cases()
             .into_iter()
@@ -59,18 +60,22 @@ impl Case {
                     index,
                 }
             })
-            .filter(|case| cfg!(target_arch = "x86_64") || !case.index)
+            .filter(|case| case.layout.runs_on(&node()))
             .collect()
     }
 
     /// What discovery must record: the artifacts recorded with the case.
     fn expected(&self) -> BTreeSet<Recorded> {
-        self.layout.artifacts().iter().map(recorded).collect()
+        self.layout
+            .artifacts_on(&node())
+            .iter()
+            .map(recorded)
+            .collect()
     }
 
     /// What the store keeps of the case, but [`EMPTY`]: every artifact's manifest and blobs, and the root if an index.
     fn digests(&self) -> Vec<String> {
-        let artifacts = self.layout.artifacts();
+        let artifacts = self.layout.artifacts_on(&node());
         let manifests = artifacts
             .iter()
             .flat_map(|artifact| std::iter::once(&artifact.manifest).chain(&artifact.blobs));
@@ -81,6 +86,14 @@ impl Case {
             .map(ToString::to_string)
             .filter(|digest| digest != EMPTY)
             .collect()
+    }
+}
+
+/// The nodes' platform: Linux on the host's architecture.
+fn node() -> Host {
+    Host {
+        os: "linux".to_owned(),
+        ..Host::current()
     }
 }
 
@@ -906,4 +919,61 @@ fn speculaire_verify_on_a_node_allows_a_signed_fixture_and_exits_1_for_an_unsign
         "{rejected}"
     );
     assert!(rejected.ends_with("exit 1\n"), "{rejected}");
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_pod_runs_the_runnable_fixture_which_speculaire_verify_on_its_node_allows() {
+    if Cluster::from_env().ip_family() == IpFamily::Dual {
+        return;
+    }
+    let worker = Worker::new();
+    let cluster = &worker.cluster;
+    let host = cluster.upstream(Kind::Referrers).address().to_owned();
+    let case = Case::pullable()
+        .into_iter()
+        .find(|case| case.name == RUNNABLE)
+        .expect("the runnable fixture holds the node's platform");
+    let image = format!("{host}/{FIXTURES}@{}", case.layout.root());
+    cluster
+        .policy(&worker.name, &runnable_policy(&host))
+        .unwrap();
+    worker.forget(std::slice::from_ref(&case));
+    let pod = "speculaire-e2e-runnable";
+    let overrides = format!(r#"{{"spec":{{"nodeName":"{}"}}}}"#, worker.name);
+
+    cluster
+        .kubectl(&[
+            "run",
+            pod,
+            "--image",
+            &image,
+            "--image-pull-policy=Always",
+            "--restart=Never",
+            &format!("--overrides={overrides}"),
+            "--command",
+            "--",
+            "sleep",
+            "3600",
+        ])
+        .unwrap();
+    let ready = cluster.kubectl(&[
+        "wait",
+        "--for=condition=Ready",
+        &format!("pod/{pod}"),
+        "--timeout=120s",
+    ]);
+    let _ = cluster.kubectl(&["delete", "pod", pod, "--now", "--timeout=60s"]);
+    ready.unwrap();
+    // Pulled by digest, the image escapes `rmi`, and the agent would verify it in the next test. CRI-O removes it only
+    // once the kubelet has removed the pod's container.
+    until(&|| format!("{image} stays on {}", worker.name), &mut || {
+        cluster
+            .exec_output(&worker.name, &["crictl", "rmi", &image])
+            .is_ok_and(|output| output.success)
+    });
+
+    let verified = worker.sh(&format!("speculaire verify {image}; echo \"exit $?\""));
+    assert!(verified.starts_with("allow\n"), "{verified}");
+    assert!(verified.ends_with("exit 0\n"), "{verified}");
 }

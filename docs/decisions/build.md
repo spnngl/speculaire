@@ -526,7 +526,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** a metric described but never set passes. A metric set but not described is caught by the tests of `/metrics` only when they emit it.
 - **Revisit when:** a metric is set without its `describe`, or the catalog is generated from the code.
 
-## D112: The e2e cluster has four upstreams and a signed test image; the proxy throttles and a node can lose an upstream (amends D94; amended by D120, D141)
+## D112: The e2e cluster has four upstreams and a signed test image; the proxy throttles and a node can lose an upstream (amends D94; amended by D120, D141, D164)
 
 - **Decision:**
   - **Start:** after `kind create cluster`, `just e2e-up` runs `cargo run -p e2e --bin upstreams` (`e2e::upstream::start`). It starts the upstreams, pushes the test images to each, writes each node's runtime config for them and restarts the runtime, before the agents are installed. Each upstream is `<cluster>-<role>.e2e.test` (`e2e::upstream::Kind`), and `e2e-down` removes it by the cluster's label:
@@ -685,7 +685,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - rustfmt of `nightly-2026-11-17` leaves the workspace and `fuzz/` unchanged.
 - **Revisit when:** the parallel frontend reaches stable (then use it for everything, after checking two clean musl builds still match), or a RAPx release builds and runs on the pinned nightly (then one nightly again).
 
-## D141: The recorded Sigstore fixtures live in `fixtures/sigstore/`, for the crates' tests and e2e's upstreams (amends D112, D130)
+## D141: The recorded Sigstore fixtures live in `fixtures/sigstore/`, for the crates' tests and e2e's upstreams (amends D112, D130; amended by D164)
 
 - **Decision:**
   - **Place:** `fixtures/sigstore/`, at the top of the repository, holds D139's recording as its workflow uploaded it, byte for byte (`.gitattributes`: `-text`): one OCI layout per case under `layouts/`, `expected.json`, `trusted_root.json`, `tuf/` and the `key` case's `cosign.pub`. Its `README.md` names the run and how to record again. It stays under 2 MB. `typos` skips its JSON and its layouts.
@@ -748,3 +748,18 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `pkg/stub` is the library NRI's sample plugins use: it is the reference the `nri` crate is compared with, and it tests the oracle without the crate. The samples are modules of their own, which the oracle cannot import.
 - **Measured (M6 step 00, arm64):** the six NRI tests of `crates/oracle-harness/tests/oracle.rs` take 1.1 s in the dev image. 400 containers of 25 KiB each, 10 MiB, reach the stub in 3 `Synchronize` requests.
 - **Revisit when:** `pkg/adaptation` exports its plugins or the announced version: drop the reflection.
+
+
+## D164: The `runnable` fixture is busybox for amd64 and arm64, recordable alone, and the newest recording's root is pinned (amends D112, D139, D141)
+
+- **Decision:**
+  - **The case:** `runnable` is `docker.io/library/busybox:1.37.0`, the e2e test image (`e2e::TEST_IMAGE`), with a file of its own for its own digest, for `linux/amd64` and `linux/arm64`. `fixtures.yml` signs its image index keyless, as `buildkit-signed`'s, and its oracle row promises `signature` passes. It is the one fixture a pod runs and the gate allows on every node: `e2e::upstream::RUNNABLE`, allowed by `e2e::upstream::runnable_policy`, which reads the signer from `expected.json`. `e2e::upstream::SIGNED` stays for discovery tests: signed with no transparency log entry, it never verifies (D142).
+  - **Recording one case:** `fixtures.yml` takes the input `cases`, `all` (the default) or `runnable`. With `runnable`, the run builds, signs, exports and checks that case alone, and its `expected.json` keeps the committed rows of the other cases. Its `trusted_root.json` and `tuf/` replace the committed ones: the newest recording's root is the one the tests and the nodes pin. `crates/verify`'s oracle test checks every case's every check against the pinned root, and `runnable` on both platforms.
+  - **Times and hashes:** the tests read the TUF repository's expiry and its trusted root's target name from `tuf/`, not from constants, so a new snapshot needs no test change.
+  - **Size:** `fixtures/sigstore/` stays under 6 MB (was 2 MB): busybox's layers are 2.2 MB on `linux/amd64` and 1.9 MB on `linux/arm64`.
+- **Because:**
+  - The gate's suites need an image that both verifies and runs. The `FROM scratch` cases have no command, and `SIGNED` has no Rekor entry.
+  - Recording one case keeps every other case's digest, so the tests pinning them stay, and the run writes one Rekor entry, not about twenty (D139).
+  - A newer root holds the older roots' keys while they verify: Sigstore keeps a retired key in the trusted root with its validity end.
+  - busybox is already every node's test image (D112) and ships both platforms the e2e legs run; `COPY` onto it needs no emulator.
+- **Revisit when:** a newer trusted root no longer verifies an older case; the fixtures near 6 MB; a gate suite needs a runnable image with attestations.

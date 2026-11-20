@@ -1,13 +1,15 @@
 //! The signature check over the recorded fixtures of step 01 (D139), offline: which authorities a bundle satisfies,
 //! with the attestations they require (D149), and the SBOM a policy can require (D150).
 
+#[path = "signature/oracle.rs"]
+mod oracle;
 mod recorded;
 #[path = "signature/sbom.rs"]
 mod sbom;
 
 use std::path::Path;
 
-use recorded::{Recorded, at, pinned};
+use recorded::{Recorded, expired, pinned};
 use sigstore_verify::types::Bundle;
 use speculaire_artifacts::Kind;
 use speculaire_artifacts::testing::{FIXTURES, Fixture, GITHUB_PRIVATE};
@@ -241,7 +243,7 @@ async fn an_expired_tuf_repository_leaves_the_check_unverifiable() {
     let fixture = Fixture::load("keyless").await;
     let policy = policy(&[keyless(&format!("subject: {SAN}"))]);
     let cache = tempfile::tempdir().expect("a temporary directory");
-    let absent = TrustRoot::fetch(Recorded, cache.path(), at("2026-11-25T00:00:00Z"))
+    let absent = TrustRoot::fetch(Recorded, cache.path(), expired())
         .await
         .expect_err("the recorded timestamp role has expired");
 
