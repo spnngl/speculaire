@@ -357,14 +357,14 @@ pub(crate) async fn blob_response(
             *response.status_mut() = StatusCode::PARTIAL_CONTENT;
             response.headers_mut().insert(
                 CONTENT_RANGE,
-                header(&format!("bytes {}-{}/{size}", span.first, span.last)),
+                header(format!("bytes {}-{}/{size}", span.first, span.last)),
             );
             Some(span)
         }
         Ranged::Unsatisfiable => {
             *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
             let headers = response.headers_mut();
-            headers.insert(CONTENT_RANGE, header(&format!("bytes */{size}")));
+            headers.insert(CONTENT_RANGE, header(format!("bytes */{size}")));
             headers.insert(CONTENT_LENGTH, HeaderValue::from(0));
             return Ok(response);
         }
@@ -388,12 +388,17 @@ pub(crate) async fn blob_response(
 }
 
 pub(crate) fn insert_digest(headers: &mut HeaderMap, digest: &Digest) {
-    headers.insert("Docker-Content-Digest", header(&digest.to_string()));
+    headers.insert(
+        "Docker-Content-Digest",
+        header([digest.algorithm(), ":", digest.encoded()].concat()),
+    );
 }
 
 /// A header value from text that is known to be one: digests, numbers, media types the mirror checked.
-pub(crate) fn header(text: &str) -> HeaderValue {
-    HeaderValue::from_str(text).unwrap_or_else(|_| HeaderValue::from_static(""))
+pub(crate) fn header(text: String) -> HeaderValue {
+    // The value takes the string's buffer, with no copy, and with no allocation when the string is no longer than it
+    // has to be (bytes 1.12.1 `src/bytes.rs:947-952`).
+    HeaderValue::try_from(text).unwrap_or_else(|_| HeaderValue::from_static(""))
 }
 
 fn ping() -> Response<Body> {
@@ -440,7 +445,7 @@ pub(crate) fn media_type(bytes: &[u8]) -> Option<HeaderValue> {
     }
     let document: Document = serde_json::from_slice(bytes).ok()?;
     if let Some(media_type) = document.media_type.filter(|m| !m.is_empty()) {
-        return HeaderValue::from_str(&media_type).ok();
+        return HeaderValue::try_from(media_type).ok();
     }
     let inferred = if document.manifests.is_some() {
         "application/vnd.oci.image.index.v1+json"

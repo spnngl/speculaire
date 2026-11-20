@@ -64,10 +64,10 @@ impl Known {
             // Pulls in flight fail and are retried, which re-teaches the names: bounded memory over exactness.
             names.clear();
         }
-        names
-            .entry(digest.clone())
-            .or_default()
-            .insert(name.to_owned());
+        let names = names.entry(digest.clone()).or_default();
+        if !names.contains(name) {
+            names.insert(name.to_owned());
+        }
     }
 
     fn has(&self, digest: &Digest, name: &str) -> bool {
