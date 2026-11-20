@@ -38,7 +38,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate (amended by D157)
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79, D162)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154)
-- D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21)
+- D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21; amended by D165)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104)
 - D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109, D116)
@@ -171,5 +171,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D162 [build](build.md): `nri-runtime` is a JSON-lines session on `pkg/adaptation`, reflecting into its unexported plugins, with NRI's `pkg/stub` as a plugin and a raw mode that writes an oversized frame and stalls ConnID 2 (amends D29, D70)
 - D163 [gate](gate.md): the NRI multiplexer is `speculaire-nri`'s `Mux`, closes the trunk on an oversize frame or a full queue as NRI v0.12.5 does, and is checked by Kani, Shuttle and `nri_mux` (amends D9)
 - D164 [build](build.md): the `runnable` fixture is busybox for amd64 and arm64, signed keyless, recordable alone by `fixtures.yml -f cases=runnable`; the newest recording's trusted root and TUF snapshot are pinned; the fixtures stay under 6 MB (amends D112, D139, D141)
+- D165 [verification](verification.md): `cache.bin` is a versioned, sized, SHA-256-checksummed binary of sorted entries read in place; `load` names why it refuses a file, and a verdict saved under other policies or another trust root loads stale from load under the current ones (amends D31)
 
-Next free number: D165.
+Next free number: D166.

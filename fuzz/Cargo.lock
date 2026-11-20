@@ -2323,10 +2323,12 @@ dependencies = [
  "sigstore-verify",
  "speculaire-artifacts",
  "speculaire-oci",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
  "x509-parser",
+ "zerocopy",
 ]
 
 [[package]]

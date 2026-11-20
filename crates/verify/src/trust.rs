@@ -45,7 +45,7 @@ pub type Held = Result<Arc<TrustRoot>, Absent>;
 
 /// The SHA-256 of a `trusted_root.json` as read, the trust-root part of a verdict's key (D20).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct RootHash([u8; 32]);
+pub struct RootHash(pub(crate) [u8; 32]);
 
 impl fmt::Display for RootHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
