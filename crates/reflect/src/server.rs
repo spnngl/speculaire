@@ -211,6 +211,9 @@ async fn accept(listener: TcpListener, acceptor: TlsAcceptor, api: Arc<Api>) {
 }
 
 /// Handshakes, then answers the agent's frames until the connection ends.
+///
+/// Two steps, so that no state of the handshake, as large as the TLS stream, outlives it: each connection's task
+/// stays about half as large.
 async fn serve(
     acceptor: TlsAcceptor,
     tcp: TcpStream,
@@ -218,16 +221,39 @@ async fn serve(
     accepted: Instant,
     api: Arc<Api>,
 ) {
-    let handshake = tokio::select! {
-        () = api.stop.cancelled() => return,
-        handshake = tokio::time::timeout(api.settings.limits.handshake, handshake(&acceptor, tcp)) => handshake,
-    };
-    let (mut tls, node) = match handshake {
-        Ok(Ok(handshake)) => handshake,
-        Ok(Err(err)) => return debug!(%address, error = %err, "reflector handshake refused"),
-        Err(_) => return debug!(%address, "reflector handshake timed out"),
+    let Some((mut tls, node)) = open(&acceptor, tcp, address, &api).await else {
+        return;
     };
     Span::current().record("node", &*node);
+    exchange(&mut tls, node, accepted, &api).await;
+}
+
+/// The handshake's stream and node, unless it fails, times out or the reflector stops first.
+async fn open(
+    acceptor: &TlsAcceptor,
+    tcp: TcpStream,
+    address: SocketAddr,
+    api: &Api,
+) -> Option<(TlsStream<TcpStream>, Arc<str>)> {
+    let handshake = tokio::select! {
+        () = api.stop.cancelled() => return None,
+        handshake = tokio::time::timeout(api.settings.limits.handshake, handshake(acceptor, tcp)) => handshake,
+    };
+    match handshake {
+        Ok(Ok(handshake)) => Some(handshake),
+        Ok(Err(err)) => {
+            debug!(%address, error = %err, "reflector handshake refused");
+            None
+        }
+        Err(_) => {
+            debug!(%address, "reflector handshake timed out");
+            None
+        }
+    }
+}
+
+/// Answers the agent's frames until the connection ends.
+async fn exchange(tls: &mut TlsStream<TcpStream>, node: Arc<str>, accepted: Instant, api: &Api) {
     let mut reader = Reader::new(api.settings.limits.message);
     let mut session = Session::new(
         Arc::clone(&api.index),
@@ -237,7 +263,7 @@ async fn serve(
     let refusal = loop {
         let read = tokio::select! {
             () = api.stop.cancelled() => break stopping(),
-            read = tokio::time::timeout(frame::SILENCE, reader.next(&mut tls)) => read,
+            read = tokio::time::timeout(frame::SILENCE, reader.next(tls)) => read,
         };
         let message = match read {
             Ok(Ok(Some(message))) => message,
@@ -249,7 +275,7 @@ async fn serve(
             }
             Err(_) => return debug!(%node, "reflector connection silent; closing it"),
         };
-        let reply = match answer(&api, &mut session, message, accepted) {
+        let reply = match answer(api, &mut session, message, accepted) {
             Ok(Some(reply)) => reply,
             Ok(None) => continue,
             Err(refusal) => break refusal,
@@ -260,7 +286,7 @@ async fn serve(
         // Stopping inside a frame leaves the agent no frame to read the refusal from: the connection just closes.
         let written = tokio::select! {
             () = api.stop.cancelled() => return,
-            written = tokio::time::timeout(frame::SILENCE, frame::write(&mut tls, &reply, frame::LIMIT)) => written,
+            written = tokio::time::timeout(frame::SILENCE, frame::write(tls, &reply, frame::LIMIT)) => written,
         };
         match written {
             Ok(Ok(())) => {}
@@ -274,7 +300,7 @@ async fn serve(
         message: Some(reflector_message::Message::Refused(refusal)),
     };
     let farewell = async {
-        frame::write(&mut tls, &refused, frame::LIMIT).await?;
+        frame::write(tls, &refused, frame::LIMIT).await?;
         tls.shutdown().await.map_err(FrameError::from)
     };
     if let Ok(Err(err)) = tokio::time::timeout(FAREWELL, farewell).await {
