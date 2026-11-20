@@ -52,7 +52,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D42 [agent](agent.md): `/metrics`, `/readyz` and `/livez` listen on `metrics.address`, port 7482, plain HTTP (amended by D45)
 - D43 [verification](verification.md): attestations count only as Sigstore bundles found as OCI referrers; `.att` tags and private GitHub attestations are not supported; `.sig` stays (amends D8, D38; amended by D49, D145, D149)
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation
-- D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror, artifact store, a reflector's API and NRI registration (amends D42)
+- D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror, artifact store, a reflector's API and NRI registration (amends D42; amended by D161)
 - D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13)
 - D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60, D91)
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29; amended by D72)
@@ -167,5 +167,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D157 [build](build.md): `release`, on a version tag or a dispatch from main, builds both musl binaries natively into one scratch image index on ghcr.io, tagged `<version>` or `dispatch-<run id>` with no GitHub release, attests SLSA provenance and a syft SPDX SBOM on its digest, and its `verify` job runs `speculaire verify` on it anonymously under `packaging/policy/release.yaml` with the public-good TUF root (amends D27, D28)
 - D158 [distribution](distribution.md): a file in a `hosts.toml` root is left out of the tree, though containerd fails every pull of its host (amends D78)
 - D159 [build](build.md): the e2e suites wait on 1 s polls, a 45 s rate-limit window and a 300 ms netem delay instead of longer fixed waits, CRI-O's relay suite runs in the IPv4 pass only, and `just e2e-up` builds the suites while the cluster comes up (amends D94, D130)
+- D161 [agent](agent.md): a listener on `[::]` clears `IPV6_V6ONLY` to take IPv4 too, and is `0.0.0.0` on a kernel without IPv6 (amends D45)
 
-Next free number: D160.
+Next free number: D162.

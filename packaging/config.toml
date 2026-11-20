@@ -104,7 +104,8 @@
 #directory = "/var/lib/speculaire/blobs"
 
 [metrics]
-# Where /metrics, /readyz and /livez listen, plain HTTP (D42, D45). Restart.
+# Where /metrics, /readyz and /livez listen, plain HTTP; "[::]" is every address, IPv4 included (D42, D45,
+# D161). Restart.
 #address = "[::]:7482"
 
 [reflector]
@@ -112,7 +113,8 @@
 #url = ""
 # Every reflector, the same list on each: [{ node = "cp-1", address = "10.0.0.1:7483" }] (D2). Restart.
 #members = []
-# Where a reflector serves agents; read only with role = "reflector" (D47). Restart.
+# Where a reflector serves agents, "[::]" as for metrics.address; read only with role = "reflector" (D47, D161).
+# Restart.
 #listen = "[::]:7483"
 
 [prewarm]

@@ -39,7 +39,7 @@ use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
 use crate::status::{self, Status};
-use crate::{systemd, telemetry, trust};
+use crate::{listen, systemd, telemetry, trust};
 
 /// Runs the agent with the config at `path`.
 ///
@@ -115,7 +115,7 @@ async fn serve(
     }
     let status = Arc::new(Status::new(metrics.clone(), role == Role::Reflector));
     let configured = *config.metrics.address.get();
-    let listener = tokio::net::TcpListener::bind(configured)
+    let listener = listen::listen(configured)
         .await
         .with_context(|| format!("listening on metrics.address {configured}"))?;
     // The bound address: port 0 in the config is the one the kernel picked.
@@ -702,7 +702,7 @@ async fn open_reflector(
             address: member.address,
         })
         .collect();
-    let opened = match tokio::net::TcpListener::bind(address).await {
+    let opened = match listen::listen(address).await {
         Ok(listener) => Reflector::spawn(listener, identity.credentials(), Settings::new(members)),
         Err(err) => Err(err),
     };

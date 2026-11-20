@@ -2447,6 +2447,7 @@ dependencies = [
  "serde",
  "serde_path_to_error",
  "sigstore-tuf",
+ "socket2",
  "speculaire-artifacts",
  "speculaire-configure",
  "speculaire-mirror",
