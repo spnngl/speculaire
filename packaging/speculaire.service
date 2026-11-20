@@ -7,7 +7,7 @@ Wants=network-online.target
 After=network-online.target containerd.service crio.service
 
 [Service]
-# The agent sends READY=1 once /readyz answers 200, STOPPING=1 on SIGTERM, and a watchdog ping every
+# The agent sends READY=1 once the mirror listens, STOPPING=1 on SIGTERM, and a watchdog ping every
 # WatchdogSec/2 from its runtime, so a stalled runtime is killed and restarted (D69).
 Type=notify
 ExecStart=/usr/bin/speculaire agent

@@ -52,7 +52,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D42 [agent](agent.md): `/metrics`, `/readyz` and `/livez` listen on `metrics.address`, port 7482, plain HTTP (amended by D45)
 - D43 [verification](verification.md): attestations count only as Sigstore bundles found as OCI referrers; `.att` tags and private GitHub attestations are not supported; `.sig` stays (amends D8, D38; amended by D49, D145, D149)
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation
-- D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror and NRI registration (amends D42)
+- D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror, artifact store, a reflector's API and NRI registration (amends D42)
 - D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13)
 - D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60, D91)
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29; amended by D72)
@@ -67,7 +67,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62, D116, D118, D125, D140)
 - D58 [build](build.md): CI runs the check on the runner with prebuilt tools, and the musl build in the build image; `ci` jobs land with their content (amends D27, D57)
 - D59 [build](build.md): e2e is a Rust test crate of `#[ignore]`d suites on a kind cluster managed by `just e2e <minor>`, with pinned containerd, kind and kubectl (amends D27; amended by D63)
-- D60 [agent](agent.md): config values parse into types that print back as written; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47; amended by D87, D135, D137, D138)
+- D60 [agent](agent.md): config values parse into types that print back canonically; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47; amended by D87, D135, D137, D138)
 - D61 [build](build.md): `speculaire_build_info` exists from startup with empty runtime versions; every build has `protoc` (amends D34; amended by D68)
 - D62 [build](build.md): binaries in `apps/`, libraries in `crates/` as `speculaire-<name>` (amends D57)
 - D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59; amended by D94, D113, D120, D130)
