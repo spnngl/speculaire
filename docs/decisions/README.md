@@ -85,7 +85,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D75 [build](build.md): a second fuzz target, `config_values`, writes config files from the keys with literals each parser accepts or refuses, so the round trip reaches the values raw bytes seldom spell (amends D27)
 - D76 [build](build.md): cargo-careful runs the workspace's tests under AddressSanitizer on each pull request, in one job on glibc Linux, outside `required` (amends D27; amended by D97, D140)
 - D77 [build](build.md): RAPx analyses the workspace on each pull request that changes Rust and every week, outside `required`; the dev image gains no RAPx (amends D27; amended by D140)
-- D78 [distribution](distribution.md): one `registry-config` crate holds both runtimes' parsers and reads what containerd reads: versions 1 to 4, any key case, credentials per host as secrets, ignored keys ignored (amends D17; amended by D115, D119)
+- D78 [distribution](distribution.md): one `registry-config` crate holds both runtimes' parsers and reads what containerd reads: versions 1 to 4, any key case, credentials per host as secrets, ignored keys ignored (amends D17; amended by D115, D119, D158)
 - D79 [build](build.md): `just oracle` also runs the Rust differential tests against the binary, mutated fuzz seeds included; the oracle reaches containerd's unexported parsers by linkname (amends D29, D70)
 - D80 [distribution](distribution.md): the CRI-O module reads what go.podman.io/image reads, from the files its `configfile` searches; credential helpers are not run, aliases are not parsed (amends D66, D70; amended by D89)
 - D81 [gate](gate.md): references and platforms are parsed as containerd's CRI plugin parses them (`ParseDockerRef`, `platforms.Only`), by a port that only its parser can build (amends D11, D15, D70)
@@ -165,5 +165,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D155 [verification](verification.md): after a change, the roots the runtime's running containers run, from CRI `ListContainers` and `ListImages`, are verified again first (amends D154)
 - D156 [verification](verification.md): `speculaire verify <name>@<digest>` prints one image's verdict, then each matched policy, authority, attestation and SBOM check with its reason, as text or `--json`, exit 0 allowed, 1 not, 2 unusable config; it discovers upstream into a store of its own, without the agent or peers, and the engine's verdict derives from the same per-check results (amends D62)
 - D157 [build](build.md): `release`, on a version tag or a dispatch from main, builds both musl binaries natively into one scratch image index on ghcr.io, tagged `<version>` or `dispatch-<run id>` with no GitHub release, attests SLSA provenance and a syft SPDX SBOM on its digest, and its `verify` job runs `speculaire verify` on it anonymously under `packaging/policy/release.yaml` with the public-good TUF root (amends D27, D28)
+- D158 [distribution](distribution.md): a file in a `hosts.toml` root is left out of the tree, though containerd fails every pull of its host (amends D78)
 
-Next free number: D158.
+Next free number: D159.

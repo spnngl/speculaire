@@ -685,7 +685,8 @@ impl Tree {
                     source,
                 })?;
                 let path = entry.path();
-                // A link is followed, as `host_dir` does; one that dangles is no directory.
+                // A link is followed, as `host_dir` does; one that dangles is no directory. A file is left out, where
+                // containerd fails every pull of its host (D158).
                 match std::fs::metadata(&path) {
                     Ok(meta) if meta.is_dir() => {}
                     Ok(_) => continue,
@@ -964,6 +965,22 @@ mod tests {
         // The tree holds what it read: a later edit is not in it.
         std::fs::remove_dir_all(roots[0].join("docker.io")).expect("removed");
         assert_eq!(tree.resolve("docker.io", None).len(), 2);
+    }
+
+    #[test]
+    fn a_tree_leaves_out_a_file_named_as_a_host_that_containerd_fails_on() {
+        let (_dir, roots) = tree_of(&[
+            ("docker.io", "not a directory"),
+            ("_default/hosts.toml", "[host.\"https://fallback.test\"]\n"),
+        ]);
+        // containerd stats the file, then fails reading `docker.io/hosts.toml` in it.
+        assert!(matches!(
+            resolve(&roots, "docker.io", None),
+            Err(HostsError::Read { .. })
+        ));
+        let tree = Tree::load(&roots).expect("a valid tree");
+        assert!(!tree.has_own_dir("docker.io"));
+        assert_eq!(tree.resolve("docker.io", None)[0].host, "fallback.test");
     }
 
     #[test]
