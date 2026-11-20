@@ -122,18 +122,18 @@ impl Lookup {
 
 /// A verdict kept, under the rest of its key.
 #[derive(Clone, Debug)]
-struct Kept {
-    policies: MatchHash,
-    root: Option<RootHash>,
-    verdict: Verdict,
+pub(crate) struct Kept {
+    pub(crate) policies: MatchHash,
+    pub(crate) root: Option<RootHash>,
+    pub(crate) verdict: Verdict,
     /// When the change came that left `verdict` stale (D21).
-    stale_since: Option<Instant>,
+    pub(crate) stale_since: Option<Instant>,
 }
 
 /// The verdicts kept, in memory (D151), by image identity.
 #[derive(Debug, Default)]
 pub struct Verdicts {
-    kept: RwLock<HashMap<Digest, Vec<Kept>>>,
+    pub(crate) kept: RwLock<HashMap<Digest, Vec<Kept>>>,
     /// `verify.stale_max`, in nanoseconds: none until [`Self::set_stale_max`].
     stale_max: AtomicU64,
 }

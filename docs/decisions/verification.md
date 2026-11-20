@@ -85,7 +85,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Because:** a compromised control plane must not be able to relax a node's policy, and systemd deployments already have config management.
 - **Revisit when:** the DaemonSet phase starts. Then mount the policy from a ConfigMap.
 
-## D31: Verdicts and signature results survive agent restarts in `/run/speculaire` (amends D20, D21)
+## D31: Verdicts and signature results survive agent restarts in `/run/speculaire` (amends D20, D21; amended by D165)
 
 - **Decision:**
   - The unit sets `RuntimeDirectory=speculaire`, `RuntimeDirectoryMode=0700` and `RuntimeDirectoryPreserve=yes`. systemd keeps `/run/speculaire` across stops and restarts, and the tmpfs is cleared at reboot.
@@ -482,3 +482,20 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The TUF cache writes atomically, each file renamed into place, so the agent and the command may refresh it at once (sigstore-tuf v0.16.0 `src/cache.rs:91-119`).
   - Text reads in a terminal and JSON in a script. Exit 2 apart from 1 tells a script "not allowed" from "could not verify".
 - **Revisit when:** the agent serves its verdicts over the status listener, or peers hold artifacts upstream lacks.
+
+
+## D165: `cache.bin` is a checksummed binary of sorted entries; a verdict saved under other policies loads stale under the current ones (amends D31)
+
+- **Decision:**
+  - **Layout:** `speculaire_verify::cache` writes an 85-byte header (format version, file size, the hash of all the policies held, the signature results' trust root, both counts), the `Allow` and `Rejected` verdicts, the signature results, and the SHA-256 of all before it. Integers are little-endian; fixed-size parts are `zerocopy` structs read in place (D107). A digest is saved as its text and parsed again at load. Both caches are saved sorted, so the same caches save the same bytes.
+  - **Refusal:** `load` checks the version first, then the size the header holds, then the checksum, then parses everything before it replaces the caches. It answers why it refused: `Version`, `Size` (a file cut short), `Checksum` or `Malformed` naming the part.
+  - **Staleness:** a stale verdict saves its age; load turns it back into an instant, and drops one that went stale before the monotonic clock's start. When the policies' hash in the header or a verdict's trust root differs from the current one, the verdict loads under the current root, stale since load unless it was already. A key whose policies match another set of policies after the change has no verdict until it is verified again, which the engine does for every root after a restart.
+  - **Signature results** load with the trust root they were checked under; `Signatures` ignores them under another.
+  - **Writing:** `write` puts the bytes in a temporary file of mode 0600 beside the target, syncs it, renames it over the target and syncs the directory.
+- **Because:**
+  - Each verdict already holds its match hash and root, the key of D20; one hash of all the policies in the header tells whether any policy changed without saving each policy's name.
+  - A size in the header tells a truncated file, the common crash damage, from a corrupted one.
+  - An `Instant` has no meaning in another process; an age does.
+  - Sorted, deterministic bytes let the fuzz target `cache_bin` check that what loads saves the same again.
+  - Measured on an Apple M5 (`just bench-micro`): saving 10k verdicts takes 1.24 ms and loading them 2.35 ms, for a file of 1.56 MB.
+- **Revisit when:** the format changes: raise `VERSION`, and an older file is then discarded at the upgrade.

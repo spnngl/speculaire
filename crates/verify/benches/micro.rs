@@ -4,7 +4,9 @@ use std::sync::LazyLock;
 
 use divan::Bencher;
 use speculaire_oci::reference::Digest;
-use speculaire_verify::{Key, MatchHash, Policies, Verdict, Verdicts};
+use speculaire_verify::cache::{self, Current};
+use speculaire_verify::{Key, MatchHash, Policies, Signatures, Verdict, Verdicts};
+use tokio::time::Instant;
 
 /// Counts each benchmark's allocations, which D107 asks a hot path to avoid.
 #[global_allocator]
@@ -56,4 +58,56 @@ fn lookup(bencher: Bencher<'_, '_>) {
         };
         verdicts.get(key).verdict
     });
+}
+
+/// The verdicts of a node of 10k images, half rejected with a reason, and the bytes they save to.
+static SAVED: LazyLock<(Verdicts, Signatures, Vec<u8>)> = LazyLock::new(|| {
+    let (_, policies, _) = &*KEPT;
+    let verdicts = Verdicts::default();
+    for n in 0..10_000_u32 {
+        let image = Digest::parse(&format!("sha256:{n:064x}")).expect("a digest parses");
+        let verdict = if n % 2 == 0 {
+            Verdict::Allow
+        } else {
+            Verdict::Rejected {
+                reason: "no signature".into(),
+            }
+        };
+        let key = Key {
+            image: &image,
+            policies: *policies,
+            root: None,
+        };
+        verdicts.keep(key, verdict);
+    }
+    let signatures = Signatures::new(0);
+    let mut bytes = Vec::new();
+    cache::save(
+        &verdicts,
+        &signatures,
+        *policies,
+        Instant::now(),
+        &mut bytes,
+    );
+    (verdicts, signatures, bytes)
+});
+
+#[divan::bench]
+fn save_10k(bencher: Bencher<'_, '_>) {
+    let (_, policies, _) = &*KEPT;
+    let (verdicts, signatures, bytes) = &*SAVED;
+    let mut out = Vec::with_capacity(bytes.len());
+    bencher.bench_local(|| cache::save(verdicts, signatures, *policies, Instant::now(), &mut out));
+}
+
+#[divan::bench]
+fn load_10k(bencher: Bencher<'_, '_>) {
+    let (_, policies, _) = &*KEPT;
+    let (_, _, bytes) = &*SAVED;
+    let current = Current {
+        policies: *policies,
+        root: None,
+    };
+    let (verdicts, signatures) = (Verdicts::default(), Signatures::new(0));
+    bencher.bench_local(|| cache::load(bytes, current, Instant::now(), &verdicts, &signatures));
 }

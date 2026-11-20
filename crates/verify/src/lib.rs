@@ -1,9 +1,11 @@
 //! Verification of the images a node runs (D8, D11): the policy file, parsed into [`Policies`], the globs and identity
 //! patterns it holds, the [`TrustRoot`] it checks against, and the [`Signatures`] check of each authority, with the
 //! in-toto [`statement::Statement`]s its attestations sign and the SBOM it can require ([`sbom`]), and the [`Engine`]
-//! that keeps a [`Verdict`] per image and policies (D20), whose reasons a [`Report`] gives part by part. It opens no connection: what it checks comes from the
+//! that keeps a [`Verdict`] per image and policies (D20), whose reasons a [`Report`] gives part by part; [`cache`] saves
+//! the verdicts and signature results across a restart (D31). It opens no connection: what it checks comes from the
 //! artifact store, which discovery fills, and the TUF repository of a trust root is a transport the caller passes in.
 
+pub mod cache;
 pub mod engine;
 pub mod glob;
 pub mod legacy;

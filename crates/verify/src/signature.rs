@@ -150,7 +150,7 @@ pub struct Unverifiable(String);
 /// The signature check, with each bundle's result kept per trust root (D20).
 #[derive(Debug)]
 pub struct Signatures {
-    cache: Mutex<Cache>,
+    pub(crate) cache: Mutex<Cache>,
     hits: AtomicU64,
     /// `sbom.max_size`: discovery leaves out a blob larger, its manifest still listing it (D150).
     max_size: u64,
@@ -158,30 +158,30 @@ pub struct Signatures {
 
 /// The results of one trust root.
 #[derive(Debug, Default)]
-struct Cache {
-    root: Option<RootHash>,
-    results: HashMap<Entry, Kept>,
+pub(crate) struct Cache {
+    pub(crate) root: Option<RootHash>,
+    pub(crate) results: HashMap<Entry, Kept>,
 }
 
 /// A signature's result, and the predicate type of the attestation it signs.
-#[derive(Clone, Debug)]
-struct Kept {
-    signed: SignatureResult,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Kept {
+    pub(crate) signed: SignatureResult,
     /// Read whether or not the signature verifies, so that a bundle that fails names the attestation it fails.
-    attests: Option<String>,
+    pub(crate) attests: Option<String>,
 }
 
 /// One signature of one image, verified by the key of a key authority or else by its certificate.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Entry {
-    target: Digest,
-    source: Source,
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Entry {
+    pub(crate) target: Digest,
+    pub(crate) source: Source,
     /// The SHA-256 of the key's DER, for a key authority.
-    public_key: Option<[u8; 32]>,
+    pub(crate) public_key: Option<[u8; 32]>,
 }
 
 /// Where a signature is, in the artifact store.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Source {
     /// The Sigstore bundle of the referrer manifest `manifest`.
     Bundle { manifest: Digest, bundle: Digest },

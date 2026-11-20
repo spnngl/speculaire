@@ -105,8 +105,8 @@ pub struct PublicKey {
 }
 
 /// The hash of a set of policies, the policy part of a verdict's key (D20): the same for the same policies in any order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MatchHash([u8; 32]);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MatchHash(pub(crate) [u8; 32]);
 
 /// Why the policy file was refused.
 #[derive(Debug, thiserror::Error)]

@@ -51,8 +51,9 @@ pub enum ReferenceError {
 
 /// A digest that names a known algorithm and holds a hash of its size.
 ///
-/// It holds its hex inline, so parsing, cloning and keying a map with one never allocate (D107).
-#[derive(Clone, PartialEq, Eq)]
+/// It holds its hex inline, so parsing, cloning and keying a map with one never allocate (D107). Digests order by
+/// algorithm, then hash.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Digest {
     algorithm: Algorithm,
     /// The hash in lower-case hex, then zeros up to the longest algorithm's size.
@@ -63,7 +64,7 @@ pub struct Digest {
 const HEX_MAX: usize = 128;
 
 /// One of the algorithms go-digest registers by default.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Algorithm {
     Sha256,
     Sha384,

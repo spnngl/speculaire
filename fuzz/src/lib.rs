@@ -27,7 +27,8 @@ use speculaire_registry_config::crio::{auth, registries};
 use speculaire_verify::policy::{MatchHash, Policies, Policy, PublicKey, Signer};
 use speculaire_verify::sbom::{Failure, Format};
 use speculaire_verify::statement::Statement;
-use speculaire_verify::{TrustRoot, legacy, signature};
+use speculaire_verify::{Signatures, TrustRoot, Verdicts, cache, legacy, signature};
+use tokio::time::Instant;
 
 /// A fuzz entry point.
 pub type Entry = fn(&[u8]);
@@ -65,6 +66,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("simplesigning", simplesigning),
     ("statement", statement),
     ("sbom", sbom),
+    ("cache_bin", cache_bin),
 ];
 
 /// The agent's config file, as `check-config` and the agent read it (D30, D60).
@@ -1056,4 +1058,48 @@ pub fn sbom(data: &[u8]) {
             assert_eq!(packages, format.packages(compact), "{format:?}");
         }
     }
+}
+
+/// `cache.bin`, as the agent loads it on start (D31), as read and with its size and checksum set again.
+///
+/// A file that loads saves bytes that load and save the same.
+///
+/// # Panics
+///
+/// When loading panics, or the bytes saved from a load do not load, or save otherwise.
+pub fn cache_bin(data: &[u8]) {
+    let current = cache::Current {
+        policies: MatchHash::of([]),
+        root: None,
+    };
+    let now = Instant::now();
+    let load = |bytes: &[u8]| {
+        let (verdicts, signatures) = (Verdicts::default(), Signatures::new(0));
+        let loaded = cache::load(bytes, current, now, &verdicts, &signatures);
+        loaded.ok().map(|_| {
+            let mut saved = Vec::new();
+            cache::save(&verdicts, &signatures, current.policies, now, &mut saved);
+            saved
+        })
+    };
+    for bytes in [Some(data.to_vec()), resealed(data)].into_iter().flatten() {
+        if let Some(saved) = load(&bytes) {
+            assert_eq!(load(&saved).as_ref(), Some(&saved));
+        }
+    }
+}
+
+/// `data` with the size `cache.bin`'s header holds and its trailing SHA-256 set to match, so that its parts parse.
+fn resealed(data: &[u8]) -> Option<Vec<u8>> {
+    let mut bytes = data.get(..data.len().checked_sub(32)?)?.to_vec();
+    bytes
+        .get_mut(4..12)?
+        .copy_from_slice(&u64::try_from(data.len()).ok()?.to_le_bytes());
+    let checksum = speculaire_oci::hash::of("sha256", &bytes)?;
+    let hex = checksum.encoded().as_bytes();
+    for pair in hex.as_chunks::<2>().0 {
+        let pair = std::str::from_utf8(pair).ok()?;
+        bytes.push(u8::from_str_radix(pair, 16).ok()?);
+    }
+    Some(bytes)
 }

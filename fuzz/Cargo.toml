@@ -33,8 +33,9 @@ speculaire-time = { path = "../crates/time" }
 speculaire-verify = { path = "../crates/verify" }
 # `reflect` decodes protobuf; the same version as the workspace's.
 prost = "0.14.5"
-# `nri_mux` reads the multiplexer's connections; the same version as the workspace's.
-tokio = { version = "1.54.1", features = ["io-util"] }
+# `nri_mux` reads the multiplexer's connections, and `cache_bin` loads at an instant; the same version as the
+# workspace's.
+tokio = { version = "1.54.1", features = ["io-util", "time"] }
 # `token_answer` reads the token it parsed; the same version as the workspace's.
 secrecy = "0.10.3"
 # `statement` writes the statement it parsed back; the same version as the workspace's.
@@ -282,6 +283,13 @@ bench = false
 [[bin]]
 name = "sbom"
 path = "fuzz_targets/sbom.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_bin"
+path = "fuzz_targets/cache_bin.rs"
 test = false
 doc = false
 bench = false

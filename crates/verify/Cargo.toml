@@ -23,16 +23,18 @@ sigstore-tuf.workspace = true
 sigstore-verify.workspace = true
 speculaire-artifacts.workspace = true
 speculaire-oci.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 x509-parser.workspace = true
+zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 divan.workspace = true
+fastrand.workspace = true
 metrics-exporter-prometheus.workspace = true
 speculaire-artifacts = { workspace = true, features = ["testing"] }
-tempfile.workspace = true
 speculaire-runtime.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

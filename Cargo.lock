@@ -2748,6 +2748,7 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "divan",
+ "fastrand",
  "jiff",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2768,6 +2769,7 @@ dependencies = [
  "tokio",
  "tracing",
  "x509-parser",
+ "zerocopy",
 ]
 
 [[package]]
