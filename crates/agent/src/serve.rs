@@ -54,7 +54,7 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     let policy = Followed::read("the policy file", config.verify.policy.get(), read_policy)?;
     let trust = trust::Source::read(&config.verify)?;
     let node = Node::new(&config);
-    let node = preflight(&node)?;
+    let node = preflight(&node, config.gate.wait.get())?;
     tokio::runtime::Runtime::new()
         .context("starting the runtime")?
         .block_on(serve(path, watch, config, logs, node, policy, trust))
@@ -68,11 +68,13 @@ fn read_policy(path: &Path) -> anyhow::Result<Arc<Policies>> {
 }
 
 /// Refuses to start on a node where the agent would mirror or gate wrongly (D86), naming each file and key; returns the
-/// node as the runtime it has runs on it.
-fn preflight(node: &Node) -> anyhow::Result<RuntimeNode> {
+/// node as the runtime it has runs on it. `wait` is `gate.wait`, checked against the runtime's NRI request timeout
+/// (D41, D64).
+fn preflight(node: &Node, wait: Duration) -> anyhow::Result<RuntimeNode> {
     let runtime = node.runtime()?;
     let on = node.on(runtime);
-    let problems = speculaire_configure::preflight(on.settings(), &node.target, SystemTime::now());
+    let problems =
+        speculaire_configure::preflight(on.settings(), &node.target, wait, SystemTime::now());
     if problems.is_empty() {
         info!(%runtime, "preflight passed");
         return Ok(on);

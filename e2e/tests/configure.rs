@@ -245,6 +245,54 @@ fn unconfigure_refuses_while_the_plugin_is_required() {
 
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn check_config_refuses_the_default_gate_wait_against_crios_500ms_request_timeout() {
+    let _serial = serial();
+    let cluster = Cluster::from_env();
+    if cluster.runtime() != Runtime::Crio {
+        return;
+    }
+    let node = workers(&cluster).remove(1);
+    // CRI-O reads its NRI settings at start only.
+    let ready = || {
+        wait_until("CRI-O", || {
+            cluster
+                .exec_output(
+                    &node,
+                    &[
+                        "sh",
+                        "-c",
+                        "crictl version && crio status config | grep -q nri",
+                    ],
+                )
+                .is_ok_and(|o| o.success)
+        });
+    };
+    sh(
+        &cluster,
+        &node,
+        "printf '[crio.nri]\\nnri_plugin_request_timeout = \"500ms\"\\n' > /etc/crio/crio.conf.d/90-timeout.conf && systemctl restart crio",
+    );
+    ready();
+    let check = cluster
+        .exec_output(&node, &["speculaire", "check-config"])
+        .unwrap();
+    sh(
+        &cluster,
+        &node,
+        "rm /etc/crio/crio.conf.d/90-timeout.conf && systemctl restart crio",
+    );
+    ready();
+    assert!(
+        !check.success
+            && check.stderr.contains(&format!(
+                "{CRIO_SOCKET}: `gate.wait = 0.3 s` is not below half of `nri_plugin_request_timeout = 500ms` in [crio.nri]"
+            )),
+        "{check:?}"
+    );
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn unconfigure_removes_only_its_own_and_pulls_still_work() {
     let _serial = serial();
     let cluster = Cluster::from_env();

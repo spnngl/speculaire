@@ -62,6 +62,7 @@ A running agent reads the policy file and a pinned trust root again on SIGHUP an
 | `does not export the settings of the CRI image service` | containerd 2.4's `io.containerd.cri.v1.images` is disabled or failed to start | Fix containerd's own logs first |
 | `` `disable = true` ``, `` `disable_connections = true` `` or `io.containerd.nri.v1.nri is in disabled_plugins` | containerd's NRI is off or closed to plugins that start on their own (D54) | Set the key to `false`, or remove the plugin from `disabled_plugins` |
 | `` `enable_nri = false` `` or `` `nri_disable_connections = true` `` | CRI-O's NRI is off or closed (D54, D64) | Set `enable_nri = true` and `nri_disable_connections = false` under `[crio.nri]` |
+| `` `gate.wait = <wait> s` is not below half of `<key> = <timeout>` `` | The runtime could give up on the gate's answer, and fail the container, before the gate answers (D41, D64). The key is containerd's `plugin_request_timeout` (config and imports) or CRI-O's `nri_plugin_request_timeout`; unset or zero, it is NRI's 2 s | Lower `gate.wait`, or raise the key under `[plugins.'io.containerd.nri.v1.nri']` or `[crio.nri]` and restart the runtime |
 | `CRI-O's inspect API answered ...` | `GET /config` on `crio.sock` failed | Check CRI-O |
 | `cannot read containerd's config` | `config.toml` or an import is not valid | Fix the file named |
 | `the registry section is invalid: ...` | containerd would refuse its registry section | Fix the section in the file named |

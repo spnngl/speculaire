@@ -238,6 +238,7 @@ fn check_config(path: &std::path::Path, runtime: &RuntimeArg) -> anyhow::Result<
         on.wiring(),
         on.settings(),
         &node.target,
+        config.gate.wait.get(),
         SystemTime::now(),
     )
     .context("cannot check the runtime's config")?;

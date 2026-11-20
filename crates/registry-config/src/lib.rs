@@ -10,6 +10,7 @@ mod error;
 mod fold;
 mod go;
 mod header;
+pub mod nri;
 
 pub use error::ParseError;
 pub use header::Headers;

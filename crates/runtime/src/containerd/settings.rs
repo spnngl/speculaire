@@ -1,4 +1,6 @@
-//! containerd's settings as the agent depends on them (D15, D54, D86).
+//! containerd's settings as the agent depends on them (D15, D41, D54, D86).
+
+use std::time::Duration;
 
 use speculaire_registry_config::containerd::config::{
     self as containerd_config, Hosts, Nri, Plugins,
@@ -6,7 +8,7 @@ use speculaire_registry_config::containerd::config::{
 
 use super::{Containerd, config_missing, image_exports};
 use crate::detect::Runtime;
-use crate::settings::{Required, Settings, chain, check_version};
+use crate::settings::{self, Required, Settings, chain, check_version};
 use crate::version::Release;
 use crate::wiring::{Error, Problem};
 
@@ -15,6 +17,9 @@ pub const MINIMUM: Release = Release::new(2, 3, 0);
 
 /// The first containerd that exports the image service's settings through introspection (D15, D86).
 const EXPORTS: Release = Release::new(2, 4, 0);
+
+/// The section of containerd's NRI config.
+const NRI: &str = "[plugins.'io.containerd.nri.v1.nri']";
 
 /// The key of containerd's NRI config that `unconfigure` checks.
 const REQUIRED: &str =
@@ -39,7 +44,7 @@ impl Settings for Containerd {
         })
     }
 
-    fn preflight(&self) -> Vec<Problem> {
+    fn preflight(&self, wait: Duration) -> Vec<Problem> {
         let (mut problems, release) = check_version(
             Runtime::Containerd,
             &self.socket,
@@ -64,6 +69,16 @@ impl Settings for Containerd {
             }
         };
         nri(&plugins.nri, &at_config, &mut problems);
+        problems.extend(
+            settings::wait(
+                wait,
+                "containerd",
+                "plugin_request_timeout",
+                NRI,
+                plugins.nri.request_timeout,
+            )
+            .map(at_config),
+        );
         // 2.4 says what its image service runs with; on 2.3 the config file is all there is (D15).
         if release.is_some_and(|release| release >= EXPORTS) {
             match image_exports(&self.socket) {
@@ -120,21 +135,20 @@ fn registry_path(unset: bool, at_config: &dyn Fn(String) -> Problem, problems: &
 }
 
 fn nri(nri: &Nri, at_config: &dyn Fn(String) -> Problem, problems: &mut Vec<Problem>) {
-    const SECTION: &str = "[plugins.'io.containerd.nri.v1.nri']";
     let mut report = |message: &str| {
         problems.push(at_config(format!(
             "{message}: the gate cannot run, and it cannot be turned off (D54); restart containerd after the change"
         )));
     };
     if nri.disable {
-        report(&format!("`disable = true` in {SECTION}: set it to false"));
+        report(&format!("`disable = true` in {NRI}: set it to false"));
     }
     if nri.plugin_disabled {
         report("`io.containerd.nri.v1.nri` is in `disabled_plugins`: remove it");
     }
     if nri.disable_connections {
         report(&format!(
-            "`disable_connections = true` in {SECTION} closes NRI to plugins that start on their own: set it to false"
+            "`disable_connections = true` in {NRI} closes NRI to plugins that start on their own: set it to false"
         ));
     }
 }

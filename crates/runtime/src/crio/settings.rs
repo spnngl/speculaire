@@ -1,8 +1,10 @@
 //! CRI-O's settings as the agent depends on them, from its inspect API (D54, D64, D86).
 
+use std::time::Duration;
+
 use super::{CriO, Nri, config};
 use crate::detect::Runtime;
-use crate::settings::{Required, Settings, check_version};
+use crate::settings::{self, Required, Settings, check_version};
 use crate::version::Release;
 use crate::wiring::{Error, Problem};
 
@@ -39,7 +41,7 @@ impl Settings for CriO {
         })
     }
 
-    fn preflight(&self) -> Vec<Problem> {
+    fn preflight(&self, wait: Duration) -> Vec<Problem> {
         let (mut problems, _) = check_version(Runtime::CriO, &self.socket, "crio_socket", MINIMUM);
         match self.nri() {
             Ok(nri) => {
@@ -59,6 +61,19 @@ impl Settings for CriO {
                         "`nri_disable_connections = true` in [crio.nri] closes NRI to plugins that start on their own: set it to false",
                     );
                 }
+                problems.extend(
+                    settings::wait(
+                        wait,
+                        "CRI-O",
+                        "nri_plugin_request_timeout",
+                        "[crio.nri]",
+                        nri.request_timeout,
+                    )
+                    .map(|message| Problem {
+                        path: self.socket.clone(),
+                        message,
+                    }),
+                );
             }
             Err(e) => problems.push(Problem {
                 path: self.socket.clone(),
