@@ -5,8 +5,10 @@
 
 #![expect(clippy::panic, reason = "a test file: its helpers report by panicking")]
 
+use std::future::{self, Future};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -14,9 +16,12 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use speculaire_agent::gate::Gate;
 use speculaire_agent::status::Status;
 use speculaire_agent::telemetry;
+use speculaire_mirror::listed::Listed;
 use speculaire_oracle_harness::Oracle;
 use speculaire_oracle_harness::nri::Start;
 use speculaire_runtime::detect::Runtime;
+use speculaire_runtime::images::{Images, Update};
+use tokio::sync::mpsc;
 
 /// A plugin connects, registers and synchronizes well within this.
 const SETTLE: Duration = Duration::from_secs(30);
@@ -70,6 +75,18 @@ impl Write for Logs {
     }
 }
 
+/// A runtime whose image list never comes: the gate registers without it.
+struct Unlisted;
+
+impl Images for Unlisted {
+    fn follow(
+        self: Arc<Self>,
+        _: mpsc::Sender<Update>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        Box::pin(future::pending())
+    }
+}
+
 /// A gate on `socket`, on a runtime of its own, with the process's recorder and logs.
 struct Agent {
     runtime: tokio::runtime::Runtime,
@@ -106,6 +123,7 @@ impl Agent {
             Gate::start(
                 socket.to_owned(),
                 runtime,
+                Listed::follow(Arc::new(Unlisted)),
                 Duration::from_millis(300),
                 Arc::clone(&status),
             )
@@ -145,6 +163,17 @@ impl Agent {
         // The exporter's order is a hash map's.
         series.sort();
         series
+    }
+
+    /// The `speculaire_identity_path` series at 1, each as its labels.
+    fn identity_paths(&self) -> Vec<String> {
+        self.metrics
+            .render()
+            .lines()
+            .filter_map(|line| line.strip_prefix("speculaire_identity_path{"))
+            .filter_map(|line| line.strip_suffix("} 1"))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Waits until the gate is registered or not, as `/readyz` and `speculaire_nri_connected` both say; returns how
@@ -235,6 +264,38 @@ fn the_gate_registers_again_at_once_and_within_2_s_of_a_runtime_that_comes_back(
     runtime.wait(1, SETTLE).unwrap();
     eprintln!("registered again {again:?} after the runtime came back");
     assert_eq!(agent.build_info().len(), 2, "{:?}", agent.build_info());
+}
+
+#[test]
+fn the_gate_reads_containerd_s_image_identity_from_nri_and_cri_o_s_from_its_image_id() {
+    let Some(oracle) = oracle() else { return };
+    // containerd 2.4 announces NRI v0.12.3; CRI-O 1.35 and 1.36 announce no NRI version (D169).
+    for (runtime, name, version, nri_version, path) in [
+        (Runtime::Containerd, "containerd", "v2.4.2", None, "nri"),
+        (
+            Runtime::CriO,
+            "cri-o",
+            "1.36.7",
+            Some(String::new()),
+            "image_id",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut start = Start::new(socket(&dir), name, version);
+        start.nri_version = nri_version;
+        let mut nri = oracle.nri_runtime().unwrap();
+        nri.start(&start).unwrap();
+        let agent = Agent::start(&socket(&dir), runtime);
+        agent.until_registered(true, SETTLE);
+        nri.wait(1, SETTLE).unwrap();
+        assert!(
+            agent
+                .identity_paths()
+                .contains(&format!(r#"path="{path}""#)),
+            "{name}: {:?}",
+            agent.identity_paths()
+        );
+    }
 }
 
 #[test]

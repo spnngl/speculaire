@@ -8,7 +8,8 @@ Open questions, each with a proposed default. Once a question is answered, recor
 
 ## In M6
 
-- **What does the gate make of CRI-O's unknown NRI version?** CRI-O announces its version without a `v` (`1.37.2`, `internal/version/version.go:26` at v1.37.2), which Go's semver refuses, so NRI's inference and its port (D166) find no NRI version for CRI-O 1.35 and 1.36, which leave `NRI_version` empty (D64): the plugin gets `NriVersion::Unknown`. [The gate picks CRI-O's identity by runtime name (D65) and never reads the NRI version on CRI-O; the port keeps NRI's behaviour rather than adding the `v`. Amends D15, D64.]
+- **Does the gate wait for an image ID that CRI-O's list lacks?** CRI-O rewrites `images.json` before a pull returns (D65), but the agent reads the list again after the change, so a container created right after a pull can name an image ID the agent's copy lacks yet: `image_id` makes it `Unverifiable("image ID is not a config digest")` (D169). [Step 08's wait on a gate miss covers it: the gate waits up to `gate.wait` for the list to name the image ID, as for a verdict still pending. Amends D65, D169.]
+- **How does `image_id` refuse an image ID that is no config digest?** With `insecure_allow_unpredictable_image_contents = "true"` in CRI-O's `storage.conf`, a partial pull makes the image ID a TOC digest (D65), yet CRI-O lists the image with the repository digests it was pulled by, so `image_id` maps it to manifests that may be allowed (D169). [The verifier records the config digest of each manifest it verifies, as D65 says, and `image_id` keeps only the manifests whose config digest is the image ID; an image left with none is `Unverifiable("image ID is not a config digest")`. Amends D65, D169.]
 
 ## Before M7
 

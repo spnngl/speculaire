@@ -11,6 +11,8 @@ use metrics_exporter_prometheus::{
 pub const BUILD_INFO: &str = "speculaire_build_info";
 /// `speculaire_nri_connected`: 1 while registered with the runtime's NRI (D41, D64).
 pub const NRI_CONNECTED: &str = "speculaire_nri_connected";
+/// `speculaire_identity_path`: 1 for the image identity path the gate reads, set at NRI's `Configure` (D15, D169).
+pub const IDENTITY_PATH: &str = "speculaire_identity_path";
 /// `speculaire_config_reload_failures_total`: reloads rejected while the previous config stays in use (D30).
 pub const CONFIG_RELOAD_FAILURES: &str = "speculaire_config_reload_failures_total";
 
@@ -89,6 +91,10 @@ fn describe() {
         "1 for the versions in use, 0 for runtime versions a later NRI Configure replaced"
     );
     describe_gauge!(NRI_CONNECTED, "1 while registered with the runtime's NRI");
+    describe_gauge!(
+        IDENTITY_PATH,
+        "1 for the path the gate reads a container's image identity through"
+    );
     describe_counter!(
         CONFIG_RELOAD_FAILURES,
         "Reloads rejected; the previous config is still in use"

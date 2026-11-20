@@ -80,14 +80,19 @@ impl Image {
     }
 }
 
-/// The digest of an image ID as the CRI lists it: containerd with its algorithm, CRI-O with the hex alone.
-fn image_id(text: &str) -> Option<Digest> {
+/// The digest of an image ID as the CRI lists it: containerd with its algorithm, CRI-O with the SHA-256 hex alone.
+/// Allocates nothing: the gate reads CRI-O's image ID with it (D107).
+pub(crate) fn image_id(text: &str) -> Option<Digest> {
     if text.contains(':') {
-        Digest::parse(text)
-    } else {
-        Digest::parse(&format!("sha256:{text}"))
+        return Digest::parse(text).ok();
     }
-    .ok()
+    let mut prefixed = *b"sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let hex = prefixed.get_mut("sha256:".len()..)?;
+    if hex.len() != text.len() {
+        return None;
+    }
+    hex.copy_from_slice(text.as_bytes());
+    Digest::parse(std::str::from_utf8(&prefixed).ok()?).ok()
 }
 
 /// The roots of the images the runtime's running containers run: each repository digest of their images (D21).

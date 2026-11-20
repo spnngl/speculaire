@@ -22,7 +22,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node (amended by D150)
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57, D105, D107, D116)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
-- D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81, D86, D167)
+- D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81, D86, D167, D169)
 - D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60, D95)
 - D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable` (amended by D66, D78, D88, D89, D121)
 - D18 [gate](gate.md): `gate.exempt` is explicit and empty by default
@@ -71,8 +71,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D61 [build](build.md): `speculaire_build_info` exists from startup with empty runtime versions; every build has `protoc` (amends D34; amended by D68, D168)
 - D62 [build](build.md): binaries in `apps/`, libraries in `crates/` as `speculaire-<name>` (amends D57; amended by D156)
 - D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59; amended by D94, D113, D120, D130)
-- D64 [gate](gate.md): the same NRI plugin gates CRI-O; the agent finds its runtime by probing both sockets, and reads CRI-O's NRI keys from `GET /config` on `crio.sock` (amends D9, D41, D54; amended by D84, D86, D90)
-- D65 [gate](gate.md): on CRI-O the image identity is the `ImageRef` annotation (the config digest), policies match every name of the image, and `images.json` changes trigger verification; no pinning (amends D11, D15, D20, D21, D22)
+- D64 [gate](gate.md): the same NRI plugin gates CRI-O; the agent finds its runtime by probing both sockets, and reads CRI-O's NRI keys from `GET /config` on `crio.sock` (amends D9, D41, D54; amended by D84, D86, D90, D169)
+- D65 [gate](gate.md): on CRI-O the image identity is the `ImageRef` annotation (the config digest), policies match every name of the image, and `images.json` changes trigger verification; no pinning (amends D11, D15, D20, D21, D22; amended by D169)
 - D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32; amended by D80, D83, D102, D123, D152)
 - D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7; amended by D88, D102)
 - D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61; amended by D168)
@@ -176,5 +176,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D166 [gate](gate.md): `speculaire-nri` serves NRI's plugin protocol on its own ttrpc unary subset, answers CreateContainer concurrently up to 256 in flight through a `Handler`, and infers the NRI version as NRI does (amends D9)
 - D167 [gate](gate.md): containerd's `k8s.io` image store is an `ArcSwap` copy kept by `/images/*` events and relists; the snapshot check follows a remapped parent only where the container's snapshot names ID mappings; the chain ID lives in `speculaire-oci` (amends D15)
 - D168 [gate](gate.md): the gate connects to NRI once the verdicts are loaded, reconnects at once then every second, is ready once `Configure` names the node's runtime, stays away from a runtime that is not the node's until restart, and sets the replaced `speculaire_build_info` series to 0 (amends D41, D45, D61, D68)
+- D169 [gate](gate.md): the gate reads the image identity through one `Identity` chosen by runtime name at `Configure`: `nri` on containerd 2.4 (the index digest), `image_id` on CRI-O (the image ID's listed manifests and names from CRI-O's image list); an image is allowed when one listed manifest is (amends D15, D64, D65)
 
-Next free number: D169.
+Next free number: D170.

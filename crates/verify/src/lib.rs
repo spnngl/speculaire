@@ -8,6 +8,7 @@
 pub mod cache;
 pub mod engine;
 pub mod glob;
+mod identity;
 pub mod legacy;
 pub mod metrics;
 pub mod pattern;

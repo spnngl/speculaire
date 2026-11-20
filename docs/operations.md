@@ -89,7 +89,8 @@ Shown in `kubectl describe pod` under `CreateContainerError`. On a node, `specul
 |---|---|---|
 | `verification pending` | The verdict was not ready within `gate.wait` (D22) | None; kubelet retries. Investigate if it persists |
 | `image identity mismatch` | On containerd 2.3, the image name no longer resolves to the container's snapshot (D15) | Check for a retag between pull and create |
-| `unverifiable: image ID is not a config digest` | On CRI-O, the image ID matches no verified manifest's config digest, as with `insecure_allow_unpredictable_image_contents = "true"` in `storage.conf` (D65) | Remove that option and pull the image again |
+| `unverifiable: image ID is not a config digest` | On CRI-O, the agent's copy of CRI-O's image list has no image of that ID with a repository digest (D65, D169) | None when the image was just pulled; kubelet retries. Otherwise check `crictl images --digests` for the image |
+| `unverifiable: no image identity in the request` | On containerd 2.4, `CreateContainer` named no image name or digest, or on CRI-O no `io.kubernetes.cri-o.ImageRef` (D169) | Report it: a runtime that sends none is not supported |
 | `unmatched` | No policy matches the image, and `gate.unmatched = "deny"` (D23) | Add a policy, or exempt the image |
 | `rejected: <detail>` | A signature, attestation or SBOM check failed (D20) | Fix the image; the verdict is final for this policy and trust root |
 | `rejected: attestation <predicateType> missing (.att tags are not supported)` | No bundle naming the image signs an in-toto statement of that predicate type, compared exactly; one that exists only as a `.att` tag is not read (D43, D149) | Attest again with a current cosign or `actions/attest`, which attach a bundle as a referrer |

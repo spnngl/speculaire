@@ -6,11 +6,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use speculaire_mirror::listed::Listed;
 use speculaire_nri::api::{Container, CreateContainerRequest, PodSandbox};
 use speculaire_nri::{
     Answer, Configuration, End, Handler, NriVersion, REGISTRATION_TIMEOUT, serve,
 };
 use speculaire_runtime::detect::Runtime;
+use speculaire_runtime::identity::NodeIdentity;
 use tokio::net::UnixStream;
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -18,7 +20,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
 
 use crate::status::Status;
-use crate::telemetry::{self, NRI_CONNECTED, Versions};
+use crate::telemetry::{self, IDENTITY_PATH, NRI_CONNECTED, Versions};
 
 /// How long the gate waits between two connections, unless the last one lasted longer (D41).
 const RETRY: Duration = Duration::from_secs(1);
@@ -31,20 +33,46 @@ pub struct Gate {
 }
 
 impl Gate {
-    /// Connects to NRI's `socket` as the plugin of `runtime`, the node's. `wait` is `gate.wait`, which each `Configure`
-    /// checks against the runtime's request timeout (D41, D168). `status` follows the registration.
+    /// Connects to NRI's `socket` as the plugin of `runtime`, the node's, whose image identity path reads `listed`
+    /// (D169). `wait` is `gate.wait`, which each `Configure` checks against the runtime's request timeout (D41, D168).
+    /// `status` follows the registration.
     #[must_use]
-    pub fn start(socket: PathBuf, runtime: Runtime, wait: Duration, status: Arc<Status>) -> Self {
+    pub fn start(
+        socket: PathBuf,
+        runtime: Runtime,
+        listed: Listed,
+        wait: Duration,
+        status: Arc<Status>,
+    ) -> Self {
         let (wait, waits) = watch::channel(wait);
         let (stop, stopped) = oneshot::channel();
+        let identity = Arc::new(NodeIdentity::of(runtime));
         let plugin = Plugin {
             runtime,
+            identity: Arc::clone(&identity),
             wait: waits,
             status,
             versions: Mutex::new(Versions::default()),
             refused: Notify::new(),
         };
-        let task = tokio::spawn(connect(socket, plugin, stopped));
+        let task = tokio::spawn(async move {
+            // The list outlives a connection, so a new one finds the image IDs already mapped. Once the runtime's
+            // list ends, the last one read stays.
+            let keep = async {
+                listed
+                    .each(|list| {
+                        if let Some(list) = list {
+                            identity.keep(list);
+                        }
+                    })
+                    .await;
+                future::pending::<()>().await;
+            };
+            tokio::select! {
+                () = connect(socket, plugin, stopped) => {}
+                () = keep => {}
+            }
+        });
         Self { wait, stop, task }
     }
 
@@ -115,6 +143,8 @@ async fn connect(socket: PathBuf, plugin: Plugin, mut stop: oneshot::Receiver<()
 struct Plugin {
     /// The node's runtime, which `Configure` must name (D64).
     runtime: Runtime,
+    /// How the image identity of a container is read (D169).
+    identity: Arc<NodeIdentity>,
     /// `gate.wait`.
     wait: watch::Receiver<Duration>,
     status: Arc<Status>,
@@ -185,6 +215,7 @@ impl Handler for Plugin {
             );
         }
         self.name(versions);
+        metrics::gauge!(IDENTITY_PATH, "path" => self.identity.path()).set(1);
         self.registered(true);
     }
 

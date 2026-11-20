@@ -698,11 +698,13 @@ pub fn nri_mux(data: &[u8]) {
 /// flags, then a protobuf `Request` whose payload is that of the method it names (D166).
 ///
 /// Reading never panics or waits, and refuses a length over the maximum before reading its body. Each request read
-/// encodes back to what decodes to it again.
+/// encodes back to what decodes to it again. Each container created reads as an image identity on both paths without
+/// waiting, the image ID's path with an image of that ID listed (D169).
 ///
 /// # Panics
 ///
-/// When reading panics or waits, refuses a length within the maximum, or a request read does not round-trip.
+/// When reading panics or waits, refuses a length within the maximum, a request read does not round-trip, or an
+/// identity read waits or differs from the request.
 pub fn nri_request(data: &[u8]) {
     use prost::Message;
     use speculaire_nri::ttrpc::{Call, MAX_MESSAGE, RequestError, read_request};
@@ -718,7 +720,12 @@ pub fn nri_request(data: &[u8]) {
             Ok(request) => match request.call {
                 Call::Configure(request) => round_trips(&request),
                 Call::Synchronize(request) => round_trips(&request),
-                Call::CreateContainer(request) => round_trips(&*request),
+                Call::CreateContainer(request) => {
+                    round_trips(&*request);
+                    if let Some(container) = &request.container {
+                        identify(container);
+                    }
+                }
                 Call::Shutdown | Call::Other { .. } => {}
             },
             Err(RequestError::Oversize { length }) => {
@@ -728,6 +735,39 @@ pub fn nri_request(data: &[u8]) {
             Err(RequestError::Decode { .. }) => {}
             Err(RequestError::Io(_)) => break,
         }
+    }
+}
+
+/// Reads `container`'s image identity on both paths: a name and digest read are the request's, and an image ID listed
+/// reads as its image.
+fn identify(container: &speculaire_nri::api::Container) {
+    use speculaire_runtime::cri::ListedImage;
+    use speculaire_runtime::identity::{IMAGE_REF, Identified, Identity, ImageId, Nri};
+    use speculaire_runtime::images::{Image, List, Update};
+
+    if let Identified::Listed { digest, name } = ready(Nri.identify(container)) {
+        let image = container
+            .image
+            .as_ref()
+            .expect("a listed identity has an image");
+        assert_eq!(digest.to_string(), image.digest);
+        assert_eq!(name, image.name);
+    }
+    let listed = container.annotations.get(IMAGE_REF).and_then(|id| {
+        Image::from_listed(&ListedImage {
+            id: id.clone(),
+            repo_tags: Vec::new(),
+            repo_digests: Vec::new(),
+        })
+    });
+    let mut list = List::default();
+    list.apply(Update::Listing(listed.iter().cloned().collect()));
+    let image_id = ImageId::default();
+    image_id.keep(&list);
+    match (ready(image_id.identify(container)), listed) {
+        (Identified::Image(image), Some(listed)) => assert_eq!(*image, listed),
+        (Identified::Unknown(_), None) => {}
+        (identified, listed) => panic!("{identified:?} for {listed:?}"),
     }
 }
 

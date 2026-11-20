@@ -207,7 +207,7 @@ impl Verdicts {
     /// Keeps for `image` a verdict under `root` and each hash of `keys`, and drops the others: one kept under both
     /// stays; any other is the one kept under the hash paired with it, stale since `since` unless it was already, or
     /// pending (D21).
-    fn rekey(
+    pub(crate) fn rekey(
         &self,
         image: &Digest,
         root: Option<RootHash>,
@@ -844,7 +844,7 @@ fn matching<'a>(policies: &'a Policies, name: &str) -> Vec<&'a Policy> {
 }
 
 /// The hash of the policies `name` matches; none when it matches none.
-fn match_hash(policies: &Policies, name: &str) -> Option<MatchHash> {
+pub(crate) fn match_hash(policies: &Policies, name: &str) -> Option<MatchHash> {
     let matched = matching(policies, name);
     (!matched.is_empty()).then(|| MatchHash::of(matched))
 }

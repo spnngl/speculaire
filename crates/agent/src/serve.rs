@@ -168,6 +168,7 @@ async fn serve(
     let gate = Gate::start(
         config.nri.socket.get().get().to_owned(),
         node.runtime(),
+        mirror.listed.clone(),
         config.gate.wait.get(),
         Arc::clone(&status),
     );
