@@ -762,4 +762,5 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Recording one case keeps every other case's digest, so the tests pinning them stay, and the run writes one Rekor entry, not about twenty (D139).
   - A newer root holds the older roots' keys while they verify: Sigstore keeps a retired key in the trusted root with its validity end.
   - busybox is already every node's test image (D112) and ships both platforms the e2e legs run; `COPY` onto it needs no emulator.
+- **Measured (M6 step 04, run 44767333052, 2026-11-20):** `fixtures/sigstore/` holds 4.4 MB, `layouts/runnable/` 4.1 MB of it. The run's `trusted_root.json` and `tuf/` targets are byte for byte the committed ones; only `tuf/timestamp.json` changed (version 837 to 839).
 - **Revisit when:** a newer trusted root no longer verifies an older case; the fixtures near 6 MB; a gate suite needs a runnable image with attestations.
