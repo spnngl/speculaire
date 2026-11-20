@@ -60,14 +60,19 @@ exclude_re = [
   'mux\.rs:\d+:\d+: replace <impl AsyncWrite for Connection>::poll_flush -> Poll<io::Result<\(\)>> with Poll::from\(Ok\(\(\)\)\)$',
   # Kani's proofs, which `just kani` runs and nextest does not (D163).
   '\.rs:\d+:\d+: replace proofs::',
+  # A gate dropped unstopped stops too, its stop channel closed; `stop` only waits for the connection to close, which
+  # the process's exit closes anyway (D168).
+  'gate\.rs:\d+:\d+: replace Gate::stop with \(\)$',
 ]
 # `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/`,
-# `crates/pki/src/testing.rs` and `crates/reflect/src/bench.rs` are test and benchmark support (D87, D95, D104).
+# `crates/nri/src/testing.rs`, `crates/pki/src/testing.rs` and `crates/reflect/src/bench.rs` are test and benchmark
+# support (D87, D95, D104, D168).
 # `apps/loadgen/` is `speculaire_load::run` behind flags, run by the `load` workflow (D104). `fuzz/` is a workspace of
 # its own, which cargo-mutants never lists.
 exclude_globs = [
   "e2e/**",
   "crates/fake-runtime/**",
+  "crates/nri/src/testing.rs",
   "crates/pki/src/testing.rs",
   "crates/reflect/src/bench.rs",
   "apps/loadgen/**",

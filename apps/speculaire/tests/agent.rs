@@ -29,11 +29,12 @@ const RELOADED: &str = r#""message":"config reloaded""#;
 const PROTOBUF: &str =
     "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited";
 
-/// The node under test: a fake containerd on a socket, and containerd's config in a directory of its own, so that
-/// the agent runs where there is no runtime, as on the CI runner and on macOS (D86).
+/// The node under test: a fake containerd and its NRI on sockets, and containerd's config in a directory of its own,
+/// so that the agent runs where there is no runtime, as on the CI runner and on macOS (D86, D168).
 struct Node {
     dir: tempfile::TempDir,
     _fake: Fake,
+    _nri: Fake,
 }
 
 impl Node {
@@ -46,20 +47,25 @@ impl Node {
     /// directory of the node.
     fn new(answers: Answers, containerd_config: Option<&str>) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let fake = Fake::start(&dir.path().join("containerd.sock"), answers).unwrap();
+        let fake = Fake::start(&dir.path().join("containerd.sock"), answers.clone()).unwrap();
+        let nri = Fake::start_nri(&dir.path().join("nri.sock"), answers).unwrap();
         if let Some(text) = containerd_config {
             let text = text.replace("@DIR@", &dir.path().display().to_string());
             std::fs::write(dir.path().join("config.toml"), text).unwrap();
         }
-        Self { dir, _fake: fake }
+        Self {
+            dir,
+            _fake: fake,
+            _nri: nri,
+        }
     }
 
-    /// The `[runtime]` table naming this node's files, CRI-O having none, and the `[artifacts]` table keeping the
-    /// artifact store in the node's directory.
+    /// The `[runtime]` and `[nri]` tables naming this node's files, CRI-O having none, and the `[artifacts]` table
+    /// keeping the artifact store in the node's directory.
     fn table(&self) -> String {
         let dir = self.dir.path().display();
         format!(
-            "[runtime]\ncontainerd_socket = \"{dir}/containerd.sock\"\ncontainerd_config = \"{dir}/config.toml\"\ncrio_socket = \"{dir}/crio.sock\"\n[artifacts]\ndirectory = \"{dir}/artifacts\"\n"
+            "[runtime]\ncontainerd_socket = \"{dir}/containerd.sock\"\ncontainerd_config = \"{dir}/config.toml\"\ncrio_socket = \"{dir}/crio.sock\"\n[nri]\nsocket = \"{dir}/nri.sock\"\n[artifacts]\ndirectory = \"{dir}/artifacts\"\n"
         )
     }
 }

@@ -39,11 +39,12 @@ const POLL: Duration = Duration::from_millis(250);
 /// How often a wait for the gauges logs them.
 const PROGRESS: Duration = Duration::from_secs(5);
 
-/// A node's files: its config, certificates and fake containerd, removed on drop. Its status listener and mirror take
+/// A node's files: its config, certificates, fake containerd and its NRI, removed on drop. Its status listener and mirror take
 /// port 0, and [`Agent::start`] reads where they opened from the agent's log.
 pub(crate) struct Node {
     dir: tempfile::TempDir,
     _containerd: Fake,
+    _nri: Fake,
     name: &'static str,
     /// The port of [`Node::address`], held for as long as the node lives.
     _port: TcpSocket,
@@ -104,6 +105,7 @@ impl Node {
     ) -> anyhow::Result<Self> {
         let dir = tempfile::tempdir()?;
         let path = dir.path();
+        let nri = Fake::start_nri(&path.join("nri.sock"), containerd.clone())?;
         let containerd = Fake::start(&path.join("containerd.sock"), containerd)?;
         let mirror = Mirror::generate(Ipv4Addr::LOCALHOST.into(), SystemTime::now())?;
         std::fs::create_dir(path.join("mirror"))?;
@@ -129,6 +131,7 @@ impl Node {
                  [identity]\ncertificate = \"{d}/node.pem\"\nca = \"{d}/ca.crt\"\n\
                  [runtime]\ncontainerd_socket = \"{d}/containerd.sock\"\ncontainerd_config = \"{d}/containerd.toml\"\n\
                  crio_socket = \"{d}/crio.sock\"\n\
+                 [nri]\nsocket = \"{d}/nri.sock\"\n\
                  [mirror]\naddress = \"{any}\"\ndirectory = \"{d}/mirror\"\n\
                  [blob_cache]\ndirectory = \"{d}/blobs\"\n\
                  [artifacts]\ndirectory = \"{d}/artifacts\"\n\
@@ -141,6 +144,7 @@ impl Node {
         Ok(Self {
             dir,
             _containerd: containerd,
+            _nri: nri,
             name,
             _port: held.0,
             address: held.1,

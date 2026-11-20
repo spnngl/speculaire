@@ -7,8 +7,10 @@ use metrics_exporter_prometheus::{
     Matcher, NativeHistogramConfig, PrometheusBuilder, PrometheusHandle,
 };
 
-/// `speculaire_build_info`: always 1, labelled with the versions in use.
+/// `speculaire_build_info`: 1, labelled with the versions in use; 0 for those an NRI `Configure` replaced (D168).
 pub const BUILD_INFO: &str = "speculaire_build_info";
+/// `speculaire_nri_connected`: 1 while registered with the runtime's NRI (D41, D64).
+pub const NRI_CONNECTED: &str = "speculaire_nri_connected";
 /// `speculaire_config_reload_failures_total`: reloads rejected while the previous config stays in use (D30).
 pub const CONFIG_RELOAD_FAILURES: &str = "speculaire_config_reload_failures_total";
 
@@ -48,7 +50,8 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
 
     describe();
     // The runtime, its version and NRI's come from NRI's `Configure` (D9, D68); empty until then.
-    gauge!(BUILD_INFO, "version" => env!("CARGO_PKG_VERSION"), "runtime" => "", "runtime_version" => "", "nri_version" => "").set(1);
+    build_info(&Versions::default()).set(1);
+    gauge!(NRI_CONNECTED).set(0);
     counter!(CONFIG_RELOAD_FAILURES).absolute(0);
     gauge!(P2P_ENABLED).set(0);
     speculaire_mirror::metrics::describe();
@@ -57,9 +60,35 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
     Ok(handle)
 }
 
+/// The runtime versions `speculaire_build_info` names, as NRI's `Configure` gives them (D68).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Versions {
+    /// `containerd` or `cri-o`.
+    pub(crate) runtime: &'static str,
+    /// The runtime's release.
+    pub(crate) runtime_version: String,
+    /// The NRI version the runtime links; empty when unknown (D64).
+    pub(crate) nri_version: String,
+}
+
+/// The `speculaire_build_info` series of `versions`.
+pub(crate) fn build_info(versions: &Versions) -> Gauge {
+    gauge!(
+        BUILD_INFO,
+        "version" => env!("CARGO_PKG_VERSION"),
+        "runtime" => versions.runtime,
+        "runtime_version" => versions.runtime_version.clone(),
+        "nri_version" => versions.nri_version.clone(),
+    )
+}
+
 /// Describes the metrics of this crate.
 fn describe() {
-    describe_gauge!(BUILD_INFO, "Always 1");
+    describe_gauge!(
+        BUILD_INFO,
+        "1 for the versions in use, 0 for runtime versions a later NRI Configure replaced"
+    );
+    describe_gauge!(NRI_CONNECTED, "1 while registered with the runtime's NRI");
     describe_counter!(
         CONFIG_RELOAD_FAILURES,
         "Reloads rejected; the previous config is still in use"

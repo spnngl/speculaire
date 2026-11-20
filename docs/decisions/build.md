@@ -248,7 +248,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a suite needs more than one cluster at a time.
 
 
-## D61: `speculaire_build_info` exists from startup, and every build has `protoc` (amends D34; amended by D68)
+## D61: `speculaire_build_info` exists from startup, and every build has `protoc` (amends D34; amended by D68, D168)
 
 - **Decision:**
   - `speculaire_build_info` is set when the recorder is installed, with `containerd_version=""` and `nri_version=""`. NRI's `Configure` fills both (D9, M6).
@@ -288,7 +288,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `kind load` imports through containerd, so CRI-O nodes pull every image from its registry, kind's control-plane images included: each CRI-O leg depends on `registry.k8s.io` and on the test image's registry.
 - **Revisit when:** kind ships a new Kubernetes minor (the oldest leaves the window), kind ships a CRI-O node image, or a containerd minor reaches its upstream end of life.
 
-## D68: `speculaire_build_info` names the runtime (amends D61)
+## D68: `speculaire_build_info` names the runtime (amends D61; amended by D168)
 
 - **Decision:** `speculaire_build_info` has the labels `version`, `runtime`, `runtime_version` and `nri_version`. `runtime` and `runtime_version` are NRI `Configure`'s `runtime_name` and `runtime_version`: `containerd` or `cri-o`, and its release. All three runtime labels are empty until `Configure`, as D61 says.
 - **Because:**

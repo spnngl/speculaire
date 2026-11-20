@@ -37,11 +37,11 @@ cat >/tmp/seed/index <<EOF
 EOF
 index=$(put /tmp/seed/index)
 
-# The node: a fake containerd, which answers what the agent's startup checks ask (D86, D87), the reference config,
-# `configure`, and the agent.
-mkdir -p /etc/speculaire /run/containerd
-fake-runtime /run/containerd/containerd.sock &
-while [ ! -S /run/containerd/containerd.sock ]; do sleep 0.1; done
+# The node: a fake containerd, which answers what the agent's startup checks ask (D86, D87), and its NRI, which
+# registers the gate (D168), the reference config, `configure`, and the agent.
+mkdir -p /etc/speculaire /run/containerd /var/run/nri
+fake-runtime /run/containerd/containerd.sock /var/run/nri/nri.sock &
+while [ ! -S /var/run/nri/nri.sock ]; do sleep 0.1; done
 cp /packaging/config.toml /etc/speculaire/config.toml
 speculaire configure --runtime containerd
 speculaire agent >/tmp/agent.log 2>&1 &

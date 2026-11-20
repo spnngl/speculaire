@@ -21,6 +21,7 @@ hyper.workspace = true
 hyper-util = { workspace = true, features = ["http1", "http2", "server-auto"] }
 prost.workspace = true
 socket2.workspace = true
+speculaire-nri = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["net", "rt", "sync"] }
 tonic-prost.workspace = true
 tower.workspace = true
