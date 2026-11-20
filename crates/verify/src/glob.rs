@@ -77,7 +77,7 @@ impl Glob {
     /// Whether the glob matches the name of `reference`.
     #[must_use]
     pub fn matches(&self, reference: &Reference) -> bool {
-        self.is_match(&reference.name())
+        self.is_match(reference.name())
     }
 
     /// Whether the glob matches `name`, a [`Reference::name`].

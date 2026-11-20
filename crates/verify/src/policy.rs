@@ -225,7 +225,7 @@ impl Policies {
         let name = reference.name();
         self.policies
             .iter()
-            .filter(move |policy| policy.images.iter().any(|glob| glob.is_match(&name)))
+            .filter(move |policy| policy.images.iter().any(|glob| glob.is_match(name)))
     }
 }
 
