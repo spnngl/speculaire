@@ -34,8 +34,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100, D102)
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
-- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104)
-- D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate
+- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157)
+- D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate (amended by D157)
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21)
@@ -164,5 +164,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D154 [verification](verification.md): the policy file and a pinned trust root reload on SIGHUP or a changed stamp, a refused one keeping the previous; a changed key serves its previous verdict stale for up to `verify.stale_max` while its root is verified again under `trigger="reverify"` (amends D21, D30, D143, D151; amended by D155)
 - D155 [verification](verification.md): after a change, the roots the runtime's running containers run, from CRI `ListContainers` and `ListImages`, are verified again first (amends D154)
 - D156 [verification](verification.md): `speculaire verify <name>@<digest>` prints one image's verdict, then each matched policy, authority, attestation and SBOM check with its reason, as text or `--json`, exit 0 allowed, 1 not, 2 unusable config; it discovers upstream into a store of its own, without the agent or peers, and the engine's verdict derives from the same per-check results (amends D62)
+- D157 [build](build.md): `release`, on a version tag or a dispatch from main, builds both musl binaries natively into one scratch image index on ghcr.io, tagged `<version>` or `dispatch-<run id>` with no GitHub release, attests SLSA provenance and a syft SPDX SBOM on its digest, and its `verify` job runs `speculaire verify` on it anonymously under `packaging/policy/release.yaml` with the public-good TUF root (amends D27, D28)
 
-Next free number: D157.
+Next free number: D158.

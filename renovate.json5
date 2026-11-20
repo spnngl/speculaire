@@ -35,8 +35,8 @@
         },
         {
             "customType": "regex",
-            "description": "Images of the e2e suites and of the fixture recorder (D139), pinned by tag and digest.",
-            "managerFilePatterns": ["/(^|/)e2e/src/[^/]+\\.rs$/", "/(^|/)\\.github/workflows/fixtures\\.yml$/"],
+            "description": "Images of the e2e suites, the fixture recorder (D139) and the release (D157), pinned by tag and digest.",
+            "managerFilePatterns": ["/(^|/)e2e/src/[^/]+\\.rs$/", "/(^|/)\\.github/workflows/(fixtures|release)\\.yml$/"],
             "matchStrings": ["\"(?<depName>(?:docker|ghcr)\\.io/[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[0-9a-f]{64})\""],
             "datasourceTemplate": "docker",
         },

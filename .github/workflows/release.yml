@@ -1,0 +1,156 @@
+name: release
+
+# speculaire's image for amd64 and arm64 in one index, pushed to ghcr.io with its build provenance and SBOM as
+# referrers, then verified by `speculaire verify` under packaging/policy/release.yaml (D28, D157). A version tag pushes
+# it as `<version>`; a dispatch from main as `dispatch-<run id>`, with no release and no tag. Later milestones add what
+# a version tag publishes besides (D27). Each run writes entries to the public Rekor log.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Each job grants only what it needs.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # `just musl` on each architecture's runner, as in ci.yml (D58).
+  musl:
+    # The policy names main and version tags only.
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+            arch: amd64
+          - os: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - env:
+          TARGET: ${{ matrix.target }}
+        run: just musl "$TARGET"
+      # Named by the architecture packaging/Containerfile copies it for.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: speculaire-${{ matrix.arch }}
+          path: target/musl/${{ matrix.target }}/speculaire
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    needs: musl
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # The GitHub attestations, signed keyless, and the image they attest.
+      id-token: write
+      attestations: write
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      SYFT_IMAGE: "ghcr.io/anchore/syft:v1.57.2@sha256:e97e20b6e6d1699c60296b66ab337941724f9bd06ac279d893eda89601fc4b2a"
+      BUILDKIT_IMAGE: "docker.io/moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: speculaire-*
+          path: ${{ runner.temp }}/context
+      # In ~/.docker/config.json, where actions/attest reads it too.
+      - env:
+          TOKEN: ${{ github.token }}
+        run: docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$TOKEN"
+      - run: docker buildx create --name release --driver docker-container --driver-opt "image=$(just hub-pull "$BUILDKIT_IMAGE")"
+      # The attestations below replace BuildKit's own, so the index holds the two images only.
+      - id: build
+        name: Build
+        run: |
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            tag=${GITHUB_REF_NAME#v}
+          else
+            tag=dispatch-$GITHUB_RUN_ID
+          fi
+          docker buildx build --builder release --platform linux/amd64,linux/arm64 --provenance=false --sbom=false \
+            --file packaging/Containerfile --output "type=image,name=$IMAGE:$tag,push=true,oci-mediatypes=true" \
+            --metadata-file "$RUNNER_TEMP/metadata.json" "$RUNNER_TEMP/context"
+          echo "digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json")" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      # From the cargo-auditable list of both binaries: each crate once per binary that links it.
+      - env:
+          TAG: ${{ steps.build.outputs.tag }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME="$RUNNER_TEMP" -v "$RUNNER_TEMP:$RUNNER_TEMP" "$SYFT_IMAGE" \
+            scan --quiet "dir:$RUNNER_TEMP/context" --source-name "$IMAGE" --source-version "$TAG" \
+            --output "spdx-json=$RUNNER_TEMP/sbom.json"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom.json
+          push-to-registry: true
+
+  # speculaire's own verifier on the index just pushed, as a node would ask: anonymously, over the public-good TUF root.
+  # The runner has no runtime: a containerd config without registry config sends ghcr.io's requests to ghcr.io.
+  verify:
+    needs: image
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: speculaire-amd64
+          path: ${{ runner.temp }}/bin
+      - env:
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          dir=$RUNNER_TEMP/verify
+          mkdir -p "$dir"
+          printf 'version = 3\n' > "$dir/containerd.toml"
+          cat > "$dir/config.toml" <<EOF
+          [runtime]
+          containerd_config = "$dir/containerd.toml"
+          [verify]
+          policy = "$GITHUB_WORKSPACE/packaging/policy/release.yaml"
+          tuf_cache = "$dir/tuf"
+          EOF
+          chmod +x "$RUNNER_TEMP/bin/speculaire"
+          "$RUNNER_TEMP/bin/speculaire" verify --config "$dir/config.toml" --runtime containerd "$IMAGE@$DIGEST"
