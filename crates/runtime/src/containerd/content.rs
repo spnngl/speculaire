@@ -1,7 +1,8 @@
 //! containerd's content: its directory, then its content service.
 
+use std::fs::File;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use containerd_client::services::v1::InfoRequest;
 use containerd_client::services::v1::content_client::ContentClient;
@@ -49,22 +50,30 @@ impl Containerd {
 impl Content for Containerd {
     async fn open(&self, digest: &Digest) -> Result<Option<Blob>, Error> {
         // The blob streams from the handle that gave its size: containerd's garbage collector may delete the file
-        // meanwhile.
-        match tokio::fs::File::open(self.blob_path(digest)).await {
-            Ok(file) => {
-                let meta = file.metadata().await?;
-                if meta.is_file() {
-                    return Ok(Some(Blob::from_open(file.into_std().await, meta.len())));
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(Error::Io(e)),
+        // meanwhile. Opened and measured in one blocking task.
+        let path = self.blob_path(digest);
+        let opened = tokio::task::spawn_blocking(move || open_file(&path))
+            .await
+            .expect("opening a file does not panic")?;
+        if let Some((file, size)) = opened {
+            return Ok(Some(Blob::from_open(file, size)));
         }
         Ok(self
             .info(digest)
             .await?
             .map(|(channel, size)| Blob::from_grpc(channel, digest.to_string(), size)))
     }
+}
+
+/// The file at `path` and its size, or `None` when no file is there.
+fn open_file(path: &Path) -> io::Result<Option<(File, u64)>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let meta = file.metadata()?;
+    Ok(meta.is_file().then_some((file, meta.len())))
 }
 
 #[cfg(test)]
