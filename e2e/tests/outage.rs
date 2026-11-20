@@ -337,10 +337,11 @@ fn an_agent_without_its_certificate_falls_through_until_the_certificate_comes() 
     let _serial = serial();
     let nodes = Nodes::new();
     let _restore = Restore(&nodes);
+    // A poll each second finds the certificate soon after it comes (D159).
     nodes.sh(
         &nodes.a,
         &format!(
-            r#"cp {CONFIG} {CONFIG}.e2e && sed -i 's|^#certificate = .*|certificate = "{CERTIFICATE}"|' {CONFIG}"#
+            r#"cp {CONFIG} {CONFIG}.e2e && sed -i 's|^#certificate = .*|certificate = "{CERTIFICATE}"|; s|^#poll_interval = 10$|poll_interval = 1|' {CONFIG} && grep -q '^poll_interval = 1$' {CONFIG}"#
         ),
     );
     nodes.cluster.reset_agent(&nodes.a).unwrap();

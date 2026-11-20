@@ -520,6 +520,12 @@ e2e-up runtime version kubernetes="": e2e-tools
         echo "e2e: no $bin: run just musl {{ arch() }}-unknown-linux-musl" >&2
         exit 1
     fi
+    # The suites and the upstreams' binary build while the node image and the cluster come up (D159).
+    mkdir -p '{{ e2e_dir }}'
+    build_log="{{ e2e_dir }}/$cluster-build.log"
+    cargo test -p e2e --locked --no-run >"$build_log" 2>&1 &
+    build=$!
+    trap 'kill "$build" 2>/dev/null || true' EXIT
     # Docker Hub's images through its mirrors (D120, D122). The Containerfile's alpine, which Renovate moves, is a named
     # context of the one pulled.
     pull() { {{ just_executable() }} hub-pull "$1"; }
@@ -530,7 +536,6 @@ e2e-up runtime version kubernetes="": e2e-tools
     docker build --quiet --build-arg "NODE=$base" --build-arg "RELEASE=$release" \
         --build-context "$alpine=docker-image://$download" -t "$image" \
         -f 'e2e/node/{{ runtime }}/Containerfile' 'e2e/node/{{ runtime }}' >/dev/null
-    mkdir -p '{{ e2e_dir }}'
     config="{{ e2e_dir }}/$cluster.yaml"
     {
         if [[ "$family" == dual ]]; then
@@ -542,6 +547,7 @@ e2e-up runtime version kubernetes="": e2e-tools
         fi
     } >"$config"
     kind create cluster --name "$cluster" --image "$image" --config "$config" --wait 180s
+    wait "$build" || { cat "$build_log" >&2; exit 1; }
     # The upstreams, the test images on each, and each node's runtime config for them (D94, D112).
     SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' SPECULAIRE_E2E_RELEASE="$release" \
         SPECULAIRE_E2E_KUBERNETES="$kubernetes" SPECULAIRE_E2E_IP_FAMILY="$family" \

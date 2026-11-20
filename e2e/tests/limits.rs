@@ -1,7 +1,7 @@
 //! Upstream rate limits (D38, D128): a `429` to discovery pauses that registry host for every image until its
 //! `Retry-After`, and discovery takes up both images it held back on its own once the window ends.
 //!
-//! The suite waits out a 120 s window, so it runs in the IPv4 pass only (D130).
+//! The suite waits out a 45 s window, so it runs in the IPv4 pass only (D130).
 #![expect(
     clippy::unwrap_used,
     reason = "the helpers of a test fail it by panicking"
@@ -23,13 +23,15 @@ const PEER_PORT: u16 = 7481;
 /// The proxy in front of the plain upstream, which the worker's runtime config names.
 const HOST: &str = "limited.e2e.test";
 
-/// The `Retry-After` of the proxy's `429`, and how long after it the store must hold both images' artifacts.
-const WINDOW: Duration = Duration::from_secs(120);
-const WITHIN: Duration = Duration::from_secs(130);
+/// The `Retry-After` of the proxy's `429`, and how long after it the store must hold both images' artifacts. The
+/// window is longer than the first backoff step, 30 s (D128): an agent that ignored `Retry-After` would ask again
+/// within [`QUIET`].
+const WINDOW: Duration = Duration::from_secs(45);
+const WITHIN: Duration = Duration::from_secs(55);
 
 /// How long the proxy's log must show nothing of either image: the window, less the gap between the agent's 429 and
 /// the test seeing it.
-const QUIET: Duration = Duration::from_secs(115);
+const QUIET: Duration = Duration::from_secs(40);
 
 /// The repository of the second signed image, an image of its own (CRI-O would merge a copy of [`SIGNED`] that keeps
 /// its config into one image whose roots each have both names) with one bundle.

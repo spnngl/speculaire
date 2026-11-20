@@ -372,8 +372,8 @@ fn a_peer_that_serves_a_corrupted_blob_is_denied_with_a_warning_and_an_audit_eve
         r#"speculaire_peer_fetches_total{result="digest_mismatch"}"#,
     );
     {
-        // C answers 1 s late, so A is asked first.
-        let _late = nodes.cluster.netem(&nodes.c, "delay 1s").unwrap();
+        // C answers 300 ms late, past any hedge delay on kind's network, so A wins the race (D159).
+        let _late = nodes.cluster.netem(&nodes.c, "delay 300ms").unwrap();
         let pull = nodes.pull(&nodes.b, &image);
         match nodes.cluster.runtime() {
             // containerd gets nothing before the whole blob matched: the pull goes on from C.
@@ -419,7 +419,7 @@ fn a_peer_that_serves_a_corrupted_blob_is_denied_with_a_warning_and_an_audit_eve
     // which count as served, whenever its image list shows `next`.
     let sent = nodes.metric(&nodes.a, UPLOAD_BYTES);
     {
-        let _late = nodes.cluster.netem(&nodes.c, "delay 1s").unwrap();
+        let _late = nodes.cluster.netem(&nodes.c, "delay 300ms").unwrap();
         nodes.pulled(&nodes.b, &next);
     }
     assert_eq!(

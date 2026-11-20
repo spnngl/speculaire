@@ -12,6 +12,8 @@ use e2e::Cluster;
 use e2e::balancer::PORT;
 use e2e::reflector::{Answer, KUBELET};
 
+const CONFIG: &str = "/etc/speculaire/config.toml";
+
 fn sh(cluster: &Cluster, node: &str, script: &str) -> String {
     cluster.exec(node, &["sh", "-c", script]).unwrap()
 }
@@ -118,17 +120,47 @@ fn same_serial(a: &str, b: &str) -> bool {
     digits(a) == digits(b)
 }
 
+/// The node's agent polls its files each second while this lives, then at the default 10 s again: each change is a
+/// SIGHUP, which reloads without a restart (D159).
+struct PollEachSecond<'a> {
+    cluster: &'a Cluster,
+    node: &'a str,
+}
+
+impl<'a> PollEachSecond<'a> {
+    fn new(cluster: &'a Cluster, node: &'a str) -> Self {
+        sh(
+            cluster,
+            node,
+            &format!(
+                "sed -i 's/^#poll_interval = 10$/poll_interval = 1/' {CONFIG} && grep -q '^poll_interval = 1$' {CONFIG} \
+                 && systemctl kill --signal=SIGHUP speculaire"
+            ),
+        );
+        Self { cluster, node }
+    }
+}
+
+impl Drop for PollEachSecond<'_> {
+    fn drop(&mut self) {
+        let script = format!(
+            "sed -i 's/^poll_interval = 1$/#poll_interval = 10/' {CONFIG} && systemctl kill --signal=SIGHUP speculaire"
+        );
+        let _ = self.cluster.exec_output(self.node, &["sh", "-c", &script]);
+    }
+}
+
 /// Calls `Members` on `address` from `node` until the reflector presents `serial`; every call must succeed.
 fn wait_serial(cluster: &Cluster, node: &str, address: SocketAddr, serial: &str) -> Answer {
-    // The agent reads the file again at its next poll, 10 s in the e2e config.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // The agent reads the file again at its next poll, each second here.
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let answer = cluster.members(node, address, KUBELET, None).unwrap();
         if same_serial(&answer.serial, serial) {
             return answer;
         }
         assert!(Instant::now() < deadline, "{answer:?}, not serial {serial}");
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -152,6 +184,9 @@ fn a_reflector_presents_its_rotated_kubelet_certificate_without_a_restart() {
         )
     };
     let before = pid();
+    // The SIGHUP also reads the certificate again; Rotated's commands take longer than the agent takes to handle it,
+    // so only a poll finds the new one.
+    let _poll = PollEachSecond::new(&cluster, &reflector);
     let first = cluster.members(&reflector, address, KUBELET, None).unwrap();
     {
         let rotated = Rotated::new(&cluster, &reflector);

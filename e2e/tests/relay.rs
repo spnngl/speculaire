@@ -2,7 +2,8 @@
 //!
 //! The upstreams are registries and a proxy on kind's network, which a worker reaches by name; the worker's own
 //! registry config names them, and `speculaire configure` puts the mirror in front of each. The tests change the same
-//! worker and put it back, so they run one at a time.
+//! worker and put it back, so they run one at a time. On CRI-O they turn peers off, and the dual-stack pass changes only
+//! the peers' addresses (D94): CRI-O's run in the IPv4 pass alone (D159).
 #![expect(
     clippy::unwrap_used,
     reason = "the helpers of a test fail it by panicking"
@@ -16,7 +17,7 @@ use e2e::registry::{
     self, Access, Certificates, LARGE_IMAGE, PASSWORD, Proxy, Registry, TokenServer, USER,
 };
 use e2e::upstream::CRIO_AUTH_FILE;
-use e2e::{Cluster, Output, Runtime, TEST_IMAGE};
+use e2e::{Cluster, IpFamily, Output, Runtime, TEST_IMAGE};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -45,7 +46,9 @@ impl Worker {
     /// The worker, on a cluster of `runtime`; `None` on the other runtime, where the test has nothing to check.
     fn on(runtime: Runtime) -> Option<Self> {
         let cluster = Cluster::from_env();
-        if cluster.runtime() != runtime {
+        if cluster.runtime() != runtime
+            || (runtime == Runtime::Crio && cluster.ip_family() == IpFamily::Dual)
+        {
             return None;
         }
         let name = cluster
@@ -67,9 +70,10 @@ impl Worker {
         worker.wait_ready();
         if runtime == Runtime::Crio {
             // These tests count what comes from upstream: with peers on, the other nodes would send the blobs of the
-            // test image (D102), which `fetch.rs` checks.
+            // test image (D102), which `fetch.rs` checks. A poll each second finds a changed file in time for the next
+            // step (D159).
             worker.sh(&format!(
-                "cp {CONFIG} {CONFIG}.e2e && sed -i 's|^url = .*|url = \"\"|' {CONFIG}"
+                "cp {CONFIG} {CONFIG}.e2e && sed -i 's|^url = .*|url = \"\"|; s|^#poll_interval = 10$|poll_interval = 1|' {CONFIG} && grep -q '^poll_interval = 1$' {CONFIG}"
             ));
             worker.agent_changed = true;
             worker.sh(&format!(
@@ -268,17 +272,12 @@ impl Drop for Worker {
                 .exec_output(&self.name, &["speculaire", "configure"]);
         }
         if self.agent_changed {
-            let _ = self.cluster.exec_output(
-                &self.name,
-                &[
-                    "sh",
-                    "-c",
-                    &format!("mv {CONFIG}.e2e {CONFIG} && systemctl reset-failed speculaire; systemctl restart speculaire"),
-                ],
-            );
+            let _ = self
+                .cluster
+                .exec_output(&self.name, &["mv", &format!("{CONFIG}.e2e"), CONFIG]);
         }
         // Some of these tests provoke warnings on purpose; `unit.rs` asserts the journal holds none, so the
-        // journal is emptied and the agent restarted for the entries it writes at start.
+        // journal is emptied and the agent restarted for the entries it writes at start, with its config put back.
         let _ = self.cluster.restart_with_empty_journal(&self.name);
         // A second panic while a failed test unwinds would abort the whole binary; the next `Worker::on` waits anyway.
         if !std::thread::panicking() {
@@ -577,8 +576,9 @@ fn on_crio_a_login_added_to_the_auth_file_is_used_by_the_next_pull_without_a_res
         CRIO_AUTH_FILE,
         &auth_file(&private.address, &basic_credentials()),
     );
-    // No SIGHUP and no restart: a poll finds the file, within `config.poll_interval` (10 s).
-    std::thread::sleep(Duration::from_secs(15));
+    // No SIGHUP and no restart: a poll finds the file, within `config.poll_interval` (1 s here). CRI-O reads the file
+    // too, so a pull before the poll succeeds straight from upstream: only the relay's bytes tell.
+    std::thread::sleep(Duration::from_secs(3));
     let bytes = worker.upstream_bytes();
     assert_pulled(&worker.pull(&image, None));
     assert!(
@@ -822,8 +822,8 @@ fn on_crio_killing_the_agent_mid_pull_fails_that_pull_and_the_next_one_succeeds(
     };
     let upstream = seeded("open.e2e.test", TEST_IMAGE);
     upstream.copy_in(LARGE_IMAGE, "app/large:1").unwrap();
-    // 2 MB/s a blob: the pull takes seconds.
-    let proxy = Proxy::start("slow.e2e.test", &upstream.address(), None, Some(2_000_000)).unwrap();
+    // 5 MB/s a blob: the pull takes seconds.
+    let proxy = Proxy::start("slow.e2e.test", &upstream.address(), None, Some(5_000_000)).unwrap();
     worker.registry_conf("slow", &proxy.address(), false);
     let image = format!("{}/app/large:1", proxy.address());
     worker
