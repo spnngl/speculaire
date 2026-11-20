@@ -1,10 +1,11 @@
-//! Digest and reference parsing, which every mirror request and reflector message goes through (D107):
-//! `just bench-micro`.
+//! Digest and reference parsing, which every mirror request and reflector message goes through (D107), and the chain
+//! ID the gate computes on containerd 2.3 (D15): `just bench-micro`.
 
 use std::collections::HashSet;
 use std::hint::black_box;
 
 use divan::{AllocProfiler, Bencher};
+use speculaire_oci::chain::chain_id;
 use speculaire_oci::reference::{Digest, Reference};
 
 #[global_allocator]
@@ -40,4 +41,13 @@ fn digest_lookup(bencher: Bencher<'_, '_>) {
 #[divan::bench(args = ["busybox", "ghcr.io/org/app:1.2", "docker.io/library/busybox@sha256:6c3c624b58dbbcd3c0dd82b4c53f04194d1247c6eebdaab7c610cf7d66709b3b"])]
 fn reference_parse(text: &str) -> Reference {
     Reference::parse_normalized_named(black_box(text)).expect("a valid reference")
+}
+
+/// The chain ID of 16 layers: no allocation (D107).
+#[divan::bench]
+fn chain(bencher: Bencher<'_, '_>) {
+    let layers: Vec<Digest> = (0..16_u32)
+        .map(|i| Digest::parse(&format!("sha256:{i:064x}")).expect("a valid digest"))
+        .collect();
+    bencher.bench_local(|| chain_id(black_box(&layers)));
 }

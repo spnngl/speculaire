@@ -36,14 +36,14 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** CRI silently bypasses it through the local-pull fallback, through imports, and through `IfNotPresent` when the image is cached. The gate covers all of these cases.
 - **Revisit when:** users want unsigned images rejected before download.
 
-## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65, D81, D86)
+## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65, D81, D86, D167)
 
 - **Decision:**
   - containerd 2.3 is the minimum. 2.4+ is the main target, and new features land there first.
   - The gate derives the *image identity* in one of two ways. This is modelled as an enum, chosen once at `Configure` from the runtime's NRI version. When the runtime leaves that version empty, it is inferred from the containerd version with our copy of NRI's table (D9):
     - **2.4+:** `container.image.digest` from NRI.
     - **2.3:** resolve the normalised `io.kubernetes.cri.image-name` annotation in containerd's image store (namespace `k8s.io`) to a target digest. Then check that the container snapshot's parent (the snapshot key is the container ID) equals that image's chain ID for the node platform. For a user-namespace pod on a snapshotter without ID remapping, that parent is a remapped snapshot whose own parent is the chain ID (v2.3.0 `client/snapshotter_opts_unix.go:105-135`); the check follows that one extra level. A mismatch is `Rejected("image identity mismatch")`.
-  - The agent keeps an in-memory copy of the image store, updated from events, so the 2.3 path makes at most two snapshot `Stat` calls while it holds the NRI lock.
+  - The agent keeps an in-memory copy of the image store, updated from events, so the 2.3 path makes at most two snapshot `Stat` calls while it holds the NRI lock. D167 holds how.
   - On 2.3 the agent logs a warning at startup naming the residual gap below, and sets `speculaire_identity_path{path="annotation"}` to 1.
   - Preflight reads `discard_unpacked_layers` from the parsed `config.toml` on 2.3, and from introspection on 2.4.
   - CI tests both versions.
@@ -204,3 +204,20 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - NRI closes a plugin whose answer to a split `Synchronize` is not the request's `more`, or carries updates (`plugin.go:536-542`), and gives the whole split one request timeout (`:504-567`).
 - **Measured (M6 step 02, arm64):** 400 containers of 25 KiB, 10 MiB, reach the handler once each from 3 `Synchronize` requests; the oracle reports `CREATE_CONTAINER` as the only event, and the handler's deadline lies within the 1.5 s request timeout. `infer` agrees with NRI on 107 runtime versions. A CreateContainer sent while another is held 1 s is answered within 50 ms, and the 257th in flight gets `overloaded` within 50 ms. The new code is about 960 lines besides tests: `plugin.rs` 400, `ttrpc.rs` 305, `version.rs` 255.
 - **Revisit when:** the gate needs a call outside D9's subset or a ttrpc stream, or NRI changes ttrpc's framing or its version table's semantics.
+
+## D167: containerd's image store is a lock-free copy kept by events, and the snapshot check follows a remap only where the container's snapshot names ID mappings (amends D15)
+
+- **Decision:**
+  - **Image store:** `containerd::store::Store` holds the `k8s.io` image store as name → target digest, behind an `ArcSwap`. `Store::get(name)` borrows the normalised name and returns the digest, which is inline: no lock and no allocation (D107). `Containerd::keep(&store)` fills it with one images `List`, then subscribes to `/images/create`, `/images/update` and `/images/delete` in `k8s.io`. A create or update is followed by a `Get` of that name, as the events carry no digest (v2.3.7 and v2.4.2 `core/metadata/images.go:169,270,337`); a delete removes it. It lists again 1 s after each subscription, every 60 s, and after the stream drops, as the inventory does (D99). Each change publishes a new map; nothing is held across an `await`.
+  - **Snapshot base:** `Containerd::snapshot_base(snapshotter, key, chain)` makes one snapshots `Stat` and returns the parent. It makes a second, and returns the grandparent, only when the parent is not `chain` and the container's snapshot carries `containerd.io/snapshot/uidmapping` or `gidmapping`. Step 07 picks the snapshotter of the runtime handler.
+  - **Chain ID:** `speculaire_oci::chain::of_config` reads `rootfs.diff_ids` and computes the OCI chain ID without allocating per layer.
+  - Both are inherent methods of `Containerd`, reached through `NodeContent::Containerd`: CRI-O has neither (D65), so no trait of D90 grows.
+  - The fake containerd answers images `List` and `Get`, snapshots `Stat` (counted), and events a test publishes or cuts.
+- **Because:**
+  - v2.3.7 `client/snapshotter_opts_unix.go:62-136` adds the remapped snapshot only when the snapshotter lacks the `remap-ids` capability and the labels are set; the labels are copied onto the container's snapshot. The labels without a remapped parent mean a snapshotter that maps IDs itself, so comparing the direct parent first covers both without reading the snapshotter's capabilities.
+  - Events then `Get` keep the store one round trip behind containerd; the relist after subscribing covers an image created between the list and the subscription, which containerd does not replay.
+- **Measured (M6 step 07a, arm64):**
+  - `store_get` in a store of 1000 names: median 42 ns, no allocation; `chain` of 16 layers: median 3.7 µs, no allocation (`just bench-micro`).
+  - On the fake containerd, a create, a retag and a delete each showed in the store within 12 ms; an image created while the event stream was cut was found after it returned.
+  - On kind with containerd 2.3.7 (overlayfs), the store listed the worker's 28 images as `ctr -n k8s.io images ls` does, and each running container's snapshot parent equalled its image's chain ID with one `Stat`; the suite took 0.8 s. The configs of `kindnetd` (an OCI index, 4 layers) and `kube-proxy-arm64` (a Docker manifest, 3 layers) are recorded in `fuzz/seeds/image_config/` with their parents.
+- **Revisit when:** containerd 2.3 reaches end of life (D15), or containerd's image events carry the target.

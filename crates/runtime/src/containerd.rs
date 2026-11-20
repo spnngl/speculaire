@@ -1,4 +1,5 @@
-//! containerd: what it says about itself, and the files and content of its node (D15, D86, D90).
+//! containerd: what it says about itself, and the files, content, image store and snapshots of its node (D15, D86,
+//! D90).
 //!
 //! The image service exports two of its settings, `DiscardUnpackedLayers` and `RegistryConfigPath`, for clients that
 //! detect them (v2.4.2 `plugins/cri/images/plugin.go:170`). containerd 2.3 exports neither: there the settings come
@@ -9,6 +10,8 @@ pub mod hosts;
 pub mod images;
 pub mod inventory;
 mod settings;
+pub mod snapshots;
+pub mod store;
 mod wiring;
 
 use std::path::{Path, PathBuf};

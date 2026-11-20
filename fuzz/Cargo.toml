@@ -218,6 +218,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "image_config"
+path = "fuzz_targets/image_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "containerd_event"
 path = "fuzz_targets/containerd_event.rs"
 test = false
