@@ -311,12 +311,18 @@ pub fn load(
 ///
 /// # Errors
 ///
-/// When the temporary file cannot be made, written or renamed, or the directory cannot be synced.
+/// When `path` names no parent directory (`InvalidInput`), when the temporary file cannot be made, written or renamed,
+/// or when the directory cannot be synced.
 pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cache path names no parent directory",
+            )
+        })?;
     let mut file = tempfile::NamedTempFile::new_in(dir)?;
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
@@ -1059,5 +1065,13 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         assert!(write(&dir.path().join("missing/cache.bin"), b"").is_err());
+    }
+
+    #[test]
+    fn a_write_refuses_a_path_with_no_parent_directory() {
+        for path in ["cache.bin", "/"] {
+            let error = write(Path::new(path), b"").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{path}");
+        }
     }
 }
