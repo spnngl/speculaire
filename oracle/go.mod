@@ -8,6 +8,7 @@ require (
 	github.com/containerd/nri v0.12.3
 	github.com/containerd/platforms v1.0.0-rc.5
 	github.com/containerd/plugin v1.1.0
+	github.com/containerd/ttrpc v1.2.9
 	github.com/distribution/reference v0.6.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/pelletier/go-toml/v2 v2.4.3
@@ -45,7 +46,6 @@ require (
 	github.com/containerd/log v0.2.0 // indirect
 	github.com/containerd/log/otel v0.1.0 // indirect
 	github.com/containerd/otelttrpc v0.1.0 // indirect
-	github.com/containerd/ttrpc v1.2.9 // indirect
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
 	github.com/containerd/zfs/v2 v2.0.0 // indirect
 	github.com/containernetworking/cni v1.3.1 // indirect

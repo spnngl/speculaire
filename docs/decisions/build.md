@@ -124,7 +124,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The project should pass its own gate. dedens ships no SBOM (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D29: Go is a test oracle, never shipped (amended by D48, D70, D79)
+## D29: Go is a test oracle, never shipped (amended by D48, D70, D79, D162)
 
 - **Decision:**
   - Production code is pure Rust.
@@ -297,7 +297,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** D61's revisit, in M6.
 
 
-## D70: The oracle lands with its pins and `version`; each subcommand lands with the port it checks (amends D29; amended by D79, D80, D81)
+## D70: The oracle lands with its pins and `version`; each subcommand lands with the port it checks (amends D29; amended by D79, D80, D81, D162)
 
 - **Decision:**
   - `oracle/` is the Go module `github.com/spnngl/speculaire/oracle`. M1 ships it with one subcommand, `speculaire-oracle version`, which prints the containerd and NRI versions it links, from its build info, as one JSON line: `{"containerd":"v2.4.2","nri":"v0.12.3"}`.
@@ -730,3 +730,21 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - In CI, the four PR legs (PR #219 then PR #227, minutes): CRI-O 1.37 x86_64 21.3 then 12.4, arm64 17.7 then 12.8; containerd 2.4 x86_64 16.6 then 11.2, arm64 15.6 then 12.4. On CRI-O x86_64 the IPv4 pass took 8.5 min and the dual-stack pass 3.6 (job 136183276120): relay 93 s, limits 55 s, fetch 34 s, outage 37 s, reflector 2 s.
   - Locally on Docker Desktop arm64 with kind, CRI-O 1.37, one test at a time, before then after: the corrupted-blob test 60 s then 21 to 24 s; the relay login test 21 s then 9 s; the relay kill test 19 s then 12 s; the rotated-certificate test about 18 s then 3 s; the late-certificate test 20.5 s then 10.4 s; each other relay test about 1 s less, as its end restarts the agent once, not twice.
 - **Revisit when:** a PR leg passes 18 min again (then the dual-stack pass and the slowest peer suites move to main, D94), or the dual-stack pass gives the relay an IPv6 path (a node's upstream over IPv6).
+
+
+## D162: `nri-runtime` is a session on `pkg/adaptation` and NRI's own stub, with a raw mode for the frames NRI never writes (amends D29, D70)
+
+- **Decision:**
+  - `nri-version` answers each `{runtime, version}` case with `{"nri_version": ...}` or `{"error": ...}` from `api.InferVersionFromRuntime`.
+  - `nri-runtime` is one session per process. Each line on stdin is a command, an object whose only key names it, and gets one answer line: `start`, `state`, `stub`, `wait`, `create`, `close` and `report` drive `pkg/adaptation`; `raw`, `accept` and `oversize` drive the raw mode. `speculaire_oracle_harness::nri::Runtime`, from `Oracle::nri_runtime`, writes them; NRI's logs go to the test's stderr.
+  - `start` runs `pkg/adaptation` with no pre-installed plugin, sets its registration and request timeouts, adds NRI's default validator when `required_plugins` names any, and can replace the NRI version `Configure` announces, with `""` as CRI-O 1.35 and 1.36 send (D64). `state` is what every plugin that connects next gets in `Synchronize`, which `pkg/adaptation` splits itself.
+  - `report` names each connected plugin, its subscribed events and the `Synchronize` requests it got, counted through `pkg/adaptation`'s metrics hook without the oversized attempts that never left. `close` closes every plugin's connection, as a runtime that exits does: `Stop` leaves external plugins connected (`pkg/adaptation/plugin.go:387-403` at v0.12.3).
+  - The oracle reads and writes `pkg/adaptation`'s unexported fields (`nriVersion`, `plugins`, a plugin's `mux`, `events`, `closed`) by reflection.
+  - `stub` connects NRI's own `pkg/stub` plugin, run inside the oracle, which allows every container or rejects each with a given text.
+  - The raw mode owns the socket and frames the mux itself. It delivers the plugin's frames on ConnID 1 to a ttrpc client of the plugin service, which `create` calls; it reads, counts and drops the frames of every other ConnID, so the plugin's calls to the runtime on ConnID 2 stall while the runtime's calls are answered. `oversize` writes one frame whose header says `maxPayloadSize + 1` and whose payload is that long.
+- **Because:**
+  - `pkg/adaptation` exports neither its plugins nor a way to set the announced version. Reflection checks the code containerd runs, as D79's linkname does, and a renamed field panics the oracle, which turns `just oracle` red.
+  - `pkg/adaptation`'s mux splits every write at `maxPayloadSize` and reads every ConnID, so neither frame can come from it.
+  - `pkg/stub` is the library NRI's sample plugins use: it is the reference the `nri` crate is compared with, and it tests the oracle without the crate. The samples are modules of their own, which the oracle cannot import.
+- **Measured (M6 step 00, arm64):** the six NRI tests of `crates/oracle-harness/tests/oracle.rs` take 1.1 s in the dev image. 400 containers of 25 KiB each, 10 MiB, reach the stub in 3 `Synchronize` requests.
+- **Revisit when:** `pkg/adaptation` exports its plugins or the announced version: drop the reflection.
