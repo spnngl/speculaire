@@ -1,25 +1,28 @@
 //! A fake containerd or CRI-O, for tests that run where there is no runtime (the CI runner, macOS): it answers the CRI's
-//! `Version`, `ListImages` and `ListContainers`, containerd's introspection `Plugins`, content `List` and `Info` and
-//! events `Subscribe`, and CRI-O's `GET /config` on a Unix socket, which is all preflight, the registry config, the
-//! inventory, the mirror and the engine ask (D86, D99).
+//! `Version`, `ListImages` and `ListContainers`, containerd's introspection `Plugins`, content `List` and `Info`, images
+//! `List` and `Get`, snapshots `Stat` and events `Subscribe`, and CRI-O's `GET /config` on a Unix socket, which is all
+//! preflight, the registry config, the inventory, the image store, the mirror and the engine ask (D86, D99).
 
 use std::convert::Infallible;
 use std::io;
 use std::net::Shutdown;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
 use bytes::Bytes;
+use containerd_client::services::v1::snapshots::{self, StatSnapshotRequest, StatSnapshotResponse};
 use containerd_client::services::v1::{
-    Info, ListContentRequest, ListContentResponse, Plugin, PluginsRequest, PluginsResponse,
-    SubscribeRequest,
+    GetImageRequest, GetImageResponse, Info, ListContentRequest, ListContentResponse,
+    ListImagesRequest as ListStoredRequest, ListImagesResponse as ListStoredResponse, Plugin,
+    PluginsRequest, PluginsResponse, SubscribeRequest,
 };
 use containerd_client::tonic::codegen::http;
 use containerd_client::tonic::server::Grpc;
 use containerd_client::tonic::{Request, Response, Status};
-use containerd_client::types::Envelope;
+use containerd_client::types::{Descriptor, Envelope};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
@@ -133,9 +136,27 @@ pub struct Answers {
     pub containers: Vec<(String, bool)>,
     /// The body of CRI-O's `GET /config`, its merged TOML; `None` answers 503.
     pub crio_config: Option<String>,
-    /// The digests of containerd's content `List`, whatever the namespace; `Subscribe` sends no event, and `Info` finds
-    /// nothing: the fake holds no bytes.
+    /// The digests of containerd's content `List`, whatever the namespace; `Info` finds nothing: the fake holds no
+    /// bytes.
     pub content: Vec<String>,
+    /// The images of containerd's images `List` and `Get`, whatever the namespace: name and target digest. Each target
+    /// is an OCI index.
+    pub image_store: Vec<(String, String)>,
+    /// Whether containerd's images `Get` answers `Unavailable`, as a containerd going away does.
+    pub image_get_unavailable: bool,
+    /// The snapshots of containerd's snapshots `Stat`, whatever the snapshotter and namespace.
+    pub snapshots: Vec<Snapshot>,
+}
+
+/// A snapshot of containerd.
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {
+    /// Its key.
+    pub key: String,
+    /// The key of the snapshot it rests on, or empty.
+    pub parent: String,
+    /// Its labels.
+    pub labels: Vec<(String, String)>,
 }
 
 impl Answers {
@@ -150,6 +171,9 @@ impl Answers {
             images: Vec::new(),
             containers: Vec::new(),
             content: Vec::new(),
+            image_store: Vec::new(),
+            image_get_unavailable: false,
+            snapshots: Vec::new(),
             crio_config: None,
         }
     }
@@ -165,6 +189,9 @@ impl Answers {
             images: Vec::new(),
             containers: Vec::new(),
             content: Vec::new(),
+            image_store: Vec::new(),
+            image_get_unavailable: false,
+            snapshots: Vec::new(),
             crio_config: Some(
                 "[crio.nri]\nenable_nri = true\nnri_disable_connections = false\n".to_owned(),
             ),
@@ -172,10 +199,22 @@ impl Answers {
     }
 }
 
+/// What the fake's connections share with the tests that drive it.
+#[derive(Debug)]
+struct Shared {
+    answers: Mutex<Answers>,
+    /// The events every `Subscribe` sends, whatever its filters.
+    events: tokio::sync::broadcast::Sender<Envelope>,
+    /// Each change of it ends every `Subscribe`.
+    cut: tokio::sync::watch::Sender<u64>,
+    /// The snapshots `Stat` calls answered so far.
+    stats: AtomicUsize,
+}
+
 /// A fake runtime listening on a socket until it is dropped.
 #[derive(Debug)]
 pub struct Fake {
-    answers: Arc<Mutex<Answers>>,
+    shared: Arc<Shared>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -194,8 +233,13 @@ impl Fake {
     fn serve(listener: UnixListener, answers: Answers) -> io::Result<Self> {
         listener.set_nonblocking(true)?;
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let answers = Arc::new(Mutex::new(answers));
-        let shared = Arc::clone(&answers);
+        let shared = Arc::new(Shared {
+            answers: Mutex::new(answers),
+            events: tokio::sync::broadcast::channel(64).0,
+            cut: tokio::sync::watch::channel(0).0,
+            stats: AtomicUsize::new(0),
+        });
+        let served = Arc::clone(&shared);
         let thread = std::thread::spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -208,7 +252,7 @@ impl Fake {
                     return;
                 };
                 tokio::select! {
-                    () = accept(&listener, shared) => {}
+                    () = accept(&listener, served) => {}
                     _ = stopped => {}
                 }
                 // A process another test spawns holds a copy of the socket until it execs, and the socket listens
@@ -218,7 +262,7 @@ impl Fake {
             });
         });
         Ok(Self {
-            answers,
+            shared,
             stop: Some(stop),
             thread: Some(thread),
         })
@@ -228,7 +272,36 @@ impl Fake {
 impl Fake {
     /// Changes what the fake answers from the next call on.
     pub fn update(&self, change: impl FnOnce(&mut Answers)) {
-        change(&mut self.answers.lock().unwrap_or_else(PoisonError::into_inner));
+        change(
+            &mut self
+                .shared
+                .answers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+    }
+
+    /// Sends `envelope` to every live `Subscribe`, as containerd publishes an event.
+    pub fn publish(&self, envelope: Envelope) {
+        // No subscriber: nobody hears it, as with containerd.
+        let _ = self.shared.events.send(envelope);
+    }
+
+    /// The live `Subscribe` streams.
+    #[must_use]
+    pub fn subscribers(&self) -> usize {
+        self.shared.events.receiver_count()
+    }
+
+    /// Ends every live `Subscribe` stream, as a containerd restart does.
+    pub fn cut(&self) {
+        self.shared.cut.send_modify(|cuts| *cuts += 1);
+    }
+
+    /// The snapshots `Stat` calls answered so far.
+    #[must_use]
+    pub fn stats(&self) -> usize {
+        self.shared.stats.load(Ordering::Relaxed)
     }
 }
 
@@ -258,16 +331,16 @@ fn config(answers: &Answers) -> http::Response<containerd_client::tonic::body::B
     response
 }
 
-async fn accept(listener: &tokio::net::UnixListener, answers: Arc<Mutex<Answers>>) {
+async fn accept(listener: &tokio::net::UnixListener, shared: Arc<Shared>) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             return;
         };
-        let answers = Arc::clone(&answers);
+        let shared = Arc::clone(&shared);
         tokio::spawn(async move {
             let service = service_fn(move |request: http::Request<hyper::body::Incoming>| {
-                let answers = Arc::clone(&answers);
-                async move { Ok::<_, Infallible>(route(&answers, request).await) }
+                let shared = Arc::clone(&shared);
+                async move { Ok::<_, Infallible>(route(&shared, request).await) }
             });
             // A client that hangs up ends its own connection. gRPC speaks HTTP/2, CRI-O's inspect API HTTP/1.
             let _ = auto::Builder::new(TokioExecutor::new())
@@ -278,11 +351,12 @@ async fn accept(listener: &tokio::net::UnixListener, answers: Arc<Mutex<Answers>
 }
 
 async fn route(
-    answers: &Arc<Mutex<Answers>>,
+    shared: &Arc<Shared>,
     request: http::Request<hyper::body::Incoming>,
 ) -> http::Response<containerd_client::tonic::body::Body> {
     let answers = Arc::new(
-        answers
+        shared
+            .answers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone(),
@@ -306,48 +380,7 @@ async fn route(
                 .await
         }
         "/containerd.services.introspection.v1.Introspection/Plugins" => {
-            let service = tower::service_fn(move |_: Request<PluginsRequest>| {
-                let answers = Arc::clone(&answers);
-                async move {
-                    if answers.plugins_unavailable {
-                        return Err(Status::unavailable("Unavailable"));
-                    }
-                    // The plugins that share a type or an id with the image service, which come first in containerd's list.
-                    let mut plugins = vec![
-                        Plugin {
-                            r#type: "io.containerd.nri.v1".to_owned(),
-                            id: "nri".to_owned(),
-                            ..Plugin::default()
-                        },
-                        Plugin {
-                            r#type: "io.containerd.cri.v1".to_owned(),
-                            id: "runtime".to_owned(),
-                            ..Plugin::default()
-                        },
-                        Plugin {
-                            r#type: "io.containerd.service.v1".to_owned(),
-                            id: "images".to_owned(),
-                            ..Plugin::default()
-                        },
-                    ];
-                    if let Some((discard, path)) = &answers.image_exports {
-                        plugins.push(Plugin {
-                            r#type: "io.containerd.cri.v1".to_owned(),
-                            id: "images".to_owned(),
-                            exports: [
-                                ("DiscardUnpackedLayers".to_owned(), discard.to_string()),
-                                ("RegistryConfigPath".to_owned(), path.clone()),
-                            ]
-                            .into(),
-                            ..Plugin::default()
-                        });
-                    }
-                    Ok::<_, Status>(Response::new(PluginsResponse { plugins }))
-                }
-            });
-            Grpc::new(ProstCodec::<PluginsResponse, PluginsRequest>::default())
-                .unary(service, request)
-                .await
+            plugins(answers, request).await
         }
         "/runtime.v1.ImageService/ListImages" => {
             let service = tower::service_fn(move |_: Request<ListImagesRequest>| {
@@ -375,12 +408,18 @@ async fn route(
         "/containerd.services.content.v1.Content/Info" => {
             Status::not_found("the fake runtime holds no bytes").into_http()
         }
-        "/containerd.services.events.v1.Events/Subscribe" => events(request).await,
+        "/containerd.services.images.v1.Images/List" => stored_images(answers, request).await,
+        "/containerd.services.images.v1.Images/Get" => stored_image(answers, request).await,
+        "/containerd.services.snapshots.v1.Snapshots/Stat" => {
+            shared.stats.fetch_add(1, Ordering::Relaxed);
+            stat(answers, request).await
+        }
+        "/containerd.services.events.v1.Events/Subscribe" => events(shared, request).await,
         other => Status::unimplemented(format!("the fake runtime has no {other}")).into_http(),
     }
 }
 
-/// containerd'"'"'s content `List`: every digest of `Answers::content`, in one message.
+/// containerd's content `List`: every digest of `Answers::content`, in one message.
 async fn content(
     answers: Arc<Answers>,
     request: http::Request<hyper::body::Incoming>,
@@ -437,16 +476,187 @@ async fn containers(
         .await
 }
 
-/// containerd'"'"'s events `Subscribe`: a stream that sends nothing.
-async fn events(
+/// containerd's image of `Answers::image_store`.
+fn stored(name: &str, digest: &str) -> containerd_client::services::v1::Image {
+    containerd_client::services::v1::Image {
+        name: name.to_owned(),
+        target: Some(Descriptor {
+            media_type: "application/vnd.oci.image.index.v1+json".to_owned(),
+            digest: digest.to_owned(),
+            ..Descriptor::default()
+        }),
+        ..containerd_client::services::v1::Image::default()
+    }
+}
+
+/// containerd's images `List`: every image of `Answers::image_store`; filters are not applied.
+async fn stored_images(
+    answers: Arc<Answers>,
     request: http::Request<hyper::body::Incoming>,
 ) -> http::Response<containerd_client::tonic::body::Body> {
-    let service = tower::service_fn(|_: Request<SubscribeRequest>| async {
-        Ok::<_, Status>(Response::new(futures_util::stream::pending::<
-            Result<Envelope, Status>,
-        >()))
+    let service = tower::service_fn(move |_: Request<ListStoredRequest>| {
+        let answers = Arc::clone(&answers);
+        async move {
+            Ok::<_, Status>(Response::new(ListStoredResponse {
+                images: answers
+                    .image_store
+                    .iter()
+                    .map(|(name, digest)| stored(name, digest))
+                    .collect(),
+            }))
+        }
+    });
+    Grpc::new(ProstCodec::<ListStoredResponse, ListStoredRequest>::default())
+        .unary(service, request)
+        .await
+}
+
+/// containerd's images `Get`: the image of `Answers::image_store` with the name asked, or `NotFound`; `Unavailable` if
+/// `Answers::image_get_unavailable`.
+async fn stored_image(
+    answers: Arc<Answers>,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let service = tower::service_fn(move |asked: Request<GetImageRequest>| {
+        let answers = Arc::clone(&answers);
+        async move {
+            if answers.image_get_unavailable {
+                return Err(Status::unavailable(
+                    "the fake containerd's images are unavailable",
+                ));
+            }
+            let name = asked.into_inner().name;
+            answers
+                .image_store
+                .iter()
+                .find(|(stored, _)| *stored == name)
+                .map(|(name, digest)| {
+                    Response::new(GetImageResponse {
+                        image: Some(stored(name, digest)),
+                    })
+                })
+                .ok_or_else(|| Status::not_found(format!("image {name:?}: not found")))
+        }
+    });
+    Grpc::new(ProstCodec::<GetImageResponse, GetImageRequest>::default())
+        .unary(service, request)
+        .await
+}
+
+/// containerd's snapshots `Stat`: the snapshot of `Answers::snapshots` with the key asked, or `NotFound`.
+async fn stat(
+    answers: Arc<Answers>,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let service = tower::service_fn(move |asked: Request<StatSnapshotRequest>| {
+        let answers = Arc::clone(&answers);
+        async move {
+            let key = asked.into_inner().key;
+            answers
+                .snapshots
+                .iter()
+                .find(|snapshot| snapshot.key == key)
+                .map(|snapshot| {
+                    Response::new(StatSnapshotResponse {
+                        info: Some(snapshots::Info {
+                            name: snapshot.key.clone(),
+                            parent: snapshot.parent.clone(),
+                            labels: snapshot.labels.iter().cloned().collect(),
+                            ..snapshots::Info::default()
+                        }),
+                    })
+                })
+                .ok_or_else(|| Status::not_found(format!("snapshot {key:?}: not found")))
+        }
+    });
+    Grpc::new(ProstCodec::<StatSnapshotResponse, StatSnapshotRequest>::default())
+        .unary(service, request)
+        .await
+}
+
+/// containerd's events `Subscribe`: each event `Fake::publish` sends from now on, whatever the filters, until
+/// `Fake::cut`.
+async fn events(
+    shared: &Shared,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let events = shared.events.subscribe();
+    let mut cut = shared.cut.subscribe();
+    cut.mark_unchanged();
+    let stream = futures_util::stream::unfold((events, cut), |(mut events, mut cut)| async move {
+        loop {
+            let received = tokio::select! {
+                _ = cut.changed() => return None,
+                received = events.recv() => received,
+            };
+            match received {
+                Ok(envelope) => return Some((Ok::<_, Status>(envelope), (events, cut))),
+                // A test that publishes more than the channel holds loses the oldest, as a slow subscriber of
+                // containerd does.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    let stream = Mutex::new(Some(stream));
+    let service = tower::service_fn(move |_: Request<SubscribeRequest>| {
+        let stream = stream.lock().unwrap_or_else(PoisonError::into_inner).take();
+        async move {
+            stream
+                .map(|stream| Response::new(Box::pin(stream)))
+                .ok_or_else(|| Status::internal("one subscription per request"))
+        }
     });
     Grpc::new(ProstCodec::<Envelope, SubscribeRequest>::default())
         .server_streaming(service, request)
+        .await
+}
+
+/// containerd's introspection `Plugins`: the image service's neighbours, and its exports if `Answers::image_exports`.
+async fn plugins(
+    answers: Arc<Answers>,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let service = tower::service_fn(move |_: Request<PluginsRequest>| {
+        let answers = Arc::clone(&answers);
+        async move {
+            if answers.plugins_unavailable {
+                return Err(Status::unavailable("Unavailable"));
+            }
+            // The plugins that share a type or an id with the image service, which come first in containerd's list.
+            let mut plugins = vec![
+                Plugin {
+                    r#type: "io.containerd.nri.v1".to_owned(),
+                    id: "nri".to_owned(),
+                    ..Plugin::default()
+                },
+                Plugin {
+                    r#type: "io.containerd.cri.v1".to_owned(),
+                    id: "runtime".to_owned(),
+                    ..Plugin::default()
+                },
+                Plugin {
+                    r#type: "io.containerd.service.v1".to_owned(),
+                    id: "images".to_owned(),
+                    ..Plugin::default()
+                },
+            ];
+            if let Some((discard, path)) = &answers.image_exports {
+                plugins.push(Plugin {
+                    r#type: "io.containerd.cri.v1".to_owned(),
+                    id: "images".to_owned(),
+                    exports: [
+                        ("DiscardUnpackedLayers".to_owned(), discard.to_string()),
+                        ("RegistryConfigPath".to_owned(), path.clone()),
+                    ]
+                    .into(),
+                    ..Plugin::default()
+                });
+            }
+            Ok::<_, Status>(Response::new(PluginsResponse { plugins }))
+        }
+    });
+    Grpc::new(ProstCodec::<PluginsResponse, PluginsRequest>::default())
+        .unary(service, request)
         .await
 }

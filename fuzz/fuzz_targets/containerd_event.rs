@@ -1,4 +1,5 @@
-//! Arbitrary bytes as an event of containerd must never panic, and only content of `k8s.io` is a change.
+//! Arbitrary bytes as an event of containerd must never panic, only content of `k8s.io` is a change, and only
+//! images of `k8s.io` are image events.
 
 #![no_main]
 

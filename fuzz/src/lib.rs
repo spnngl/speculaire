@@ -47,6 +47,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("www_authenticate", www_authenticate),
     ("token_answer", token_answer),
     ("manifest", manifest),
+    ("image_config", image_config),
     ("mirror_request", mirror_request),
     ("peer_response", peer_response),
     ("reference", reference),
@@ -730,26 +731,50 @@ pub fn nri_request(data: &[u8]) {
     }
 }
 
-/// An event of containerd's `Subscribe`, as the inventory reads it (D99).
+/// An event of containerd's `Subscribe`, as the inventory (D99) and the image store (D15) read it.
 ///
-/// Decoding never panics, and an event is a change only for content of `k8s.io` created or deleted.
+/// Decoding never panics, an event is a change only for content of `k8s.io` created or deleted, and an image event
+/// only for an image of `k8s.io` created, updated or deleted.
 ///
 /// # Panics
 ///
-/// When decoding panics, or another event is a change.
+/// When decoding panics, or another event is a change or an image event.
 pub fn containerd_event(data: &[u8]) {
     use containerd_client::types::Envelope;
     use prost::Message as _;
-    use speculaire_runtime::containerd::inventory::change;
-    if let Ok(envelope) = Envelope::decode(data)
-        && change(&envelope).is_some()
-    {
+    use speculaire_runtime::containerd::{inventory, store};
+    let Ok(envelope) = Envelope::decode(data) else {
+        return;
+    };
+    let topic = envelope.topic.as_str();
+    if inventory::change(&envelope).is_some() {
         assert_eq!(envelope.namespace, "k8s.io");
         assert!(
-            ["/content/create", "/content/delete"].contains(&envelope.topic.as_str()),
-            "{}",
-            envelope.topic
+            ["/content/create", "/content/delete"].contains(&topic),
+            "{topic}"
         );
+    }
+    if store::event(&envelope).is_some() {
+        assert_eq!(envelope.namespace, "k8s.io");
+        assert!(
+            ["/images/create", "/images/update", "/images/delete"].contains(&topic),
+            "{topic}"
+        );
+    }
+}
+
+/// An image config, as the gate reads its chain ID (D15).
+///
+/// Reading never panics, and a chain ID read prints as it parses.
+///
+/// # Panics
+///
+/// When reading panics, or the chain ID does not survive printing.
+pub fn image_config(data: &[u8]) {
+    use speculaire_oci::chain::of_config;
+    use speculaire_oci::reference::Digest;
+    if let Ok(chain) = of_config(data) {
+        assert_eq!(Digest::parse(&chain.to_string()), Ok(chain));
     }
 }
 

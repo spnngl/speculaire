@@ -1,7 +1,12 @@
-//! The polls of the registry config (D93) and the reads of a blob, whole or streamed: `just bench-micro`.
+//! The polls of the registry config (D93), the reads of a blob, whole or streamed, and a lookup in the image store
+//! (D15): `just bench-micro`.
+
+use std::hint::black_box;
 
 use divan::Bencher;
 use futures_util::TryStreamExt as _;
+use speculaire_oci::reference::Digest;
+use speculaire_runtime::containerd::store::Store;
 use speculaire_runtime::content::Blob;
 use speculaire_runtime::registries::{ContainerdRegistries, Registries};
 
@@ -95,4 +100,17 @@ fn stream(bencher: Bencher<'_, '_>) {
             chunks.try_collect::<Vec<_>>().await.expect("the chunks")
         })
     });
+}
+
+/// A lookup in an image store of 1k names, as the gate makes one while it holds the runtime's NRI call: no allocation
+/// (D107).
+#[divan::bench]
+fn store_get(bencher: Bencher<'_, '_>) {
+    let digest =
+        Digest::parse("sha256:6c3c624b58dbbcd3c0dd82b4c53f04194d1247c6eebdaab7c610cf7d66709b3b")
+            .expect("a valid digest");
+    let store: Store = (0..1000)
+        .map(|n| (format!("registry.test/team/image-{n}:1.0"), digest.clone()))
+        .collect();
+    bencher.bench_local(|| store.get(black_box("registry.test/team/image-500:1.0")));
 }
