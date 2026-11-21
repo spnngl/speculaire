@@ -1,4 +1,4 @@
-//! The gate on the nodes' real runtimes (D9, D15, D41, D64, D168): containerd's image store and snapshots, the gate's
+//! The gate on the nodes' real runtimes (D9, D15, D41, D64, D168, D170): containerd's image store and snapshots, the gate's
 //! registration with the runtime's NRI, and from M6's later steps its decisions.
 //!
 //! containerd's socket of a worker is relayed to this host, one `docker exec` per connection, so the runtime crate's
@@ -410,12 +410,13 @@ fn readyz_is_503_until_the_gate_registers_and_build_info_names_the_runtime() {
 
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
-fn the_gate_reads_the_image_identity_from_nri_on_containerd_and_from_the_image_id_on_cri_o() {
+fn the_gate_reads_the_image_identity_by_annotation_on_containerd_2_3_from_nri_on_2_4_and_from_the_image_id_on_cri_o()
+ {
     let Some(worker) = Worker::new() else { return };
-    // containerd 2.3 takes step 07's `annotation` path.
+    // containerd 2.3 announces NRI v0.12.0, which names no image (D15, D170).
     let release = worker.cluster.release();
     let path = match worker.cluster.runtime() {
-        Runtime::Containerd if release.starts_with("2.3.") => return,
+        Runtime::Containerd if release.starts_with("2.3.") => "annotation",
         Runtime::Containerd => "nri",
         Runtime::Crio => "image_id",
     };
@@ -423,10 +424,11 @@ fn the_gate_reads_the_image_identity_from_nri_on_containerd_and_from_the_image_i
         worker.series("speculaire_identity_path"),
         [format!(r#"path="{path}"}} 1"#)]
     );
-    // No warning of an identity gap, which the `annotation` path alone has (D15, D169).
+    // The `annotation` path alone warns of its identity gap, at each registration since the journal was emptied.
     let warnings = worker.sh("journalctl -u speculaire -p warning -o cat --no-pager");
-    assert!(
-        !warnings.to_lowercase().contains("image identity"),
+    assert_eq!(
+        warnings.contains("identity gap, D15"),
+        path == "annotation",
         "{warnings}"
     );
 }

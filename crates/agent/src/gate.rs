@@ -33,31 +33,33 @@ pub struct Gate {
 }
 
 impl Gate {
-    /// Connects to NRI's `socket` as the plugin of `runtime`, the node's, whose image identity path reads `listed`
-    /// (D169). `wait` is `gate.wait`, which each `Configure` checks against the runtime's request timeout (D41, D168).
-    /// `status` follows the registration.
+    /// Connects to NRI's `socket` as the plugin of `runtime`, the node's, whose image identity path `identity` reads
+    /// `listed` (D169, D170). `wait` is `gate.wait`, which each `Configure` checks against the runtime's request timeout
+    /// (D41, D168). `status` follows the registration.
     #[must_use]
     pub fn start(
         socket: PathBuf,
         runtime: Runtime,
+        identity: NodeIdentity,
         listed: Listed,
         wait: Duration,
         status: Arc<Status>,
     ) -> Self {
         let (wait, waits) = watch::channel(wait);
         let (stop, stopped) = oneshot::channel();
-        let identity = Arc::new(NodeIdentity::of(runtime));
+        let identity = Arc::new(identity);
         let plugin = Plugin {
             runtime,
             identity: Arc::clone(&identity),
             wait: waits,
             status,
             versions: Mutex::new(Versions::default()),
+            path: Mutex::new(None),
             refused: Notify::new(),
         };
         let task = tokio::spawn(async move {
-            // The list outlives a connection, so a new one finds the image IDs already mapped. Once the runtime's
-            // list ends, the last one read stays.
+            // The list and containerd's image store outlive a connection, so a new one finds them already read. Once
+            // the runtime's list ends, the last one read stays.
             let keep = async {
                 listed
                     .each(|list| {
@@ -71,6 +73,7 @@ impl Gate {
             tokio::select! {
                 () = connect(socket, plugin, stopped) => {}
                 () = keep => {}
+                () = identity.follow() => {}
             }
         });
         Self { wait, stop, task }
@@ -150,6 +153,8 @@ struct Plugin {
     status: Arc<Status>,
     /// The versions `speculaire_build_info` names: empty until the first `Configure` (D61, D168).
     versions: Mutex<Versions>,
+    /// The path `speculaire_identity_path` names: none until the first `Configure` (D170).
+    path: Mutex<Option<&'static str>>,
     /// Notified when `Configure` names a runtime that is not the node's.
     refused: Notify,
 }
@@ -171,6 +176,26 @@ impl Plugin {
             telemetry::build_info(&named).set(0);
             telemetry::build_info(&versions).set(1);
             *named = versions;
+        }
+    }
+
+    /// Chooses the identity path by NRI's version, and moves `speculaire_identity_path` to it, setting the series it
+    /// named before to 0 (D170). On `annotation`, warns of the gap D15 accepts.
+    fn choose_path(&self, nri_version: &NriVersion, named: &str) {
+        let path = self.identity.configure(nri_version);
+        let mut chosen = self.path.lock().expect("no thread panics holding the path");
+        if let Some(before) = chosen.replace(path) {
+            metrics::gauge!(IDENTITY_PATH, "path" => before).set(0);
+        }
+        metrics::gauge!(IDENTITY_PATH, "path" => path).set(1);
+        if path == "annotation" {
+            warn!(
+                nri_version = named,
+                "NRI below v0.12.2 names no image: the gate identifies a container's image by the name containerd \
+                 annotates it with, and rejects the container when its snapshot does not rest on that image's layers. \
+                 An image retagged after the pull to one of the same layers and another config passes as the old one \
+                 (identity gap, D15)"
+            );
         }
     }
 }
@@ -214,8 +239,8 @@ impl Handler for Plugin {
                  pending may outlast the runtime's wait (D41)"
             );
         }
+        self.choose_path(&configuration.nri_version, &versions.nri_version);
         self.name(versions);
-        metrics::gauge!(IDENTITY_PATH, "path" => self.identity.path()).set(1);
         self.registered(true);
     }
 

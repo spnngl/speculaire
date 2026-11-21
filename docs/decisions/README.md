@@ -22,7 +22,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node (amended by D150)
 - D13 [build](build.md): tokio/axum/tonic/rustls stack, `metrics` and `tracing`, static-PIE musl built natively on Alpine (amended by D34, D46, D57, D105, D107, D116)
 - D14 [distribution](distribution.md): the mirror is TLS with client auth on `127.0.0.1:7480`, using a local CA from `configure`; the peer API is mTLS on `node-ip:7481` (amended by D32, D56, D66, D82, D85)
-- D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81, D86, D167, D169)
+- D15 [gate](gate.md): containerd 2.3 minimum, 2.4+ main target; image identity comes from NRI on 2.4, and from the annotation plus a snapshot chain-ID check on 2.3 (amended by D65, D81, D86, D167, D169, D170)
 - D16 [identity](identity.md): node identity is the kubelet client certificate, checked by custom rustls verifiers; P2P stays off until the certificate exists (amended by D60, D95)
 - D17 [distribution](distribution.md): upstream access reuses containerd's registry config; images pullable only with pull secrets end `Unverifiable` (amended by D66, D78, D88, D89, D121)
 - D18 [gate](gate.md): `gate.exempt` is explicit and empty by default
@@ -174,8 +174,9 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D164 [build](build.md): the `runnable` fixture is busybox for amd64 and arm64, signed keyless, recordable alone by `fixtures.yml -f cases=runnable`; the newest recording's trusted root and TUF snapshot are pinned; the fixtures stay under 6 MB (amends D112, D139, D141)
 - D165 [verification](verification.md): `cache.bin` is a versioned, sized, SHA-256-checksummed binary of sorted entries read in place; `load` names why it refuses a file, and a verdict saved under other policies or another trust root loads stale from load under the current ones (amends D31)
 - D166 [gate](gate.md): `speculaire-nri` serves NRI's plugin protocol on its own ttrpc unary subset, answers CreateContainer concurrently up to 256 in flight through a `Handler`, and infers the NRI version as NRI does (amends D9)
-- D167 [gate](gate.md): containerd's `k8s.io` image store is an `ArcSwap` copy kept by `/images/*` events and relists; the snapshot check follows a remapped parent only where the container's snapshot names ID mappings; the chain ID lives in `speculaire-oci` (amends D15)
+- D167 [gate](gate.md): containerd's `k8s.io` image store is an `ArcSwap` copy kept by `/images/*` events and relists; the snapshot check follows a remapped parent only where the container's snapshot names ID mappings; the chain ID lives in `speculaire-oci` (amends D15; amended by D170)
 - D168 [gate](gate.md): the gate connects to NRI once the verdicts are loaded, reconnects at once then every second, is ready once `Configure` names the node's runtime, stays away from a runtime that is not the node's until restart, and sets the replaced `speculaire_build_info` series to 0 (amends D41, D45, D61, D68)
-- D169 [gate](gate.md): the gate reads the image identity through one `Identity` chosen by runtime name at `Configure`: `nri` on containerd 2.4 (the index digest), `image_id` on CRI-O (the image ID's listed manifests and names from CRI-O's image list); an image is allowed when one listed manifest is (amends D15, D64, D65)
+- D169 [gate](gate.md): the gate reads the image identity through one `Identity` chosen by runtime name at `Configure`: `nri` on containerd 2.4 (the index digest), `image_id` on CRI-O (the image ID's listed manifests and names from CRI-O's image list); an image is allowed when one listed manifest is (amends D15, D64, D65; amended by D170)
+- D170 [gate](gate.md): on containerd below NRI v0.12.2 the gate resolves `io.kubernetes.cri.image-name` in its image store, keeps the chain ID of the node's platform image per target, and rejects a container whose snapshot base is another (amends D15, D167, D169)
 
-Next free number: D170.
+Next free number: D171.

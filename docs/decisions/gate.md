@@ -36,7 +36,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** CRI silently bypasses it through the local-pull fallback, through imports, and through `IfNotPresent` when the image is cached. The gate covers all of these cases.
 - **Revisit when:** users want unsigned images rejected before download.
 
-## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65, D81, D86, D167, D169)
+## D15: containerd 2.3 minimum, 2.4+ main target (amended by D65, D81, D86, D167, D169, D170)
 
 - **Decision:**
   - containerd 2.3 is the minimum. 2.4+ is the main target, and new features land there first.
@@ -205,7 +205,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Measured (M6 step 02, arm64):** 400 containers of 25 KiB, 10 MiB, reach the handler once each from 3 `Synchronize` requests; the oracle reports `CREATE_CONTAINER` as the only event, and the handler's deadline lies within the 1.5 s request timeout. `infer` agrees with NRI on 107 runtime versions. A CreateContainer sent while another is held 1 s is answered within 50 ms, and the 257th in flight gets `overloaded` within 50 ms. The new code is about 960 lines besides tests: `plugin.rs` 400, `ttrpc.rs` 305, `version.rs` 255.
 - **Revisit when:** the gate needs a call outside D9's subset or a ttrpc stream, or NRI changes ttrpc's framing or its version table's semantics.
 
-## D167: containerd's image store is a lock-free copy kept by events, and the snapshot check follows a remap only where the container's snapshot names ID mappings (amends D15)
+## D167: containerd's image store is a lock-free copy kept by events, and the snapshot check follows a remap only where the container's snapshot names ID mappings (amends D15; amended by D170)
 
 - **Decision:**
   - **Image store:** `containerd::store::Store` holds the `k8s.io` image store as name → target digest, behind an `ArcSwap`. `Store::get(name)` borrows the normalised name and returns the digest, which is inline: no lock and no allocation (D107). `Containerd::keep(&store)` fills it with one images `List`, then subscribes to `/images/create`, `/images/update` and `/images/delete` in `k8s.io`. A create or update is followed by a `Get` of that name, as the events carry no digest (v2.3.7 and v2.4.2 `core/metadata/images.go:169,270,337`); a delete removes it. It lists again 1 s after each subscription, every 60 s, and after the stream drops, as the inventory does (D99). Each change publishes a new map; nothing is held across an `await`.
@@ -242,7 +242,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The gate is 205 lines besides tests, `speculaire_nri::testing` 102.
 - **Revisit when:** the recorder can remove a series, or NRI makes plugins wait for `Synchronize` before CreateContainer.
 
-## D169: The gate reads the image identity through one `Identity`, chosen by the runtime at `Configure`; on CRI-O it maps the image ID to the image's listed manifests (amends D15, D64, D65)
+## D169: The gate reads the image identity through one `Identity`, chosen by the runtime at `Configure`; on CRI-O it maps the image ID to the image's listed manifests (amends D15, D64, D65; amended by D170)
 
 - **Decision:**
   - **Trait:** `speculaire_runtime::identity::Identity::identify(&Container)` gives an `Identified`: `Listed { digest, name }`, `Image(Arc<Image>)` or `Unknown(reason)`. `NodeIdentity::of(runtime)` gives one enum, as `NodeContent` is, because the trait is async for step 07's `annotation` path and so has no `dyn` form (D90). The gate builds it once, so its copy of the image list outlives a connection, and sets `speculaire_identity_path{path}` to 1 at `Configure`, with `path` `nri` or `image_id` from `NodeIdentity::path()`. CRI-O logs no identity warning.
@@ -258,3 +258,21 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The runtime already decides what runs; its image list is no wider trust than the image it runs.
 - **Cost:** with `insecure_allow_unpredictable_image_contents = "true"`, an image ID that is a TOC digest still maps to the image's manifests, so the gate no longer makes that image `Unverifiable` as D65 did (`docs/security.md`, `docs/TODECIDE.md`). `Verdicts::identified` parses each name and allocates; step 08 measures it.
 - **Revisit when:** CRI-O fills `Container.image`, or containerd names the platform manifest in `Container.image.digest`.
+
+
+## D170: On containerd below NRI v0.12.2, the gate resolves the image name annotation in its image store and rejects a container whose snapshot is not on that image's layers (amends D15, D167, D169)
+
+- **Decision:**
+  - **Choice:** on containerd, each `Configure` picks the path by NRI version, announced or inferred (D166): `nri` from v0.12.2, `annotation` below and when the version does not parse. CRI-O stays `image_id`. `NodeIdentity::configure(&NriVersion)` gives the path; the gate sets its `speculaire_identity_path` series to 1 and the one it replaces to 0. On `annotation` it logs a warning naming the identity gap at each registration. `Node::identity()` builds the `NodeIdentity`, which keeps the image store (D167) from the gate's start on containerd, whatever the path.
+  - **Name:** `io.kubernetes.cri.image-name`, parsed and normalised as `ParseDockerRef` does (D81), selects the target digest in `Store`. No parsable annotation is `Unknown("no image identity in the request")`; a name the store lacks is `Unknown("image name not in containerd's image store")`.
+  - **Chain ID:** the target is read from containerd's content store. An index gives the platform manifest `Index::platform_manifest` picks for the node (D81), with OCI and Docker manifest media types exact; a manifest is read as is. Its config gives the chain ID (D167). The chain ID is kept per target digest, both content-addressed, in a map of at most 4096 entries emptied when full; the lock is never held across an `await`. A blob missing or over 4 MiB, a nested index or no image for the platform is `Unknown("image layers cannot be read")`.
+  - **Snapshot:** `snapshot_base` with the container ID as key, in the snapshotter of the CRI images section, read from `config.toml` at each `Configure` (default `overlayfs`, v2 `[containerd] snapshotter` carried over as containerd migrates it; a config that cannot be read keeps the one read before, as containerd keeps running on it). A runtime handler's own `snapshotter` is not read (`docs/TODECIDE.md`): its container has no snapshot there, `Unknown("container snapshot cannot be read")`, as is any `Stat` error.
+  - **Verdict:** a base equal to the chain ID is `Listed { digest: target, name: annotation }`, verified as on `nri` (D169). Any other is `Identified::Mismatched`, which `Verdicts::identified` makes `Rejected("image identity mismatch")` whatever the policies.
+- **Because:**
+  - containerd 2.3.0 to 2.3.7 vendor NRI v0.12.0, which has no `Container.image`; v0.12.2 adds it, and containerd 2.4 fills it (D15). A version check rather than the runtime version keeps a 2.3 build that vendors v0.12.2 on `nri`.
+  - containerd sets the annotation from the CRI image name after copying the pod's pass-through annotations (v2.3.7 `internal/cri/server/container_create.go:921-929`, then `:986`), so a pod cannot forge it.
+  - The oracle agrees on the platform manifest: `speculaire-oracle platform` runs containerd v2.4.2 `images.Manifest` (`core/images/image.go:153`) with `platforms.Only` over 1000 generated indexes and both manifest media types, exact and near misses; both pick the same config in all 1000, an image in 261. Two differences are left out of the generator and fail closed: containerd walks a nested index, and checks the config platform of an entry without one.
+  - The chain ID of a target never changes, so after the first check of an image one store lookup and one `Stat` remain on the NRI call.
+- **Measured (M6 step 07, arm64):** `identity_check` against the fake containerd, 16 layers, chain ID kept: median 30 µs, slowest of 2000 116 µs, 23 allocations (`just bench-micro`); 1 `Stat`, 2 under a remap.
+- **Cost:** the identity gap of D15 stays: a retag between pull and create to an image of identical layers and another config passes (`docs/security.md`). A pod on a handler with its own snapshotter is unverifiable on 2.3.
+- **Revisit when:** containerd 2.3 reaches end of life: drop `annotation` with it.

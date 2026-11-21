@@ -58,8 +58,9 @@ type Registry struct {
 
 // Plugins is what the agent reads of the plugin sections besides the registry.
 type Plugins struct {
-	DiscardUnpackedLayers bool `json:"discard_unpacked_layers"`
-	NRI                   NRI  `json:"nri"`
+	DiscardUnpackedLayers bool   `json:"discard_unpacked_layers"`
+	Snapshotter           string `json:"snapshotter"`
+	NRI                   NRI    `json:"nri"`
 }
 
 // NRI is the NRI plugin's settings, and whether the daemon's `disabled_plugins` names it.
@@ -79,7 +80,8 @@ type ConfigAnswer struct {
 
 // criImages is the part of the CRI image config the oracle reads besides the registry.
 type criImages struct {
-	DiscardUnpackedLayers bool `json:"discardUnpackedLayers"`
+	DiscardUnpackedLayers bool   `json:"discardUnpackedLayers"`
+	Snapshotter           string `json:"snapshotter"`
 }
 
 // criNRI is the part of the NRI config the oracle reads, through its JSON tags.
@@ -260,6 +262,7 @@ func pluginsOf(images, nri any, config *srvconfig.Config) *Plugins {
 	}
 	return &Plugins{
 		DiscardUnpackedLayers: i.DiscardUnpackedLayers,
+		Snapshotter:           i.Snapshotter,
 		NRI: NRI{
 			Disable:            n.Disable,
 			DisableConnections: n.DisableConnections,

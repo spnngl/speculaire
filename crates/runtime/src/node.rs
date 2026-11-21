@@ -8,12 +8,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 
 use crate::containerd::Containerd;
 use crate::content::{self, Blob, Content};
 use crate::crio::CriO;
 use crate::detect::{Runtime, Sockets};
+use crate::identity::NodeIdentity;
+use crate::identity::annotation::Annotation;
 use crate::images::Images;
 use crate::inventory::Inventory;
 use crate::paths::Paths;
@@ -154,6 +157,17 @@ impl Node {
         match &self.kind {
             Kind::Containerd(containerd) => Arc::new(containerd.clone()),
             Kind::CriO(crio) => Arc::new(crio.clone()),
+        }
+    }
+
+    /// The image identity the gate reads from NRI's `CreateContainer` (D169, D170).
+    #[must_use]
+    pub fn identity(&self) -> NodeIdentity {
+        match &self.kind {
+            Kind::Containerd(containerd) => {
+                NodeIdentity::containerd(Annotation::new(containerd.clone(), Host::current()))
+            }
+            Kind::CriO(_) => NodeIdentity::crio(),
         }
     }
 

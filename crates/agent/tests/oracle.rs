@@ -19,8 +19,10 @@ use speculaire_agent::telemetry;
 use speculaire_mirror::listed::Listed;
 use speculaire_oracle_harness::Oracle;
 use speculaire_oracle_harness::nri::Start;
-use speculaire_runtime::detect::Runtime;
+use speculaire_runtime::Node;
+use speculaire_runtime::detect::{Runtime, Sockets};
 use speculaire_runtime::images::{Images, Update};
+use speculaire_runtime::paths::Paths;
 use tokio::sync::mpsc;
 
 /// A plugin connects, registers and synchronizes well within this.
@@ -118,11 +120,19 @@ impl Agent {
         let status = Arc::new(Status::new(metrics.clone(), false));
         status.mirror_listening();
         let tokio = tokio::runtime::Runtime::new().expect("a runtime builds");
+        // A node with no runtime socket: containerd's image store stays empty.
+        let root = socket.parent().expect("the socket is in a directory");
+        let sockets = Sockets {
+            containerd: root.join("containerd.sock"),
+            crio: root.join("crio.sock"),
+        };
+        let node = Node::new(runtime, &sockets, Paths::under(root), None, "systemctl");
         let gate = {
             let _entered = tokio.enter();
             Gate::start(
                 socket.to_owned(),
                 runtime,
+                node.identity(),
                 Listed::follow(Arc::new(Unlisted)),
                 Duration::from_millis(300),
                 Arc::clone(&status),
@@ -217,15 +227,16 @@ fn the_gate_registers_again_at_once_and_within_2_s_of_a_runtime_that_comes_back(
     let report = runtime.wait(1, SETTLE).unwrap();
     assert_eq!(report.plugins[0].name, "50-speculaire");
     let version = env!("CARGO_PKG_VERSION");
-    assert_eq!(
-        agent.build_info(),
-        [
-            format!(r#"version="{version}",runtime="",runtime_version="",nri_version=""}} 0"#),
-            format!(
-                r#"version="{version}",runtime="containerd",runtime_version="v2.4.2",nri_version="v0.12.3"}} 1"#
-            ),
-        ]
-    );
+    // The recorder is the process's: the series of the tests before are there too.
+    let series = agent.build_info();
+    for want in [
+        format!(r#"version="{version}",runtime="",runtime_version="",nri_version=""}} 0"#),
+        format!(
+            r#"version="{version}",runtime="containerd",runtime_version="v2.4.2",nri_version="v0.12.3"}} 1"#
+        ),
+    ] {
+        assert!(series.contains(&want), "{want} not in {series:?}");
+    }
 
     // The runtime closes the connection: the gate registers again at once. Meanwhile `gate.wait` became half of
     // the oracle's 2 s request timeout: the new `Configure` logs both, and the gate stays registered (Q5).
@@ -263,15 +274,23 @@ fn the_gate_registers_again_at_once_and_within_2_s_of_a_runtime_that_comes_back(
     let again = agent.until_registered(true, AGAIN);
     runtime.wait(1, SETTLE).unwrap();
     eprintln!("registered again {again:?} after the runtime came back");
-    assert_eq!(agent.build_info().len(), 2, "{:?}", agent.build_info());
+    assert_eq!(agent.build_info(), series);
 }
 
 #[test]
 fn the_gate_reads_containerd_s_image_identity_from_nri_and_cri_o_s_from_its_image_id() {
     let Some(oracle) = oracle() else { return };
-    // containerd 2.4 announces NRI v0.12.3; CRI-O 1.35 and 1.36 announce no NRI version (D169).
+    // containerd 2.4 announces NRI v0.12.3, and 2.3 v0.12.0, whose `Container` names no image; CRI-O 1.35 and 1.36
+    // announce no NRI version (D169, D170).
     for (runtime, name, version, nri_version, path) in [
         (Runtime::Containerd, "containerd", "v2.4.2", None, "nri"),
+        (
+            Runtime::Containerd,
+            "containerd",
+            "v2.3.7",
+            Some("v0.12.0".to_owned()),
+            "annotation",
+        ),
         (
             Runtime::CriO,
             "cri-o",
@@ -286,6 +305,7 @@ fn the_gate_reads_containerd_s_image_identity_from_nri_and_cri_o_s_from_its_imag
         let mut nri = oracle.nri_runtime().unwrap();
         nri.start(&start).unwrap();
         let agent = Agent::start(&socket(&dir), runtime);
+        let before = agent.logs.text().len();
         agent.until_registered(true, SETTLE);
         nri.wait(1, SETTLE).unwrap();
         assert!(
@@ -295,7 +315,45 @@ fn the_gate_reads_containerd_s_image_identity_from_nri_and_cri_o_s_from_its_imag
             "{name}: {:?}",
             agent.identity_paths()
         );
+        let logs = agent.logs.text().split_off(before);
+        assert_eq!(
+            logs.contains("identity gap, D15"),
+            path == "annotation",
+            "{name} {version}: {logs}"
+        );
     }
+}
+
+#[test]
+fn containerd_upgraded_to_nri_v0_12_2_moves_the_gate_off_the_annotation() {
+    let Some(oracle) = oracle() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut start = Start::new(socket(&dir), "containerd", "v2.3.7");
+    start.nri_version = Some("v0.12.0".to_owned());
+    let mut nri = oracle.nri_runtime().unwrap();
+    nri.start(&start).unwrap();
+    let agent = Agent::start(&socket(&dir), Runtime::Containerd);
+    agent.until_registered(true, SETTLE);
+    nri.wait(1, SETTLE).unwrap();
+    assert!(
+        agent
+            .identity_paths()
+            .contains(&r#"path="annotation""#.to_owned())
+    );
+    drop(nri);
+    agent.until_registered(false, SETTLE);
+    let mut start = Start::new(socket(&dir), "containerd", "v2.4.2");
+    start.nri_version = None;
+    let mut nri = oracle.nri_runtime().unwrap();
+    nri.start(&start).unwrap();
+    agent.until_registered(true, AGAIN);
+    nri.wait(1, SETTLE).unwrap();
+    let paths = agent.identity_paths();
+    assert!(paths.contains(&r#"path="nri""#.to_owned()), "{paths:?}");
+    assert!(
+        !paths.contains(&r#"path="annotation""#.to_owned()),
+        "{paths:?}"
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
-//! The verdict of a container's image, from the identity the gate reads in its `CreateContainer` (D65, D169).
+//! The verdict of a container's image, from the identity the gate reads in its `CreateContainer` (D65, D169, D170).
 
-use speculaire_runtime::identity::{Identified, NOT_CONFIG};
+use speculaire_runtime::identity::{Identified, MISMATCH, NOT_CONFIG};
 use tokio::time::Instant;
 
 use crate::engine::{Key, Lookup, Verdict, Verdicts, match_hash};
@@ -11,7 +11,8 @@ impl Verdicts {
     ///
     /// Each listed manifest of the image passes when its verdict under each policy group of the names passes (D151).
     /// The image is allowed when one of its manifests is; otherwise it has the most hopeful of their verdicts, and
-    /// `Unverifiable` when it has no listed manifest or no identity (D65).
+    /// `Unverifiable` when it has no listed manifest or no identity (D65). A container whose snapshot is not its
+    /// image's is `Rejected`, whatever its names (D170).
     #[must_use]
     pub fn identified(
         &self,
@@ -19,8 +20,17 @@ impl Verdicts {
         policies: &Policies,
         root: Option<RootHash>,
     ) -> Option<Lookup> {
-        if let Identified::Unknown(reason) = identified {
-            return Some(unverifiable(reason));
+        match identified {
+            Identified::Unknown(reason) => return Some(unverifiable(reason)),
+            Identified::Mismatched => {
+                return Some(Lookup {
+                    verdict: Verdict::Rejected {
+                        reason: MISMATCH.into(),
+                    },
+                    stale: false,
+                });
+            }
+            Identified::Listed { .. } | Identified::Image(_) => {}
         }
         let mut hashes: Vec<MatchHash> = Vec::new();
         for name in identified.names() {

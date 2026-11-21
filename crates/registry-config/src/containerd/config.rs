@@ -311,7 +311,10 @@ const FILE_FIELDS: &[&str] = &[
 /// The keys of the image service's section that the agent reads, matched in any case as go-toml does.
 fn fold_images(images: &mut Table) {
     const AUTH: &[&str] = &["username", "password", "auth", "identitytoken"];
-    fold_value_fields(images, &["registry", "discard_unpacked_layers"]);
+    fold_value_fields(
+        images,
+        &["registry", "discard_unpacked_layers", "snapshotter"],
+    );
     let Some(registry) = value_table_at(images, "registry") else {
         return;
     };
@@ -335,13 +338,32 @@ fn fold_images(images: &mut Table) {
     }
 }
 
-/// The image service's plugin section, of which only `registry` and `discard_unpacked_layers` are read.
-#[derive(Deserialize, Default)]
+/// The image service's plugin section, of which only `registry`, `discard_unpacked_layers` and `snapshotter` are read.
+#[derive(Deserialize)]
 struct Images {
     #[serde(default)]
     registry: RawRegistry,
     #[serde(default)]
     discard_unpacked_layers: bool,
+    #[serde(default = "default_snapshotter")]
+    snapshotter: String,
+}
+
+impl Default for Images {
+    fn default() -> Self {
+        Self {
+            registry: RawRegistry::default(),
+            discard_unpacked_layers: false,
+            snapshotter: default_snapshotter(),
+        }
+    }
+}
+
+/// The snapshotter containerd's image service defaults to on Linux (v2.3.7 `defaults/defaults_linux.go:32`).
+pub const DEFAULT_SNAPSHOTTER: &str = "overlayfs";
+
+fn default_snapshotter() -> String {
+    DEFAULT_SNAPSHOTTER.to_owned()
 }
 
 /// The NRI plugin's section, of which only `disable`, `disable_connections`, `plugin_request_timeout` and the default
@@ -383,13 +405,26 @@ impl Nri {
 
 /// What the agent reads of containerd's plugin sections besides the registry (D15, D54, D86); the default is what
 /// containerd runs on without a config file.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plugins {
     /// `discard_unpacked_layers` of the image service: containerd drops the layers it has unpacked, so the node
     /// cannot serve them.
     pub discard_unpacked_layers: bool,
+    /// `snapshotter` of the image service: the one containers are created on, unless their runtime handler names
+    /// another (D170).
+    pub snapshotter: String,
     /// The NRI plugin.
     pub nri: Nri,
+}
+
+impl Default for Plugins {
+    fn default() -> Self {
+        Self {
+            discard_unpacked_layers: false,
+            snapshotter: default_snapshotter(),
+            nri: Nri::default(),
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -485,6 +520,7 @@ pub fn load_plugins(path: &Path) -> Result<Plugins, LoadError> {
     let nri = from_value::<RawNri>(Value::Table(nri)).map_err(LoadError::Nri)?;
     Ok(Plugins {
         discard_unpacked_layers: images.discard_unpacked_layers,
+        snapshotter: images.snapshotter,
         nri: Nri {
             disable: nri.disable,
             disable_connections: nri.disable_connections,
@@ -617,7 +653,7 @@ fn migrate(file: &mut File) -> Result<(), ParseError> {
         ));
     };
     let registry = cri.get("registry").cloned();
-    let discard = discard_unpacked_layers(cri)?;
+    let carried = carried(cri)?;
     let mut images = match file.plugins.remove(IMAGES_PLUGIN) {
         None => Table::new(),
         Some(Value::Table(table)) => table,
@@ -631,7 +667,7 @@ fn migrate(file: &mut File) -> Result<(), ParseError> {
     // `migrateConfig` type-asserts these two sections of the image service, and the daemon crashes on others.
     for key in ["pinned_images", "runtime_platform"] {
         if images.get(key).is_some_and(|v| !v.is_table())
-            && (key == "pinned_images" || discard.reached)
+            && (key == "pinned_images" || carried.reached)
         {
             return Err(ParseError::new(
                 format!("plugins.{IMAGES_PLUGIN:?}.{key}"),
@@ -642,8 +678,8 @@ fn migrate(file: &mut File) -> Result<(), ParseError> {
     if let Some(registry) = registry {
         images.insert("registry".to_owned(), registry);
     }
-    if let Some(value) = discard.value {
-        images.insert("discard_unpacked_layers".to_owned(), value);
+    for (key, value) in carried.values {
+        images.insert(key.to_owned(), value);
     }
     file.plugins
         .insert(IMAGES_PLUGIN.to_owned(), Value::Table(images));
@@ -651,19 +687,20 @@ fn migrate(file: &mut File) -> Result<(), ParseError> {
 }
 
 /// What `migrateConfig` takes from `[containerd]` of the CRI plugin.
-struct Discard {
+struct Carried {
     /// The migration got past `containerd.runtimes`, where it copies the keys it carries over.
     reached: bool,
-    /// `containerd.discard_unpacked_layers`, copied only when `reached`.
-    value: Option<Value>,
+    /// `containerd.discard_unpacked_layers` and `containerd.snapshotter`, those set, copied only when `reached`.
+    values: Vec<(&'static str, Value)>,
 }
 
-/// `migrateConfig` (`plugins/cri/images/plugin.go`, v2.4.2): it copies `discard_unpacked_layers` from `[containerd]`
-/// only when that table has `runtimes`, and asserts that `containerd`, `runtimes` and each runtime are tables.
-fn discard_unpacked_layers(cri: &Table) -> Result<Discard, ParseError> {
-    let none = Discard {
+/// `migrateConfig` (`plugins/cri/images/plugin.go`, v2.4.2): it copies `discard_unpacked_layers` and `snapshotter`
+/// from `[containerd]` only when that table has `runtimes`, and asserts that `containerd`, `runtimes` and each runtime
+/// are tables.
+fn carried(cri: &Table) -> Result<Carried, ParseError> {
+    let none = Carried {
         reached: false,
-        value: None,
+        values: Vec::new(),
     };
     let key = format!("plugins.{CRI_PLUGIN:?}");
     let Some(containerd) = cri.get("containerd") else {
@@ -690,9 +727,12 @@ fn discard_unpacked_layers(cri: &Table) -> Result<Discard, ParseError> {
             "is not a table",
         ));
     }
-    Ok(Discard {
+    Ok(Carried {
         reached: true,
-        value: containerd.get("discard_unpacked_layers").cloned(),
+        values: ["discard_unpacked_layers", "snapshotter"]
+            .into_iter()
+            .filter_map(|key| Some((key, containerd.get(key)?.clone())))
+            .collect(),
     })
 }
 
@@ -830,6 +870,58 @@ mod tests {
         );
         std::fs::write(&import, "version = 3\nroot = \"/srv/c\"\n").expect("a file");
         assert_eq!(load_root(&conf).expect("a valid config"), "/srv/c");
+    }
+
+    /// The image service's snapshotter: its default, its own key, and version 2's `[containerd]` one, carried over
+    /// only past `runtimes` (D170). The oracle's `config` case compares the same against containerd.
+    #[test]
+    fn the_snapshotter_is_the_image_service_s_else_overlayfs() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let conf = dir.path().join("config.toml");
+        let cri = "[plugins.\"io.containerd.grpc.v1.cri\".containerd]\nsnapshotter = \"native\"\n";
+        for (text, snapshotter) in [
+            ("version = 3\n".to_owned(), "overlayfs"),
+            (
+                "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = \"zfs\"\n"
+                    .to_owned(),
+                "zfs",
+            ),
+            (format!("version = 2\n{cri}"), "overlayfs"),
+            (
+                format!(
+                    "version = 2\n{cri}[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runc]\n"
+                ),
+                "native",
+            ),
+        ] {
+            std::fs::write(&conf, &text).expect("a file");
+            let plugins = load_plugins(&conf).expect("a valid config");
+            assert_eq!(plugins.snapshotter, snapshotter, "{text}");
+        }
+        assert_eq!(Plugins::default().snapshotter, DEFAULT_SNAPSHOTTER);
+    }
+
+    /// `migrateConfig` type-asserts `pinned_images` always, and `runtime_platform` only past `runtimes`.
+    #[test]
+    fn migration_refuses_what_containerd_cannot_type_assert() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let conf = dir.path().join("config.toml");
+        let cri = "[plugins.\"io.containerd.grpc.v1.cri\"]\nsandbox_image = \"x\"\n";
+        let runtimes = "[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runc]\nx = 1\n";
+        let images = "[plugins.\"io.containerd.cri.v1.images\"]\n";
+        for (body, refused) in [
+            (format!("{cri}{images}pinned_images = 1\n"), true),
+            (format!("{cri}{images}pinned_images = {{}}\n"), false),
+            (format!("{cri}{images}runtime_platform = 1\n"), false),
+            (format!("{runtimes}{images}runtime_platform = 1\n"), true),
+            (
+                format!("{runtimes}{images}runtime_platform = {{}}\n"),
+                false,
+            ),
+        ] {
+            std::fs::write(&conf, format!("version = 2\n{body}")).expect("a file");
+            assert_eq!(load_plugins(&conf).is_err(), refused, "{body}");
+        }
     }
 
     #[test]

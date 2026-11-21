@@ -1068,6 +1068,7 @@ fn our_config(root: &Path, entry: &str) -> Value {
         },
         "plugins": {
             "discard_unpacked_layers": plugins.discard_unpacked_layers,
+            "snapshotter": plugins.snapshotter,
             "nri": {
                 "disable": plugins.nri.disable,
                 "disable_connections": plugins.nri.disable_connections,
@@ -1330,6 +1331,26 @@ fn config_cases(root: &Path) -> Vec<(String, ConfigCase)> {
     let cri = "\"io.containerd.grpc.v1.cri\"";
     let nri = "\"io.containerd.nri.v1.nri\"";
     for (label, text) in [
+        (
+            "snapshotter in the images plugin",
+            "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nSnapshotter = \"native\"\n".to_owned(),
+        ),
+        (
+            "snapshotter set empty",
+            "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = \"\"\n".to_owned(),
+        ),
+        (
+            "snapshotter in the CRI plugin with runtimes",
+            format!("version = 2\n[plugins.{cri}.containerd]\nsnapshotter = \"native\"\n[plugins.{cri}.containerd.runtimes.runc]\nx = 1\n"),
+        ),
+        (
+            "snapshotter in the CRI plugin without runtimes",
+            format!("version = 2\n[plugins.{cri}.containerd]\nsnapshotter = \"native\"\n"),
+        ),
+        (
+            "snapshotter is not a string",
+            "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = 1\n".to_owned(),
+        ),
         (
             "discard in the images plugin",
             "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\ndiscard_unpacked_layers = true\n".to_owned(),

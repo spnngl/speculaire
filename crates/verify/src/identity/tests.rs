@@ -167,6 +167,21 @@ fn an_image_without_a_listed_manifest_is_unverifiable_and_one_no_policy_matches_
     assert_eq!(verdict(&verdicts, &image(&[digest(0xa)]), &elsewhere), None);
 }
 
+/// A container whose snapshot is not its image's is rejected, under any policy or none (D170).
+#[test]
+fn a_mismatched_identity_is_rejected_whatever_the_policies() {
+    let verdicts = Verdicts::default();
+    for policies in [
+        policies(),
+        Policies::parse(&policy("quay", "quay.io/**")).expect("parses"),
+    ] {
+        assert_eq!(
+            verdict(&verdicts, &Identified::Mismatched, &policies),
+            Some(rejected(MISMATCH))
+        );
+    }
+}
+
 /// containerd's identity is the one digest and name it reads.
 #[test]
 fn a_listed_identity_has_the_verdict_of_its_digest_under_its_name() {

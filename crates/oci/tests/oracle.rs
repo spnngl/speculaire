@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use oci_spec::image::{Arch, Os, Platform, PlatformBuilder};
 use serde::Serialize;
 use serde_json::{Value, json};
+use speculaire_oci::index::Index;
+use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::platform::{self, Host, Matcher};
 use speculaire_oci::reference::Reference;
 use speculaire_oracle_harness::Oracle;
@@ -513,6 +515,216 @@ fn platforms_agree_with_containerd() {
         .map(|((label, case), theirs)| (label.clone(), our_platform(case, &host), theirs))
         .collect();
     expect_same("platform", &labelled);
+}
+
+/// A blob of a content store, with the media type its descriptor gives it.
+#[derive(Serialize)]
+struct Blob {
+    media_type: String,
+    content: String,
+}
+
+impl Blob {
+    fn new(media_type: &str, content: &Value) -> Self {
+        Self {
+            media_type: media_type.to_owned(),
+            content: content.to_string(),
+        }
+    }
+
+    fn digest(&self) -> String {
+        speculaire_oci::hash::of("sha256", self.content.as_bytes())
+            .expect("SHA-256 hashes")
+            .to_string()
+    }
+
+    fn descriptor(&self) -> Value {
+        json!({"mediaType": self.media_type, "digest": self.digest(), "size": self.content.len()})
+    }
+}
+
+/// A `platform` case that asks only which image of `index` containerd runs on `platform`.
+#[derive(Serialize)]
+struct PickCase {
+    platform: Plat,
+    index: Blob,
+    blobs: Vec<Blob>,
+}
+
+const OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
+const DOCKER_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+json";
+
+/// The config digest of the image manifest [`Index::platform_manifest`] picks, as `images.Manifest` answers it.
+fn our_pick(case: &PickCase) -> Option<String> {
+    let host = Host {
+        os: case.platform.os.clone(),
+        arch: case.platform.architecture.clone(),
+        variant: case.platform.variant.clone(),
+    };
+    let index = Index::parse(case.index.content.as_bytes()).ok()?;
+    let picked = index.platform_manifest(&host)?.to_string();
+    let blob = case.blobs.iter().find(|blob| blob.digest() == picked)?;
+    match manifest::children(blob.content.as_bytes()).ok()? {
+        Children::Image { config, .. } => Some(config.to_string()),
+        Children::Index { .. } => None,
+    }
+}
+
+/// The config of an image of platform `of`, told apart by `comment`, and its manifest of `media_type`.
+fn image(of: &Plat, media_type: &str, comment: &str) -> (Blob, Blob) {
+    let config = Blob::new(
+        "application/vnd.oci.image.config.v1+json",
+        &json!({
+            "os": of.os, "architecture": of.architecture, "variant": of.variant,
+            "rootfs": {"type": "layers", "diff_ids": []},
+            "comment": comment,
+        }),
+    );
+    let mut document = json!({"schemaVersion": 2, "config": config.descriptor(), "layers": []});
+    if media_type == OCI_MANIFEST || media_type == DOCKER_MANIFEST {
+        document["mediaType"] = json!(media_type);
+    }
+    let manifest = Blob::new(media_type, &document);
+    (config, manifest)
+}
+
+/// Indexes made up from a fixed generator: image manifests of either exact media type, of near misses, with platforms
+/// of every sort or none, and BuildKit's attestation manifests.
+///
+/// containerd reads the config of the image an entry without a platform names and runs it only when the config's
+/// platform matches, which [`Index::platform_manifest`] does not: such an image here is always of the node's platform.
+/// A nested index is left out too: containerd walks into it, and the gate picks nothing.
+fn pick_cases(count: usize) -> Vec<PickCase> {
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        usize::try_from(state % u64::try_from(bound).expect("a small bound"))
+            .expect("a small index")
+    };
+    let nodes = [
+        Plat::new("linux", "amd64", ""),
+        Plat::new("linux", "arm64", ""),
+        Plat::new("linux", "arm64", "v8"),
+        Plat::new("linux", "arm", "v7"),
+        Plat::new("linux", "arm", "v6"),
+        Plat::new("linux", "386", ""),
+    ];
+    let platforms = [
+        Plat::new("linux", "amd64", ""),
+        Plat::new("linux", "amd64", "v2"),
+        Plat::new("linux", "amd64", "v3"),
+        Plat::new("linux", "arm64", ""),
+        Plat::new("linux", "arm64", "v8"),
+        Plat::new("linux", "arm64", "v9"),
+        Plat::new("linux", "arm", "v5"),
+        Plat::new("linux", "arm", "v6"),
+        Plat::new("linux", "arm", "v7"),
+        Plat::new("linux", "arm", ""),
+        Plat::new("linux", "386", ""),
+        Plat::new("linux", "s390x", ""),
+        Plat::new("Linux", "x86_64", ""),
+        Plat::new("windows", "amd64", ""),
+        Plat::new("unknown", "unknown", ""),
+    ];
+    let media_types = [
+        OCI_MANIFEST,
+        DOCKER_MANIFEST,
+        OCI_MANIFEST,
+        DOCKER_MANIFEST,
+        "application/vnd.oci.image.manifest.v1+json; charset=utf-8",
+        "application/vnd.docker.distribution.manifest.v1+prettyjws",
+        "application/vnd.oci.image.manifest.v2+json",
+        "application/vnd.docker.distribution.manifest.v2+JSON",
+        "",
+    ];
+    let mut cases = Vec::new();
+    for case in 0..count {
+        let node = nodes[next(nodes.len())].clone();
+        let mut blobs = Vec::new();
+        let mut entries = Vec::new();
+        for entry in 0..next(7) {
+            let platform = (next(4) != 0).then(|| platforms[next(platforms.len())].clone());
+            let attestation = next(6) == 0 && !entries.is_empty();
+            let media_type = if attestation {
+                OCI_MANIFEST
+            } else {
+                media_types[next(media_types.len())]
+            };
+            let of = platform.as_ref().unwrap_or(&node);
+            let (config, manifest) = image(of, media_type, &format!("case {case} entry {entry}"));
+            let mut descriptor = manifest.descriptor();
+            if attestation {
+                let of: &Value = &entries[next(entries.len())];
+                descriptor["platform"] = json!({"os": "unknown", "architecture": "unknown"});
+                descriptor["annotations"] = json!({
+                    "vnd.docker.reference.type": "attestation-manifest",
+                    "vnd.docker.reference.digest": of["digest"],
+                });
+            } else if let Some(platform) = &platform {
+                let mut value = json!({"os": platform.os, "architecture": platform.architecture});
+                if !platform.variant.is_empty() {
+                    value["variant"] = json!(platform.variant);
+                }
+                descriptor["platform"] = value;
+            }
+            entries.push(descriptor);
+            blobs.push(config);
+            blobs.push(manifest);
+        }
+        let index_type = if next(2) == 0 {
+            "application/vnd.oci.image.index.v1+json"
+        } else {
+            "application/vnd.docker.distribution.manifest.list.v2+json"
+        };
+        let index = Blob::new(
+            index_type,
+            &json!({"schemaVersion": 2, "mediaType": index_type, "manifests": entries}),
+        );
+        cases.push(PickCase {
+            platform: node,
+            index,
+            blobs,
+        });
+    }
+    cases
+}
+
+/// The image the gate checks a containerd 2.3 container against is the one containerd runs (D170).
+#[test]
+fn index_picks_agree_with_containerd() {
+    let Some(oracle) = oracle() else { return };
+    let cases = pick_cases(1000);
+    let asked: Vec<&PickCase> = cases.iter().collect();
+    let theirs: Vec<Value> = oracle.ask("platform", &asked).expect("the oracle answers");
+    let labelled: Vec<(String, Value, Value)> = cases
+        .iter()
+        .zip(theirs)
+        .map(|(case, theirs)| {
+            let label = format!(
+                "{}/{}/{} {}",
+                case.platform.os,
+                case.platform.architecture,
+                case.platform.variant,
+                case.index.content
+            );
+            (
+                label,
+                json!(our_pick(case)),
+                theirs["pick"]["config"].clone(),
+            )
+        })
+        .collect();
+    let picked = labelled
+        .iter()
+        .filter(|(_, ours, _)| !ours.is_null())
+        .count();
+    eprintln!(
+        "oracle: containerd picks an image in {picked} of {} indexes",
+        labelled.len()
+    );
+    expect_same("platform pick", &labelled);
 }
 
 /// The seeds of a fuzz target, and for each of them mutations that a fuzzer would try: bytes deleted, replaced by one
