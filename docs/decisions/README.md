@@ -29,7 +29,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D19 [build](build.md): the dev loop is Docker on macOS plus CI on native runners (amended by D57)
 - D20 [verification](verification.md): `Verdict` has four states; `Unverifiable` is retried, `Rejected` is final (amended by D31, D38, D65, D145, D151)
 - D21 [verification](verification.md): stale verdicts keep serving during re-verification, for up to `verify.stale_max` (amended by D31, D65, D154)
-- D22 [verification](verification.md): verification starts at the manifest fetch (amended by D65, D66, D121, D152)
+- D22 [verification](verification.md): verification starts at the manifest fetch (amended by D65, D66, D121, D152, D174)
 - D23 [gate](gate.md): `gate.unmatched` (default `deny`) decides images that no policy matches
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100, D102)
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
@@ -153,7 +153,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D143 [verification](verification.md): the trust root is a pinned file, or the one sigstore-tuf fetches over our client every 6 h, served from cache while the repository fails; its hash is its file's SHA-256, its expiry the earliest of its TUF metadata or the latest end of its keys (amends D8; amended by D145, D154)
 - D144 [verification](verification.md): the store is collected beside a discovery, which keeps from collection its root and every blob it finds held or keeps, until no discovery and no collection runs; a root that left the list while discovered is collected once its discovery ends (amends D131; amended by D146, D148)
 - D145 [verification](verification.md): a bundle naming the image, whatever its predicate type, is verified once per trust root with any identity, then its signer matched to each authority; an unknown CA is named before any crypto (amends D8, D20, D43, D143; amended by D147)
-- D146 [verification](verification.md): the roots of an image just listed have a discovery lane of their own, beside that of a listing's roots and retries; each lane discovers one root at a time, and a root under way in one is dropped by the other (amends D121, D144; amended by D148, D152)
+- D146 [verification](verification.md): the roots of an image just listed have a discovery lane of their own, beside that of a listing's roots and retries; each lane discovers one root at a time, and a root under way in one is dropped by the other (amends D121, D144; amended by D148, D152, D174)
 - D147 [verification](verification.md): a legacy `.sig` layer is a signature once its simple signing payload names the image and it verifies as a v0.1 bundle with its SET as log entry (amends D8, D126, D145)
 - D148 [verification](verification.md): each discovery holds its own root and blobs, released when it ends, or when the collection it ended during does (amends D144, D146)
 - D149 [verification](verification.md): an authority that requires attestations passes on bundles of each predicate type, compared exactly, by its signer; a cosign signature never counts; the first failing attestation names the reason (amends D11, D43)
@@ -179,7 +179,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D169 [gate](gate.md): the gate reads the image identity through one `Identity` chosen by runtime name at `Configure`: `nri` on containerd 2.4 (the index digest), `image_id` on CRI-O (the image ID's listed manifests and names from CRI-O's image list); an image is allowed when one listed manifest is (amends D15, D64, D65; amended by D170, D171, D172)
 - D170 [gate](gate.md): on containerd below NRI v0.12.2 the gate resolves `io.kubernetes.cri.image-name` in its image store, keeps the chain ID of the node's platform image per target, and rejects a container whose snapshot base is another (amends D15, D167, D169; amended by D171)
 - D171 [gate](gate.md): on containerd below NRI v0.12.2 the snapshot check asks the snapshotter of the pod's runtime handler, else the CRI images section's; `Identity::identify` takes the pod (amends D169, D170)
-- D172 [gate](gate.md): the gate decides exempt namespace, identity, exempt image names, policy match, then the verdict; a pending verdict or an image ID CRI-O has not listed waits up to `gate.wait` and asks the engine (`gate_miss`); audit allows all; on CRI-O only manifests whose recorded config digest is the image ID stand for it (amends D18, D65, D169)
+- D172 [gate](gate.md): the gate decides exempt namespace, identity, exempt image names, policy match, then the verdict; a pending verdict or an image ID CRI-O has not listed waits up to `gate.wait` and asks the engine (`gate_miss`); audit allows all; on CRI-O only manifests whose recorded config digest is the image ID stand for it (amends D18, D65, D169; amended by D174)
 - D173 [agent](agent.md): audit fields are D37's words in snake_case, every one written, empty when it names nothing, listed in `docs/operations.md` § Audit events; the `gate` event gives the reason `enforce` would, in either mode; its image name is containerd's pod-spec string, and on CRI-O the repositories policies match (amends D37)
+- D174 [gate](gate.md): a root listed and not yet discovered that the gate waits on is discovered at once, under `gate_miss`; `e2e/tests/gate.rs` checks `enforce` end to end on one worker per runtime (amends D22, D146, D172)
 
-Next free number: D174.
+Next free number: D175.

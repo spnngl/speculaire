@@ -931,6 +931,42 @@ async fn a_root_the_gate_misses_is_discovered_and_verified_under_the_trigger_gat
     );
 }
 
+/// A root listed and still queued for discovery behind the listing's others, as on a node that just booted, is
+/// discovered at once when the gate asks for it, and verified under `trigger="gate_miss"` (D174).
+#[tokio::test]
+async fn a_listed_root_the_gate_waits_on_is_discovered_at_once_under_the_trigger_gate_miss() {
+    let fixture = Fixture::load("keyless").await;
+    let root = &fixture.root;
+    let policies = policies(&[("a", "reg.test/a", SAN)]);
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // The engine runs on this thread: the test's runtime has one.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let run = Run::start(&fixture.store, policies.clone(), true, Ok(pinned()));
+    let key = Key {
+        image: root,
+        policies: hash(&policies, &["a"]),
+        root: Some(pinned().hash()),
+    };
+    // The listing's discovery of the root has not ended.
+    run.found
+        .send(Found::Roots {
+            listed: roots(&list(&[(&digest(1), &[("reg.test/a", root)])])),
+            fetched: Roots::new(),
+        })
+        .expect("the engine runs");
+    run.asker
+        .send(Asked {
+            root: root.clone(),
+            names: vec!["reg.test/a".to_owned()],
+            by: Asking::GateMiss,
+        })
+        .expect("the engine runs");
+    assert_eq!(run.verdict(key).await, Verdict::Allow);
+    let missed = r#"speculaire_verifications_total{result="allow",trigger="gate_miss"} 1"#;
+    assert!(handle.render().contains(missed), "{}", handle.render());
+}
+
 #[tokio::test]
 async fn a_config_digest_unread_when_a_fetch_verified_the_root_is_read_once_a_list_names_it() {
     let fixture = Fixture::load("keyless").await;

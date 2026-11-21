@@ -190,12 +190,13 @@ impl Nodes {
     /// The lookups of `node`'s agent that found no reflector to ask (D103).
     fn no_reflector(&self, node: &str) -> u64 {
         self.cluster
-            .histogram_count(
+            .histogram(
                 node,
                 "speculaire_lookup_seconds",
                 ("result", "no_reflector"),
             )
             .unwrap()
+            .count
     }
 
     /// What `node`'s mirror left to the upstream: the blob requests that fell through on containerd, the bytes it

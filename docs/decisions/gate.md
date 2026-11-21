@@ -290,7 +290,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Tested:** a unit test against the fake containerd, whose snapshots belong to one snapshotter, proves the handler's snapshotter is the one asked. No e2e: a RuntimeClass whose handler names another snapshotter needs a second snapshotter in the kind node.
 - **Revisit when:** containerd 2.3 reaches end of life, with D170.
 
-## D172: The gate decides each container from its verdict, waits up to `gate.wait` for a missing one, and on CRI-O keeps only the manifests whose config digest is the image ID (amends D18, D65, D169)
+## D172: The gate decides each container from its verdict, waits up to `gate.wait` for a missing one, and on CRI-O keeps only the manifests whose config digest is the image ID (amends D18, D65, D169; amended by D174)
 
 - **Decision:**
   - **Order:** `gate::decision::Decider::decide` takes each `CreateContainer`. A pod namespace in `gate.exempt.namespaces` is `exempt` before any lookup. Then the identity is read (D169, D170); an image whose names match a `gate.exempt.images` glob is `exempt`. Then `Verdicts::identified` gives the verdict, and its `None`, no matching policy, is `unmatched` (D23). A verdict served stale is counted `stale="true"` (D21).
@@ -308,3 +308,14 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Measured (M6 step 08, arm64):** `just bench-micro decide`, the whole decision on a cached `Allow` under `enforce`, 2000 samples, four runs: the `nri` path takes 0.41–0.45 µs median and 1.6 µs at worst, with 4 allocations, the name parse and the policy match of `Verdicts::identified`; the `annotation` path, on a fake containerd 2.3, takes 31–33 µs median and 226 µs at worst, with 27 allocations, mostly the snapshot `Stat` over gRPC. Both are far under the 5 ms p99 target (D107). `Verdicts::get` itself allocates nothing.
 - **Cost:** on CRI-O an image whose platform manifest the node holds in neither the artifact store nor the mirror's blob cache, as one pulled before the agent ran and since evicted, is unverifiable. Image exemptions do not see the pod-spec string, so a glob must name the image as the runtime resolved it.
 - **Revisit when:** step 11 adds the roots of NRI `Synchronize`.
+
+## D174: A root listed and not yet discovered that the gate waits on is discovered at once, under `gate_miss` (amends D22, D146, D172)
+
+- **Decision:**
+  - An `Asked { by: Asking::GateMiss }` for a root a list named, whose discovery neither ran nor failed, with no discovery the engine asked for under way and no retry set, has the engine discover it at once, beside the listing's lanes. Its first verification counts `trigger="gate_miss"`. A root discovered, asking, or waiting on a retry goes on as it was.
+  - `e2e/tests/gate.rs` checks `enforce` on one worker of each runtime: the agent's rejections reach the kubelet's `CreateContainerError`, `runnable` starts on its first pull by tag and by digest, the runtime's default validator rejects every container while the agent is down, exemptions and `gate.unmatched` decide, a cold node starts `runnable` within three of the kubelet's retries, and `speculaire_gate_seconds` keeps its p99 under half of `gate.wait`.
+- **Because:**
+  - A node that boots lists every image it holds, and each lane discovers one root at a time (D146): a held image the policies match queues behind images whose sources answer slowly or not at all, as kind's on `public.ecr.aws`, rate limited. A pod of it was refused `verification pending` until its turn came: on containerd 2.3, twice, 20 s of the kubelet's back-off. The gate already asks, but the engine ignored a root it knew.
+  - A root whose discovery failed keeps the engine's back-off, so a pod retried in a loop does not hammer its sources.
+- **Measured (M6 step 10, kind on arm64, Kubernetes 1.37):** the cold-node pod met `verification pending` twice on containerd 2.3 before the change, 20 s of back-off, and started at its first try after it, counted under `gate_miss`. `speculaire_gate_seconds` p99 under `enforce`, over seven decisions, across runs: `image_id` 40–61 µs on CRI-O 1.37, `nri` 0.07–20 ms on containerd 2.4, `annotation` 0.35–20 ms on containerd 2.3, under the 150 ms bound, half of `gate.wait`. The enforce cases take 44–47 s per leg.
+- **Revisit when:** `cache.bin` (step 12) keeps verdicts over a restart: a cold node then starts from them.

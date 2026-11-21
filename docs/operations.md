@@ -78,7 +78,7 @@ A running agent reads the policy file and a pinned trust root again on SIGHUP an
 Work through these steps in order, and stop at the first one that helps.
 
 1. **The gate rejects images it should allow.** Set `gate.mode = "audit"` and run `systemctl reload speculaire`. The mode reloads live (D30), and pods start on kubelet's next retry.
-2. **The agent is down.** Run `systemctl restart speculaire`. If it does not start, run `speculaire check-config` and read `journalctl -u speculaire`: both give the refusals of "Startup refusals".
+2. **The agent is down.** The runtime's validator rejects every container: `required plugin "speculaire" not present`. Run `systemctl restart speculaire`. If it does not start, run `speculaire check-config` and read `journalctl -u speculaire`: both give the refusals of "Startup refusals".
 3. **The agent cannot be started.** Remove `speculaire` from `required_plugins` and run `systemctl restart containerd`; on CRI-O, from `nri_validator_required_plugins`, then `systemctl restart crio`. Running containers survive a runtime restart. New containers then start ungated.
 
 ## Rejection reasons
