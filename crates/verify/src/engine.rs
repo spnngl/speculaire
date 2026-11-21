@@ -675,11 +675,36 @@ impl<D: Discover> Engine<D> {
         }
     }
 
-    /// Discovers a root no list named yet, as its first verification's `trigger` asks; a known root goes on as it was.
-    /// The next change of the roots that does not name it forgets it, as any root.
+    /// Discovers a root no list named yet, as its first verification's `trigger` asks; a known root goes on as it was,
+    /// but for a listed one the gate waits on before its discovery ran, which is discovered at once (D174). The next
+    /// change of the roots that does not name it forgets it, as any root.
     fn asked(&mut self, asked: Asked) {
-        let Entry::Vacant(entry) = self.roots.entry(asked.root) else {
-            return;
+        let entry = match self.roots.entry(asked.root) {
+            Entry::Vacant(entry) => entry,
+            Entry::Occupied(mut known) => {
+                let root = known.get_mut();
+                // Queued behind the listing's other roots, as on a node that just booted; the engine's own retries
+                // pace a root whose discovery failed.
+                if asked.by == Asking::GateMiss
+                    && !root.discovered
+                    && !root.asking
+                    && root.retry_at.is_none()
+                    && !root.keys.is_empty()
+                {
+                    root.asking = true;
+                    if root.failures == 0 {
+                        root.trigger = Trigger::GateMiss;
+                    }
+                    let names = root.names.clone();
+                    self.asks.spawn(ask(
+                        Arc::clone(&self.discovery),
+                        known.key().clone(),
+                        names,
+                        Ask::Discover,
+                    ));
+                }
+                return;
+            }
         };
         let keys: Vec<MatchHash> = groups(&self.policies, &asked.names)
             .iter()

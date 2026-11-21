@@ -64,7 +64,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Cost:** a tightened policy takes effect after re-verification (normally seconds), not instantly.
 - **Revisit when:** —
 
-## D22: Verification starts at the manifest fetch (amended by D65, D66, D121, D152)
+## D22: Verification starts at the manifest fetch (amended by D65, D66, D121, D152, D174)
 
 - **Decision:** triggers, earliest first:
   1. the mirror serving or forwarding `GET /v2/<repo>/manifests/<digest>` (containerd fetches manifests by digest through the mirror, even when it resolved the tag upstream, D6);
@@ -324,7 +324,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Measured:** 8 crates enter `Cargo.lock` (sigstore-verify, sigstore-bundle, sigstore-rekor, sigstore-tsa, sigstore-merkle, cms, serde_json_canonicalizer, ryu-js). One verification takes 1.2 ms for the keyless fixture and 0.65 ms for the key fixture (release, Apple M5); parsing the trusted root with its verifier takes 0.25 ms.
 - **Revisit when:** sigstore-verify matches identities by pattern, or cosign stops counting attestations as signatures.
 
-## D146: The roots of an image just listed have a discovery lane of their own (amends D121, D144; amended by D148, D152)
+## D146: The roots of an image just listed have a discovery lane of their own (amends D121, D144; amended by D148, D152, D174)
 
 - **Decision:**
   - **Lanes:** the follower of the image list runs two discoveries at most, one per lane, each one root at a time. The roots of an image just listed go in the pulled lane, in the order they come. Those a full listing queues, and those due again after a failure (D128, D134), go in the backlog lane.

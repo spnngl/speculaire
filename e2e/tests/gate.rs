@@ -17,7 +17,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use e2e::node::POLICY;
-use e2e::upstream::{Kind, UNSIGNED};
+use e2e::upstream::{FIXTURES, Kind, RUNNABLE, SIGNED, UNSIGNED, runnable_policy};
 use e2e::{Cluster, IpFamily, Runtime};
 use speculaire_oci::chain::of_config;
 use speculaire_oci::index::Index;
@@ -26,6 +26,7 @@ use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::containerd::Containerd;
 use speculaire_runtime::containerd::store::Store;
+use speculaire_runtime::identity::MISMATCH;
 use speculaire_runtime::paths::Paths;
 
 /// Copies bytes both ways between stdin and stdout and containerd's socket, until either side ends.
@@ -711,4 +712,425 @@ fn with_the_audit_on_a_creation_and_a_changed_verdict_are_one_event_each_and_wit
     let journal = worker.cluster.audit(&worker.node).unwrap();
     assert!(journal.is_empty(), "{journal:?}");
     drop(guard);
+}
+
+/// The label of the enforce suite's pods, by which its guard deletes them in any namespace.
+const ENFORCE: &str = "speculaire-e2e=enforce";
+
+/// The worker under `gate.mode = "enforce"`, with `kube-system` exempt, a policy over the runnable and the unsigned
+/// images, and the runtime requiring the plugin as `docs/operations.md` § Before turning on `enforce` step 5 says, until
+/// dropped: then the suite's pods and `images` go, and the runtime's config, the agent's and the policy are put back.
+struct Enforced<'a> {
+    worker: &'a Worker,
+    images: Vec<String>,
+}
+
+impl<'a> Enforced<'a> {
+    fn on(worker: &'a Worker, policy: &str, images: Vec<String>) -> Self {
+        worker.sh(&format!(
+            "cp {CONFIG} {CONFIG}.e2e && sed -i -e '/^\\[gate\\]/,/^\\[/ s/^#mode = \"audit\"$/mode = \"enforce\"/' -e \
+             '/^\\[gate.exempt\\]/,/^\\[/ s/^#namespaces = \\[\\]$/namespaces = [\"kube-system\"]/' {CONFIG} && grep -q \
+             '^mode = \"enforce\"$' {CONFIG} && grep -q '^namespaces = \\[\"kube-system\"\\]$' {CONFIG}"
+        ));
+        let enforced = Self { worker, images };
+        worker.cluster.policy(&worker.node, policy).unwrap();
+        enforced.restart_agent();
+        let require = match worker.cluster.runtime() {
+            Runtime::Containerd => format!(
+                "cp {CONTAINERD} {CONTAINERD}.e2e && printf '\\n[plugins.\"io.containerd.nri.v1.nri\".default_validator]\\n  \
+                 enable = true\\n  required_plugins = [\"speculaire\"]\\n' >> {CONTAINERD}"
+            ),
+            Runtime::Crio => format!(
+                "printf '[crio.nri.default_validator]\\nnri_enable_default_validator = true\\n\
+                 nri_validator_required_plugins = [\"speculaire\"]\\n' > {CRIO_REQUIRED}"
+            ),
+        };
+        worker.sh(&require);
+        enforced.restart_runtime();
+        enforced
+    }
+
+    /// Edits the agent's config with the `sed` script `edit`, checks that `line` is in it, and restarts the agent.
+    fn set(&self, edit: &str, line: &str) {
+        self.worker.sh(&format!(
+            "sed -i -e '{edit}' {CONFIG} && grep -q '^{line}$' {CONFIG}"
+        ));
+        self.restart_agent();
+    }
+
+    /// Restarts the agent, keeping its journal, and waits until it is registered again.
+    fn restart_agent(&self) {
+        self.worker.sh("systemctl restart speculaire");
+        self.worker.cluster.wait_ready(&self.worker.node).unwrap();
+    }
+
+    /// Restarts the runtime, and waits until it answers and the agent is registered again.
+    fn restart_runtime(&self) {
+        self.worker.sh(match self.worker.cluster.runtime() {
+            Runtime::Containerd => "systemctl restart containerd",
+            Runtime::Crio => "systemctl restart crio",
+        });
+        self.worker.wait_runtime();
+        self.worker.cluster.wait_ready(&self.worker.node).unwrap();
+    }
+}
+
+impl Drop for Enforced<'_> {
+    fn drop(&mut self) {
+        let worker = self.worker;
+        let _ = worker.cluster.kubectl(&[
+            "delete",
+            "pod",
+            "-A",
+            "-l",
+            ENFORCE,
+            "--now",
+            "--timeout=60s",
+        ]);
+        let unrequire = match worker.cluster.runtime() {
+            Runtime::Containerd => format!("mv {CONTAINERD}.e2e {CONTAINERD}"),
+            Runtime::Crio => format!("rm -f {CRIO_REQUIRED}"),
+        };
+        let _ = worker
+            .cluster
+            .exec_output(&worker.node, &["sh", "-c", &unrequire]);
+        self.restart_runtime();
+        let _ = worker.cluster.exec_output(
+            &worker.node,
+            &[
+                "sh",
+                "-c",
+                &format!("mv {CONFIG}.e2e {CONFIG}; rm -f {POLICY}"),
+            ],
+        );
+        self.restart_agent();
+        for image in &self.images {
+            if !remove(worker, image) {
+                eprintln!("{image} stays on {}", worker.node);
+            }
+        }
+    }
+}
+
+/// containerd's config, which the enforce suite makes require the plugin.
+const CONTAINERD: &str = "/etc/containerd/config.toml";
+/// The CRI-O drop-in by which the enforce suite makes CRI-O require the plugin.
+const CRIO_REQUIRED: &str = "/etc/crio/crio.conf.d/90-required.conf";
+
+/// Removes `image` from the worker, by its ID, so every name of it goes, waiting up to a minute for the kubelet to
+/// remove the containers that use it; whether it went.
+fn remove(worker: &Worker, image: &str) -> bool {
+    let script = format!(
+        "id=$(crictl inspecti -o go-template --template '{{{{.status.id}}}}' {image} 2>/dev/null) || exit 0; \
+         crictl rmi \"$id\" >/dev/null 2>&1; exit 1"
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !worker
+        .cluster
+        .exec_output(&worker.node, &["sh", "-c", &script])
+        .is_ok_and(|out| out.success)
+    {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    true
+}
+
+/// Removes `image` from the worker, then starts `pod` of it: its start is a first pull.
+fn create(worker: &Worker, namespace: &str, pod: &str, image: &str) {
+    assert!(remove(worker, image), "{image} stays on {}", worker.node);
+    start(worker, namespace, pod, image);
+}
+
+/// Creates `pod` in `namespace` on the worker, labelled [`ENFORCE`], one container of `image`.
+fn start(worker: &Worker, namespace: &str, pod: &str, image: &str) {
+    let overrides = format!(r#"{{"spec":{{"nodeName":"{}"}}}}"#, worker.node);
+    worker
+        .cluster
+        .kubectl(&[
+            "run",
+            pod,
+            "-n",
+            namespace,
+            "--labels",
+            ENFORCE,
+            "--image",
+            image,
+            "--image-pull-policy=IfNotPresent",
+            "--restart=Never",
+            &format!("--overrides={overrides}"),
+            "--command",
+            "--",
+            "sleep",
+            "3600",
+        ])
+        .unwrap();
+}
+
+/// Waits until `pod` is ready, then deletes it, and returns the creation errors the kubelet met on the way: the
+/// messages of its `Failed` events, each as many times as the kubelet counted it.
+fn ready(worker: &Worker, namespace: &str, pod: &str) -> Vec<String> {
+    let kubectl = |args: &[&str]| -> String {
+        let mut all = vec!["-n", namespace];
+        all.extend_from_slice(args);
+        worker.cluster.kubectl(&all).unwrap()
+    };
+    kubectl(&[
+        "wait",
+        "--for=condition=Ready",
+        &format!("pod/{pod}"),
+        "--timeout=120s",
+    ]);
+    // By UID: an earlier run's pod of the same name has its own events.
+    let uid = kubectl(&["get", "pod", pod, "-o", "jsonpath={.metadata.uid}"]);
+    let events = kubectl(&[
+        "get",
+        "events",
+        "--field-selector",
+        &format!("involvedObject.uid={uid},reason=Failed"),
+        "-o",
+        r#"jsonpath={range .items[*]}{.count} {.message}{"\n"}{end}"#,
+    ]);
+    kubectl(&["delete", "pod", pod, "--now", "--timeout=60s"]);
+    events
+        .lines()
+        .flat_map(|line| {
+            let (count, message) = line.split_once(' ').unwrap();
+            let count = count.parse().unwrap_or(1);
+            std::iter::repeat_n(message.to_owned(), count)
+        })
+        .collect()
+}
+
+/// Waits until the creation of `pod`'s container fails with a message that holds `reason`, then deletes the pod, and
+/// returns the message.
+fn rejected(worker: &Worker, namespace: &str, pod: &str, reason: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut state = String::new();
+    while Instant::now() < deadline {
+        state = worker
+            .cluster
+            .kubectl(&[
+                "get",
+                "pod",
+                "-n",
+                namespace,
+                pod,
+                "-o",
+                r#"jsonpath={.status.containerStatuses[0].state.waiting.reason}{"\n"}{.status.containerStatuses[0].state.waiting.message}"#,
+            ])
+            .unwrap();
+        if let Some(("CreateContainerError", message)) = state.split_once('\n')
+            && message.contains(reason)
+        {
+            let message = message.to_owned();
+            worker
+                .cluster
+                .kubectl(&[
+                    "delete",
+                    "pod",
+                    "-n",
+                    namespace,
+                    pod,
+                    "--now",
+                    "--timeout=60s",
+                ])
+                .unwrap();
+            return message;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    panic!("{pod}: no creation error holding {reason:?}, last {state:?}")
+}
+
+/// The decisions of the worker's agent since it started, on a verdict at hand or after a wait, take under half of
+/// `gate.wait` at the 99th percentile (D41, D107); the path they took.
+fn latency(worker: &Worker) -> &'static str {
+    let path = match worker.cluster.runtime() {
+        Runtime::Containerd if worker.cluster.release().starts_with("2.3.") => "annotation",
+        Runtime::Containerd => "nri",
+        Runtime::Crio => "image_id",
+    };
+    let seconds = worker
+        .cluster
+        .histogram(&worker.node, "speculaire_gate_seconds", ("path", path))
+        .unwrap();
+    let p99 = seconds.percentile(99);
+    eprintln!(
+        "{}: speculaire_gate_seconds{{path=\"{path}\"}} p99 {p99} s over {} decisions",
+        worker.node, seconds.count
+    );
+    assert!(seconds.count > 0 && p99 <= 0.15, "p99 {p99} s");
+    path
+}
+
+/// A cold node, as after a reboot, which wipes `/run`: `runnable` is held, and the agent starts with no verdict of
+/// it. A pod of it starts within three of the kubelet's retries: the startup list names the image, and a creation
+/// that finds its verdict pending has the engine discover it at once, under `gate_miss` (D174).
+fn cold(worker: &Worker, runnable: &str) {
+    assert!(remove(worker, runnable));
+    worker.sh(&format!("crictl pull {runnable} >/dev/null"));
+    worker.cluster.stop_agent(&worker.node).unwrap();
+    worker.sh("rm -f /run/speculaire/cache.bin");
+    worker.cluster.start_agent(&worker.node).unwrap();
+    start(worker, "default", "speculaire-e2e-cold", runnable);
+    let failures = ready(worker, "default", "speculaire-e2e-cold");
+    let verifications = worker.series("speculaire_verifications_total");
+    eprintln!("{}: cold node {failures:?}, {verifications:?}", worker.node);
+    assert!(failures.len() <= 3, "{failures:?}");
+    // The listing verifies `runnable` first when its discovery comes before the creation.
+    let missed = count(
+        worker,
+        "speculaire_verifications_total",
+        &[r#"result="allow""#, r#"trigger="gate_miss""#],
+    );
+    assert!(failures.is_empty() || missed > 0, "{verifications:?}");
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refused() {
+    let Some(worker) = Worker::new() else { return };
+    let begun = Instant::now();
+    let lap = |case: &str| eprintln!("{}: {case} at {:?}", worker.node, begun.elapsed());
+    let upstream = worker.cluster.upstream(Kind::Referrers);
+    let host = upstream.address().to_owned();
+    let runnable = format!("{host}/{FIXTURES}:{RUNNABLE}");
+    let by_digest = format!(
+        "{host}/{FIXTURES}@{}",
+        upstream.digest(&format!("{FIXTURES}:{RUNNABLE}")).unwrap()
+    );
+    let unsigned = format!("{host}/{UNSIGNED}");
+    let signed = format!("{host}/{SIGNED}");
+    let policy = format!(
+        "{}---\n{}",
+        runnable_policy(&host),
+        unsigned_policy(&host, "unsigned")
+    );
+    let enforced = Enforced::on(
+        &worker,
+        &policy,
+        vec![
+            runnable.clone(),
+            by_digest.clone(),
+            unsigned.clone(),
+            signed.clone(),
+        ],
+    );
+    lap("switched");
+
+    // The verdict's reason, which containerd wraps and CRI-O does not (D64).
+    create(&worker, "default", "speculaire-e2e-unsigned", &unsigned);
+    let message = rejected(
+        &worker,
+        "default",
+        "speculaire-e2e-unsigned",
+        "rejected: no signature",
+    );
+    assert_eq!(
+        message.contains("failed to get NRI adjustment for container"),
+        worker.cluster.runtime() == Runtime::Containerd,
+        "{message}"
+    );
+    lap("unsigned");
+
+    // The verification that the manifest fetch starts lands before the container: no retry (D22).
+    for (pod, image) in [
+        ("speculaire-e2e-tag", &runnable),
+        ("speculaire-e2e-digest", &by_digest),
+    ] {
+        create(&worker, "default", pod, image);
+        let failures = ready(&worker, "default", pod);
+        assert!(failures.is_empty(), "{image}: {failures:?}");
+        lap(pod);
+    }
+
+    // No policy matches the signed image: an exempt namespace runs it, any other is denied.
+    create(&worker, "kube-system", "speculaire-e2e-exempt", &signed);
+    ready(&worker, "kube-system", "speculaire-e2e-exempt");
+    create(&worker, "default", "speculaire-e2e-unmatched", &signed);
+    rejected(&worker, "default", "speculaire-e2e-unmatched", "unmatched");
+    lap("exempt and unmatched");
+
+    // Read before the agent restarts, which empties its histograms.
+    if latency(&worker) == "annotation" {
+        mismatch(&worker, &runnable, &unsigned);
+        lap("mismatch");
+    }
+
+    enforced.set(
+        r#"/^\[gate.exempt\]/,/^\[/ s/^namespaces = \["kube-system"\]$/namespaces = []/"#,
+        r"namespaces = \[\]",
+    );
+    create(&worker, "kube-system", "speculaire-e2e-exempt", &signed);
+    rejected(&worker, "kube-system", "speculaire-e2e-exempt", "unmatched");
+    enforced.set(
+        r#"/^\[gate\]/,/^\[/ s/^#unmatched = "deny"$/unmatched = "allow"/"#,
+        r#"unmatched = "allow""#,
+    );
+    create(&worker, "default", "speculaire-e2e-unmatched", &signed);
+    ready(&worker, "default", "speculaire-e2e-unmatched");
+    lap("no exemption, then unmatched allowed");
+
+    // The runtime requires the plugin: without the agent, nothing starts (D64).
+    worker.cluster.stop_agent(&worker.node).unwrap();
+    create(&worker, "default", "speculaire-e2e-stopped", &signed);
+    let message = rejected(
+        &worker,
+        "default",
+        "speculaire-e2e-stopped",
+        r#"required plugin "speculaire" not present"#,
+    );
+    worker.cluster.start_agent(&worker.node).unwrap();
+    lap(&format!("agent stopped: {message}"));
+
+    cold(&worker, &runnable);
+    lap("cold node");
+    drop(enforced);
+    lap("restored");
+}
+
+/// On containerd 2.3, a container whose image name another image took after the kubelet resolved it, as a retag between
+/// the pull and the creation does, is rejected (D15, D170). The container is created as the kubelet creates it: from
+/// the image ID, naming the image as the pod spec does.
+fn mismatch(worker: &Worker, a: &str, b: &str) {
+    assert!(remove(worker, a) && remove(worker, b));
+    let dir = "/tmp/speculaire-e2e-mismatch";
+    let id = worker.sh(&format!(
+        "crictl pull {a} >/dev/null && crictl pull {b} >/dev/null && \
+         crictl inspecti -o go-template --template '{{{{.status.id}}}}' {a}"
+    ));
+    let id = id.trim();
+    let pod = r#"{"metadata":{"name":"speculaire-e2e-mismatch","namespace":"default","uid":"speculaire-e2e-mismatch"},"linux":{"cgroup_parent":"speculaire-e2e.slice"}}"#;
+    let container = format!(
+        r#"{{"metadata":{{"name":"mismatch"}},"image":{{"image":"{id}","user_specified_image":"{a}"}},"command":["sleep","3600"],"linux":{{}}}}"#
+    );
+    let sandbox = worker.sh(&format!(
+        "crictl pods -q --name speculaire-e2e-mismatch | xargs -r -n1 crictl rmp -f >/dev/null && mkdir -p {dir} && \
+         printf '%s' '{pod}' > {dir}/pod.json && printf '%s' '{container}' > {dir}/container.json && \
+         crictl runp {dir}/pod.json && ctr -n k8s.io images tag --force {b} {a} >/dev/null"
+    ));
+    let sandbox = sandbox.trim();
+    // The agent follows the retag by containerd's events: a container created before it is removed, and made again.
+    let create = format!("crictl create {sandbox} {dir}/container.json {dir}/pod.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let refused = loop {
+        let out = worker
+            .cluster
+            .exec_output(&worker.node, &["sh", "-c", &create])
+            .unwrap();
+        if out.success {
+            worker.sh(&format!("crictl rm {}", out.stdout.trim()));
+        } else if out.stderr.contains(MISMATCH) || Instant::now() > deadline {
+            break out.stderr;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    worker.sh(&format!(
+        "crictl rmp -f {sandbox} >/dev/null && rm -rf {dir}"
+    ));
+    assert!(refused.contains(MISMATCH), "{refused}");
+    assert!(remove(worker, id) && remove(worker, b));
 }
