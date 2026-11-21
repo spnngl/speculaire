@@ -30,7 +30,7 @@ fn listed(id: &str, repo_tags: &[&str], repo_digests: &[&str]) -> List {
 
 fn identify<'a>(identity: &'a impl Identity, container: &'a Container) -> Identified<'a> {
     identity
-        .identify(container)
+        .identify(&api::PodSandbox::default(), container)
         .now_or_never()
         .expect("the path reads the request alone")
 }

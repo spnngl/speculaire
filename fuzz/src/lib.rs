@@ -112,6 +112,7 @@ pub fn containerd_config(data: &[u8]) {
         let _ = Registry::try_from(raw);
     }
     let _ = containerd_config_file::load_plugins(&path);
+    let _ = containerd_config_file::load_snapshotters(&path);
 }
 
 /// A CRI-O `registries.conf` or drop-in (D66).
@@ -723,7 +724,7 @@ pub fn nri_request(data: &[u8]) {
                 Call::CreateContainer(request) => {
                     round_trips(&*request);
                     if let Some(container) = &request.container {
-                        identify(container);
+                        identify(&request.pod.clone().unwrap_or_default(), container);
                     }
                 }
                 Call::Shutdown | Call::Other { .. } => {}
@@ -740,12 +741,12 @@ pub fn nri_request(data: &[u8]) {
 
 /// Reads `container`'s image identity on both paths: a name and digest read are the request's, and an image ID listed
 /// reads as its image.
-fn identify(container: &speculaire_nri::api::Container) {
+fn identify(pod: &speculaire_nri::api::PodSandbox, container: &speculaire_nri::api::Container) {
     use speculaire_runtime::cri::ListedImage;
     use speculaire_runtime::identity::{IMAGE_REF, Identified, Identity, ImageId, Nri};
     use speculaire_runtime::images::{Image, List, Update};
 
-    if let Identified::Listed { digest, name } = ready(Nri.identify(container)) {
+    if let Identified::Listed { digest, name } = ready(Nri.identify(pod, container)) {
         let image = container
             .image
             .as_ref()
@@ -764,7 +765,7 @@ fn identify(container: &speculaire_nri::api::Container) {
     list.apply(Update::Listing(listed.iter().cloned().collect()));
     let image_id = ImageId::default();
     image_id.keep(&list);
-    match (ready(image_id.identify(container)), listed) {
+    match (ready(image_id.identify(pod, container)), listed) {
         (Identified::Image(image), Some(listed)) => assert_eq!(*image, listed),
         (Identified::Unknown(_), None) => {}
         (identified, listed) => panic!("{identified:?} for {listed:?}"),

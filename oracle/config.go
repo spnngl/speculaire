@@ -27,6 +27,9 @@ const imagesPlugin = "io.containerd.cri.v1.images"
 // nriPlugin is containerd's NRI plugin.
 const nriPlugin = "io.containerd.nri.v1.nri"
 
+// runtimePlugin is the CRI runtime service, whose configuration holds the runtime handlers.
+const runtimePlugin = "io.containerd.cri.v1.runtime"
+
 func init() {
 	// The loader warns about every unknown key; cases are not the place to read that.
 	logrus.SetOutput(io.Discard)
@@ -60,7 +63,10 @@ type Registry struct {
 type Plugins struct {
 	DiscardUnpackedLayers bool   `json:"discard_unpacked_layers"`
 	Snapshotter           string `json:"snapshotter"`
-	NRI                   NRI    `json:"nri"`
+	DefaultRuntimeName    string `json:"default_runtime_name"`
+	// RuntimeSnapshotters is the snapshotter of each runtime handler that names one.
+	RuntimeSnapshotters map[string]string `json:"runtime_snapshotters"`
+	NRI                 NRI               `json:"nri"`
 }
 
 // NRI is the NRI plugin's settings, and whether the daemon's `disabled_plugins` names it.
@@ -82,6 +88,16 @@ type ConfigAnswer struct {
 type criImages struct {
 	DiscardUnpackedLayers bool   `json:"discardUnpackedLayers"`
 	Snapshotter           string `json:"snapshotter"`
+}
+
+// criRuntime is the part of the CRI runtime config the oracle reads, through its JSON tags.
+type criRuntime struct {
+	Containerd struct {
+		DefaultRuntimeName string `json:"defaultRuntimeName"`
+		Runtimes           map[string]struct {
+			Snapshotter string `json:"snapshotter"`
+		} `json:"runtimes"`
+	} `json:"containerd"`
 }
 
 // criNRI is the part of the NRI config the oracle reads, through its JSON tags.
@@ -179,7 +195,11 @@ func loadRegistry(ctx context.Context, path string) ConfigAnswer {
 	if err != nil {
 		return ConfigAnswer{Error: err.Error()}
 	}
-	return ConfigAnswer{Registry: registryOf(images), Plugins: pluginsOf(images, nri, config)}
+	runtime, err := decodePlugin(ctx, graph, config, runtimePlugin)
+	if err != nil {
+		return ConfigAnswer{Error: err.Error()}
+	}
+	return ConfigAnswer{Registry: registryOf(images), Plugins: pluginsOf(images, nri, runtime, config)}
 }
 
 // decodePlugin decodes the section of the plugin with this URI as the daemon does.
@@ -241,13 +261,14 @@ func deepCopy(v reflect.Value) reflect.Value {
 	}
 }
 
-func pluginsOf(images, nri any, config *srvconfig.Config) *Plugins {
+func pluginsOf(images, nri, runtime any, config *srvconfig.Config) *Plugins {
 	var i criImages
 	var n criNRI
+	var r criRuntime
 	for _, c := range []struct {
 		from any
 		to   any
-	}{{images, &i}, {nri, &n}} {
+	}{{images, &i}, {nri, &n}, {runtime, &r}} {
 		raw, err := json.Marshal(c.from)
 		if err != nil {
 			panic(err)
@@ -260,9 +281,17 @@ func pluginsOf(images, nri any, config *srvconfig.Config) *Plugins {
 	if n.DefaultValidator != nil && n.DefaultValidator.RequiredPlugins != nil {
 		required = n.DefaultValidator.RequiredPlugins
 	}
+	handlers := map[string]string{}
+	for name, handler := range r.Containerd.Runtimes {
+		if handler.Snapshotter != "" {
+			handlers[name] = handler.Snapshotter
+		}
+	}
 	return &Plugins{
 		DiscardUnpackedLayers: i.DiscardUnpackedLayers,
 		Snapshotter:           i.Snapshotter,
+		DefaultRuntimeName:    r.Containerd.DefaultRuntimeName,
+		RuntimeSnapshotters:   handlers,
 		NRI: NRI{
 			Disable:            n.Disable,
 			DisableConnections: n.DisableConnections,

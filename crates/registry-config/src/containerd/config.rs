@@ -1,9 +1,10 @@
 //! containerd's `config.toml`: the registry section the CRI image service reads (D17).
 //!
 //! Ported from containerd's `cmd/containerd/server/config/config.go` at v2.4.2 (`LoadConfigWithPlugins`,
-//! `resolveImports`, `mergeConfig`, the migrations of config versions 1 to 3), the image service's migration
-//! (`plugins/cri/images/plugin.go:configMigration`) and `internal/cri/config/config.go` (`Registry`,
-//! `ValidateImageConfig`). The `config` tests run it against containerd's own loader.
+//! `resolveImports`, `mergeConfig`, the migrations of config versions 1 to 3), the image and runtime services'
+//! migrations (`plugins/cri/images/plugin.go:configMigration`, `plugins/cri/runtime/plugin.go:configMigration`) and
+//! `internal/cri/config/config.go` (`Registry`, `ValidateImageConfig`). The `config` tests run it against
+//! containerd's own loader.
 //!
 //! A config of version 1 or 2 keeps the registry under `plugins."io.containerd.grpc.v1.cri".registry`, a config of
 //! version 3 or 4 under `plugins."io.containerd.cri.v1.images".registry`; containerd migrates the older in memory and
@@ -35,6 +36,7 @@ const CONFIG_VERSION: i64 = 4;
 const CRI_PLUGIN: &str = "io.containerd.grpc.v1.cri";
 const IMAGES_PLUGIN: &str = "io.containerd.cri.v1.images";
 const NRI_PLUGIN: &str = "io.containerd.nri.v1.nri";
+const RUNTIME_PLUGIN: &str = "io.containerd.cri.v1.runtime";
 /// `config_path` when the config sets neither it nor `mirrors` (`plugins/cri/images/plugin.go:76`).
 const DEFAULT_CONFIG_PATH: &str = "/etc/containerd/certs.d:/etc/docker/certs.d";
 
@@ -294,6 +296,9 @@ pub enum LoadError {
     /// The NRI section of the merged config is not valid.
     #[error("invalid NRI section of the config")]
     Nri(#[source] ParseError),
+    /// The CRI runtime section of the merged config is not valid.
+    #[error("invalid CRI runtime section of the config")]
+    Runtime(#[source] ParseError),
     /// containerd would refuse the registry section.
     #[error(transparent)]
     Refused(#[from] RegistryError),
@@ -405,26 +410,89 @@ impl Nri {
 
 /// What the agent reads of containerd's plugin sections besides the registry (D15, D54, D86); the default is what
 /// containerd runs on without a config file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plugins {
     /// `discard_unpacked_layers` of the image service: containerd drops the layers it has unpacked, so the node
     /// cannot serve them.
     pub discard_unpacked_layers: bool,
-    /// `snapshotter` of the image service: the one containers are created on, unless their runtime handler names
-    /// another (D170).
-    pub snapshotter: String,
     /// The NRI plugin.
     pub nri: Nri,
 }
 
-impl Default for Plugins {
+/// The runtime handler of a pod that names none, unless the config names another (v2.3.7
+/// `internal/cri/config/config_unix.go:91`).
+pub const DEFAULT_RUNTIME: &str = "runc";
+
+/// The snapshotters containerd creates containers on (D170, D171); the default is what containerd runs on without a
+/// config file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshotters {
+    /// `snapshotter` of the image service, as set: empty when the config sets it empty.
+    pub images: String,
+    /// `containerd.default_runtime_name` of the CRI runtime service.
+    pub default_runtime: String,
+    /// `snapshotter` of each runtime handler under `containerd.runtimes` of the CRI runtime service, as set.
+    pub handlers: BTreeMap<String, String>,
+}
+
+impl Default for Snapshotters {
     fn default() -> Self {
         Self {
-            discard_unpacked_layers: false,
-            snapshotter: default_snapshotter(),
-            nri: Nri::default(),
+            images: default_snapshotter(),
+            default_runtime: DEFAULT_RUNTIME.to_owned(),
+            handlers: BTreeMap::new(),
         }
     }
+}
+
+impl Snapshotters {
+    /// The snapshotter of the containers of a pod run by `handler`, the default handler when empty
+    /// (`internal/cri/config/config.go:750`): the handler's own, else the image service's (v2.3.7
+    /// `internal/cri/server/images/service.go:191`), else the default one, as containerd's client picks for an empty
+    /// name.
+    #[must_use]
+    pub fn of(&self, handler: &str) -> &str {
+        let handler = if handler.is_empty() {
+            &self.default_runtime
+        } else {
+            handler
+        };
+        [self.handlers.get(handler), Some(&self.images)]
+            .into_iter()
+            .flatten()
+            .find(|snapshotter| !snapshotter.is_empty())
+            .map_or(DEFAULT_SNAPSHOTTER, String::as_str)
+    }
+}
+
+/// The CRI runtime service's section, of which only `containerd.default_runtime_name` and each runtime's
+/// `snapshotter` are read.
+#[derive(Deserialize, Default)]
+struct RawRuntime {
+    #[serde(default)]
+    containerd: RawContainerd,
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct RawContainerd {
+    default_runtime_name: String,
+    runtimes: BTreeMap<String, RawHandler>,
+}
+
+impl Default for RawContainerd {
+    fn default() -> Self {
+        Self {
+            default_runtime_name: DEFAULT_RUNTIME.to_owned(),
+            runtimes: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RawHandler {
+    #[serde(default)]
+    snapshotter: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -520,7 +588,6 @@ pub fn load_plugins(path: &Path) -> Result<Plugins, LoadError> {
     let nri = from_value::<RawNri>(Value::Table(nri)).map_err(LoadError::Nri)?;
     Ok(Plugins {
         discard_unpacked_layers: images.discard_unpacked_layers,
-        snapshotter: images.snapshotter,
         nri: Nri {
             disable: nri.disable,
             disable_connections: nri.disable_connections,
@@ -528,6 +595,49 @@ pub fn load_plugins(path: &Path) -> Result<Plugins, LoadError> {
             required_plugins: nri.default_validator.required_plugins,
             request_timeout: nri.plugin_request_timeout,
         },
+    })
+}
+
+/// The CRI runtime service's section of the merged config, decoded as the daemon does.
+fn runtime_section(merged: &mut Merged) -> Result<RawRuntime, LoadError> {
+    let mut runtime = match merged.plugins.remove(RUNTIME_PLUGIN) {
+        None => return Ok(RawRuntime::default()),
+        Some(Value::Table(runtime)) => runtime,
+        Some(_) => {
+            return Err(LoadError::Runtime(ParseError::new(
+                format!("plugins.{RUNTIME_PLUGIN:?}"),
+                "is not a table",
+            )));
+        }
+    };
+    fold_value_fields(&mut runtime, &["containerd"]);
+    if let Some(containerd) = value_table_at(&mut runtime, "containerd") {
+        fold_value_fields(containerd, &["default_runtime_name", "runtimes"]);
+        if let Some(runtimes) = value_table_at(containerd, "runtimes") {
+            value_tables_in(runtimes)
+                .for_each(|handler| fold_value_fields(handler, &["snapshotter"]));
+        }
+    }
+    from_value::<RawRuntime>(Value::Table(runtime)).map_err(LoadError::Runtime)
+}
+
+/// Loads `path` and its imports, and returns the snapshotters of the image and runtime services.
+///
+/// # Errors
+///
+/// As [`load_raw`], and when the runtime section is not a valid one.
+pub fn load_snapshotters(path: &Path) -> Result<Snapshotters, LoadError> {
+    let mut merged = load_merged(path)?;
+    let images = images_section(&mut merged)?;
+    let runtime = runtime_section(&mut merged)?.containerd;
+    Ok(Snapshotters {
+        images: images.snapshotter,
+        default_runtime: runtime.default_runtime_name,
+        handlers: runtime
+            .runtimes
+            .into_iter()
+            .map(|(name, handler)| (name, handler.snapshotter))
+            .collect(),
     })
 }
 
@@ -620,8 +730,9 @@ fn validate(merged: &Merged) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// What containerd's migrations make of a file's plugin sections, for the registry: version 1 plugin names become
-/// URIs, and before version 4 the image service's section takes `registry` from the CRI plugin's.
+/// What containerd's migrations make of a file's plugin sections, for the agent: version 1 plugin names become URIs,
+/// and before version 4 the image service's section takes `registry` from the CRI plugin's, and the runtime service's
+/// takes `[containerd]`.
 fn migrate(file: &mut File) -> Result<(), ParseError> {
     if file.version >= CONFIG_VERSION {
         return Ok(());
@@ -654,6 +765,10 @@ fn migrate(file: &mut File) -> Result<(), ParseError> {
     };
     let registry = cri.get("registry").cloned();
     let carried = carried(cri)?;
+    let containerd = match cri.get("containerd") {
+        Some(Value::Table(containerd)) => Some(containerd.clone()),
+        _ => None,
+    };
     let mut images = match file.plugins.remove(IMAGES_PLUGIN) {
         None => Table::new(),
         Some(Value::Table(table)) => table,
@@ -683,7 +798,36 @@ fn migrate(file: &mut File) -> Result<(), ParseError> {
     }
     file.plugins
         .insert(IMAGES_PLUGIN.to_owned(), Value::Table(images));
+    if let Some(containerd) = containerd {
+        migrate_runtime(&mut file.plugins, containerd);
+    }
     Ok(())
+}
+
+/// `migrateConfig` of the runtime service (`plugins/cri/runtime/plugin.go`, v2.4.2): each key of `[containerd]` of
+/// the CRI plugin but those the image service takes goes to the runtime service's `[containerd]`, where that sets
+/// none. A section of the runtime service that is not a table is replaced.
+fn migrate_runtime(plugins: &mut Table, carried: Table) {
+    const TAKEN: &[&str] = &[
+        "snapshotter",
+        "disable_snapshot_annotations",
+        "discard_unpacked_layers",
+    ];
+    let mut runtime = match plugins.remove(RUNTIME_PLUGIN) {
+        Some(Value::Table(runtime)) => runtime,
+        _ => Table::new(),
+    };
+    let mut containerd = match runtime.remove("containerd") {
+        Some(Value::Table(containerd)) => containerd,
+        _ => Table::new(),
+    };
+    for (key, value) in carried {
+        if !TAKEN.contains(&key.as_str()) {
+            containerd.entry(key).or_insert(value);
+        }
+    }
+    runtime.insert("containerd".to_owned(), Value::Table(containerd));
+    plugins.insert(RUNTIME_PLUGIN.to_owned(), Value::Table(runtime));
 }
 
 /// What `migrateConfig` takes from `[containerd]` of the CRI plugin.
@@ -879,13 +1023,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let conf = dir.path().join("config.toml");
         let cri = "[plugins.\"io.containerd.grpc.v1.cri\".containerd]\nsnapshotter = \"native\"\n";
+        let images = "[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter";
         for (text, snapshotter) in [
             ("version = 3\n".to_owned(), "overlayfs"),
-            (
-                "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = \"zfs\"\n"
-                    .to_owned(),
-                "zfs",
-            ),
+            (format!("version = 3\n{images} = \"zfs\"\n"), "zfs"),
+            (format!("version = 3\n{images} = \"\"\n"), "overlayfs"),
             (format!("version = 2\n{cri}"), "overlayfs"),
             (
                 format!(
@@ -895,10 +1037,84 @@ mod tests {
             ),
         ] {
             std::fs::write(&conf, &text).expect("a file");
-            let plugins = load_plugins(&conf).expect("a valid config");
-            assert_eq!(plugins.snapshotter, snapshotter, "{text}");
+            let snapshotters = load_snapshotters(&conf).expect("a valid config");
+            assert_eq!(snapshotters.of(""), snapshotter, "{text}");
         }
-        assert_eq!(Plugins::default().snapshotter, DEFAULT_SNAPSHOTTER);
+        assert_eq!(Snapshotters::default().of(""), DEFAULT_SNAPSHOTTER);
+    }
+
+    /// A runtime handler's snapshotter comes before the image service's, the default handler's for a pod that names
+    /// none, and version 2 keeps the handlers in the CRI plugin (D171).
+    #[test]
+    fn a_runtime_handler_s_snapshotter_comes_before_the_image_service_s() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let conf = dir.path().join("config.toml");
+        let runtime = "[plugins.\"io.containerd.cri.v1.runtime\".containerd";
+        let cri = "[plugins.\"io.containerd.grpc.v1.cri\".containerd";
+        let kata = format!("{runtime}.runtimes.kata]\nsnapshotter = \"devmapper\"\n");
+        for (text, handler, snapshotter) in [
+            (format!("version = 3\n{kata}"), "kata", "devmapper"),
+            (format!("version = 3\n{kata}"), "runc", "overlayfs"),
+            (format!("version = 3\n{kata}"), "", "overlayfs"),
+            (format!("version = 3\n{kata}"), "unknown", "overlayfs"),
+            (
+                format!("version = 3\n{kata}{runtime}]\ndefault_runtime_name = \"kata\"\n"),
+                "",
+                "devmapper",
+            ),
+            (
+                "version = 3\n[plugins.\"io.containerd.cri.v1.runtime\".Containerd.Runtimes.kata]\nSnapshotter = \"devmapper\"\n".to_owned(),
+                "kata",
+                "devmapper",
+            ),
+            (
+                format!(
+                    "version = 3\n{runtime}.runtimes.kata]\nsnapshotter = \"\"\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = \"zfs\"\n"
+                ),
+                "kata",
+                "zfs",
+            ),
+            (
+                format!("version = 2\n{cri}]\ndefault_runtime_name = \"kata\"\n{cri}.runtimes.kata]\nsnapshotter = \"devmapper\"\n"),
+                "",
+                "devmapper",
+            ),
+            (
+                format!("version = 2\n{cri}.runtimes.a]\nsnapshotter = \"x\"\n{runtime}.runtimes.b]\nsnapshotter = \"y\"\n"),
+                "a",
+                "overlayfs",
+            ),
+            (
+                format!("version = 2\n{cri}.runtimes.a]\nsnapshotter = \"x\"\n{runtime}.runtimes.b]\nsnapshotter = \"y\"\n"),
+                "b",
+                "y",
+            ),
+            (
+                format!("version = 2\n{cri}.runtimes.a]\nsnapshotter = \"x\"\n[plugins.\"io.containerd.cri.v1.runtime\"]\ncontainerd = 1\n"),
+                "a",
+                "x",
+            ),
+            (
+                format!("version = 4\n{cri}.runtimes.kata]\nsnapshotter = \"devmapper\"\n"),
+                "kata",
+                "overlayfs",
+            ),
+        ] {
+            std::fs::write(&conf, &text).expect("a file");
+            let snapshotters = load_snapshotters(&conf).expect("a valid config");
+            assert_eq!(snapshotters.of(handler), snapshotter, "{handler:?} in {text}");
+        }
+        for text in [
+            "version = 3\n[plugins]\n\"io.containerd.cri.v1.runtime\" = 1\n".to_owned(),
+            format!("version = 3\n{runtime}]\nruntimes = 1\n"),
+            format!("version = 3\n{runtime}.runtimes.kata]\nsnapshotter = 1\n"),
+        ] {
+            std::fs::write(&conf, &text).expect("a file");
+            assert!(
+                matches!(load_snapshotters(&conf), Err(LoadError::Runtime(_))),
+                "{text}"
+            );
+        }
     }
 
     /// `migrateConfig` type-asserts `pinned_images` always, and `runtime_platform` only past `runtimes`.

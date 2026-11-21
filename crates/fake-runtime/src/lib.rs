@@ -148,13 +148,15 @@ pub struct Answers {
     pub image_store: Vec<(String, String)>,
     /// Whether containerd's images `Get` answers `Unavailable`, as a containerd going away does.
     pub image_get_unavailable: bool,
-    /// The snapshots of containerd's snapshots `Stat`, whatever the snapshotter and namespace.
+    /// The snapshots of containerd's snapshots `Stat`, whatever the namespace.
     pub snapshots: Vec<Snapshot>,
 }
 
 /// A snapshot of containerd.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
+    /// The snapshotter that holds it.
+    pub snapshotter: String,
     /// Its key.
     pub key: String,
     /// The key of the snapshot it rests on, or empty.
@@ -600,7 +602,8 @@ async fn stored_image(
         .await
 }
 
-/// containerd's snapshots `Stat`: the snapshot of `Answers::snapshots` with the key asked, or `NotFound`.
+/// containerd's snapshots `Stat`: the snapshot of `Answers::snapshots` with the snapshotter and key asked, or
+/// `NotFound`.
 async fn stat(
     answers: Arc<Answers>,
     request: http::Request<hyper::body::Incoming>,
@@ -608,11 +611,11 @@ async fn stat(
     let service = tower::service_fn(move |asked: Request<StatSnapshotRequest>| {
         let answers = Arc::clone(&answers);
         async move {
-            let key = asked.into_inner().key;
+            let StatSnapshotRequest { snapshotter, key } = asked.into_inner();
             answers
                 .snapshots
                 .iter()
-                .find(|snapshot| snapshot.key == key)
+                .find(|snapshot| snapshot.snapshotter == snapshotter && snapshot.key == key)
                 .map(|snapshot| {
                     Response::new(StatSnapshotResponse {
                         info: Some(snapshots::Info {
