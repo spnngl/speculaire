@@ -320,7 +320,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Measured (M6 step 10, kind on arm64, Kubernetes 1.37):** the cold-node pod met `verification pending` twice on containerd 2.3 before the change, 20 s of back-off, and started at its first try after it, counted under `gate_miss`. `speculaire_gate_seconds` p99 under `enforce`, over seven decisions, across runs: `image_id` 40–61 µs on CRI-O 1.37, `nri` 0.07–20 ms on containerd 2.4, `annotation` 0.35–20 ms on containerd 2.3, under the 150 ms bound, half of `gate.wait`. The enforce cases take 44–47 s per leg.
 - **Revisit when:** `cache.bin` (step 12) keeps verdicts over a restart: a cold node then starts from them.
 
-## D175: The containers of NRI `Synchronize` become discovery roots under `trigger="synchronize"`, and the gate warns of each one a verdict does not allow (amends D22, D155, D172)
+## D175: The containers of NRI `Synchronize` become discovery roots under `trigger="synchronize"`, and the gate warns of each one a verdict does not allow (amends D22, D155, D172; amended by D176)
 
 - **Decision:**
   - **Roots:** the gate keeps the containers of the latest `Synchronize`, created, running or paused. It reads each one's identity as for `CreateContainer` (D169, D170), and sends each manifest to the engine as `Asked { by: Asking::Synchronize }`, which discovers it at once, as any root no list named yet. An identity read before the image list (`Identified::Unlisted`) or containerd's image store (`image name not in containerd's image store`) loaded is read again every 100 ms for 5 s, and at each verdict or list kept. A container in an exempt namespace is skipped.

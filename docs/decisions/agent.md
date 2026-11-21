@@ -206,7 +206,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Measured (M2 step 03, arm64, Docker):** on a worker of each runtime, `unconfigure` with the validator requiring `speculaire` (containerd: the `config.toml` key; CRI-O: a `crio.conf.d` drop-in and `systemctl restart crio`) exited non-zero, naming the key, and changed no file; with the socket of the runtime moved aside (neither), and with a stand-in socket where the other runtime's would be (both), all three commands refused naming both paths (CI run 43182634661, 14 legs).
 - **Revisit when:** a node runs both runtimes.
 
-## D87: The runtime's sockets and containerd's config file are restart keys, and the agent's tests run against a fake containerd (amends D60)
+## D87: The runtime's sockets and containerd's config file are restart keys, and the agent's tests run against a fake containerd (amends D60; amended by D176)
 
 - **Decision:**
   - **Keys:** `[runtime]` has `containerd_socket` (`/run/containerd/containerd.sock`), `containerd_config` (`/etc/containerd/config.toml`) and `crio_socket` (`/var/run/crio/crio.sock`), absolute paths, restart keys (D47). The agent, `configure`, `unconfigure` and `check-config` all read them, through `speculaire_agent::node::Node`, so a node whose runtime lives elsewhere is set up and checked the same way. The mirror's content service reads `runtime.containerd_socket` too.

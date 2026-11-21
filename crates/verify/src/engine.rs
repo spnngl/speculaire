@@ -451,7 +451,7 @@ pub struct Engine<D> {
     /// The policies verified against, swapped as a whole when `policy_feed` changes (D21).
     policies: Arc<Policies>,
     policy_feed: watch::Receiver<Arc<Policies>>,
-    signatures: Signatures,
+    signatures: Arc<Signatures>,
     /// The trust root verified against, swapped as a whole when `trust` changes (D21).
     held: Held,
     trust: watch::Receiver<Held>,
@@ -482,7 +482,7 @@ impl<D: Discover> Engine<D> {
             discovery,
             policies: current,
             policy_feed: policies,
-            signatures,
+            signatures: Arc::new(signatures),
             held,
             trust,
             verdicts: Arc::default(),
@@ -498,6 +498,12 @@ impl<D: Discover> Engine<D> {
     #[must_use]
     pub fn verdicts(&self) -> &Arc<Verdicts> {
         &self.verdicts
+    }
+
+    /// The signature results the engine keeps.
+    #[must_use]
+    pub fn signatures(&self) -> &Arc<Signatures> {
+        &self.signatures
     }
 
     /// Where the gate asks for the roots no list named yet (D22).
