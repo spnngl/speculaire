@@ -39,6 +39,15 @@ impl Runtime {
             Self::Crio => "cri-o",
         }
     }
+
+    /// The runtime's systemd unit on a node.
+    #[must_use]
+    pub fn unit(self) -> &'static str {
+        match self {
+            Self::Containerd => "containerd",
+            Self::Crio => "crio",
+        }
+    }
 }
 
 /// The addresses of the cluster's nodes, which `SPECULAIRE_E2E_IP_FAMILY` picks (D94).

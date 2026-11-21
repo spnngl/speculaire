@@ -16,7 +16,7 @@ use std::process::Stdio;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use e2e::node::POLICY;
+use e2e::node::{POLICY, STATE};
 use e2e::upstream::{FIXTURES, Kind, RUNNABLE, SIGNED, UNSIGNED, runnable_policy};
 use e2e::{Cluster, IpFamily, Runtime};
 use speculaire_oci::chain::of_config;
@@ -217,9 +217,6 @@ const MIRROR: &str = "https://127.0.0.1:7480";
 const MIRROR_DIR: &str = "/var/lib/speculaire/mirror";
 /// Where a test points `nri.socket`, to hold the agent before its registration.
 const HELD: &str = "/run/speculaire-e2e/nri.sock";
-/// The agent's `/readyz` and `speculaire_nri_connected`, as one line: `200 1` when registered.
-const STATE: &str = "state() { echo \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7482/readyz) \
-                     $(curl -s http://127.0.0.1:7482/metrics | sed -n 's/^speculaire_nri_connected //p')\"; }";
 
 /// A worker that is not a reflector, whose readiness waits for the gate alone, on the IPv4 pass.
 struct Worker {
@@ -256,52 +253,6 @@ impl Worker {
         self.cluster
             .exec(&self.node, &["sh", "-c", script])
             .unwrap()
-    }
-
-    /// Restarts the node's runtime, and returns each change of the agent's state from before the restart until the
-    /// agent is registered again, as `<ms since the restart> <readyz> <speculaire_nri_connected>`.
-    fn restart_runtime(&self) -> Vec<String> {
-        let service = match self.cluster.runtime() {
-            Runtime::Containerd => "containerd",
-            Runtime::Crio => "crio",
-        };
-        // Polled on the node: a registration takes milliseconds, less than an exec from the host.
-        let changes = self.sh(&format!(
-            "{STATE}
-             last=$(state); echo \"0 $last\"; away=0
-             start=$(date +%s%N); end=$((start + 30000000000))
-             systemctl restart {service} &
-             while [ \"$(date +%s%N)\" -lt \"$end\" ]; do
-                 s=$(state)
-                 if [ \"$s\" != \"$last\" ]; then echo \"$((($(date +%s%N) - start) / 1000000)) $s\"; last=$s; fi
-                 if [ \"$s\" = '200 1' ]; then [ $away = 1 ] && break; else away=1; fi
-                 sleep 0.02
-             done
-             wait"
-        ));
-        self.wait_runtime();
-        changes.lines().map(str::to_owned).collect()
-    }
-
-    /// Waits until the runtime answers, so that kubelet and the next suite find it.
-    fn wait_runtime(&self) {
-        let check = match self.cluster.runtime() {
-            Runtime::Containerd => "crictl version",
-            Runtime::Crio => "crictl version && crio status config | grep -q nri",
-        };
-        let deadline = Instant::now() + Duration::from_secs(90);
-        while !self
-            .cluster
-            .exec_output(&self.node, &["sh", "-c", check])
-            .is_ok_and(|o| o.success)
-        {
-            assert!(
-                Instant::now() < deadline,
-                "{}: the runtime is not back",
-                self.node
-            );
-            std::thread::sleep(Duration::from_millis(500));
-        }
     }
 
     /// The agent's `speculaire_build_info` series, each as its labels and value.
@@ -347,7 +298,7 @@ fn parent(path: &str) -> &str {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn the_gate_registers_again_after_the_runtime_restarts() {
     let Some(worker) = Worker::new() else { return };
-    let changes = worker.restart_runtime();
+    let changes = worker.cluster.restart_runtime(&worker.node).unwrap();
     eprintln!("{}: {changes:?}", worker.node);
     let states: Vec<&str> = changes
         .iter()
@@ -771,12 +722,11 @@ impl<'a> Enforced<'a> {
 
     /// Restarts the runtime, and waits until it answers and the agent is registered again.
     fn restart_runtime(&self) {
-        self.worker.sh(match self.worker.cluster.runtime() {
-            Runtime::Containerd => "systemctl restart containerd",
-            Runtime::Crio => "systemctl restart crio",
-        });
-        self.worker.wait_runtime();
-        self.worker.cluster.wait_ready(&self.worker.node).unwrap();
+        let (cluster, node) = (&self.worker.cluster, &self.worker.node);
+        self.worker
+            .sh(&format!("systemctl restart {}", cluster.runtime().unit()));
+        cluster.wait_runtime(node).unwrap();
+        cluster.wait_ready(node).unwrap();
     }
 }
 
@@ -875,6 +825,11 @@ fn start(worker: &Worker, namespace: &str, pod: &str, image: &str) {
         .unwrap();
 }
 
+/// [`Cluster::rejected`] on the worker.
+fn rejected(worker: &Worker, namespace: &str, pod: &str, reason: &str) -> String {
+    worker.cluster.rejected(namespace, pod, reason).unwrap()
+}
+
 /// Waits until `pod` is ready, then deletes it, and returns the creation errors the kubelet met on the way: the
 /// messages of its `Failed` events, each as many times as the kubelet counted it.
 fn ready(worker: &Worker, namespace: &str, pod: &str) -> Vec<String> {
@@ -908,47 +863,6 @@ fn ready(worker: &Worker, namespace: &str, pod: &str) -> Vec<String> {
             std::iter::repeat_n(message.to_owned(), count)
         })
         .collect()
-}
-
-/// Waits until the creation of `pod`'s container fails with a message that holds `reason`, then deletes the pod, and
-/// returns the message.
-fn rejected(worker: &Worker, namespace: &str, pod: &str, reason: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(90);
-    let mut state = String::new();
-    while Instant::now() < deadline {
-        state = worker
-            .cluster
-            .kubectl(&[
-                "get",
-                "pod",
-                "-n",
-                namespace,
-                pod,
-                "-o",
-                r#"jsonpath={.status.containerStatuses[0].state.waiting.reason}{"\n"}{.status.containerStatuses[0].state.waiting.message}"#,
-            ])
-            .unwrap();
-        if let Some(("CreateContainerError", message)) = state.split_once('\n')
-            && message.contains(reason)
-        {
-            let message = message.to_owned();
-            worker
-                .cluster
-                .kubectl(&[
-                    "delete",
-                    "pod",
-                    "-n",
-                    namespace,
-                    pod,
-                    "--now",
-                    "--timeout=60s",
-                ])
-                .unwrap();
-            return message;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    panic!("{pod}: no creation error holding {reason:?}, last {state:?}")
 }
 
 /// The decisions of the worker's agent since it started, on a verdict at hand or after a wait, take under half of
