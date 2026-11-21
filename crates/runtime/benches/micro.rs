@@ -8,7 +8,7 @@ use std::time::Duration;
 use divan::Bencher;
 use futures_util::TryStreamExt as _;
 use speculaire_fake_runtime::{Answers, Fake, Snapshot};
-use speculaire_nri::api::Container;
+use speculaire_nri::api::{Container, PodSandbox};
 use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::containerd::Containerd;
@@ -169,6 +169,7 @@ fn identity_check(bencher: Bencher<'_, '_>) {
     let mut answers = Answers::containerd("2.3.7");
     answers.image_store = vec![("registry.test/team/app:1.0".to_owned(), target.to_string())];
     answers.snapshots = vec![Snapshot {
+        snapshotter: "overlayfs".to_owned(),
         key: "container".to_owned(),
         parent: chain.to_string(),
         labels: Vec::new(),
@@ -196,14 +197,17 @@ fn identity_check(bencher: Bencher<'_, '_>) {
     // The store is read, and the chain ID kept, before the first sample.
     runtime.block_on(async {
         while !matches!(
-            annotation.identify(&container).await,
+            annotation
+                .identify(&PodSandbox::default(), &container)
+                .await,
             Identified::Listed { .. }
         ) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     });
     bencher.bench_local(|| {
-        let identified = runtime.block_on(annotation.identify(black_box(&container)));
+        let identified =
+            runtime.block_on(annotation.identify(&PodSandbox::default(), black_box(&container)));
         assert!(matches!(identified, Identified::Listed { .. }));
     });
 }

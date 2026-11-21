@@ -5,7 +5,7 @@
 
 use futures_util::FutureExt as _;
 use prost::Message as _;
-use speculaire_nri::api::{Container, CreateContainerRequest};
+use speculaire_nri::api::{Container, CreateContainerRequest, PodSandbox};
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::cri::ListedImage;
 use speculaire_runtime::identity::{Identified, Identity, ImageId, Nri};
@@ -54,7 +54,7 @@ fn list(path: &str) -> List {
 
 fn identify<'a>(identity: &'a impl Identity, container: &'a Container) -> Identified<'a> {
     identity
-        .identify(container)
+        .identify(&PodSandbox::default(), container)
         .now_or_never()
         .expect("the path reads the request alone")
 }

@@ -7,6 +7,7 @@ use serde_json::json;
 use speculaire_fake_runtime::{Answers, Fake, Snapshot};
 use speculaire_oci::hash;
 use speculaire_oci::referrers::{INDEX, MANIFEST};
+use speculaire_registry_config::containerd::config::DEFAULT_SNAPSHOTTER;
 
 use super::*;
 use crate::paths::Paths;
@@ -100,6 +101,7 @@ fn put(root: &Path, blobs: &[(Digest, Vec<u8>)]) {
 
 fn snapshot(key: &str, parent: &str, mapped: bool) -> Snapshot {
     Snapshot {
+        snapshotter: DEFAULT_SNAPSHOTTER.to_owned(),
         key: key.to_owned(),
         parent: parent.to_owned(),
         labels: if mapped {
@@ -127,6 +129,14 @@ fn node(image: &Image, snapshots: Vec<Snapshot>) -> (Fake, Annotation, tempfile:
     (fake, annotation, dir)
 }
 
+/// A pod run by `handler`.
+fn pod(handler: &str) -> PodSandbox {
+    PodSandbox {
+        runtime_handler: handler.to_owned(),
+        ..PodSandbox::default()
+    }
+}
+
 fn container(name: Option<&str>) -> Container {
     Container {
         id: CONTAINER.to_owned(),
@@ -146,7 +156,7 @@ async fn a_container_on_its_image_s_layers_is_identified_by_the_image_s_target_a
         vec![snapshot(CONTAINER, &image.amd64.to_string(), false)],
     );
     let container = container(Some(NAME));
-    let identified = annotation.identify(&container).await;
+    let identified = annotation.identify(&pod(""), &container).await;
     assert_eq!(
         identified,
         Identified::Listed {
@@ -165,7 +175,7 @@ async fn a_container_on_another_image_s_layers_is_a_mismatch() {
         vec![snapshot(CONTAINER, &image.arm64.to_string(), false)],
     );
     assert_eq!(
-        annotation.identify(&container(Some(NAME))).await,
+        annotation.identify(&pod(""), &container(Some(NAME))).await,
         Identified::Mismatched
     );
 }
@@ -190,7 +200,10 @@ async fn a_user_namespaced_container_is_checked_on_its_grandparent_in_two_stats(
                 snapshot("remapped", &grandparent.to_string(), true),
             ],
         );
-        assert_eq!(annotation.identify(&container(Some(NAME))).await, want);
+        assert_eq!(
+            annotation.identify(&pod(""), &container(Some(NAME))).await,
+            want
+        );
         assert_eq!(fake.stats(), 2);
     }
 }
@@ -217,7 +230,7 @@ async fn the_name_is_normalised_as_containerd_names_its_images() {
         let container = container(Some(name));
         assert!(
             matches!(
-                annotation.identify(&container).await,
+                annotation.identify(&pod(""), &container).await,
                 Identified::Listed { .. }
             ),
             "{name}"
@@ -230,28 +243,30 @@ async fn each_missing_link_is_its_own_unverifiable_reason() {
     let image = image();
     let (_fake, annotation, dir) = node(&image, Vec::new());
     assert_eq!(
-        annotation.identify(&container(None)).await,
-        Identified::Unknown(MISSING)
-    );
-    assert_eq!(
-        annotation.identify(&container(Some("Not A Name"))).await,
+        annotation.identify(&pod(""), &container(None)).await,
         Identified::Unknown(MISSING)
     );
     assert_eq!(
         annotation
-            .identify(&container(Some("reg.test/app:2")))
+            .identify(&pod(""), &container(Some("Not A Name")))
+            .await,
+        Identified::Unknown(MISSING)
+    );
+    assert_eq!(
+        annotation
+            .identify(&pod(""), &container(Some("reg.test/app:2")))
             .await,
         Identified::Unknown(NOT_STORED)
     );
     assert_eq!(
-        annotation.identify(&container(Some(NAME))).await,
+        annotation.identify(&pod(""), &container(Some(NAME))).await,
         Identified::Unknown(NO_SNAPSHOT),
         "the container has no snapshot"
     );
     std::fs::remove_dir_all(dir.path().join("var/lib/containerd")).unwrap();
     annotation.chains().clear();
     assert_eq!(
-        annotation.identify(&container(Some(NAME))).await,
+        annotation.identify(&pod(""), &container(Some(NAME))).await,
         Identified::Unknown(NO_CHAIN),
         "the image's blobs are gone"
     );
@@ -274,7 +289,7 @@ async fn an_image_s_chain_id_is_read_once() {
     let containers = [container(Some(NAME)), container(Some("reg.test/app:2"))];
     for container in &containers {
         assert!(matches!(
-            annotation.identify(container).await,
+            annotation.identify(&pod(""), container).await,
             Identified::Listed { .. }
         ));
     }
@@ -282,7 +297,7 @@ async fn an_image_s_chain_id_is_read_once() {
     for container in &containers {
         assert!(
             matches!(
-                annotation.identify(container).await,
+                annotation.identify(&pod(""), container).await,
                 Identified::Listed { .. }
             ),
             "the chain ID of each target is kept"
@@ -299,7 +314,7 @@ async fn an_image_without_a_manifest_for_the_node_has_no_chain_id() {
     );
     annotation.host.arch = "riscv64".to_owned();
     assert_eq!(
-        annotation.identify(&container(Some(NAME))).await,
+        annotation.identify(&pod(""), &container(Some(NAME))).await,
         Identified::Unknown(NO_CHAIN)
     );
 }
@@ -314,7 +329,7 @@ async fn a_single_platform_image_is_read_from_its_manifest() {
     let manifest = amd64_manifest(&image);
     annotation.store = [(NAME.to_owned(), manifest.clone())].into_iter().collect();
     assert_eq!(
-        annotation.identify(&container(Some(NAME))).await,
+        annotation.identify(&pod(""), &container(Some(NAME))).await,
         Identified::Listed {
             digest: manifest,
             name: NAME
@@ -322,55 +337,153 @@ async fn a_single_platform_image_is_read_from_its_manifest() {
     );
 }
 
-#[tokio::test]
-async fn the_snapshotter_is_the_image_service_s_or_the_default() {
-    let image = image();
-    let (_fake, annotation, dir) = node(&image, Vec::new());
-    annotation.configure();
-    assert_eq!(
-        **annotation.snapshotter.load(),
-        DEFAULT_SNAPSHOTTER,
-        "no config"
+/// A node whose container snapshot rests on `image`'s layers in `listed` and on other layers in `mismatched`, and the
+/// path of its containerd config: `identify` tells which snapshotter it asked by being `Listed`, `Mismatched` or
+/// `Unknown`.
+fn held(
+    image: &Image,
+    listed: &str,
+    mismatched: &str,
+) -> (Fake, Annotation, std::path::PathBuf, tempfile::TempDir) {
+    let in_snapshotter = |snapshotter: &str, parent: &Digest| Snapshot {
+        snapshotter: snapshotter.to_owned(),
+        ..snapshot(CONTAINER, &parent.to_string(), false)
+    };
+    let (fake, annotation, dir) = node(
+        image,
+        vec![
+            in_snapshotter(listed, &image.amd64),
+            in_snapshotter(mismatched, &image.arm64),
+        ],
     );
     let config = dir.path().join("etc/containerd/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-    std::fs::write(
-        &config,
-        "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = \"native\"\n",
-    )
-    .unwrap();
-    annotation.configure();
-    assert_eq!(**annotation.snapshotter.load(), "native");
-    std::fs::write(
-        &config,
-        "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = \"\"\n",
-    )
-    .unwrap();
+    (fake, annotation, config, dir)
+}
+
+fn listed(image: &Image) -> Identified<'static> {
+    Identified::Listed {
+        digest: image.target.clone(),
+        name: NAME,
+    }
+}
+
+#[tokio::test]
+async fn the_snapshotter_is_the_image_service_s_or_the_default() {
+    let image = image();
+    let (_fake, annotation, config, _dir) = held(&image, "native", DEFAULT_SNAPSHOTTER);
+    let container = container(Some(NAME));
+    let images = |snapshotter: &str| {
+        format!(
+            "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = \"{snapshotter}\"\n"
+        )
+    };
     annotation.configure();
     assert_eq!(
-        **annotation.snapshotter.load(),
-        DEFAULT_SNAPSHOTTER,
+        annotation.identify(&pod(""), &container).await,
+        Identified::Mismatched,
+        "no config"
+    );
+    std::fs::write(&config, images("native")).unwrap();
+    annotation.configure();
+    assert_eq!(
+        annotation.identify(&pod(""), &container).await,
+        listed(&image)
+    );
+    std::fs::write(&config, images("")).unwrap();
+    annotation.configure();
+    assert_eq!(
+        annotation.identify(&pod(""), &container).await,
+        Identified::Mismatched,
         "empty"
     );
-    std::fs::write(
-        &config,
-        "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = \"native\"\n",
-    )
-    .unwrap();
+    std::fs::write(&config, images("native")).unwrap();
     annotation.configure();
     std::fs::write(&config, "version = \n").unwrap();
     annotation.configure();
     assert_eq!(
-        **annotation.snapshotter.load(),
-        "native",
+        annotation.identify(&pod(""), &container).await,
+        listed(&image),
         "unreadable: containerd runs on the config it read"
     );
     std::fs::remove_file(&config).unwrap();
     annotation.configure();
     assert_eq!(
-        **annotation.snapshotter.load(),
-        DEFAULT_SNAPSHOTTER,
+        annotation.identify(&pod(""), &container).await,
+        Identified::Mismatched,
         "removed"
+    );
+}
+
+#[tokio::test]
+async fn a_runtime_handler_s_snapshotter_comes_before_the_image_service_s() {
+    let image = image();
+    let (fake, annotation, config, _dir) = held(&image, "devmapper", DEFAULT_SNAPSHOTTER);
+    let runtimes = "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.kata]\nsnapshotter = \"devmapper\"\n\
+                    [plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.untrusted]\nsnapshotter = \"native\"\n\
+                    [plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.runc]\nruntime_type = \"io.containerd.runc.v2\"\n";
+    std::fs::write(&config, format!("version = 3\n{runtimes}")).unwrap();
+    annotation.configure();
+    let container = container(Some(NAME));
+    assert_eq!(
+        annotation.identify(&pod("kata"), &container).await,
+        listed(&image)
+    );
+    assert_eq!(fake.stats(), 1);
+    for handler in ["runc", "", "unknown"] {
+        assert_eq!(
+            annotation.identify(&pod(handler), &container).await,
+            Identified::Mismatched,
+            "{handler:?}: the image service's"
+        );
+    }
+    let untrusted = PodSandbox {
+        annotations: [(
+            "io.kubernetes.cri.untrusted-workload".to_owned(),
+            "true".to_owned(),
+        )]
+        .into(),
+        ..pod("")
+    };
+    assert_eq!(
+        annotation.identify(&untrusted, &container).await,
+        Identified::Unknown(NO_SNAPSHOT),
+        "an untrusted workload runs on the `untrusted` handler"
+    );
+
+    std::fs::write(
+        &config,
+        format!(
+            "version = 3\n{runtimes}[plugins.\"io.containerd.cri.v1.runtime\".containerd]\ndefault_runtime_name = \"kata\"\n"
+        ),
+    )
+    .unwrap();
+    annotation.configure();
+    assert_eq!(
+        annotation.identify(&pod(""), &container).await,
+        listed(&image),
+        "no handler: the default one"
+    );
+}
+
+#[tokio::test]
+async fn a_version_2_config_names_handlers_in_the_cri_plugin() {
+    let image = image();
+    let (_fake, annotation, config, _dir) = held(&image, "devmapper", DEFAULT_SNAPSHOTTER);
+    std::fs::write(
+        &config,
+        "version = 2\n[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.kata]\nsnapshotter = \"devmapper\"\n",
+    )
+    .unwrap();
+    annotation.configure();
+    let container = container(Some(NAME));
+    assert_eq!(
+        annotation.identify(&pod("kata"), &container).await,
+        listed(&image)
+    );
+    assert_eq!(
+        annotation.identify(&pod("runc"), &container).await,
+        Identified::Mismatched
     );
 }
 
@@ -391,7 +504,7 @@ async fn the_store_follows_containerd_s_images() {
         () = annotation.follow() => panic!("following ends only when the agent stops"),
         identified = async {
             loop {
-                if let identified @ Identified::Listed { .. } = annotation.identify(&container).await {
+                if let identified @ Identified::Listed { .. } = annotation.identify(&pod(""), &container).await {
                     break identified;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;

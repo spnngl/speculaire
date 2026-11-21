@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
 use speculaire_nri::NriVersion;
-use speculaire_nri::api::Container;
+use speculaire_nri::api::{Container, PodSandbox};
 use speculaire_oci::reference::Digest;
 use speculaire_oci::tagged::Tagged;
 
@@ -107,11 +107,12 @@ fn repositories(image: &Image) -> impl Iterator<Item = &str> {
 
 /// How a container's image identity is read.
 pub trait Identity: Send + Sync {
-    /// The image identity of `container`, and its names.
+    /// The image identity of `container`, created in `pod`, and its names.
     fn identify<'a>(
         &'a self,
+        pod: &PodSandbox,
         container: &'a Container,
-    ) -> impl Future<Output = Identified<'a>> + Send + 'a;
+    ) -> impl Future<Output = Identified<'a>> + Send;
 }
 
 /// containerd 2.4's path, `nri`: `Container.image`, which NRI v0.12.2 added (D15).
@@ -136,8 +137,9 @@ impl Nri {
 impl Identity for Nri {
     fn identify<'a>(
         &'a self,
+        _pod: &PodSandbox,
         container: &'a Container,
-    ) -> impl Future<Output = Identified<'a>> + Send + 'a {
+    ) -> impl Future<Output = Identified<'a>> + Send {
         ready(Self::read(container))
     }
 }
@@ -175,8 +177,9 @@ impl ImageId {
 impl Identity for ImageId {
     fn identify<'a>(
         &'a self,
+        _pod: &PodSandbox,
         container: &'a Container,
-    ) -> impl Future<Output = Identified<'a>> + Send + 'a {
+    ) -> impl Future<Output = Identified<'a>> + Send {
         ready(self.read(container))
     }
 }
@@ -267,14 +270,14 @@ impl NodeIdentity {
 }
 
 impl Identity for NodeIdentity {
-    async fn identify<'a>(&'a self, container: &'a Container) -> Identified<'a> {
+    async fn identify<'a>(&'a self, pod: &PodSandbox, container: &'a Container) -> Identified<'a> {
         match self {
             Self::Containerd {
                 annotation,
                 annotated,
-            } if annotated.load(Ordering::Relaxed) => annotation.identify(container).await,
-            Self::Containerd { .. } => Nri.identify(container).await,
-            Self::ImageId(image_id) => image_id.identify(container).await,
+            } if annotated.load(Ordering::Relaxed) => annotation.identify(pod, container).await,
+            Self::Containerd { .. } => Nri.identify(pod, container).await,
+            Self::ImageId(image_id) => image_id.identify(pod, container).await,
         }
     }
 }

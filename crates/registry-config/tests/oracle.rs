@@ -1048,7 +1048,11 @@ fn auth(a: &Auth) -> Value {
 
 fn our_config(root: &Path, entry: &str) -> Value {
     let path = root.join(entry);
-    let (Ok(raw), Ok(plugins)) = (config::load_raw(&path), config::load_plugins(&path)) else {
+    let (Ok(raw), Ok(plugins), Ok(snapshotters)) = (
+        config::load_raw(&path),
+        config::load_plugins(&path),
+        config::load_snapshotters(&path),
+    ) else {
         return json!({"error": true});
     };
     let RawRegistry {
@@ -1068,7 +1072,9 @@ fn our_config(root: &Path, entry: &str) -> Value {
         },
         "plugins": {
             "discard_unpacked_layers": plugins.discard_unpacked_layers,
-            "snapshotter": plugins.snapshotter,
+            "snapshotter": snapshotters.images,
+            "default_runtime_name": snapshotters.default_runtime,
+            "runtime_snapshotters": snapshotters.handlers.into_iter().filter(|(_, s)| !s.is_empty()).map(|(h, s)| (h, Value::String(s))).collect::<serde_json::Map<_, _>>(),
             "nri": {
                 "disable": plugins.nri.disable,
                 "disable_connections": plugins.nri.disable_connections,
@@ -1330,6 +1336,7 @@ fn config_cases(root: &Path) -> Vec<(String, ConfigCase)> {
     // Plugin settings: discard_unpacked_layers where each version keeps it, and NRI.
     let cri = "\"io.containerd.grpc.v1.cri\"";
     let nri = "\"io.containerd.nri.v1.nri\"";
+    let runtime = "\"io.containerd.cri.v1.runtime\"";
     for (label, text) in [
         (
             "snapshotter in the images plugin",
@@ -1350,6 +1357,46 @@ fn config_cases(root: &Path) -> Vec<(String, ConfigCase)> {
         (
             "snapshotter is not a string",
             "version = 3\n[plugins.\"io.containerd.cri.v1.images\"]\nsnapshotter = 1\n".to_owned(),
+        ),
+        (
+            "runtime handler's snapshotter",
+            format!("version = 3\n[plugins.{runtime}.containerd.runtimes.kata]\nsnapshotter = \"devmapper\"\n[plugins.{runtime}.containerd.runtimes.runc]\nruntime_type = \"x\"\n"),
+        ),
+        (
+            "runtime handler's snapshotter, other case",
+            format!("version = 3\n[plugins.{runtime}.Containerd.Runtimes.kata]\nSnapshotter = \"devmapper\"\n"),
+        ),
+        (
+            "default runtime handler",
+            format!("version = 3\n[plugins.{runtime}.containerd]\ndefault_runtime_name = \"kata\"\n[plugins.{runtime}.containerd.runtimes.kata]\nsnapshotter = \"devmapper\"\n"),
+        ),
+        (
+            "runtime handlers in the CRI plugin",
+            format!("version = 2\n[plugins.{cri}.containerd]\ndefault_runtime_name = \"kata\"\nsnapshotter = \"native\"\n[plugins.{cri}.containerd.runtimes.kata]\nsnapshotter = \"devmapper\"\n"),
+        ),
+        (
+            "runtime handlers in the CRI plugin of version 1",
+            "version = 1\n[plugins.cri.containerd.runtimes.kata]\nsnapshotter = \"devmapper\"\n".to_owned(),
+        ),
+        (
+            "runtime handlers in the CRI plugin of version 4",
+            format!("version = 4\n[plugins.{cri}.containerd.runtimes.kata]\nsnapshotter = \"devmapper\"\n"),
+        ),
+        (
+            "runtime handlers in both plugins",
+            format!("version = 2\n[plugins.{cri}.containerd]\ndefault_runtime_name = \"a\"\n[plugins.{cri}.containerd.runtimes.a]\nsnapshotter = \"x\"\n[plugins.{runtime}.containerd.runtimes.b]\nsnapshotter = \"y\"\n"),
+        ),
+        (
+            "runtime handlers in the CRI plugin over a runtime containerd that is not a table",
+            format!("version = 2\n[plugins.{cri}.containerd.runtimes.a]\nsnapshotter = \"x\"\n[plugins.{runtime}]\ncontainerd = 1\n"),
+        ),
+        (
+            "runtime handler's snapshotter is not a string",
+            format!("version = 3\n[plugins.{runtime}.containerd.runtimes.kata]\nsnapshotter = 1\n"),
+        ),
+        (
+            "runtime handlers are not a table",
+            format!("version = 3\n[plugins.{runtime}.containerd]\nruntimes = 1\n"),
         ),
         (
             "discard in the images plugin",

@@ -19,14 +19,18 @@ enum Ids {
     Mapped,
 }
 
-/// A fake containerd holding `snapshots` (key, parent, IDs), and a client of it.
-fn snapshots(snapshots: &[(&str, &str, Ids)]) -> (Fake, Containerd, tempfile::TempDir) {
+/// A fake containerd holding `snapshots` (key, parent, IDs) in `snapshotter`, and a client of it.
+fn snapshots(
+    snapshotter: &str,
+    snapshots: &[(&str, &str, Ids)],
+) -> (Fake, Containerd, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("containerd.sock");
     let mut answers = Answers::containerd("2.3.7");
     answers.snapshots = snapshots
         .iter()
         .map(|&(key, parent, ids)| Snapshot {
+            snapshotter: snapshotter.to_owned(),
             key: key.to_owned(),
             parent: parent.to_owned(),
             labels: match ids {
@@ -45,7 +49,7 @@ fn snapshots(snapshots: &[(&str, &str, Ids)]) -> (Fake, Containerd, tempfile::Te
 
 #[tokio::test]
 async fn a_container_rests_on_its_parent_after_one_stat() {
-    let (fake, containerd, _dir) = snapshots(&[("container", CHAIN, Ids::Kept)]);
+    let (fake, containerd, _dir) = snapshots("overlayfs", &[("container", CHAIN, Ids::Kept)]);
     let base = containerd
         .snapshot_base("overlayfs", "container", &chain())
         .await;
@@ -55,7 +59,7 @@ async fn a_container_rests_on_its_parent_after_one_stat() {
 
 #[tokio::test]
 async fn a_container_on_another_parent_rests_on_it() {
-    let (fake, containerd, _dir) = snapshots(&[("container", "elsewhere", Ids::Kept)]);
+    let (fake, containerd, _dir) = snapshots("overlayfs", &[("container", "elsewhere", Ids::Kept)]);
     let base = containerd
         .snapshot_base("overlayfs", "container", &chain())
         .await;
@@ -65,10 +69,13 @@ async fn a_container_on_another_parent_rests_on_it() {
 
 #[tokio::test]
 async fn a_remapped_container_rests_on_its_grandparent_after_two_stats() {
-    let (fake, containerd, _dir) = snapshots(&[
-        ("container", "remapped", Ids::Mapped),
-        ("remapped", CHAIN, Ids::Kept),
-    ]);
+    let (fake, containerd, _dir) = snapshots(
+        "native",
+        &[
+            ("container", "remapped", Ids::Mapped),
+            ("remapped", CHAIN, Ids::Kept),
+        ],
+    );
     let base = containerd
         .snapshot_base("native", "container", &chain())
         .await;
@@ -78,7 +85,7 @@ async fn a_remapped_container_rests_on_its_grandparent_after_two_stats() {
 
 #[tokio::test]
 async fn a_mapped_container_on_a_snapshotter_that_maps_ids_rests_on_its_parent() {
-    let (fake, containerd, _dir) = snapshots(&[("container", CHAIN, Ids::Mapped)]);
+    let (fake, containerd, _dir) = snapshots("overlayfs", &[("container", CHAIN, Ids::Mapped)]);
     let base = containerd
         .snapshot_base("overlayfs", "container", &chain())
         .await;
@@ -88,7 +95,7 @@ async fn a_mapped_container_on_a_snapshotter_that_maps_ids_rests_on_its_parent()
 
 #[tokio::test]
 async fn a_snapshot_without_parent_or_record_has_no_base() {
-    let (_fake, containerd, _dir) = snapshots(&[("scratch", "", Ids::Kept)]);
+    let (_fake, containerd, _dir) = snapshots("overlayfs", &[("scratch", "", Ids::Kept)]);
     let base = containerd
         .snapshot_base("overlayfs", "scratch", &chain())
         .await;
@@ -111,7 +118,7 @@ async fn no_containerd_has_no_base() {
 
 #[tokio::test]
 async fn a_restarted_containerd_is_reached_again_after_one_failed_stat() {
-    let (fake, containerd, dir) = snapshots(&[("container", CHAIN, Ids::Kept)]);
+    let (fake, containerd, dir) = snapshots("overlayfs", &[("container", CHAIN, Ids::Kept)]);
     let socket = dir.path().join("containerd.sock");
     let base = containerd
         .snapshot_base("overlayfs", "container", &chain())
@@ -126,6 +133,7 @@ async fn a_restarted_containerd_is_reached_again_after_one_failed_stat() {
     std::fs::remove_file(&socket).unwrap();
     let mut answers = Answers::containerd("2.3.7");
     answers.snapshots = vec![Snapshot {
+        snapshotter: "overlayfs".to_owned(),
         key: "container".to_owned(),
         parent: CHAIN.to_owned(),
         labels: Vec::new(),
