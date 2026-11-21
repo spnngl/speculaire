@@ -136,6 +136,7 @@ A pull by tag asks the peers whose runtime lists that tag before upstream, so it
 - `journalctl -u speculaire` shows the agent's logs, at `warn` and above by default. Change `log.filter` (`EnvFilter` syntax) and reload to see more (D37).
 - At `log.filter = "debug"` (or `speculaire_mirror=debug,speculaire_reflect=debug`), set `log.timings = true` and reload to log each span as it closes, as JSON on stderr with `time.busy` and `time.idle`: `mirror request` (`kind`, `digest`, `source`, `result`) closes at the body's last byte, `peer fetch` (`peer`, `rank`, `result`) at the attempt's end, and `reflector connection` (`peer`, `node`) at the connection's end. Turn it off once read: each request writes a line.
 - Set `audit.enabled = true` and reload to record one `gate` event per container creation, one `verdict` event per changed verdict, and one `peer` event per peer denied for a wrong digest (D52). Read them with `journalctl -t speculaire-audit` (D37); "Audit events" lists their fields.
+- When the gate registers, it checks the containers already running: each one whose verdict lands as `rejected: …` or `unverifiable: …` gets one warning, `a container running since before the gate registered has a verdict that does not allow it`, naming its namespace, pod, container, image and reason, again only when the verdict changes. The gate stops none; its next start is decided as any (D175). `journalctl -u speculaire -p warning --grep 'running since before'` lists them.
 - Registry credentials and tokens never appear in either.
 
 ## Audit events

@@ -91,6 +91,7 @@ impl Node {
             policies: watch::channel(Arc::new(policies)).1,
             trust: watch::channel(Err(Absent::new("none in the benchmark"))).1,
             asker: mpsc::unbounded_channel().0,
+            synchronized: Arc::default(),
         };
         let gate = config::parse(
             "[gate]\nmode = \"enforce\"\n[gate.exempt]\nnamespaces = [\"kube-system\"]\n",

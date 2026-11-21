@@ -6,6 +6,8 @@
 //! `audit` allows every container; `enforce` rejects with the reason texts of `docs/operations.md`. Each decision is a
 //! `gate` audit event (D37, D173).
 
+pub mod running;
+
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -175,6 +177,9 @@ pub struct Verifier {
     pub trust: watch::Receiver<Held>,
     /// The engine's [`speculaire_verify::Engine::asker`].
     pub asker: mpsc::UnboundedSender<Asked>,
+    /// Told once the gate asked for the images of the containers `Synchronize` listed, which the image list waits for
+    /// (D175).
+    pub synchronized: Arc<Notify>,
 }
 
 impl Verifier {
@@ -208,8 +213,8 @@ impl Verifier {
         matched
     }
 
-    /// Asks the engine to verify each manifest of `identified` that no list named yet (D22).
-    fn ask(&self, identified: &Identified<'_>) {
+    /// Asks the engine, as `by`, to verify each manifest of `identified` that no list named yet (D22, D175).
+    fn ask(&self, identified: &Identified<'_>, by: Asking) {
         let names: Vec<String> = identified
             .names()
             .filter_map(|name| Reference::parse_normalized_named(name).ok())
@@ -219,7 +224,7 @@ impl Verifier {
             let asked = Asked {
                 root: root.clone(),
                 names: names.clone(),
-                by: Asking::GateMiss,
+                by,
             };
             // A closed engine has stopped verifying: the wait ends as `Pending`.
             drop(self.asker.send(asked));
@@ -331,7 +336,7 @@ impl Decider {
                 return (decision, Some(current));
             }
             if !asked {
-                self.verifier.ask(&current);
+                self.verifier.ask(&current, Asking::GateMiss);
                 asked = true;
             }
             tokio::select! {

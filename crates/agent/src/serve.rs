@@ -37,6 +37,7 @@ use crate::config::{self, Config, PeerAddress, Role};
 use crate::followed::Followed;
 use crate::gate::Gate;
 use crate::gate::decision::Verifier;
+use crate::gate::decision::running::SYNCHRONIZE_WAIT;
 use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
@@ -555,16 +556,16 @@ fn start_discovery(
         policies,
         trust,
         asker: engine.asker(),
+        synchronized: Arc::default(),
     };
     verifier
         .verdicts
         .set_stale_max(config.verify.stale_max.get());
     let (found, told) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(engine.run(told));
-    let images = node.images();
-    tokio::spawn(speculaire_artifacts::follow(
+    let follow = speculaire_artifacts::follow(
         discovery,
-        images,
+        node.images(),
         Fetching {
             fetched,
             grace: config.artifacts.grace.get().get(),
@@ -572,7 +573,14 @@ fn start_discovery(
         linked_or_after(last_up.clone(), LINK_WAIT),
         last_up,
         found,
-    ));
+    );
+    // The running containers' roots are verified first, under `synchronize`: the list waits for the gate to ask for
+    // them (D175).
+    let synchronized = Arc::clone(&verifier.synchronized);
+    tokio::spawn(async move {
+        drop(tokio::time::timeout(SYNCHRONIZE_WAIT, synchronized.notified()).await);
+        follow.await;
+    });
     Ok((store, verifier))
 }
 

@@ -64,7 +64,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Cost:** a tightened policy takes effect after re-verification (normally seconds), not instantly.
 - **Revisit when:** —
 
-## D22: Verification starts at the manifest fetch (amended by D65, D66, D121, D152, D174)
+## D22: Verification starts at the manifest fetch (amended by D65, D66, D121, D152, D174, D175)
 
 - **Decision:** triggers, earliest first:
   1. the mirror serving or forwarding `GET /v2/<repo>/manifests/<digest>` (containerd fetches manifests by digest through the mirror, even when it resolved the tag upstream, D6);
@@ -456,7 +456,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Revisit when:** running containers must be verified first (D21): the engine needs the runtime's container list.
 
 
-## D155: After a change, the roots running containers run are verified again first (amends D154)
+## D155: After a change, the roots running containers run are verified again first (amends D154; amended by D175)
 
 - **Decision:**
   - On a change that queues roots, the engine asks the runtime over the CRI which containers run (`ListContainers`, filtered on `CONTAINER_RUNNING`), maps each one's `image_id` (its `image_ref` when the field is empty) to the image of `ListImages` with that ID, and takes each repository digest of those images as a running root. A stable sort puts the running roots first in the queue; the others keep their order.
@@ -466,7 +466,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - D21 asks for running containers first: their images are the ones a restart or a new replica pulls again soonest.
   - Both runtimes fill `image_id` with the ID `ListImages` lists: containerd its config digest (`internal/cri/server/container_list.go:53-66` at v2.3.0), CRI-O its storage ID (`internal/oci/container.go:181-199` at v1.37.2), whose `image_ref` may be a `repository@digest` no registry served.
   - One CRI call per change, not per root, and none while nothing changed.
-- **Revisit when:** the gate (M6) holds the running containers from NRI `Synchronize`.
+- **Revisit when:** the gate follows container stops and removals over NRI events (D175).
 
 ## D156: `speculaire verify` prints one image's verdict and each check's reason, without the agent (amends D62)
 

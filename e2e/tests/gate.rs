@@ -1134,3 +1134,83 @@ fn mismatch(worker: &Worker, a: &str, b: &str) {
     assert!(refused.contains(MISMATCH), "{refused}");
     assert!(remove(worker, id) && remove(worker, b));
 }
+
+/// The agent's warnings in the worker's journal whose field `F_POD` is `pod`.
+fn warnings(worker: &Worker, pod: &str) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    worker
+        .sh("journalctl -q -t speculaire -p warning --no-pager -o json")
+        .lines()
+        .filter_map(|line| match serde_json::from_str(line) {
+            Ok(serde_json::Value::Object(record)) => Some(record),
+            _ => None,
+        })
+        .filter(|record| record.get("F_POD").is_some_and(|p| p == pod))
+        .collect()
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_pod_running_before_the_agent_starts_is_verified_under_synchronize_warned_of_once_and_left_running()
+ {
+    let Some(worker) = Worker::new() else { return };
+    let host = worker
+        .cluster
+        .upstream(Kind::Referrers)
+        .address()
+        .to_owned();
+    let guard = Unsigned {
+        worker: &worker,
+        pod: "speculaire-e2e-running",
+        image: format!("{host}/{UNSIGNED}"),
+    };
+    worker.sh(&format!(
+        "rm -f {POLICY}; crictl pull {} >/dev/null; systemctl stop speculaire",
+        guard.image
+    ));
+    run(&worker, guard.pod, &guard.image);
+    // A policy of a fresh name: no verdict of the agent's cache holds (D31).
+    worker
+        .cluster
+        .policy(&worker.node, &unsigned_policy(&host, &fresh("running")))
+        .unwrap();
+    worker.cluster.reset_agent(&worker.node).unwrap();
+
+    let synchronized = [r#"result="rejected""#, r#"trigger="synchronize""#];
+    let start = Instant::now();
+    while count(&worker, "speculaire_verifications_total", &synchronized) == 0
+        || warnings(&worker, guard.pod).is_empty()
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{}: no rejected verification under synchronize, or no warning: {:?}",
+            worker.node,
+            worker.series("speculaire_verifications_total")
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // A retry or reload landing the same verdict again warns no more.
+    std::thread::sleep(Duration::from_secs(2));
+    let warned = warnings(&worker, guard.pod);
+    let [warning] = warned.as_slice() else {
+        panic!("not one warning: {warned:?}")
+    };
+    assert_eq!(warning["F_CONTAINER"], guard.pod, "{warning:?}");
+    assert!(
+        warning["F_REASON"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("rejected: ")),
+        "{warning:?}"
+    );
+    let phase = worker
+        .cluster
+        .kubectl(&[
+            "get",
+            "pod",
+            guard.pod,
+            "-o",
+            "jsonpath={.status.phase} {.status.containerStatuses[0].restartCount}",
+        ])
+        .unwrap();
+    assert_eq!(phase.trim(), "Running 0");
+    drop(guard);
+}
