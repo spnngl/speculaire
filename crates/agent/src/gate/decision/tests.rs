@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -8,10 +7,12 @@ use speculaire_oci::reference::Digest;
 use speculaire_runtime::identity::annotation::{NO_CHAIN, NO_SNAPSHOT, NOT_STORED};
 use speculaire_runtime::identity::{IMAGE_REF, MISMATCH, NOT_CONFIG};
 use speculaire_runtime::images::{Image, RepoDigest, Update};
-use speculaire_verify::{Absent, Key, MatchHash};
+use speculaire_verify::cache::{self, Current};
+use speculaire_verify::{Absent, Key, MatchHash, Signatures};
 
 use super::running::Running;
 use super::*;
+use crate::capture::Capture;
 
 /// The image ID of the test image, and its config digest.
 const ID: &str = "ad4f11f7c85f87c0a6d6c0fe492ad53f9cdcff6e8c88b881360c70eff701c67b";
@@ -284,70 +285,6 @@ fn audit_fields(event: &str) -> Vec<&'static str> {
         .filter_map(|line| line.strip_prefix(row.as_str())?.split_once('`'))
         .map(|(field, _)| field)
         .collect()
-}
-
-/// What a test's subscriber writes.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    /// Makes a subscriber writing the audit events as JSON here this thread's default, until the guard drops.
-    ///
-    /// A second dispatcher stays registered beside it: with one alone, a callsite another test's thread hits first
-    /// caches `never` (tracing-core 0.1.36 `src/callsite.rs:319`, `:546`, `:565`).
-    fn install(&self) -> (tracing::subscriber::DefaultGuard, tracing::Dispatch) {
-        let sink = self.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .with_max_level(Level::INFO)
-            .with_writer(move || sink.clone())
-            .finish();
-        (
-            tracing::subscriber::set_default(subscriber),
-            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
-        )
-    }
-
-    /// The fields of each audit event written.
-    fn events(&self) -> Vec<serde_json::Map<String, serde_json::Value>> {
-        self.written(|event| event["target"] == AUDIT_TARGET)
-    }
-
-    /// The fields of each warning written.
-    fn warnings(&self) -> Vec<serde_json::Map<String, serde_json::Value>> {
-        self.written(|event| event["level"] == "WARN")
-    }
-
-    /// The fields of each event written that `kept` keeps.
-    fn written(
-        &self,
-        kept: impl Fn(&serde_json::Value) -> bool,
-    ) -> Vec<serde_json::Map<String, serde_json::Value>> {
-        let written = self.0.lock().expect("no test panics holding the capture");
-        String::from_utf8_lossy(&written)
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a JSON event"))
-            .filter(|event| kept(event))
-            .map(|mut event| match event["fields"].take() {
-                serde_json::Value::Object(fields) => fields,
-                other => panic!("the fields are no object: {other}"),
-            })
-            .collect()
-    }
-}
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .expect("no test panics holding the capture")
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 #[tokio::test]
@@ -656,4 +593,62 @@ async fn a_running_container_is_asked_for_under_synchronize_and_warned_of_once_p
             "{fields:?}"
         );
     }
+}
+
+/// A verdict loaded from `cache.bin` warns of a running container at start, like any verdict, and not again when
+/// re-verification lands the same one (D175, D176).
+#[tokio::test]
+async fn a_rejection_loaded_from_the_cache_warns_of_a_running_container_once() {
+    let (saved, _) = verifier(&policy());
+    let (verifier, mut asks) = verifier(&policy());
+    let decider = decider(verifier.clone(), enforce(), true);
+    let (synchronized, listed) = watch::channel(Arc::default());
+    let capture = Capture::default();
+    let _guard = capture.install();
+    let rejected = Verdict::Rejected {
+        reason: "no signature".into(),
+    };
+    let mut bytes = Vec::new();
+    keep(&saved, rejected.clone());
+    let policies = MatchHash::of(verifier.policies.borrow().iter());
+    let signatures = Signatures::new(0);
+    cache::save(
+        &saved.verdicts,
+        &signatures,
+        policies,
+        Instant::now(),
+        &mut bytes,
+    );
+    let current = Current {
+        policies,
+        root: None,
+    };
+    cache::load(
+        &bytes,
+        current,
+        Instant::now(),
+        &verifier.verdicts,
+        &signatures,
+    )
+    .expect("the saved verdicts load");
+    let lands = async {
+        synchronized.send_replace(Arc::new(running(&["default"])));
+        asks.recv().await.expect("the gate asks");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            capture.warnings().len(),
+            1,
+            "no warning before verification"
+        );
+        keep(&verifier, rejected);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    tokio::select! {
+        () = decider.watch_running(listed) => panic!("the watch ends"),
+        () = lands => {}
+    }
+    let warnings = capture.warnings();
+    let reasons: Vec<&serde_json::Value> =
+        warnings.iter().map(|fields| &fields["reason"]).collect();
+    assert_eq!(reasons, ["rejected: no signature"]);
 }

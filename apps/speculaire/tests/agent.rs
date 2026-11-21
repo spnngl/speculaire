@@ -314,10 +314,17 @@ fn write_config(path: &Path, node: &Node, extra: &str) {
         "[log]\nfilter = \"info\"\n"
     };
     // A test with a `[verify]` of its own names its trust root: with none, the agent would ask Sigstore's TUF repository.
-    let verify = if extra.contains("[verify]") {
-        String::new()
-    } else {
-        format!("[verify]\ntrusted_root = \"{TRUSTED_ROOT}\"\n")
+    // The verdicts are saved in the node's directory.
+    let cache = format!(
+        "cache = \"{}\"\n",
+        node.dir.path().join("cache.bin").display()
+    );
+    let (extra, verify) = match extra.split_once("[verify]\n") {
+        Some((before, after)) => (format!("{before}[verify]\n{cache}{after}"), String::new()),
+        None => (
+            extra.to_owned(),
+            format!("[verify]\ntrusted_root = \"{TRUSTED_ROOT}\"\n{cache}"),
+        ),
     };
     std::fs::write(
         path,
@@ -436,6 +443,49 @@ fn a_healthy_start_is_ready_and_logs_nothing_below_warn() {
         .filter(|l| l.contains(r#""level":"WARN""#) || l.contains(r#""level":"ERROR""#))
         .collect();
     assert!(loud.is_empty(), "{loud:#?}");
+}
+
+const LOADED: &str = r#"speculaire_cache_loads_total{result="loaded"}"#;
+const DISCARDED: &str = r#"speculaire_cache_loads_total{result="discarded"}"#;
+
+#[test]
+fn the_verdicts_saved_at_stop_load_at_the_next_start() {
+    let mut agent = Agent::start("");
+    assert_eq!(
+        metric(&agent, LOADED).as_deref(),
+        Some(&*format!("{LOADED} 0"))
+    );
+    agent.signal("TERM");
+    assert!(wait_exit(&mut agent.child).success());
+    // A new node, as the old one's fake runtime stops with the agent.
+    let node = Node::healthy();
+    let saved = agent.node.dir.path().join("cache.bin");
+    std::fs::copy(saved, node.dir.path().join("cache.bin")).unwrap();
+    drop(agent);
+    let mut agent = Agent::spawn_on(node, "", &[]);
+    agent.line(&["saved verdicts loaded"]);
+    assert_eq!(
+        metric(&agent, LOADED).as_deref(),
+        Some(&*format!("{LOADED} 1"))
+    );
+}
+
+#[test]
+fn a_damaged_cache_is_discarded_at_start_with_a_warning_naming_the_cause() {
+    let node = Node::healthy();
+    std::fs::write(node.dir.path().join("cache.bin"), b"not a cache").unwrap();
+    let mut agent = Agent::spawn_on(node, "", &[]);
+    let warning = agent.line(&["saved verdicts discarded"]);
+    assert!(warning.contains(r#""level":"WARN""#), "{warning}");
+    assert!(warning.contains("format version"), "{warning}");
+    assert_eq!(
+        metric(&agent, DISCARDED).as_deref(),
+        Some(&*format!("{DISCARDED} 1"))
+    );
+    assert_eq!(
+        metric(&agent, LOADED).as_deref(),
+        Some(&*format!("{LOADED} 0"))
+    );
 }
 
 #[test]

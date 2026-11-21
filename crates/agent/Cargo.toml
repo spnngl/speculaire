@@ -48,6 +48,7 @@ speculaire-artifacts = { workspace = true, features = ["testing"] }
 speculaire-fake-runtime.workspace = true
 speculaire-oracle-harness.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 
 [[bench]]

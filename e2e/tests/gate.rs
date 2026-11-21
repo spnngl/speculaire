@@ -780,7 +780,7 @@ impl Drop for Enforced<'_> {
         let worker = self.worker;
         let _ = worker.cluster.kubectl(&[
             "delete",
-            "pod",
+            "deployment,pod",
             "-A",
             "-l",
             ENFORCE,
@@ -966,15 +966,151 @@ fn latency(worker: &Worker) -> &'static str {
     path
 }
 
-/// A cold node, as after a reboot, which wipes `/run`: `runnable` is held, and the agent starts with no verdict of
-/// it. A pod of it starts within three of the kubelet's retries: the startup list names the image, and a creation
-/// that finds its verdict pending has the engine discover it at once, under `gate_miss` (D174).
+/// The journal records of the agent whose message starts with `message`, oldest first.
+fn logged(worker: &Worker, message: &str) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    worker
+        .sh("journalctl -q -t speculaire --no-pager -o json")
+        .lines()
+        .filter_map(|line| match serde_json::from_str(line) {
+            Ok(serde_json::Value::Object(record)) => Some(record),
+            _ => None,
+        })
+        .filter(|record| {
+            record
+                .get("MESSAGE")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|m| m.starts_with(message))
+        })
+        .collect()
+}
+
+/// The agent restarts while a Deployment of `runnable` rolls out: it loads the verdicts it saved at stop, so no new
+/// pod waits on a verification (D31, D176). Creations during the restart fail on the missing plugin and are retried.
+fn restarted(enforced: &Enforced<'_>, runnable: &str) {
+    let worker = enforced.worker;
+    let deployment = "speculaire-e2e-rollout";
+    let spec = format!(
+        r#"{{"apiVersion":"apps/v1","kind":"Deployment","metadata":{{"name":"{deployment}","namespace":"default","labels":{{"speculaire-e2e":"enforce"}}}},"spec":{{"replicas":2,"selector":{{"matchLabels":{{"app":"{deployment}"}}}},"template":{{"metadata":{{"labels":{{"app":"{deployment}","speculaire-e2e":"enforce"}}}},"spec":{{"nodeName":"{}","terminationGracePeriodSeconds":0,"containers":[{{"name":"c","image":"{runnable}","imagePullPolicy":"IfNotPresent","command":["sleep","3600"]}}]}}}}}}}}"#,
+        worker.node
+    );
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), spec).unwrap();
+    let kubectl = |args: &[&str]| worker.cluster.kubectl(args).unwrap();
+    let rolled = || {
+        kubectl(&[
+            "rollout",
+            "status",
+            "-n",
+            "default",
+            &format!("deployment/{deployment}"),
+            "--timeout=180s",
+        ])
+    };
+    kubectl(&["apply", "-f", &file.path().display().to_string()]);
+    rolled();
+    let loads = logged(worker, "saved verdicts loaded").len();
+    kubectl(&[
+        "rollout",
+        "restart",
+        "-n",
+        "default",
+        &format!("deployment/{deployment}"),
+    ]);
+    enforced.restart_agent();
+    rolled();
+    let logged = logged(worker, "saved verdicts loaded");
+    assert_eq!(logged.len(), loads + 1, "{logged:?}");
+    let loaded = count(
+        worker,
+        "speculaire_cache_loads_total",
+        &[r#"result="loaded""#],
+    );
+    assert_eq!(
+        loaded,
+        1,
+        "{:?}",
+        worker.series("speculaire_cache_loads_total")
+    );
+    let uids = kubectl(&[
+        "get",
+        "pods",
+        "-n",
+        "default",
+        "-l",
+        &format!("app={deployment}"),
+        "-o",
+        r#"jsonpath={range .items[*]}{.metadata.uid}{"\n"}{end}"#,
+    ]);
+    let mut events = Vec::new();
+    for uid in uids.lines() {
+        events.extend(
+            kubectl(&[
+                "get",
+                "events",
+                "-n",
+                "default",
+                "--field-selector",
+                &format!("involvedObject.uid={uid},reason=Failed"),
+                "-o",
+                r#"jsonpath={range .items[*]}{.message}{"\n"}{end}"#,
+            ])
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        );
+    }
+    eprintln!(
+        "{}: restarted during a rollout, {:?}: {events:?}",
+        worker.node,
+        logged.last()
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.contains("verification pending")),
+        "{events:?}"
+    );
+    kubectl(&[
+        "delete",
+        "deployment",
+        "-n",
+        "default",
+        deployment,
+        "--timeout=60s",
+    ]);
+}
+
+/// A cold node: `runnable` is held, and the agent starts with no verdict of it, as its `cache.bin` is corrupt and
+/// discarded (D176). A pod of it starts within three of the kubelet's retries: the startup list names the image, and
+/// a creation that finds its verdict pending has the engine discover it at once, under `gate_miss` (D174).
 fn cold(worker: &Worker, runnable: &str) {
     assert!(remove(worker, runnable));
     worker.sh(&format!("crictl pull {runnable} >/dev/null"));
     worker.cluster.stop_agent(&worker.node).unwrap();
-    worker.sh("rm -f /run/speculaire/cache.bin");
+    // One bit flipped past the header: the checksum no longer matches.
+    worker.sh(
+        r#"perl -e 'open F, "+<", $ARGV[0] or die $!; seek F, 90, 0; read F, $b, 1; seek F, 90, 0; print F chr(ord($b) ^ 1)' /run/speculaire/cache.bin"#,
+    );
     worker.cluster.start_agent(&worker.node).unwrap();
+    let discarded = count(
+        worker,
+        "speculaire_cache_loads_total",
+        &[r#"result="discarded""#],
+    );
+    assert_eq!(
+        discarded,
+        1,
+        "{:?}",
+        worker.series("speculaire_cache_loads_total")
+    );
+    let cause = logged(worker, "saved verdicts discarded");
+    assert!(
+        cause
+            .last()
+            .and_then(|record| record.get("F_CAUSE"))
+            .is_some_and(|cause| cause == "the checksum does not match"),
+        "{cause:?}"
+    );
     start(worker, "default", "speculaire-e2e-cold", runnable);
     let failures = ready(worker, "default", "speculaire-e2e-cold");
     let verifications = worker.series("speculaire_verifications_total");
@@ -1073,6 +1209,9 @@ fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refuse
     create(&worker, "default", "speculaire-e2e-unmatched", &signed);
     ready(&worker, "default", "speculaire-e2e-unmatched");
     lap("no exemption, then unmatched allowed");
+
+    restarted(&enforced, &runnable);
+    lap("agent restarted during a rollout");
 
     // The runtime requires the plugin: without the agent, nothing starts (D64).
     worker.cluster.stop_agent(&worker.node).unwrap();

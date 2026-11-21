@@ -19,6 +19,8 @@ pub const GATE_TOTAL: &str = "speculaire_gate_total";
 pub const GATE_SECONDS: &str = "speculaire_gate_seconds";
 /// `speculaire_config_reload_failures_total`: reloads rejected while the previous config stays in use (D30).
 pub const CONFIG_RELOAD_FAILURES: &str = "speculaire_config_reload_failures_total";
+/// `speculaire_cache_loads_total`: loads of `cache.bin` at startup, by `result` (D31, D176).
+pub const CACHE_LOADS: &str = "speculaire_cache_loads_total";
 
 /// `speculaire_p2p_enabled`: 1 while a node identity and the cluster CA are loaded and the identity has not expired (D16).
 pub const P2P_ENABLED: &str = "speculaire_p2p_enabled";
@@ -59,6 +61,9 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
     build_info(&Versions::default()).set(1);
     gauge!(NRI_CONNECTED).set(0);
     counter!(CONFIG_RELOAD_FAILURES).absolute(0);
+    for result in ["loaded", "discarded"] {
+        counter!(CACHE_LOADS, "result" => result).absolute(0);
+    }
     gauge!(P2P_ENABLED).set(0);
     speculaire_mirror::metrics::describe();
     speculaire_mirror::metrics::describe_peer();
@@ -108,6 +113,10 @@ fn describe() {
     describe_counter!(
         CONFIG_RELOAD_FAILURES,
         "Reloads rejected; the previous config is still in use"
+    );
+    describe_counter!(
+        CACHE_LOADS,
+        "Loads of the saved verdicts at startup: loaded, or discarded as unreadable"
     );
     describe_gauge!(
         P2P_ENABLED,

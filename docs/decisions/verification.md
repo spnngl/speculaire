@@ -85,7 +85,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Because:** a compromised control plane must not be able to relax a node's policy, and systemd deployments already have config management.
 - **Revisit when:** the DaemonSet phase starts. Then mount the policy from a ConfigMap.
 
-## D31: Verdicts and signature results survive agent restarts in `/run/speculaire` (amends D20, D21; amended by D165)
+## D31: Verdicts and signature results survive agent restarts in `/run/speculaire` (amends D20, D21; amended by D165, D176)
 
 - **Decision:**
   - The unit sets `RuntimeDirectory=speculaire`, `RuntimeDirectoryMode=0700` and `RuntimeDirectoryPreserve=yes`. systemd keeps `/run/speculaire` across stops and restarts, and the tmpfs is cleared at reboot.
@@ -499,3 +499,22 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Sorted, deterministic bytes let the fuzz target `cache_bin` check that what loads saves the same again.
   - Measured on an Apple M5 (`just bench-micro`): saving 10k verdicts takes 1.24 ms and loading them 2.35 ms, for a file of 1.56 MB.
 - **Revisit when:** the format changes: raise `VERSION`, and an older file is then discarded at the upgrade.
+
+
+## D176: The agent loads `cache.bin` from `verify.cache` before the engine runs, and saves it at most once a second while the verdicts change (amends D31, D87, D175)
+
+- **Decision:**
+  - **Key:** `verify.cache`, a restart key, is the file's absolute path, `/run/speculaire/cache.bin` by default. D87's directory key arrives as this one file's path.
+  - **Load:** `start_discovery` loads the file once the engine is built and before it runs, so that the load, which replaces both caches, races no verdict the engine keeps, and before the gate registers. The verdicts load under the hash of the policies and the trust root held then (D165). A missing file, as after a reboot, logs at `info` and counts nothing. A file that cannot be read, or that `load` refuses, is discarded: one warning whose `cause` is the I/O error or the refusal, `speculaire_cache_loads_total{result="discarded"}`, and the agent starts with no verdicts. A file loaded counts `result="loaded"` and logs both counts.
+  - **Save:** a task waits for `Verdicts::changed`, saves, then waits a second before it waits again, and saves once more at stop, D39 step 5: after the drains, before the gate leaves NRI. Signature results change only during a verification, so the verdict it ends with wakes the save, and the stop save keeps those of a verification that ended `Unverifiable`. The task encodes on the async runtime and writes on the blocking pool; a failed write warns once until a write succeeds, and the agent goes on.
+  - **Policies first:** the save reads the policies' hash before the caches; a policy change in between leaves the file under the previous hash, whose verdicts then load stale.
+  - **Warnings of running containers:** a loaded verdict that does not allow a container of `Synchronize` warns of it at start, as any verdict landing does (D175). The agent does not keep which warnings it gave, so such a container is warned of once per agent start, and a verification landing the same verdict adds none.
+  - `e2e/tests/gate.rs` restarts the agent during a rollout of `runnable`: the agent logs the load, counts `result="loaded"` once, and no new pod meets `verification pending`. The cold-node case flips one bit of the file, which the agent discards, counting `result="discarded"`, and then starts with no verdicts.
+- **Because:**
+  - The agent's tests run in a temporary directory, where `/run/speculaire` does not exist; a key for the file, rather than its directory, is the smallest thing that moves it.
+  - A load after the engine's first keep would replace a fresh verdict with a saved one.
+  - A missing file is the normal first start, not damage; counting it would alert on every reboot.
+  - Saving per second bounds the writes of a busy node to one a second, under 2 ms of encoding for 10k verdicts (D165), and a restart loses at most the last second, which the engine verifies again.
+  - Remembering warnings across restarts would need its own file for one log line per container per restart, and a restart already logs its own lines; the user's rule is one warning per verdict change, and an agent start is one.
+- **Measured (M6 step 12, kind on arm64, Kubernetes 1.37):** the agent restarted during a rollout of two pods of `runnable` loads the file once, and no pod meets `verification pending`, on containerd 2.4 and CRI-O 1.37. The gate suite, with the restart, takes 68.7 s on containerd 2.4 (66.5 s before) and 81.0 s on CRI-O 1.37 (76.2 s before).
+- **Revisit when:** encoding the caches shows in a profile of a busy node, or a key other than a verdict needs saving on its own change.

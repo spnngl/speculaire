@@ -144,6 +144,7 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
     ("verify.tuf_cache", PATHS),
     ("verify.tuf_refresh", SPANS),
     ("verify.stale_max", SPANS),
+    ("verify.cache", PATHS),
     ("sbom.max_size", SIZES),
     ("mirror.address", LOOPBACKS),
     ("mirror.directory", PATHS),

@@ -108,6 +108,7 @@ impl Config {
                     tuf_cache,
                     tuf_refresh,
                     stale_max: _,
+                    cache,
                 },
             sbom: Sbom { max_size: _ },
             artifacts:
@@ -204,6 +205,7 @@ impl Config {
             tuf_refresh,
             &running.verify.tuf_refresh,
         );
+        keep(&mut kept, "verify.cache", cache, &running.verify.cache);
         keep(&mut kept, "mirror.address", mirror, &running.mirror.address);
         keep(
             &mut kept,
@@ -441,6 +443,8 @@ pub struct Verify {
     pub tuf_refresh: Restart<Interval>,
     /// How long a stale verdict keeps serving during re-verification (D21).
     pub stale_max: Span,
+    /// Where the verdicts and the signature results are saved across a restart (D31, D176).
+    pub cache: Restart<Absolute>,
 }
 
 impl Default for Verify {
@@ -452,6 +456,7 @@ impl Default for Verify {
             tuf_cache: Restart(Absolute::new("/var/lib/speculaire/tuf")),
             tuf_refresh: Restart(Interval::from_secs(21_600)),
             stale_max: Span::from_secs(3600),
+            cache: Restart(Absolute::new("/run/speculaire/cache.bin")),
         }
     }
 }

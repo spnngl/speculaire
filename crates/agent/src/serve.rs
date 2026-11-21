@@ -33,6 +33,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
 
+use crate::cache::{Caches, Saver};
 use crate::config::{self, Config, PeerAddress, Role};
 use crate::followed::Followed;
 use crate::gate::Gate;
@@ -157,7 +158,7 @@ async fn serve(
     // failed just after one came up (D126, D134). Without `reflector.url` the sender drops: discovery waits for none.
     let (up, last_up) = tokio::sync::watch::channel(None);
     let up = client_config(&config).map(|_| up);
-    let (store, verifier) = start_discovery(
+    let (store, verifier, saver) = start_discovery(
         &config,
         &node,
         (&mirror, fetched),
@@ -241,6 +242,8 @@ async fn serve(
     // The runtime's followers end as the teardown cuts them, without a warning.
     node.stop();
     shut_down(&config, mirror, sharing, reflector).await;
+    // D39, step 5.
+    saver.stop().await;
     // D39, step 6.
     gate.stop().await;
     // An error means the server already ended; its result says why.
@@ -252,7 +255,7 @@ async fn serve(
 }
 
 /// D39, steps 2 to 4 for peers, and a stopping reflector closes the streams of its agents. The mirror's part of steps 2
-/// and 4, and step 5, arrive with the cache.
+/// and 4 arrives with the cache.
 async fn shut_down(
     config: &Config,
     mirror: Mirror,
@@ -527,7 +530,7 @@ fn start_discovery(
         tokio::sync::watch::Receiver<Arc<Policies>>,
         tokio::sync::watch::Receiver<trust::Held>,
     ),
-) -> anyhow::Result<(Arc<Store>, Verifier)> {
+) -> anyhow::Result<(Arc<Store>, Verifier, Saver)> {
     let directory = config.artifacts.directory.get().get();
     let store = Store::open(directory)
         .with_context(|| format!("opening the artifact store {}", directory.display()))?;
@@ -561,6 +564,16 @@ fn start_discovery(
     verifier
         .verdicts
         .set_stale_max(config.verify.stale_max.get());
+    // Before the engine runs, as a load replaces the verdicts it keeps, and before the gate registers (D31).
+    let caches = Caches {
+        path: config.verify.cache.get().get().to_owned(),
+        verdicts: Arc::clone(engine.verdicts()),
+        signatures: Arc::clone(engine.signatures()),
+        policies: verifier.policies.clone(),
+        trust: verifier.trust.clone(),
+    };
+    caches.load();
+    let saver = caches.save();
     let (found, told) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(engine.run(told));
     let follow = speculaire_artifacts::follow(
@@ -581,7 +594,7 @@ fn start_discovery(
         drop(tokio::time::timeout(SYNCHRONIZE_WAIT, synchronized.notified()).await);
         follow.await;
     });
-    Ok((store, verifier))
+    Ok((store, verifier, saver))
 }
 
 /// The roots the runtime's running containers run, asked over the CRI at `socket` (D21): none when it does not answer.

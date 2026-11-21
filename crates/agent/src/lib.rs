@@ -1,5 +1,8 @@
 //! The agent: its config, logs, metrics, status listener and systemd notifications; `apps/speculaire` parses arguments and calls [`run`].
 
+mod cache;
+#[cfg(test)]
+mod capture;
 pub mod config;
 mod followed;
 pub mod gate;
