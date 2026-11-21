@@ -36,6 +36,11 @@ exclude_re = [
   # The engine's one-line calls into discovery: `crates/artifacts` tests `Discovery::discover` and `again`, the e2e test
   # of an unverifiable verdict sees the engine call `discover`, and an engine test of them would need a registry (D151).
   'engine\.rs:\d+:\d+: replace <impl Discover for Discovery>::(discover|again) -> Result<\(\), Error> with Ok\(\(\)\)$',
+  # `crates/artifacts` tests `Discovery::config`, and the e2e test of a rejected image on CRI-O sees the engine call
+  # it (D172).
+  'engine\.rs:\d+:\d+: replace <impl Discover for Discovery>::config -> Option<Digest> with None$',
+  # The exemptions' log line at start (D18): the decisions are the same either way.
+  'gate\.rs:\d+:\d+: replace exempted with \(\)$',
   # A stale verdict read at the very nanosecond `verify.stale_max` ends: it is pending this lookup or the next.
   'engine\.rs:\d+:\d+: replace < with <= in Verdicts::get$',
   # Whether a change queued roots: when it queued none, asking the runtime what runs and sorting the queue change no

@@ -176,12 +176,32 @@ impl Discovery {
     /// The manifests the index `root` names, from the store else the node; none when `root` is no index, `None` when
     /// neither holds it.
     pub async fn children(&self, root: &Digest) -> Option<Vec<Digest>> {
-        let bytes = match self.store.read(root).await {
-            Ok(Some(bytes)) => bytes.into(),
-            Ok(None) | Err(_) => self.local.manifest(root, self.limits.manifest).await?,
-        };
+        let bytes = self.manifest_here(root).await?;
         let index = Index::parse(&bytes).ok();
         Some(index.map_or_else(Vec::new, |index| index.manifests().cloned().collect()))
+    }
+
+    /// The config digest of `root`'s manifest for the node's platform, from the store else the node; `None` when
+    /// neither holds a manifest on the way, or it names no config (D65, D172).
+    pub async fn config(&self, root: &Digest) -> Option<Digest> {
+        let mut bytes = self.manifest_here(root).await?;
+        if let Ok(index) = Index::parse(&bytes) {
+            bytes = self
+                .manifest_here(index.platform_manifest(&self.platform)?)
+                .await?;
+        }
+        match manifest::children(&bytes) {
+            Ok(Children::Image { config, .. }) => Some(config),
+            Ok(Children::Index { .. }) | Err(_) => None,
+        }
+    }
+
+    /// The manifest `digest`, from the store else the node.
+    async fn manifest_here(&self, digest: &Digest) -> Option<Bytes> {
+        match self.store.read(digest).await {
+            Ok(Some(bytes)) => Some(bytes.into()),
+            Ok(None) | Err(_) => self.local.manifest(digest, self.limits.manifest).await,
+        }
     }
 
     /// Discovers the artifacts of `root`, which the image list names in each of `names`

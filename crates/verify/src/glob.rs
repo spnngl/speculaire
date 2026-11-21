@@ -12,7 +12,7 @@
 use std::fmt;
 
 use regex_automata::meta::{self, Regex};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 use speculaire_oci::reference::Reference;
 
 /// Docker Hub, as a normalised reference names it.
@@ -20,7 +20,8 @@ const DOCKER_HUB: &str = "docker.io/";
 /// Docker Hub, as go-containerregistry names it and policy-controller's globs spell it (`glob.go:27`).
 const INDEX_DOCKER_HUB: &str = "index.docker.io/";
 
-/// A glob over normalised image names, built only from text that [`Glob::new`] accepts.
+/// A glob over normalised image names, built only from text that [`Glob::new`] accepts; two are equal when their texts
+/// are.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "String")]
 pub struct Glob {
@@ -109,6 +110,20 @@ impl fmt::Display for Glob {
     }
 }
 
+impl PartialEq for Glob {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+    }
+}
+
+impl Eq for Glob {}
+
+impl Serialize for Glob {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.text)
+    }
+}
+
 impl TryFrom<String> for Glob {
     type Error = GlobError;
 
@@ -124,6 +139,14 @@ mod tests {
     fn matches(glob: &str, image: &str) -> bool {
         let reference = Reference::parse_docker_ref(image).unwrap();
         Glob::new(glob).unwrap().matches(&reference)
+    }
+
+    #[test]
+    fn globs_of_the_same_text_are_equal_and_serialise_as_it() {
+        let glob = Glob::new("reg.test/**").unwrap();
+        assert_eq!(glob, Glob::new("reg.test/**").unwrap());
+        assert_ne!(glob, Glob::new("reg.test/*").unwrap());
+        assert_eq!(serde_json::to_string(&glob).unwrap(), r#""reg.test/**""#);
     }
 
     /// policy-controller v0.15.1 `pkg/apis/glob/glob_test.go:21-87`, each row as D142 reads it.

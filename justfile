@@ -241,11 +241,11 @@ careful sanitizer="" package="":
     cargo careful test --target "$host" {{ if sanitizer == "" { "" } else { "-Zcareful-sanitizer=" + sanitizer } }} {{ if package == "" { "--workspace --exclude e2e" } else { "-p " + package } }} --all-features --locked
 
 # Divan's micro-benchmarks (D104): the reflector's index lookup in D33's fleet, blob hashing as content arrives (D7), and
-# the gate's verdict lookup (D20).
+# the gate's verdict lookup (D20) and its whole decision on each identity path (D172).
 # On this machine, outside CI: the numbers compare changes on one machine only. Arguments go to divan, such as a filter.
 # Measure the hot paths: just bench-micro
 bench-micro *args:
-    cargo bench --locked -p speculaire-reflect -p speculaire-mirror -p speculaire-runtime -p speculaire-oci -p speculaire-verify --bench micro \
+    cargo bench --locked -p speculaire-reflect -p speculaire-mirror -p speculaire-runtime -p speculaire-oci -p speculaire-verify -p speculaire-agent --bench micro \
         --features speculaire-reflect/bench,speculaire-mirror/bench -- {{ args }}
 
 # `just profile` and `just valgrind` run in the glibc profile image (D116), privileged for perf, on the release

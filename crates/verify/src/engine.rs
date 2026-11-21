@@ -1,5 +1,6 @@
 //! The verdict engine: one verdict per key for each root listed, from the artifacts discovery keeps (D20, D151).
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
@@ -12,7 +13,8 @@ use speculaire_artifacts::discover::{Error, Reason};
 use speculaire_artifacts::follow::{Found, Roots};
 use speculaire_artifacts::{Artifact, Discovery, Store};
 use speculaire_oci::reference::{Digest, Reference};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::futures::Notified;
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until};
 use tracing::{info, warn};
@@ -114,7 +116,8 @@ pub struct Lookup {
 }
 
 impl Lookup {
-    const PENDING: Self = Self {
+    /// The lookup of a key with no verdict yet.
+    pub const PENDING: Self = Self {
         verdict: Verdict::Pending,
         stale: false,
     };
@@ -136,6 +139,11 @@ pub struct Verdicts {
     pub(crate) kept: RwLock<HashMap<Digest, Vec<Kept>>>,
     /// `verify.stale_max`, in nanoseconds: none until [`Self::set_stale_max`].
     stale_max: AtomicU64,
+    /// Wakes the gate's waits at each verdict kept (D41).
+    changed: Notify,
+    /// The config digest of each root's manifest for the node's platform, as the verifier read it; none when it could
+    /// not (D65, D172).
+    configs: RwLock<HashMap<Digest, Option<Digest>>>,
 }
 
 impl Verdicts {
@@ -175,9 +183,20 @@ impl Verdicts {
         }
     }
 
+    /// Completes at the next verdict kept. Enabled before a lookup, it misses none kept after the lookup.
+    pub fn changed(&self) -> Notified<'_> {
+        self.changed.notified()
+    }
+
     /// Keeps `verdict` for `key`, in place of one kept under an earlier trust root or a stale one, and returns the
     /// verdict kept before, unless a rejection is kept already: it is final (D20).
     pub fn keep(&self, key: Key<'_>, verdict: Verdict) -> Option<Verdict> {
+        let before = self.replace(key, verdict);
+        self.changed.notify_waiters();
+        before
+    }
+
+    fn replace(&self, key: Key<'_>, verdict: Verdict) -> Option<Verdict> {
         let mut kept = self.kept.write().unwrap_or_else(PoisonError::into_inner);
         let image = kept.entry(key.image.clone()).or_default();
         match image.iter_mut().find(|kept| kept.policies == key.policies) {
@@ -239,9 +258,11 @@ impl Verdicts {
         if !after.is_empty() {
             kept.insert(image.clone(), after);
         }
+        drop(kept);
+        self.changed.notify_waiters();
     }
 
-    /// Drops the verdicts of `image` but those under `policies`.
+    /// Drops the verdicts of `image` but those under `policies`, and its config digest with the last.
     fn retain(&self, image: &Digest, policies: &[MatchHash]) {
         let mut kept = self.kept.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(verdicts) = kept.get_mut(image) {
@@ -250,6 +271,31 @@ impl Verdicts {
                 kept.remove(image);
             }
         }
+        if policies.is_empty() {
+            let mut configs = self.configs.write().unwrap_or_else(PoisonError::into_inner);
+            configs.remove(image);
+        }
+    }
+
+    /// Whether the config digest of `root`'s manifest is read: one unread is read again at the next verification.
+    fn configured(&self, root: &Digest) -> bool {
+        let configs = self.configs.read().unwrap_or_else(PoisonError::into_inner);
+        configs.get(root).is_some_and(Option::is_some)
+    }
+
+    /// Records `config` as the config digest of `root`'s manifest for the node's platform, none when unread.
+    pub(crate) fn configure(&self, root: &Digest, config: Option<Digest>) {
+        let mut configs = self.configs.write().unwrap_or_else(PoisonError::into_inner);
+        configs.insert(root.clone(), config);
+    }
+
+    /// Whether `root` may stand for the image of ID `id`: its manifest's config digest is `id`, or it is not recorded
+    /// yet, as for a verdict `cache.bin` kept that was not verified again since (D31, D172).
+    pub(crate) fn builds(&self, root: &Digest, id: &Digest) -> bool {
+        let configs = self.configs.read().unwrap_or_else(PoisonError::into_inner);
+        configs
+            .get(root)
+            .is_none_or(|config| config.as_ref() == Some(id))
     }
 
     /// How many verdicts are kept in each state.
@@ -282,6 +328,9 @@ pub trait Discover: Send + Sync + 'static {
         root: &Digest,
         names: &[String],
     ) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// The config digest of `root`'s manifest for the node's platform; none when it cannot be read (D65, D172).
+    fn config(&self, root: &Digest) -> impl Future<Output = Option<Digest>> + Send;
 }
 
 impl Discover for Discovery {
@@ -295,6 +344,10 @@ impl Discover for Discovery {
 
     async fn again(&self, root: &Digest, names: &[String]) -> Result<(), Error> {
         Discovery::again(self, root, names).await.map(drop)
+    }
+
+    async fn config(&self, root: &Digest) -> Option<Digest> {
+        Discovery::config(self, root).await
     }
 }
 
@@ -326,6 +379,10 @@ enum Trigger {
     Manifest,
     /// The first after a policy or trust-root change changed a key of the root (D21).
     Reverify,
+    /// The first of a root NRI's `Synchronize` named, before any list did (D22).
+    Synchronize,
+    /// The first of a root a `CreateContainer` named, before any list did (D22).
+    GateMiss,
     /// Any other: a listing, a discovery or a retry (D151).
     Event,
 }
@@ -336,9 +393,31 @@ impl Trigger {
         match self {
             Self::Manifest => "manifest",
             Self::Reverify => "reverify",
+            Self::Synchronize => "synchronize",
+            Self::GateMiss => "gate_miss",
             Self::Event => "event",
         }
     }
+}
+
+/// A root the gate names before any list does, which the engine discovers and verifies at once (D22).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asked {
+    /// The image identity.
+    pub root: Digest,
+    /// The names of the image, as the pod spec or the runtime gives them.
+    pub names: Vec<String>,
+    /// Who asks.
+    pub by: Asking,
+}
+
+/// Who asks for a root: the `trigger` of its first verification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asking {
+    /// NRI's `Synchronize`, for a running container.
+    Synchronize,
+    /// A `CreateContainer` whose verdict is missing.
+    GateMiss,
 }
 
 impl Root {
@@ -382,6 +461,8 @@ pub struct Engine<D> {
     /// The roots to verify again after a change, in order.
     reverify: VecDeque<Digest>,
     running: Running,
+    /// The sender [`Engine::asker`] clones, and its receiver.
+    asks_in: (mpsc::UnboundedSender<Asked>, mpsc::UnboundedReceiver<Asked>),
 }
 
 impl<D: Discover> Engine<D> {
@@ -409,6 +490,7 @@ impl<D: Discover> Engine<D> {
             asks: JoinSet::new(),
             reverify: VecDeque::new(),
             running,
+            asks_in: mpsc::unbounded_channel(),
         }
     }
 
@@ -416,6 +498,12 @@ impl<D: Discover> Engine<D> {
     #[must_use]
     pub fn verdicts(&self) -> &Arc<Verdicts> {
         &self.verdicts
+    }
+
+    /// Where the gate asks for the roots no list named yet (D22).
+    #[must_use]
+    pub fn asker(&self) -> mpsc::UnboundedSender<Asked> {
+        self.asks_in.0.clone()
     }
 
     /// Verifies each root `found` tells of until it closes (D151).
@@ -437,6 +525,7 @@ impl<D: Discover> Engine<D> {
                     Some(Found::Ended { root, discovered }) => self.ended(&root, discovered).await,
                     None => break,
                 },
+                Some(asked) = self.asks_in.1.recv() => self.asked(asked),
                 Some(answer) = self.asks.join_next() => match answer {
                     Ok((root, ask, answer)) => self.answered(&root, ask, answer).await,
                     Err(e) => warn!(error = %e, "a discovery for verification failed"),
@@ -550,6 +639,10 @@ impl<D: Discover> Engine<D> {
                     self.verdicts.keep(key, Verdict::Pending);
                 }
             }
+            // A pull stores the manifests after the fetch that verified the root first, so its listing reads them (D172).
+            if !keys.is_empty() {
+                self.configure(&digest).await;
+            }
             match self.roots.get_mut(&digest) {
                 Some(root) if root.names == names => {}
                 Some(root) => {
@@ -580,6 +673,40 @@ impl<D: Discover> Engine<D> {
         for digest in changed {
             self.verify(&digest).await;
         }
+    }
+
+    /// Discovers a root no list named yet, as its first verification's `trigger` asks; a known root goes on as it was.
+    /// The next change of the roots that does not name it forgets it, as any root.
+    fn asked(&mut self, asked: Asked) {
+        let Entry::Vacant(entry) = self.roots.entry(asked.root) else {
+            return;
+        };
+        let keys: Vec<MatchHash> = groups(&self.policies, &asked.names)
+            .iter()
+            .map(|group| group.hash)
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        self.asks.spawn(ask(
+            Arc::clone(&self.discovery),
+            entry.key().clone(),
+            asked.names.clone(),
+            Ask::Discover,
+        ));
+        entry.insert(Root {
+            names: asked.names,
+            trigger: match asked.by {
+                Asking::Synchronize => Trigger::Synchronize,
+                Asking::GateMiss => Trigger::GateMiss,
+            },
+            keys,
+            discovered: false,
+            failures: 0,
+            retry_at: None,
+            asking: true,
+            asked_again: false,
+        });
     }
 
     /// Takes in the end of the discovery that follows the image list.
@@ -690,6 +817,25 @@ impl<D: Discover> Engine<D> {
         }
     }
 
+    /// Records the config digest of `digest`'s manifest for the node's platform, unless read already (D65, D172).
+    async fn configure(&self, digest: &Digest) {
+        if !self.verdicts.configured(digest) {
+            let config = self.discovery.config(digest).await;
+            self.verdicts.configure(digest, config);
+        }
+    }
+
+    /// The artifacts recorded for `digest`, after the config digest of its manifest for the node's platform, unless
+    /// read already (D65, D172).
+    async fn recorded(&self, digest: &Digest) -> Result<Vec<Artifact>, String> {
+        self.configure(digest).await;
+        match self.discovery.store().recorded(digest).await {
+            Ok(Some(artifacts)) => Ok(artifacts),
+            Ok(None) => Err("artifacts not recorded".to_owned()),
+            Err(e) => Err(format!("artifact store: {e}")),
+        }
+    }
+
     /// Verifies each key of `digest` over its recorded artifacts, and keeps what it came to.
     async fn verify(&mut self, digest: &Digest) {
         let Some(root) = self.roots.get(digest).filter(|root| !root.keys.is_empty()) else {
@@ -698,11 +844,7 @@ impl<D: Discover> Engine<D> {
         let started = Instant::now();
         let held = self.held.clone();
         let trust = self.trust_hash();
-        let artifacts = match self.discovery.store().recorded(digest).await {
-            Ok(Some(artifacts)) => Ok(artifacts),
-            Ok(None) => Err("artifacts not recorded".to_owned()),
-            Err(e) => Err(format!("artifact store: {e}")),
-        };
+        let artifacts = self.recorded(digest).await;
         let groups = groups(&self.policies, &root.names);
         let mut outcomes = Vec::with_capacity(groups.len());
         for group in &groups {

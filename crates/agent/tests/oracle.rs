@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 
 use metrics_exporter_prometheus::PrometheusHandle;
 use speculaire_agent::gate::Gate;
+use speculaire_agent::gate::decision::Verifier;
 use speculaire_agent::status::Status;
-use speculaire_agent::telemetry;
+use speculaire_agent::{config, telemetry};
 use speculaire_mirror::listed::Listed;
 use speculaire_oracle_harness::Oracle;
 use speculaire_oracle_harness::nri::Start;
@@ -23,7 +24,8 @@ use speculaire_runtime::Node;
 use speculaire_runtime::detect::{Runtime, Sockets};
 use speculaire_runtime::images::{Images, Update};
 use speculaire_runtime::paths::Paths;
-use tokio::sync::mpsc;
+use speculaire_verify::{Absent, Policies, Verdicts};
+use tokio::sync::{mpsc, watch};
 
 /// A plugin connects, registers and synchronizes well within this.
 const SETTLE: Duration = Duration::from_secs(30);
@@ -89,6 +91,16 @@ impl Images for Unlisted {
     }
 }
 
+/// A verifier with no policy and no trust root, whose engine is not running.
+fn verifier() -> Verifier {
+    Verifier {
+        verdicts: Arc::new(Verdicts::default()),
+        policies: watch::channel(Arc::new(Policies::default())).1,
+        trust: watch::channel(Err(Absent::new("none in this test"))).1,
+        asker: mpsc::unbounded_channel().0,
+    }
+}
+
 /// A gate on `socket`, on a runtime of its own, with the process's recorder and logs.
 struct Agent {
     runtime: tokio::runtime::Runtime,
@@ -132,9 +144,9 @@ impl Agent {
             Gate::start(
                 socket.to_owned(),
                 runtime,
-                node.identity(),
-                Listed::follow(Arc::new(Unlisted)),
-                Duration::from_millis(300),
+                (node.identity(), Listed::follow(Arc::new(Unlisted))),
+                verifier(),
+                &config::Gate::default(),
                 Arc::clone(&status),
             )
         };
@@ -242,11 +254,8 @@ fn the_gate_registers_again_at_once_and_within_2_s_of_a_runtime_that_comes_back(
     // the oracle's 2 s request timeout: the new `Configure` logs both, and the gate stays registered (Q5).
     let too_long = "gate.wait is not below half of the request timeout";
     assert!(!agent.logs.text().contains(too_long));
-    agent
-        .gate
-        .as_ref()
-        .unwrap()
-        .set_wait(Duration::from_secs(1));
+    let config = config::parse("[gate]\nwait = 1\n").unwrap();
+    agent.gate.as_ref().unwrap().set(&config.gate);
     assert_eq!(runtime.close().unwrap(), 1);
     runtime.wait(1, AGAIN).unwrap();
     agent.until_registered(true, AGAIN);

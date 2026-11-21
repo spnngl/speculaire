@@ -22,6 +22,7 @@ impl Verdicts {
     ) -> Option<Lookup> {
         match identified {
             Identified::Unknown(reason) => return Some(unverifiable(reason)),
+            Identified::Unlisted => return Some(Lookup::PENDING),
             Identified::Mismatched => {
                 return Some(Lookup {
                     verdict: Verdict::Rejected {
@@ -60,8 +61,15 @@ impl Verdicts {
                 },
             })
         };
+        // CRI-O's manifests stand for the image ID whose config they name (D65, D172).
+        let id = if let Identified::Image(image) = identified {
+            Some(&image.id)
+        } else {
+            None
+        };
         let best = identified
             .digests()
+            .filter(|digest| id.is_none_or(|id| self.builds(digest, id)))
             .filter_map(manifest)
             .max_by_key(|lookup| hope(&lookup.verdict));
         Some(best.unwrap_or_else(|| unverifiable(NOT_CONFIG)))

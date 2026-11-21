@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use metrics::{Gauge, counter, describe_counter, describe_gauge, gauge};
+use metrics::{Gauge, counter, describe_counter, describe_gauge, describe_histogram, gauge};
 use metrics_exporter_prometheus::{
     Matcher, NativeHistogramConfig, PrometheusBuilder, PrometheusHandle,
 };
@@ -13,6 +13,10 @@ pub const BUILD_INFO: &str = "speculaire_build_info";
 pub const NRI_CONNECTED: &str = "speculaire_nri_connected";
 /// `speculaire_identity_path`: 1 for the image identity path the gate reads, set at NRI's `Configure` (D15, D169).
 pub const IDENTITY_PATH: &str = "speculaire_identity_path";
+/// `speculaire_gate_total`: gate decisions, by `mode`, `result` and `stale` (D18, D21, D23, D172).
+pub const GATE_TOTAL: &str = "speculaire_gate_total";
+/// `speculaire_gate_seconds`: `CreateContainer` handling time, by identity `path` (D107, D172).
+pub const GATE_SECONDS: &str = "speculaire_gate_seconds";
 /// `speculaire_config_reload_failures_total`: reloads rejected while the previous config stays in use (D30).
 pub const CONFIG_RELOAD_FAILURES: &str = "speculaire_config_reload_failures_total";
 
@@ -94,6 +98,12 @@ fn describe() {
     describe_gauge!(
         IDENTITY_PATH,
         "1 for the path the gate reads a container's image identity through"
+    );
+    describe_counter!(GATE_TOTAL, "Gate decisions");
+    describe_histogram!(
+        GATE_SECONDS,
+        metrics::Unit::Seconds,
+        "CreateContainer handling time"
     );
     describe_counter!(
         CONFIG_RELOAD_FAILURES,

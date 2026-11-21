@@ -31,7 +31,7 @@
 [gate.exempt]
 # Namespaces whose containers the gate allows, by exact name (D18).
 #namespaces = []
-# Images the gate allows: globs on the normalised pod-spec image name (D18).
+# Images the gate allows: globs on the normalised names the runtime gives the image, each repository on CRI-O (D18, D172).
 #images = []
 
 [runtime]

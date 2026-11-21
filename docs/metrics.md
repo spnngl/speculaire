@@ -52,7 +52,7 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 
 | Metric | Type | Labels | Meaning | Planned |
 |---|---|---|---|---|
-| `speculaire_verifications_total` | counter | `result` = `allow`\|`rejected`\|`unverifiable`; `trigger` = `manifest`\|`event`\|`synchronize`\|`gate_miss`\|`reverify` | Completed verifications (D20, D22); `manifest` is the first of a root a fetch through the mirror made (D152), `event` follows any other discovery or a retry (D151); `reverify` follows a policy or trust-root change (D21) | |
+| `speculaire_verifications_total` | counter | `result` = `allow`\|`rejected`\|`unverifiable`; `trigger` = `manifest`\|`event`\|`synchronize`\|`gate_miss`\|`reverify` | Completed verifications (D20, D22); `manifest` is the first of a root a fetch through the mirror made (D152), `event` follows any other discovery or a retry (D151); `gate_miss` the first of a root a container needed before a list named it (D172); `synchronize` is unused until NRI `Synchronize` adds roots (step 11); `reverify` follows a policy or trust-root change (D21) | |
 | `speculaire_verification_seconds` | histogram | — | Time from trigger to verdict | |
 | `speculaire_verdicts` | gauge | `state` = `allow`\|`rejected`\|`unverifiable`\|`pending` | Verdicts in memory, one per key (D151) | |
 | `speculaire_artifact_fetches_total` | counter | `source` = `peer`\|`upstream`; `upstream`; `result` = `ok`\|`not_found`\|`digest_mismatch`\|`rate_limited`\|`error` | Artifact requests by outcome, one per request (D38, D121); `rate_limited` is a `429`, or a `503` with `Retry-After` (D128); `upstream` is a host with a `hosts.toml` directory, on CRI-O a `[[registry]]` table, else `other`, and empty for peer fetches (D50, D121); a peer fetch is one per manifest or blob asked of peers, `not_found` when none gave it, and a mismatch counts in `speculaire_peer_fetches_total` (D52, D126) | M4 |
@@ -64,8 +64,8 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 
 | Metric | Type | Labels | Meaning | Planned |
 |---|---|---|---|---|
-| `speculaire_gate_total` | counter | `mode` = `audit`\|`enforce`; `result` = `allow`\|`rejected`\|`unverifiable`\|`pending`\|`unmatched`\|`exempt`; `stale` = `true`\|`false` | Gate decisions (D18, D21, D23) | M6 |
-| `speculaire_gate_seconds` | histogram | `path` = `nri`\|`annotation`\|`image_id` | `CreateContainer` handling time (target: p99 under 5 ms on a cached verdict) | M6 |
+| `speculaire_gate_total` | counter | `mode` = `audit`\|`enforce`; `result` = `allow`\|`rejected`\|`unverifiable`\|`pending`\|`unmatched`\|`exempt`\|`overloaded`; `stale` = `true`\|`false` | Gate decisions (D18, D21, D23, D172): `pending` when no verdict came within `gate.wait`, `overloaded` when the gate held 256 requests already; `stale` marks a verdict kept before a policy or trust-root change and served while re-verified, up to `verify.stale_max` (D21) | |
+| `speculaire_gate_seconds` | histogram | `path` = `nri`\|`annotation`\|`image_id` | `CreateContainer` handling time, waits included (target: p99 under 5 ms on a cached verdict, D107) | |
 | `speculaire_identity_path` | gauge | `path` = `nri`\|`annotation`\|`image_id` | 1 for the image-identity path in use, set at NRI's `Configure`, and 0 for the one it replaces: `nri` on containerd from NRI v0.12.2, `annotation` below, `image_id` on CRI-O (D15, D169, D170) | |
 | `speculaire_nri_connected` | gauge | — | 1 while registered with the runtime's NRI: from its `Configure` until the connection ends (D41, D64, D168) | |
 

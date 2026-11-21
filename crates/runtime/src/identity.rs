@@ -29,8 +29,8 @@ pub const IMAGE_REF: &str = "io.kubernetes.cri-o.ImageRef";
 /// Why no identity is read when the request carries none: an `Unverifiable` reason.
 pub const MISSING: &str = "no image identity in the request";
 
-/// Why a CRI-O image ID has no identity: no image the runtime lists has it, so no listed manifest has that config
-/// digest (D65); an `Unverifiable` reason.
+/// Why a CRI-O image ID has no identity: it is no digest, or no manifest listed for its image has it as config digest
+/// (D65, D172); an `Unverifiable` reason.
 pub const NOT_CONFIG: &str = "image ID is not a config digest";
 
 /// Why a container is rejected whose snapshot is not its image's: a `Rejected` reason (D15).
@@ -51,6 +51,8 @@ pub enum Identified<'a> {
     },
     /// CRI-O's: the image of the ID, as last listed; its repository digests are its listed manifests (D65).
     Image(Arc<Image>),
+    /// CRI-O's: an image ID the agent's copy of the image list lacks, until a list names it (D172).
+    Unlisted,
     /// containerd 2.3's: the container's snapshot does not rest on the image its name resolves to; [`MISMATCH`].
     Mismatched,
     /// No identity, and why, as an `Unverifiable` reason.
@@ -63,7 +65,7 @@ impl Identified<'_> {
         let (listed, repo_digests): (_, &[RepoDigest]) = match self {
             Self::Listed { digest, .. } => (Some(digest), &[]),
             Self::Image(image) => (None, &image.repo_digests),
-            Self::Mismatched | Self::Unknown(_) => (None, &[]),
+            Self::Unlisted | Self::Mismatched | Self::Unknown(_) => (None, &[]),
         };
         let unique = repo_digests
             .iter()
@@ -83,7 +85,7 @@ impl Identified<'_> {
         let (listed, image) = match self {
             Self::Listed { name, .. } => (Some(*name), None),
             Self::Image(image) => (None, Some(image.as_ref())),
-            Self::Mismatched | Self::Unknown(_) => (None, None),
+            Self::Unlisted | Self::Mismatched | Self::Unknown(_) => (None, None),
         };
         let repositories = image.into_iter().flat_map(repositories);
         listed.into_iter().chain(repositories)
@@ -169,7 +171,7 @@ impl ImageId {
         };
         match self.images.load().get(&id) {
             Some(image) => Identified::Image(Arc::clone(image)),
-            None => Identified::Unknown(NOT_CONFIG),
+            None => Identified::Unlisted,
         }
     }
 }

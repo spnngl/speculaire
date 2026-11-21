@@ -16,6 +16,8 @@ use std::process::Stdio;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use e2e::node::POLICY;
+use e2e::upstream::{Kind, UNSIGNED};
 use e2e::{Cluster, IpFamily, Runtime};
 use speculaire_oci::chain::of_config;
 use speculaire_oci::index::Index;
@@ -431,4 +433,123 @@ fn the_gate_reads_the_image_identity_by_annotation_on_containerd_2_3_from_nri_on
         path == "annotation",
         "{warnings}"
     );
+}
+
+/// A policy over the unsigned image at `host`: any keyless signer passes it, and it has none.
+fn unsigned_policy(host: &str) -> String {
+    let name = UNSIGNED.split_once(':').expect("a tag").0;
+    format!(
+        "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: unsigned\nspec:\n  \
+         images:\n  - glob: {host}/{name}\n  authorities:\n  - keyless:\n      identities:\n      - issuerRegExp: \
+         \".*\"\n        subjectRegExp: \".*\"\n"
+    )
+}
+
+/// The sum of the agent's `name` series whose labels hold each of `labels`.
+fn count(worker: &Worker, name: &str, labels: &[&str]) -> u64 {
+    worker
+        .series(name)
+        .iter()
+        .filter(|series| labels.iter().all(|label| series.contains(label)))
+        .map(|series| {
+            let value = series.rsplit_once(' ').unwrap().1;
+            value.parse::<u64>().unwrap_or_else(|_| panic!("{series}"))
+        })
+        .sum()
+}
+
+/// Deletes the pod, the policy file and the image, and restarts the agent, even when the test fails.
+struct Unsigned<'a> {
+    worker: &'a Worker,
+    pod: &'static str,
+    image: String,
+}
+
+impl Drop for Unsigned<'_> {
+    fn drop(&mut self) {
+        let Unsigned { worker, pod, image } = self;
+        let _ = worker
+            .cluster
+            .kubectl(&["delete", "pod", pod, "--now", "--timeout=60s"]);
+        let _ = worker.cluster.exec_output(
+            &worker.node,
+            &["sh", "-c", &format!("rm -f {POLICY}; crictl rmi {image}")],
+        );
+        worker.cluster.reset_agent(&worker.node).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn in_audit_a_pod_of_a_rejected_image_runs_and_counts_as_rejected() {
+    let Some(worker) = Worker::new() else { return };
+    let host = worker
+        .cluster
+        .upstream(Kind::Referrers)
+        .address()
+        .to_owned();
+    worker
+        .cluster
+        .policy(&worker.node, &unsigned_policy(&host))
+        .unwrap();
+    let guard = Unsigned {
+        worker: &worker,
+        pod: "speculaire-e2e-unsigned",
+        image: format!("{host}/{UNSIGNED}"),
+    };
+    worker.cluster.reset_agent(&worker.node).unwrap();
+    // The verdict is in before the pod: the first `CreateContainer` finds it, not `Pending`.
+    worker.sh(&format!("crictl pull {} >/dev/null", guard.image));
+    let start = Instant::now();
+    while count(
+        &worker,
+        "speculaire_verifications_total",
+        &[r#"result="rejected""#],
+    ) == 0
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{}: no rejected verification of {}",
+            worker.node,
+            guard.image
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let rejected = [r#"mode="audit""#, r#"result="rejected""#];
+    let before = count(&worker, "speculaire_gate_total", &rejected);
+
+    let overrides = format!(r#"{{"spec":{{"nodeName":"{}"}}}}"#, worker.node);
+    worker
+        .cluster
+        .kubectl(&[
+            "run",
+            guard.pod,
+            "--image",
+            &guard.image,
+            "--image-pull-policy=IfNotPresent",
+            "--restart=Never",
+            &format!("--overrides={overrides}"),
+            "--command",
+            "--",
+            "sleep",
+            "3600",
+        ])
+        .unwrap();
+    worker
+        .cluster
+        .kubectl(&[
+            "wait",
+            "--for=condition=Ready",
+            &format!("pod/{}", guard.pod),
+            "--timeout=120s",
+        ])
+        .unwrap();
+    let after = count(&worker, "speculaire_gate_total", &rejected);
+    assert_eq!(
+        after,
+        before + 1,
+        "{:?}",
+        worker.series("speculaire_gate_total")
+    );
+    drop(guard);
 }

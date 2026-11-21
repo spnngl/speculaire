@@ -863,3 +863,71 @@ async fn a_registry_the_config_names_counts_under_its_host() {
     );
     assert!(!rendered.contains("upstream=\"other\""), "{rendered}");
 }
+
+/// A node holding these manifests.
+struct Holding(HashMap<Digest, Bytes>);
+
+impl Local for Holding {
+    fn manifest<'a>(
+        &'a self,
+        digest: &'a Digest,
+        _: u64,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Option<Bytes>> + Send + 'a>> {
+        Box::pin(std::future::ready(self.0.get(digest).cloned()))
+    }
+}
+
+/// An image manifest whose config is `config`, as bytes.
+fn image_manifest(config: &Digest) -> Bytes {
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": MANIFEST,
+        "config": descriptor("application/vnd.oci.image.config.v1+json", config, 6),
+        "layers": [],
+    });
+    Bytes::from(manifest.to_string())
+}
+
+#[tokio::test]
+async fn the_config_digest_is_read_from_the_platform_manifest_the_node_holds() {
+    let (amd64_config, arm64_config) = (digest_of(b"amd64"), digest_of(b"arm64"));
+    let (amd64, arm64) = (image_manifest(&amd64_config), image_manifest(&arm64_config));
+    let entry = |bytes: &Bytes, arch: &str| {
+        let mut entry = descriptor(MANIFEST, &digest_of(bytes), bytes.len());
+        entry["platform"] = json!({"os": "linux", "architecture": arch});
+        entry
+    };
+    let index = Bytes::from(
+        json!({"schemaVersion": 2, "mediaType": INDEX, "manifests": [entry(&arm64, "arm64"), entry(&amd64, "amd64")]})
+            .to_string(),
+    );
+    let lone_config = digest_of(b"lone");
+    let lone = image_manifest(&lone_config);
+    let unheld = Bytes::from(
+        json!({"schemaVersion": 2, "mediaType": INDEX, "manifests": [entry(&arm64, "amd64")]})
+            .to_string(),
+    );
+    let held = [&index, &amd64, &lone, &unheld].map(|bytes| (digest_of(bytes), bytes.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let peers = Fetcher::new(dir.path().join("staging"), SETTINGS);
+    let local = Arc::new(Holding(held.into_iter().collect()));
+    let test = Test::near(Limits::new(1024), |_| Vec::new(), local, peers, dir).await;
+
+    let cases = [
+        (&index, Some(amd64_config), "an index: its amd64 manifest's"),
+        (&lone, Some(lone_config), "an image manifest: its own"),
+        (&arm64, None, "a manifest the node lacks"),
+        (
+            &unheld,
+            None,
+            "an index whose platform manifest the node lacks",
+        ),
+    ];
+    for (root, config, case) in cases {
+        assert_eq!(
+            test.discovery.config(&digest_of(root)).await,
+            config,
+            "{case}"
+        );
+    }
+}

@@ -73,7 +73,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Measured (M2 step 02, arm64, Docker):** the differential tests send the oracle 19214 `reference` cases (the string literals of the test files of distribution/reference v0.6.0, 40 mutations of each, the e2e images, and about 70 by hand) and 3555 `platform` cases (specifiers, 20 mutations of each literal of containerd/platforms' tests, and 63 nodes against 63 candidates for `Only`, `OnlyStrict` and their `Less`), and every answer is the same. Two planted faults, no `library/` added to official images and an `arm64` matcher that does not match `arm/v8` (throwaway PR 40, closed), turned the `oracle` job red in run 43136382265: both the `reference` and the `platform` test failed.
 - **Revisit when:** a Windows node is supported, or containerd 2.5 moves `platforms` or `reference`.
 
-## D18: Exemptions are explicit and empty by default
+## D18: Exemptions are explicit and empty by default (amended by D172)
 
 - **Decision:** `gate.exempt.namespaces` (exact names) and `gate.exempt.images` (globs on the normalised pod-spec image name). Both are empty by default and logged at startup.
 - **Because:** the user wants no implicit exemptions, but an escape hatch. Anyone who can create pods in an exempt namespace bypasses the gate, so the setting stays explicit.
@@ -127,7 +127,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Revisit when:** CRI-O fills `Container.image`, or a node runs both runtimes.
 
 
-## D65: On CRI-O the image identity is CRI-O's image ID, read from its annotations (amends D11, D15, D20, D21, D22; amended by D169)
+## D65: On CRI-O the image identity is CRI-O's image ID, read from its annotations (amends D11, D15, D20, D21, D22; amended by D169, D172)
 
 - **Decision:**
   - **Identity:** in `CreateContainer` on CRI-O, the *image identity* is the `io.kubernetes.cri-o.ImageRef` annotation, CRI-O's image ID, which is the config digest of the platform manifest the image was pulled by. The gate reads it from the NRI request and makes no lookup.
@@ -242,7 +242,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The gate is 205 lines besides tests, `speculaire_nri::testing` 102.
 - **Revisit when:** the recorder can remove a series, or NRI makes plugins wait for `Synchronize` before CreateContainer.
 
-## D169: The gate reads the image identity through one `Identity`, chosen by the runtime at `Configure`; on CRI-O it maps the image ID to the image's listed manifests (amends D15, D64, D65; amended by D170, D171)
+## D169: The gate reads the image identity through one `Identity`, chosen by the runtime at `Configure`; on CRI-O it maps the image ID to the image's listed manifests (amends D15, D64, D65; amended by D170, D171, D172)
 
 - **Decision:**
   - **Trait:** `speculaire_runtime::identity::Identity::identify(&PodSandbox, &Container)` (D171) gives an `Identified`: `Listed { digest, name }`, `Image(Arc<Image>)` or `Unknown(reason)`. `NodeIdentity::of(runtime)` gives one enum, as `NodeContent` is, because the trait is async for step 07's `annotation` path and so has no `dyn` form (D90). The gate builds it once, so its copy of the image list outlives a connection, and sets `speculaire_identity_path{path}` to 1 at `Configure`, with `path` `nri` or `image_id` from `NodeIdentity::path()`. CRI-O logs no identity warning.
@@ -289,3 +289,22 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The oracle runs containerd v2.4.2's loader and runtime migration over the same configs, and agrees on the images snapshotter, the default handler and every handler's `snapshotter`.
 - **Tested:** a unit test against the fake containerd, whose snapshots belong to one snapshotter, proves the handler's snapshotter is the one asked. No e2e: a RuntimeClass whose handler names another snapshotter needs a second snapshotter in the kind node.
 - **Revisit when:** containerd 2.3 reaches end of life, with D170.
+
+## D172: The gate decides each container from its verdict, waits up to `gate.wait` for a missing one, and on CRI-O keeps only the manifests whose config digest is the image ID (amends D18, D65, D169)
+
+- **Decision:**
+  - **Order:** `gate::decision::Decider::decide` takes each `CreateContainer`. A pod namespace in `gate.exempt.namespaces` is `exempt` before any lookup. Then the identity is read (D169, D170); an image whose names match a `gate.exempt.images` glob is `exempt`. Then `Verdicts::identified` gives the verdict, and its `None`, no matching policy, is `unmatched` (D23). A verdict served stale is counted `stale="true"` (D21).
+  - **Exempt images:** the globs match the names the identity gives, normalised (D81): containerd's image name, every repository CRI-O lists for the image. The pod-spec string reaches the gate on neither runtime: `Container.image.name` and `io.kubernetes.cri.image-name` are containerd's resolved name, and CRI-O's `io.kubernetes.cri-o.ImageName` is the image's own (v1.36.9 `internal/annotations/annotations.go:83`). An identity without names, `Unknown` or `Mismatched`, exempts nothing. `gate.exempt.images` is parsed as globs when the config loads, so a bad glob refuses the config.
+  - **Wait:** a `Pending` verdict, and on CRI-O an image ID the agent's copy of the list lacks (`Identified::Unlisted`), wait until the earlier of `gate.wait` and the runtime's deadline, woken by each verdict kept and each list kept. A wait that ends is `Pending`. The first pending pass sends each manifest of the identity, with its names, to the engine as `Asked { by: Asking::GateMiss }`; a root the engine does not know is discovered at once, and its verdicts are counted `trigger="gate_miss"` (D22). `Asking::Synchronize` and `trigger="synchronize"` wait for step 11.
+  - **Answers:** `audit` allows every container. `enforce` allows `exempt`, `allow`, and `unmatched` under `gate.unmatched = "allow"`. It rejects with the texts of `docs/operations.md` § Rejection reasons: the verdict as displayed (`rejected: …`, `unverifiable: …`), `unmatched`, and `verification pending` for `Pending` and for a request past the 256 in flight (`Handler::overloaded`, D166), counted `result="overloaded"`.
+  - **Metrics:** each answer counts `speculaire_gate_total{mode, result, stale}`; each `CreateContainer` records `speculaire_gate_seconds{path}`, waits included.
+  - **Config digest:** before a root's first verification, the engine records the config digest of its platform manifest for the node, read from the artifact store or the node (`Discovery::config`), or none when neither holds both. A root read as none is read again at its next verification and when a list names it, since a fetch's verification can come before the pull stores the platform manifest. `Verdicts::identified` keeps, of CRI-O's listed manifests, those whose recorded config digest is the image ID, and those not recorded yet: verdicts loaded from `cache.bin` before their root is verified again (D31). None left is `Unverifiable("image ID is not a config digest")`.
+  - **Settings:** a reload swaps one `Settings` that the next decision reads. The exemptions are logged at start (D18).
+- **Because:**
+  - An exempt namespace costs one comparison and no lookup, for the pods meant to pass unchecked.
+  - CRI-O lists an image once its pull ends, and the agent's copy follows by events or a relist, so a container can come before the copy names it. The user chose to wait for the list as for a pending verdict (2026-11-21).
+  - The config digest brings back D65's check, which D169 dropped: under `insecure_allow_unpredictable_image_contents` the image ID is a TOC digest that no manifest has as config, so the image is `Unverifiable` again rather than allowed on a manifest whose layers CRI-O never checked. The user chose it (2026-11-21).
+  - The waits hold no lock across an `await`: they wait on `Notify`, and the lookup takes the verdicts' read lock alone.
+- **Measured (M6 step 08, arm64):** `just bench-micro decide`, the whole decision on a cached `Allow` under `enforce`, 2000 samples, four runs: the `nri` path takes 0.41–0.45 µs median and 1.6 µs at worst, with 4 allocations, the name parse and the policy match of `Verdicts::identified`; the `annotation` path, on a fake containerd 2.3, takes 31–33 µs median and 226 µs at worst, with 27 allocations, mostly the snapshot `Stat` over gRPC. Both are far under the 5 ms p99 target (D107). `Verdicts::get` itself allocates nothing.
+- **Cost:** on CRI-O an image whose platform manifest the node holds in neither the artifact store nor the mirror's blob cache, as one pulled before the agent ran and since evicted, is unverifiable. Image exemptions do not see the pod-spec string, so a glob must name the image as the runtime resolved it.
+- **Revisit when:** step 11 adds the roots of NRI `Synchronize`.
