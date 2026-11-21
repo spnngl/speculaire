@@ -60,6 +60,16 @@ pub enum Identified<'a> {
 }
 
 impl Identified<'_> {
+    /// The image identity: containerd's listed digest, or CRI-O's image ID; none when no listed image is read (D15).
+    #[must_use]
+    pub fn identity(&self) -> Option<&Digest> {
+        match self {
+            Self::Listed { digest, .. } => Some(digest),
+            Self::Image(image) => Some(&image.id),
+            Self::Unlisted | Self::Mismatched | Self::Unknown(_) => None,
+        }
+    }
+
     /// The digests the engine keys the image's verdicts by: its listed manifests, each once.
     pub fn digests(&self) -> impl Iterator<Item = &Digest> {
         let (listed, repo_digests): (_, &[RepoDigest]) = match self {
@@ -250,6 +260,22 @@ impl NodeIdentity {
             Self::Containerd { annotated, .. } if annotated.load(Ordering::Relaxed) => "annotation",
             Self::Containerd { .. } => "nri",
             Self::ImageId(_) => "image_id",
+        }
+    }
+
+    /// The image name of `container` for the `gate` audit event (D173): containerd's pod-spec string, which it annotates
+    /// on every path; CRI-O passes none (D65), so the names policies match in `identified`, comma-separated.
+    #[must_use]
+    pub fn image_name(&self, container: &Container, identified: Option<&Identified<'_>>) -> String {
+        match self {
+            Self::Containerd { .. } => container
+                .annotations
+                .get(annotation::IMAGE_NAME)
+                .cloned()
+                .unwrap_or_default(),
+            Self::ImageId(_) => identified
+                .map(|identified| identified.names().collect::<Vec<_>>().join(", "))
+                .unwrap_or_default(),
         }
     }
 

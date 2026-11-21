@@ -274,18 +274,16 @@ impl Handler for Plugin {
         answer(&decision, &settings)
     }
 
-    fn overloaded(&self, _: &CreateContainerRequest) -> Answer {
-        answer(&Decision::Overloaded, &self.decider.settings())
+    fn overloaded(&self, request: &CreateContainerRequest) -> Answer {
+        let settings = self.decider.settings();
+        answer(&self.decider.overloaded(request, &settings), &settings)
     }
 }
 
 /// The answer `decision` gets under `settings`, counted under `speculaire_gate_total`.
 fn answer(decision: &Decision, settings: &Settings) -> Answer {
-    let mode = match settings.mode {
-        config::Mode::Audit => "audit",
-        config::Mode::Enforce => "enforce",
-    };
     let stale = if decision.stale() { "true" } else { "false" };
+    let mode = settings.mode.name();
     metrics::counter!(GATE_TOTAL, "mode" => mode, "result" => decision.result(), "stale" => stale)
         .increment(1);
     decision.answer(settings)

@@ -1028,7 +1028,8 @@ async fn combine(
 }
 
 /// Keeps `verdict` for `key`, counts the verification under the trigger that started it at the time given, and logs and
-/// audits it when it differs from the one kept (D37).
+/// audits it when it differs from the one kept; the audit event's fields are `docs/operations.md` § Audit events' (D37,
+/// D173).
 fn decide(
     verdicts: &Verdicts,
     key: Key<'_>,
@@ -1056,18 +1057,117 @@ fn decide(
     info!(
         target: AUDIT_TARGET,
         event = "verdict",
-        image = %key.image,
-        policies = %names,
-        trust_root,
+        image_identity = %key.image,
+        matched_policies = %names,
+        trust_root_hash = trust_root,
         result = verdict.state(),
         reason = verdict.reason(),
-        signers = %signers.join("; "),
+        signer_identities = %signers.join("; "),
     );
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// What a test's subscriber writes.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("no test panics holding the capture")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_changed_verdict_is_one_audit_event_with_every_field_operations_md_names() {
+        let doc = include_str!("../../../docs/operations.md");
+        let (_, section) = doc
+            .split_once("## Audit events\n")
+            .expect("operations.md has the section");
+        let section = section.split("\n## ").next().unwrap_or(section);
+        let mut want: Vec<&str> = section
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `verdict` | `")?.split_once('`'))
+            .map(|(field, _)| field)
+            .collect();
+        assert!(want.len() >= 6, "{want:?}");
+        want.push("event");
+        want.sort_unstable();
+
+        let policies = crate::Policies::parse(
+            "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: a\nspec:\n  \
+             images:\n  - glob: \"**\"\n  authorities:\n  - keyless:\n      identities:\n      - issuer: \
+             https://issuer.test\n        subject: https://subject.test\n",
+        )
+        .expect("the test policy parses");
+        let matched: Vec<&Policy> = policies.iter().collect();
+        let image = speculaire_oci::hash::of("sha256", b"image").expect("sha256 is an algorithm");
+        let key = Key {
+            image: &image,
+            policies: MatchHash::of(policies.iter()),
+            root: None,
+        };
+        let signers = ["a: someone (issuer https://issuer.test)".to_owned()];
+        let verdicts = Verdicts::default();
+        let capture = Capture::default();
+        let sink = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || sink.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            // A second dispatcher: with one alone, a callsite another test's thread hits first caches `never`
+            // (tracing-core 0.1.36 `src/callsite.rs:319`, `:546`, `:565`).
+            let _other = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            for _ in 0..2 {
+                decide(
+                    &verdicts,
+                    key,
+                    &matched,
+                    &Verdict::Allow,
+                    &signers,
+                    ("test", Instant::now()),
+                );
+            }
+        });
+        let written = capture
+            .0
+            .lock()
+            .expect("no test panics holding the capture");
+        let events: Vec<serde_json::Value> = String::from_utf8_lossy(&written)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a JSON event"))
+            .filter(|event: &serde_json::Value| event["target"] == AUDIT_TARGET)
+            .collect();
+        let [event] = events.as_slice() else {
+            panic!("one event for one change: {events:?}");
+        };
+        let fields = event["fields"]
+            .as_object()
+            .expect("the fields are an object");
+        let mut keys: Vec<&str> = fields.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, want);
+        assert_eq!(fields["event"], "verdict");
+        assert_eq!(fields["image_identity"], image.to_string());
+        assert_eq!(fields["matched_policies"], "a");
+        assert_eq!(fields["trust_root_hash"], "none");
+        assert_eq!(fields["result"], "allow");
+        assert_eq!(fields["reason"], "");
+        assert_eq!(fields["signer_identities"], signers[0]);
+    }
 
     #[test]
     fn a_verdict_changes_with_its_state_or_reason_and_not_with_its_retry_time() {

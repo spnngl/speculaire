@@ -44,7 +44,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109, D116)
 - D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower (amended by D106, D114)
 - D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56, D100)
-- D37 [agent](agent.md): logs through `tracing` to journald or JSON, default `warn`; an audit log of gate decisions and verdict changes, off by default; secrets never logged (amends D30; amended by D52, D116)
+- D37 [agent](agent.md): logs through `tracing` to journald or JSON, default `warn`; an audit log of gate decisions and verdict changes, off by default; secrets never logged (amends D30; amended by D52, D116, D173)
 - D38 [verification](verification.md): upstream `429` pauses discovery to that host until `Retry-After`; fallback and `.sig` tags are probed with `HEAD` (amends D20; amended by D43, D128)
 - D39 [agent](agent.md): shutdown withdraws from reflectors, drains for 10 s, saves the cache, and leaves NRI last (amended by D69, D103)
 - D40 [build](build.md): SemVer, `0.x` until `enforce` ships; fixes for the latest minor only; containerd minors from 2.3 while upstream supports them (amended by D63)
@@ -180,5 +180,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D170 [gate](gate.md): on containerd below NRI v0.12.2 the gate resolves `io.kubernetes.cri.image-name` in its image store, keeps the chain ID of the node's platform image per target, and rejects a container whose snapshot base is another (amends D15, D167, D169; amended by D171)
 - D171 [gate](gate.md): on containerd below NRI v0.12.2 the snapshot check asks the snapshotter of the pod's runtime handler, else the CRI images section's; `Identity::identify` takes the pod (amends D169, D170)
 - D172 [gate](gate.md): the gate decides exempt namespace, identity, exempt image names, policy match, then the verdict; a pending verdict or an image ID CRI-O has not listed waits up to `gate.wait` and asks the engine (`gate_miss`); audit allows all; on CRI-O only manifests whose recorded config digest is the image ID stand for it (amends D18, D65, D169)
+- D173 [agent](agent.md): audit fields are D37's words in snake_case, every one written, empty when it names nothing, listed in `docs/operations.md` § Audit events; the `gate` event gives the reason `enforce` would, in either mode; its image name is containerd's pod-spec string, and on CRI-O the repositories policies match (amends D37)
 
-Next free number: D173.
+Next free number: D174.

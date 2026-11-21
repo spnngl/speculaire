@@ -135,8 +135,39 @@ A pull by tag asks the peers whose runtime lists that tag before upstream, so it
 
 - `journalctl -u speculaire` shows the agent's logs, at `warn` and above by default. Change `log.filter` (`EnvFilter` syntax) and reload to see more (D37).
 - At `log.filter = "debug"` (or `speculaire_mirror=debug,speculaire_reflect=debug`), set `log.timings = true` and reload to log each span as it closes, as JSON on stderr with `time.busy` and `time.idle`: `mirror request` (`kind`, `digest`, `source`, `result`) closes at the body's last byte, `peer fetch` (`peer`, `rank`, `result`) at the attempt's end, and `reflector connection` (`peer`, `node`) at the connection's end. Turn it off once read: each request writes a line.
-- Set `audit.enabled = true` and reload to record one `gate` event per container creation, one `verdict` event per changed verdict, and one `peer` event per peer denied for a wrong digest (D52). Read them with `journalctl -t speculaire-audit` (D37).
+- Set `audit.enabled = true` and reload to record one `gate` event per container creation, one `verdict` event per changed verdict, and one `peer` event per peer denied for a wrong digest (D52). Read them with `journalctl -t speculaire-audit` (D37); "Audit events" lists their fields.
 - Registry credentials and tokens never appear in either.
+
+## Audit events
+
+Each event has a field `event` naming it. journald stores a field under its name in capitals behind `F_`: `journalctl -t speculaire-audit F_EVENT=gate -o json` gives the `gate` events with `F_NAMESPACE`, `F_POD` and the rest; without journald, the JSON on stderr has them in `fields` as named here (D37, D173). A field with nothing to name is empty.
+
+kubelet retries a rejected container creation with a backoff, and each retry is a creation: a rejected pod leaves one `gate` event per retry, as `speculaire_gate_total` counts one per retry.
+
+| Event | Field | Value |
+|---|---|---|
+| `gate` | `namespace` | The pod's namespace |
+| `gate` | `pod` | The pod's name |
+| `gate` | `container` | The container's name |
+| `gate` | `image_name` | On containerd, the image as the pod names it; on CRI-O, which passes no such name, the repositories policies match, comma-separated (D65) |
+| `gate` | `image_identity` | The image identity read: containerd's listed digest, CRI-O's image ID (D15); empty when none was read |
+| `gate` | `identity_path` | `nri`, `annotation` or `image_id`, as `speculaire_identity_path` names it (D170) |
+| `gate` | `matched_policies` | The names of the policies the image's names match, comma-separated |
+| `gate` | `mode` | `gate.mode` |
+| `gate` | `result` | As `speculaire_gate_total` labels it: `allow`, `rejected`, `unverifiable`, `pending`, `exempt`, `unmatched` or `overloaded` |
+| `gate` | `reason` | The rejection reason `enforce` gives, under either mode ("Rejection reasons"); empty when it allows |
+| `gate` | `stale` | Whether the verdict was stale (D21) |
+| `gate` | `exemption` | `namespace` or `image`, the exemption that applied (D18) |
+| `verdict` | `image_identity` | The manifest digest the verdict keys (D20) |
+| `verdict` | `matched_policies` | The names of the policies verified, comma-separated |
+| `verdict` | `trust_root_hash` | The trust root's hash, or `none` (D143) |
+| `verdict` | `result` | `allow`, `rejected`, `unverifiable` or `pending` |
+| `verdict` | `reason` | The verdict's reason; empty for `allow` |
+| `verdict` | `signer_identities` | Each `<policy>: <subject> (issuer <issuer>)`, or `<policy>: a key`, that satisfied a policy, semicolon-separated |
+| `peer` | `node` | The denied peer's node identity (D52) |
+| `peer` | `peer` | Its address |
+| `peer` | `digest` | The digest it sent other content for |
+| `peer` | `until` | When its denial ends |
 
 ## Stopping
 

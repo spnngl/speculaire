@@ -19,7 +19,7 @@ use speculaire_agent::status::Status;
 use speculaire_agent::{config, telemetry};
 use speculaire_mirror::listed::Listed;
 use speculaire_oracle_harness::Oracle;
-use speculaire_oracle_harness::nri::{self, Start};
+use speculaire_oracle_harness::nri::Start;
 use speculaire_runtime::Node;
 use speculaire_runtime::detect::{Runtime, Sockets};
 use speculaire_runtime::images::{Images, Update};
@@ -108,8 +108,6 @@ struct Agent {
     status: Arc<Status>,
     metrics: PrometheusHandle,
     logs: Logs,
-    /// The length of `logs` when the gate started: the process's lines before are other tests'.
-    from: usize,
     _serial: MutexGuard<'static, ()>,
 }
 
@@ -128,7 +126,6 @@ impl Agent {
                 logs
             })
             .clone();
-        let from = logs.text().len();
         let metrics = METRICS
             .get_or_init(|| telemetry::install().expect("the first recorder of the process"))
             .clone();
@@ -159,7 +156,6 @@ impl Agent {
             status,
             metrics,
             logs,
-            from,
             _serial: serial,
         }
     }
@@ -231,24 +227,6 @@ fn socket(dir: &tempfile::TempDir) -> PathBuf {
     dir.path().join("nri.sock")
 }
 
-/// Waits until a plugin has synchronized since `runtime` closed its connections, which only a new connection does: the
-/// closed plugin stays listed until pkg/adaptation reads the end of its connection (`pkg/adaptation/plugin.go:271-276`
-/// at v0.12.3).
-fn until_synchronized(runtime: &mut nri::Runtime, within: Duration) {
-    let start = Instant::now();
-    loop {
-        let report = runtime.report().expect("the oracle reports its plugins");
-        if report.plugins.iter().any(|p| p.synchronize_requests > 0) {
-            return;
-        }
-        assert!(
-            start.elapsed() < within,
-            "no plugin synchronized again within {within:?}: {report:?}"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 #[test]
 fn the_gate_registers_again_at_once_and_within_2_s_of_a_runtime_that_comes_back() {
     let Some(oracle) = oracle() else { return };
@@ -272,15 +250,14 @@ fn the_gate_registers_again_at_once_and_within_2_s_of_a_runtime_that_comes_back(
         assert!(series.contains(&want), "{want} not in {series:?}");
     }
 
-    // The runtime closes the connection: the gate registers again within `AGAIN`. Meanwhile `gate.wait` became half
-    // of the oracle's 2 s request timeout: the new `Configure` logs both, and the gate stays registered (Q5).
+    // The runtime closes the connection: the gate registers again at once. Meanwhile `gate.wait` became half of
+    // the oracle's 2 s request timeout: the new `Configure` logs both, and the gate stays registered (Q5).
     let too_long = "gate.wait is not below half of the request timeout";
     assert!(!agent.logs.text().contains(too_long));
     let config = config::parse("[gate]\nwait = 1\n").unwrap();
     agent.gate.as_ref().unwrap().set(&config.gate);
     assert_eq!(runtime.close().unwrap(), 1);
-    // The gate configures before the runtime synchronizes it, so its `Configure` has logged by then.
-    until_synchronized(&mut runtime, AGAIN);
+    runtime.wait(1, AGAIN).unwrap();
     agent.until_registered(true, AGAIN);
     let logs = agent.logs.text();
     let line = logs
@@ -337,6 +314,7 @@ fn the_gate_reads_containerd_s_image_identity_from_nri_and_cri_o_s_from_its_imag
         let mut nri = oracle.nri_runtime().unwrap();
         nri.start(&start).unwrap();
         let agent = Agent::start(&socket(&dir), runtime);
+        let before = agent.logs.text().len();
         agent.until_registered(true, SETTLE);
         nri.wait(1, SETTLE).unwrap();
         assert!(
@@ -346,7 +324,7 @@ fn the_gate_reads_containerd_s_image_identity_from_nri_and_cri_o_s_from_its_imag
             "{name}: {:?}",
             agent.identity_paths()
         );
-        let logs = agent.logs.text().split_off(agent.from);
+        let logs = agent.logs.text().split_off(before);
         assert_eq!(
             logs.contains("identity gap, D15"),
             path == "annotation",
