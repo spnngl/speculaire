@@ -246,3 +246,54 @@ fn a_manifest_is_stale_when_one_group_is_and_tells_the_first_names_reason() {
         })
     );
 }
+
+/// On CRI-O only the manifests whose config digest is the image ID stand for it; one not verified since the agent
+/// started, as `cache.bin` keeps it, stands until it is (D172).
+#[test]
+fn only_the_manifests_whose_config_digest_is_the_image_id_stand_for_it() {
+    let policies = Policies::parse(&policy("docker", "docker.io/**")).expect("parses");
+    let docker = hash(&policies, "docker");
+    let busybox = image(&[digest(0xa), digest(0xb)]);
+    let Identified::Image(listed) = &busybox else {
+        unreachable!("image() lists an image");
+    };
+    let verdicts = Verdicts::default();
+    keep(&verdicts, 0xa, docker, Verdict::Allow);
+    keep(&verdicts, 0xb, docker, rejected("unsigned"));
+    assert_eq!(
+        verdict(&verdicts, &busybox, &policies),
+        Some(Verdict::Allow)
+    );
+    verdicts.configure(&digest(0xa), Some(digest(0xc)));
+    verdicts.configure(&digest(0xb), Some(listed.id.clone()));
+    assert_eq!(
+        verdict(&verdicts, &busybox, &policies),
+        Some(rejected("unsigned")),
+        "the allowed manifest has another config"
+    );
+    verdicts.configure(&digest(0xb), None);
+    let unverifiable = verdict(&verdicts, &busybox, &policies);
+    assert!(
+        matches!(&unverifiable, Some(Verdict::Unverifiable { reason, .. }) if **reason == *NOT_CONFIG),
+        "{unverifiable:?}"
+    );
+    let listed_digest = Identified::Listed {
+        digest: digest(0xa),
+        name: "docker.io/library/busybox:1.37",
+    };
+    assert_eq!(
+        verdict(&verdicts, &listed_digest, &policies),
+        Some(Verdict::Allow),
+        "containerd's identity is the manifest"
+    );
+}
+
+/// An image ID no list names yet is pending, whatever the policies: the gate waits for the list (D172).
+#[test]
+fn an_unlisted_image_id_is_pending() {
+    let verdicts = Verdicts::default();
+    assert_eq!(
+        verdict(&verdicts, &Identified::Unlisted, &policies()),
+        Some(Verdict::Pending)
+    );
+}

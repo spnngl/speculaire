@@ -27,7 +27,7 @@ use speculaire_runtime::inventory::{Change, Inventory, Update};
 use speculaire_runtime::registries::{self, Registries, Reloaded};
 use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode, images};
-use speculaire_verify::{Engine, Policies, Running, Signatures, Verdicts};
+use speculaire_verify::{Engine, Policies, Running, Signatures};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
@@ -36,6 +36,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{self, Config, PeerAddress, Role};
 use crate::followed::Followed;
 use crate::gate::Gate;
+use crate::gate::decision::Verifier;
 use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
@@ -155,7 +156,7 @@ async fn serve(
     // failed just after one came up (D126, D134). Without `reflector.url` the sender drops: discovery waits for none.
     let (up, last_up) = tokio::sync::watch::channel(None);
     let up = client_config(&config).map(|_| up);
-    let (store, verdicts) = start_discovery(
+    let (store, verifier) = start_discovery(
         &config,
         &node,
         (&mirror, fetched),
@@ -168,9 +169,9 @@ async fn serve(
     let gate = Gate::start(
         config.nri.socket.get().get().to_owned(),
         node.runtime(),
-        node.identity(),
-        mirror.listed.clone(),
-        config.gate.wait.get(),
+        (node.identity(), mirror.listed.clone()),
+        verifier.clone(),
+        &config.gate,
         Arc::clone(&status),
     );
     let mut reflector = None;
@@ -222,8 +223,10 @@ async fn serve(
                 open_sharing(&config, &identity, &mirror, &node, &store, up.as_ref(), &mut sharing);
             }
         }
-        verdicts.set_stale_max(config.verify.stale_max.get());
-        gate.set_wait(config.gate.wait.get());
+        verifier
+            .verdicts
+            .set_stale_max(config.verify.stale_max.get());
+        gate.set(&config.gate);
         if config.config.poll_interval.get() != period {
             period = config.config.poll_interval.get();
             poll = polls(period);
@@ -511,7 +514,8 @@ const LINK_WAIT: Duration = Duration::from_secs(10);
 /// on (D131).
 ///
 /// The verdict engine verifies each root against the policies and the trust root `held` holds as its discovery ends,
-/// and paces the discoveries of the roots it waits on (D151); it verifies again as they change (D21).
+/// and paces the discoveries of the roots it waits on (D151); it verifies again as they change (D21). The gate reads its
+/// verdicts, and asks for the roots no list named yet, through the [`Verifier`] returned (D22).
 fn start_discovery(
     config: &Config,
     node: &RuntimeNode,
@@ -522,7 +526,7 @@ fn start_discovery(
         tokio::sync::watch::Receiver<Arc<Policies>>,
         tokio::sync::watch::Receiver<trust::Held>,
     ),
-) -> anyhow::Result<(Arc<Store>, Arc<Verdicts>)> {
+) -> anyhow::Result<(Arc<Store>, Verifier)> {
     let directory = config.artifacts.directory.get().get();
     let store = Store::open(directory)
         .with_context(|| format!("opening the artifact store {}", directory.display()))?;
@@ -541,13 +545,20 @@ fn start_discovery(
     let signatures = Signatures::new(config.sbom.max_size.get());
     let engine = Engine::new(
         Arc::clone(&discovery),
-        policies,
+        policies.clone(),
         signatures,
-        trust,
+        trust.clone(),
         running(node.socket().to_owned()),
     );
-    let verdicts = Arc::clone(engine.verdicts());
-    verdicts.set_stale_max(config.verify.stale_max.get());
+    let verifier = Verifier {
+        verdicts: Arc::clone(engine.verdicts()),
+        policies,
+        trust,
+        asker: engine.asker(),
+    };
+    verifier
+        .verdicts
+        .set_stale_max(config.verify.stale_max.get());
     let (found, told) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(engine.run(told));
     let images = node.images();
@@ -562,7 +573,7 @@ fn start_discovery(
         last_up,
         found,
     ));
-    Ok((store, verdicts))
+    Ok((store, verifier))
 }
 
 /// The roots the runtime's running containers run, asked over the CRI at `socket` (D21): none when it does not answer.

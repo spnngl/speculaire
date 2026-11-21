@@ -9,6 +9,7 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use speculaire_verify::Glob;
 pub use value::{
     Absolute, ByteSize, Interval, InvalidValue, LogFilter, Loopback, MaxUploads, NodeName,
     PeerAddress, ReflectorUrl, RegistryName, Span, TrustedRoot, TufUrl,
@@ -371,8 +372,8 @@ pub enum Unmatched {
 pub struct Exempt {
     /// Namespaces, by exact name.
     pub namespaces: Vec<String>,
-    /// Globs on the normalised pod-spec image name (D11), checked when the gate compiles them.
-    pub images: Vec<String>,
+    /// Globs on the normalised pod-spec image name (D11).
+    pub images: Vec<Glob>,
 }
 
 /// `[runtime]`.
@@ -881,6 +882,11 @@ mod tests {
                 "[gate]\nwait = \"300ms\"\n",
                 "gate.wait",
                 "a number of seconds",
+            ),
+            (
+                "[gate.exempt]\nimages = [\"reg.test/app:1\"]\n",
+                "gate.exempt.images[0]",
+                "names a tag or a digest",
             ),
             (
                 "[config]\npoll_interval = 0\n",

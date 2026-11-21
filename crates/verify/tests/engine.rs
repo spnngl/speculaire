@@ -12,8 +12,9 @@ use speculaire_artifacts::discover::{Error, Reason};
 use speculaire_artifacts::follow::{Found, Roots, roots};
 use speculaire_artifacts::testing::{FIXTURES, Fixture};
 use speculaire_oci::reference::Digest;
+use speculaire_runtime::identity::Identified;
 use speculaire_runtime::images::{Image, List, RepoDigest, Update};
-use speculaire_verify::engine::{Discover, RETRY_FIRST, RETRY_MAX};
+use speculaire_verify::engine::{Asked, Asking, Discover, RETRY_FIRST, RETRY_MAX};
 use speculaire_verify::{
     Absent, Engine, Held, Key, Lookup, MatchHash, Policies, Signatures, TrustRoot, Verdict,
     Verdicts,
@@ -43,6 +44,10 @@ struct Scripted {
     asked_again: Mutex<Vec<Digest>>,
     /// The roots the runtime's containers run.
     running: Mutex<HashSet<Digest>>,
+    /// The config digest the node holds for every root, none until the test sets one.
+    config: Mutex<Option<Digest>>,
+    /// How many times the engine read a config digest.
+    config_reads: AtomicUsize,
 }
 
 impl Scripted {
@@ -80,6 +85,16 @@ impl Discover for Scripted {
             answer
         }
     }
+
+    fn config(&self, _: &Digest) -> impl Future<Output = Option<Digest>> + Send {
+        self.config_reads.fetch_add(1, Ordering::Relaxed);
+        std::future::ready(
+            self.config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        )
+    }
 }
 
 fn unreachable() -> Error {
@@ -96,6 +111,7 @@ struct Run {
     discovery: Arc<Scripted>,
     policies: watch::Sender<Arc<Policies>>,
     trust: watch::Sender<Held>,
+    asker: mpsc::UnboundedSender<Asked>,
 }
 
 impl Run {
@@ -109,6 +125,8 @@ impl Run {
             reads: AtomicUsize::new(0),
             asked_again: Mutex::default(),
             running: Mutex::default(),
+            config: Mutex::default(),
+            config_reads: AtomicUsize::new(0),
         });
         let (policies, policy_feed) = watch::channel(Arc::new(policies));
         let (trust, held) = watch::channel(trust);
@@ -128,6 +146,7 @@ impl Run {
             }),
         );
         let verdicts = Arc::clone(engine.verdicts());
+        let asker = engine.asker();
         let (found, told) = mpsc::unbounded_channel();
         tokio::spawn(engine.run(told));
         Self {
@@ -136,6 +155,7 @@ impl Run {
             discovery,
             policies,
             trust,
+            asker,
         }
     }
 
@@ -842,4 +862,141 @@ async fn a_change_verifies_the_roots_of_running_containers_first() {
         running,
         "{asked:?}"
     );
+}
+
+/// A root the gate asks for before any list names it is discovered and verified at once, under `trigger="gate_miss"`,
+/// and the gate's wait wakes as its verdict lands; a known root goes on as it was (D22, D172).
+#[tokio::test]
+async fn a_root_the_gate_misses_is_discovered_and_verified_under_the_trigger_gate_miss() {
+    let fixture = Fixture::load("keyless").await;
+    let root = &fixture.root;
+    let policies = policies(&[("a", "reg.test/a", SAN)]);
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // The engine runs on this thread: the test's runtime has one.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let run = Run::start(&fixture.store, policies.clone(), true, Ok(pinned()));
+    let key = Key {
+        image: root,
+        policies: hash(&policies, &["a"]),
+        root: Some(pinned().hash()),
+    };
+    let landed = run.verdicts.changed();
+    tokio::pin!(landed);
+    landed.as_mut().enable();
+    let asked = Asked {
+        root: root.clone(),
+        names: vec!["reg.test/a".to_owned()],
+        by: Asking::GateMiss,
+    };
+    run.asker.send(asked.clone()).expect("the engine runs");
+    tokio::time::timeout(Duration::from_secs(10), landed)
+        .await
+        .expect("a verdict lands");
+    assert_eq!(run.verdict(key).await, Verdict::Allow);
+    let missed = r#"speculaire_verifications_total{result="allow",trigger="gate_miss"} 1"#;
+    assert!(handle.render().contains(missed), "{missed}");
+    assert_eq!(
+        run.discovery
+            .discovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len(),
+        1
+    );
+
+    run.asker.send(asked).expect("the engine runs");
+    run.found
+        .send(Found::Ended {
+            root: root.clone(),
+            discovered: Ok(()),
+        })
+        .expect("the engine runs");
+    let event = r#"speculaire_verifications_total{result="allow",trigger="event"} 1"#;
+    for _ in 0..200 {
+        if handle.render().contains(event) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(handle.render().contains(event), "{event}");
+    assert_eq!(
+        run.discovery
+            .discovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len(),
+        1,
+        "a known root is not discovered again"
+    );
+}
+
+#[tokio::test]
+async fn a_config_digest_unread_when_a_fetch_verified_the_root_is_read_once_a_list_names_it() {
+    let fixture = Fixture::load("keyless").await;
+    let root = &fixture.root;
+    let policies = policies(&[("a", "reg.test/a", SAN)]);
+    let run = Run::start(&fixture.store, policies.clone(), true, Ok(pinned()));
+    let key = Key {
+        image: root,
+        policies: hash(&policies, &["a"]),
+        root: Some(pinned().hash()),
+    };
+    let names = Roots::from([(root.clone(), vec!["reg.test/a".to_owned()])]);
+    run.found
+        .send(Found::Roots {
+            listed: Roots::new(),
+            fetched: names.clone(),
+        })
+        .expect("the engine runs");
+    run.found
+        .send(Found::Ended {
+            root: root.clone(),
+            discovered: Ok(()),
+        })
+        .expect("the engine runs");
+    assert_eq!(run.verdict(key).await, Verdict::Allow);
+    // CRI-O lists the image under its config digest, which the node did not hold at the fetch (D172).
+    let id = digest(0xc);
+    let crio = list(&[(&id, &[("reg.test/a", root)])]);
+    let image = Arc::new(crio.images().next().expect("an image").clone());
+    let identified = Identified::Image(image);
+    let lookup = || {
+        run.verdicts
+            .identified(&identified, &policies, Some(pinned().hash()))
+            .expect("a policy matches")
+            .verdict
+    };
+    assert_eq!(lookup().state(), "unverifiable");
+
+    *run.discovery
+        .config
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(id);
+    run.found
+        .send(Found::Roots {
+            listed: names.clone(),
+            fetched: Roots::new(),
+        })
+        .expect("the engine runs");
+    for _ in 0..200 {
+        if lookup() == Verdict::Allow {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(lookup(), Verdict::Allow);
+
+    // A config digest read stays; a root no policy matches has none read.
+    let reads = run.discovery.config_reads.load(Ordering::Relaxed);
+    let mut listed = names;
+    listed.insert(digest(0xd), vec!["reg.test/other".to_owned()]);
+    run.found
+        .send(Found::Roots {
+            listed,
+            fetched: Roots::new(),
+        })
+        .expect("the engine runs");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(run.discovery.config_reads.load(Ordering::Relaxed), reads);
 }

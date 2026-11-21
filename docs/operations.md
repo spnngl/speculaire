@@ -87,12 +87,12 @@ Shown in `kubectl describe pod` under `CreateContainerError`. On a node, `specul
 
 | Reason | Meaning | Action |
 |---|---|---|
-| `verification pending` | The verdict was not ready within `gate.wait` (D22) | None; kubelet retries. Investigate if it persists |
-| `image identity mismatch` | On containerd below NRI v0.12.2, the image the name annotation resolves to is not the one the container's snapshot rests on (D15, D170) | Check for a retag between pull and create |
+| `verification pending` | The verdict was not ready within `gate.wait`, CRI-O listed no image of that ID within it, or the gate held 256 requests already (D22, D172) | None; kubelet retries. Investigate if it persists |
+| `rejected: image identity mismatch` | On containerd below NRI v0.12.2, the image the name annotation resolves to is not the one the container's snapshot rests on (D15, D170) | Check for a retag between pull and create |
 | `unverifiable: image name not in containerd's image store` | On containerd below NRI v0.12.2, the agent's copy of the `k8s.io` image store has no image of the container's name (D170) | None when the image was just pulled; kubelet retries. Otherwise check `ctr -n k8s.io images ls` for the name |
 | `unverifiable: image layers cannot be read` | On containerd below NRI v0.12.2, the image's index, manifest or config is missing from containerd's content store, unreadable, or has no image for the node's platform (D170) | Check the agent's debug log; pull the image again |
 | `unverifiable: container snapshot cannot be read` | On containerd below NRI v0.12.2, the container's snapshot is not in the snapshotter of the pod's runtime handler as `config.toml` names it, or the `Stat` failed (D170, D171) | Check the handler's `snapshotter` in `config.toml` and the agent's debug log |
-| `unverifiable: image ID is not a config digest` | On CRI-O, the agent's copy of CRI-O's image list has no image of that ID with a repository digest (D65, D169) | None when the image was just pulled; kubelet retries. Otherwise check `crictl images --digests` for the image |
+| `unverifiable: image ID is not a config digest` | On CRI-O, no manifest CRI-O lists for the image has the image ID as its config digest, or the node holds none of them to read it from (D65, D172) | Check `crictl images --digests` for the image; with `insecure_allow_unpredictable_image_contents` CRI-O's image IDs are no config digests |
 | `unverifiable: no image identity in the request` | On containerd 2.4, `CreateContainer` named no image name or digest, on containerd below NRI v0.12.2 no parsable `io.kubernetes.cri.image-name`, or on CRI-O no `io.kubernetes.cri-o.ImageRef` (D169, D170) | Report it: a runtime that sends none is not supported |
 | `unmatched` | No policy matches the image, and `gate.unmatched = "deny"` (D23) | Add a policy, or exempt the image |
 | `rejected: <detail>` | A signature, attestation or SBOM check failed (D20) | Fix the image; the verdict is final for this policy and trust root |

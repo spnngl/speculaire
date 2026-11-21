@@ -1,7 +1,9 @@
 //! The gate's NRI plugin (D9, D41, D64): it registers with the runtime's NRI, again at once when the runtime closes the
-//! connection, then every second until it succeeds. Until the gate checks images, it allows every container.
+//! connection, then every second until it succeeds. Each `CreateContainer` gets the [`decision`] of its image.
 
-use std::future::{self, Future};
+pub mod decision;
+
+use std::future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,39 +21,42 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
 
+use self::decision::{Decider, Decision, Settings, Verifier};
+use crate::config;
 use crate::status::Status;
-use crate::telemetry::{self, IDENTITY_PATH, NRI_CONNECTED, Versions};
+use crate::telemetry::{self, GATE_SECONDS, GATE_TOTAL, IDENTITY_PATH, NRI_CONNECTED, Versions};
 
 /// How long the gate waits between two connections, unless the last one lasted longer (D41).
 const RETRY: Duration = Duration::from_secs(1);
 
 /// The gate's connection to the runtime's NRI, held while the agent serves.
 pub struct Gate {
-    wait: watch::Sender<Duration>,
+    settings: watch::Sender<Arc<Settings>>,
     stop: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
 
 impl Gate {
     /// Connects to NRI's `socket` as the plugin of `runtime`, the node's, whose image identity path `identity` reads
-    /// `listed` (D169, D170). `wait` is `gate.wait`, which each `Configure` checks against the runtime's request timeout
-    /// (D41, D168). `status` follows the registration.
+    /// `listed` (D169, D170), and decides each container from the verdicts of `verifier` under `gate` (D172). Each
+    /// `Configure` checks `gate.wait` against the runtime's request timeout (D41, D168). `status` follows the
+    /// registration.
     #[must_use]
     pub fn start(
         socket: PathBuf,
         runtime: Runtime,
-        identity: NodeIdentity,
-        listed: Listed,
-        wait: Duration,
+        (identity, listed): (NodeIdentity, Listed),
+        verifier: Verifier,
+        gate: &config::Gate,
         status: Arc<Status>,
     ) -> Self {
-        let (wait, waits) = watch::channel(wait);
+        exempted(gate);
+        let (settings, read) = watch::channel(Arc::new(Settings::new(gate)));
         let (stop, stopped) = oneshot::channel();
-        let identity = Arc::new(identity);
+        let decider = Arc::new(Decider::new(Arc::new(identity), verifier, read));
         let plugin = Plugin {
             runtime,
-            identity: Arc::clone(&identity),
-            wait: waits,
+            decider: Arc::clone(&decider),
             status,
             versions: Mutex::new(Versions::default()),
             path: Mutex::new(None),
@@ -64,7 +69,7 @@ impl Gate {
                 listed
                     .each(|list| {
                         if let Some(list) = list {
-                            identity.keep(list);
+                            decider.keep(list);
                         }
                     })
                     .await;
@@ -73,15 +78,19 @@ impl Gate {
             tokio::select! {
                 () = connect(socket, plugin, stopped) => {}
                 () = keep => {}
-                () = identity.follow() => {}
+                () = decider.identity().follow() => {}
             }
         });
-        Self { wait, stop, task }
+        Self {
+            settings,
+            stop,
+            task,
+        }
     }
 
-    /// Takes a new `gate.wait`, which the next `Configure` checks.
-    pub fn set_wait(&self, wait: Duration) {
-        self.wait.send_replace(wait);
+    /// Takes the `[gate]` settings of a reload, which the next decision reads and the next `Configure` checks.
+    pub fn set(&self, gate: &config::Gate) {
+        self.settings.send_replace(Arc::new(Settings::new(gate)));
     }
 
     /// Closes the connection (D39 step 6).
@@ -92,6 +101,13 @@ impl Gate {
             error!(%err, "the gate's NRI connection panicked");
         }
     }
+}
+
+/// Logs the exemptions of `gate` (D18).
+fn exempted(gate: &config::Gate) {
+    let exempt = &gate.exempt;
+    let images: Vec<String> = exempt.images.iter().map(ToString::to_string).collect();
+    info!(namespaces = ?exempt.namespaces, ?images, "the gate allows these namespaces and images unchecked");
 }
 
 /// Connects until `stop`, and plays the plugin on each connection.
@@ -146,10 +162,8 @@ async fn connect(socket: PathBuf, plugin: Plugin, mut stop: oneshot::Receiver<()
 struct Plugin {
     /// The node's runtime, which `Configure` must name (D64).
     runtime: Runtime,
-    /// How the image identity of a container is read (D169).
-    identity: Arc<NodeIdentity>,
-    /// `gate.wait`.
-    wait: watch::Receiver<Duration>,
+    /// Decides each container, through the image identity the node's runtime gives (D169, D172).
+    decider: Arc<Decider>,
     status: Arc<Status>,
     /// The versions `speculaire_build_info` names: empty until the first `Configure` (D61, D168).
     versions: Mutex<Versions>,
@@ -182,7 +196,7 @@ impl Plugin {
     /// Chooses the identity path by NRI's version, and moves `speculaire_identity_path` to it, setting the series it
     /// named before to 0 (D170). On `annotation`, warns of the gap D15 accepts.
     fn choose_path(&self, nri_version: &NriVersion, named: &str) {
-        let path = self.identity.configure(nri_version);
+        let path = self.decider.identity().configure(nri_version);
         let mut chosen = self.path.lock().expect("no thread panics holding the path");
         if let Some(before) = chosen.replace(path) {
             metrics::gauge!(IDENTITY_PATH, "path" => before).set(0);
@@ -229,7 +243,7 @@ impl Handler for Plugin {
             nri_version = versions.nri_version,
             "registered with NRI"
         );
-        let wait = *self.wait.borrow();
+        let wait = self.decider.settings().wait;
         let timeout = configuration.request_timeout;
         if wait.saturating_mul(2) >= timeout {
             error!(
@@ -247,15 +261,55 @@ impl Handler for Plugin {
     // The gate is ready without it (Q4), and nothing needs the containers that exist yet.
     fn synchronize(&self, _: Vec<PodSandbox>, _: Vec<Container>) {}
 
-    fn create_container(
+    async fn create_container(
         &self,
-        _: &CreateContainerRequest,
-        _: Instant,
-    ) -> impl Future<Output = Answer> + Send {
-        future::ready(Answer::Allow)
+        request: &CreateContainerRequest,
+        deadline: Instant,
+    ) -> Answer {
+        let started = Instant::now();
+        let settings = self.decider.settings();
+        let decision = self.decider.decide(request, &settings, deadline).await;
+        let path = self.decider.identity().path();
+        metrics::histogram!(GATE_SECONDS, "path" => path).record(started.elapsed());
+        answer(&decision, &settings)
     }
 
     fn overloaded(&self, _: &CreateContainerRequest) -> Answer {
-        Answer::Allow
+        answer(&Decision::Overloaded, &self.decider.settings())
+    }
+}
+
+/// The answer `decision` gets under `settings`, counted under `speculaire_gate_total`.
+fn answer(decision: &Decision, settings: &Settings) -> Answer {
+    let mode = match settings.mode {
+        config::Mode::Audit => "audit",
+        config::Mode::Enforce => "enforce",
+    };
+    let stale = if decision.stale() { "true" } else { "false" };
+    metrics::counter!(GATE_TOTAL, "mode" => mode, "result" => decision.result(), "stale" => stale)
+        .increment(1);
+    decision.answer(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_reload_swaps_the_settings_the_next_decision_reads() {
+        let gate = config::Gate::default();
+        let (settings, read) = watch::channel(Arc::new(Settings::new(&gate)));
+        let (stop, _) = oneshot::channel();
+        let gate = Gate {
+            settings,
+            stop,
+            task: tokio::spawn(async {}),
+        };
+        assert_eq!(read.borrow().mode, config::Mode::Audit);
+        let reloaded =
+            config::parse("[gate]\nmode = \"enforce\"\nwait = 0.1\n").expect("the settings parse");
+        gate.set(&reloaded.gate);
+        assert_eq!(read.borrow().mode, config::Mode::Enforce);
+        assert_eq!(read.borrow().wait, Duration::from_millis(100));
     }
 }

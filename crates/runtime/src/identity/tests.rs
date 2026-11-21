@@ -119,13 +119,10 @@ fn image_id_reads_the_listed_image_with_every_manifest_and_repository_once() {
 }
 
 #[test]
-fn image_id_without_a_listed_image_reads_no_identity() {
+fn image_id_without_a_listed_image_is_unlisted_until_a_list_names_it() {
     let image_id = ImageId::default();
     let unlisted = annotated(ID);
-    assert_eq!(
-        identify(&image_id, &unlisted),
-        Identified::Unknown(NOT_CONFIG)
-    );
+    assert_eq!(identify(&image_id, &unlisted), Identified::Unlisted);
     image_id.keep(&listed(ID, &["reg.test/one:1"], &[]));
     let Identified::Image(image) = identify(&image_id, &unlisted) else {
         panic!("the image is listed now");
@@ -135,7 +132,7 @@ fn image_id_without_a_listed_image_reads_no_identity() {
     image_id.keep(&listed(&other, &[], &[]));
     assert_eq!(
         identify(&image_id, &unlisted),
-        Identified::Unknown(NOT_CONFIG),
+        Identified::Unlisted,
         "the list is replaced"
     );
     for bad in ["", "ad4f", &format!("{ID}0"), "sha256:", "é"] {

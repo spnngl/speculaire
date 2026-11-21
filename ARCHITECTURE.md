@@ -88,13 +88,13 @@ The verifier works asynchronously, so the gate never waits on the network.
 6. **On a policy or trust-root change,** re-verify every image in the runtime's image store in the background, running containers first (D21).
 
 ### Gate
-1. NRI `CreateContainer` derives the *image identity* (D15, D65), then checks `gate.exempt` (D18). An exempt container is allowed and counted in metrics.
+1. NRI `CreateContainer` checks the pod namespace against `gate.exempt`, derives the *image identity* (D15, D65, D169), then checks its names against `gate.exempt` (D18, D172). An exempt container is allowed and counted in metrics.
 2. The gate computes the *policy match*. If it is empty, `gate.unmatched` decides (D23).
-3. The gate looks up the verdict, falling back to a *stale verdict* (D21). `Pending` waits at most `gate.wait` (default 300 ms, D47). The wait is short because the call holds the node's single NRI lock, which every pod and container event shares, and must end well inside containerd's `plugin_request_timeout` (D41).
+3. The gate looks up the verdict, falling back to a *stale verdict* (D21). `Pending` asks the verifier for the image (`gate_miss`, D22) and waits at most `gate.wait` (default 300 ms, D47, D172). The wait is short because the call holds the node's single NRI lock, which every pod and container event shares, and must end well inside containerd's `plugin_request_timeout` (D41).
 4. If the verdict is still `Pending`, the gate denies with "verification pending" and kubelet retries.
 5. **Modes** (`gate.mode`, default `audit`; no setting turns the gate off, D54):
    - `audit` allows, and records the verdict in metrics and the audit log (D37).
-   - `enforce` rejects `Rejected`, `Unverifiable` and `Pending`, each with its own reason.
+   - `enforce` rejects `Rejected`, `Unverifiable` and `Pending`, each with its own reason (`docs/operations.md`).
 6. **Fail-closed:** the runtime's default validator requires the plugin: containerd's `required_plugins = ["speculaire"]`, CRI-O's `nri_validator_required_plugins` (D64).
 
 ### Prewarm
