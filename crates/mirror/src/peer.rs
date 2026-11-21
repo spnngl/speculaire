@@ -40,8 +40,8 @@ use crate::serve::{Api, MAX_MANIFEST, listen, manifest_response, media_type, sta
 /// `uploads`, until `stop` completes.
 ///
 /// `tls` is the node identity's server side (`speculaire_pki::node::Credentials::server`). Once `stop` completes, it
-/// returns when every connection has closed: an idle one at once, one with a body in flight once it has sent the body
-/// (D39, D103).
+/// returns when every connection open then has closed: an idle one at once, one with a body in flight once it has sent
+/// the body (D39, D103); until then a new connection is answered as `uploads` says, 503 once stopped (D177).
 pub async fn serve<C: Content, A: Referrers>(
     listener: TcpListener,
     mut tls: ServerConfig,

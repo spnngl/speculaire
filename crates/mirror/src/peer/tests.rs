@@ -738,6 +738,10 @@ async fn once_stopped_new_requests_answer_503_and_the_api_ends_after_the_body_in
         let answer = ask(&mut sender, method.clone(), &blob_path(&held), None).await;
         assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE, "{method}");
     }
+    let (address, late) = (
+        test.address,
+        credentials(&test.cluster, &test.dir, "node-d").client(SERVER),
+    );
     let mut served = test.stop();
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut served)
@@ -745,8 +749,11 @@ async fn once_stopped_new_requests_answer_503_and_the_api_ends_after_the_body_in
             .is_err(),
         "a body is in flight"
     );
-    // The idle connection closed at once; the busy one sends its whole body.
+    // The idle connection closed at once, and a new one is answered 503 (D177); the busy one sends its whole body.
     assert!(sender.ready().await.is_err(), "an idle connection stays");
+    let mut late = connect(address, late).await.unwrap();
+    let answer = ask(&mut late, Method::GET, &blob_path(&held), None).await;
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
     let body = first.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body, pattern(LARGE));
     tokio::time::timeout(Duration::from_secs(5), served)

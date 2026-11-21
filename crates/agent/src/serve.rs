@@ -241,11 +241,13 @@ async fn serve(
     info!("stopping");
     // The runtime's followers end as the teardown cuts them, without a warning.
     node.stop();
-    shut_down(&config, mirror, sharing, reflector).await;
-    // D39, step 5.
-    saver.stop().await;
-    // D39, step 6.
-    gate.stop().await;
+    // D39, step 6 after steps 2 to 5.
+    gate.stop_after(async {
+        shut_down(&config, mirror, sharing, reflector).await;
+        // D39, step 5.
+        saver.stop().await;
+    })
+    .await;
     // An error means the server already ended; its result says why.
     let _ = stop.send(());
     server
@@ -254,8 +256,8 @@ async fn serve(
         .context("serving the status listener")
 }
 
-/// D39, steps 2 to 4 for peers, and a stopping reflector closes the streams of its agents. The mirror's part of steps 2
-/// and 4 arrives with the cache.
+/// D39, steps 2 to 4: the peer API answers 503 and the mirror 404 from now on, and both drain; a stopping reflector
+/// closes the streams of its agents.
 async fn shut_down(
     config: &Config,
     mirror: Mirror,
@@ -263,6 +265,7 @@ async fn shut_down(
     reflector: Option<Reflector>,
 ) {
     mirror.uploads.stop();
+    let mirror = mirror.stop();
     let (client, peers) = sharing
         .map(|sharing| (sharing.client, sharing.peers))
         .unzip();
@@ -272,14 +275,15 @@ async fn shut_down(
     if let Some(reflector) = reflector {
         reflector.stop().await;
     }
-    // Both listeners close, and their connections send what is in flight before they close (D39 step 4, D103).
+    // The connections open on both send what is in flight, then close (D39 step 4, D103); a listener closes once its
+    // connections have, or with the process when they are cut (D177).
     let peers = async {
         if let Some(peers) = peers {
             peers.stop().await;
         }
     };
     let drain = config.shutdown.drain_timeout.get();
-    let transfers = async { tokio::join!(peers, mirror.stop()) };
+    let transfers = async { tokio::join!(peers, mirror) };
     if tokio::time::timeout(drain, transfers).await.is_err() {
         warn!(
             ?drain,
@@ -411,11 +415,16 @@ impl Mirror {
         }
     }
 
-    async fn stop(self) {
+    /// Answers every request 404 from now on (D39 step 2); the future returned ends once the connections open have
+    /// closed (step 4).
+    fn stop(self) -> impl Future<Output = ()> {
         // An error means the mirror already ended.
         let _ = self.stop.send(());
-        if let Err(err) = self.task.await {
-            error!(error = %err, "the mirror panicked");
+        let task = self.task;
+        async move {
+            if let Err(err) = task.await {
+                error!(error = %err, "the mirror panicked");
+            }
         }
     }
 }

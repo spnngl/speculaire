@@ -5,6 +5,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -48,8 +49,9 @@ pub struct Fetched {
     pub name: String,
 }
 
-/// Serves the pull API on `listener` until `stop` completes, then until every connection has closed: an idle one at
-/// once, a busy one once it has sent its response (D39, D103). Each manifest fetched goes to `fetched`.
+/// Serves the pull API on `listener` until `stop` completes, then answers every request 404, so that the runtime pulls
+/// upstream, until every connection open at the stop has closed: an idle one at once, a busy one once it has sent its
+/// response (D39, D103, D177). Each manifest fetched goes to `fetched`.
 pub async fn serve<P: Pulls>(
     listener: TcpListener,
     tls: Arc<Tls>,
@@ -61,7 +63,13 @@ pub async fn serve<P: Pulls>(
         pulls,
         series: PullSeries::new(),
         fetched,
+        stopping: AtomicBool::new(false),
     });
+    let stopping = Arc::clone(&mirror);
+    let stop = async move {
+        stop.await;
+        stopping.stopping.store(true, Ordering::Relaxed);
+    };
     listen(listener, move || tls.config(), mirror, stop).await;
 }
 
@@ -71,11 +79,13 @@ pub(crate) trait Api: Send + Sync + 'static {
     fn answer(&self, request: &Request<Incoming>) -> impl Future<Output = Response<Body>> + Send;
 }
 
-/// The pull API: what `pulls` answers, measured into `series`, each manifest fetched told to `fetched`.
+/// The pull API: what `pulls` answers, measured into `series`, each manifest fetched told to `fetched`; 404 once
+/// `stopping`.
 struct Mirror<P> {
     pulls: Arc<P>,
     series: PullSeries,
     fetched: mpsc::UnboundedSender<Fetched>,
+    stopping: AtomicBool,
 }
 
 impl<P: Pulls> Api for Mirror<P> {
@@ -85,7 +95,9 @@ impl<P: Pulls> Api for Mirror<P> {
 }
 
 /// Serves `api` over HTTP/1.1 on `listener`, each connection with the TLS config `tls` gives then, until `stop`
-/// completes; then closes `listener`, and returns once every connection has closed.
+/// completes; then tells the connections open to close, and returns once they have. Until then the listener stays open
+/// (D177): a new connection gets what `api` answers once stopped, a 404 or a 503 rather than a refusal, and is not
+/// waited for.
 ///
 /// Waiting for the connections, not only for their bodies, is what lets a body's last bytes leave: hyper drops a body
 /// once it has buffered its end, and the process may exit before hyper sends it.
@@ -95,17 +107,24 @@ pub(crate) async fn listen<A: Api>(
     api: Arc<A>,
     stop: impl Future<Output = ()>,
 ) {
-    // Each connection holds a receiver: a send tells them all to close, and `closed` waits until they have.
+    // Each connection holds a receiver: a send tells them all to close, and `closed` waits until they have. Those
+    // accepted once stopped hold one of `late`, which is never sent.
     let (closing, _) = watch::channel(());
+    let (late, _) = watch::channel(());
+    let mut stopped = false;
     tokio::pin!(stop);
     loop {
         tokio::select! {
-            () = &mut stop => break,
+            () = &mut stop, if !stopped => {
+                stopped = true;
+                closing.send_replace(());
+            }
+            () = closing.closed(), if stopped => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
                     let acceptor = TlsAcceptor::from(tls());
                     let api = Arc::clone(&api);
-                    let closing = closing.subscribe();
+                    let closing = if stopped { &late } else { &closing }.subscribe();
                     tokio::spawn(connection(stream, acceptor, api, closing));
                 }
                 // A connection that was reset before it was accepted, or no file descriptor left: log and go on.
@@ -120,9 +139,6 @@ pub(crate) async fn listen<A: Api>(
             },
         }
     }
-    drop(listener);
-    closing.send_replace(());
-    closing.closed().await;
 }
 
 /// Serves one connection until it ends, or until `closing` changes or goes: then a request in flight is answered,
@@ -191,7 +207,12 @@ async fn handle<P: Pulls>(mirror: &Mirror<P>, request: &Request<Incoming>) -> Re
         pulls,
         series,
         fetched,
+        stopping,
     } = mirror;
+    // The runtime falls through to upstream rather than start what the drain may cut (D39 step 2).
+    if stopping.load(Ordering::Relaxed) {
+        return status(StatusCode::NOT_FOUND);
+    }
     let started = Instant::now();
     let Some(route) = route(request.method(), request.uri().path()) else {
         return status(StatusCode::NOT_FOUND);

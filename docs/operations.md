@@ -172,7 +172,16 @@ kubelet retries a rejected container creation with a backoff, and each retry is 
 
 ## Stopping
 
-`systemctl stop speculaire` withdraws the node from the reflectors, drains transfers for up to `shutdown.drain_timeout` (10 s), saves the cache, and disconnects from NRI last (D39). While it is stopped, pulls fall through to upstream, and with `required_plugins` set, container creation is rejected.
+`systemctl stop speculaire` runs D39's steps in order (D177):
+
+1. `/readyz` answers 503.
+2. The mirror answers every request 404, so pulls fall through to upstream, and the peer API answers 503.
+3. The node withdraws from the reflectors.
+4. Transfers in flight get up to `shutdown.drain_timeout` (10 s) to finish; the agent logs `transfers still in flight at shutdown.drain_timeout are cut` for those it cuts.
+5. The cache is saved.
+6. The gate disconnects from NRI, and the agent exits.
+
+Until step 6, the gate decides each container creation from memory, as when running. Keep `shutdown.drain_timeout` under the unit's `TimeoutStopSec=20s`, less the save, or systemd kills the agent before it saves. Once stopped, pulls fall through to upstream, and with `required_plugins` set, container creation is rejected.
 
 ## Metrics to alert on
 

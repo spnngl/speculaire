@@ -60,7 +60,8 @@ struct Server {
     directory: tempfile::TempDir,
     mirror: Mirror,
     fetched: mpsc::UnboundedReceiver<Fetched>,
-    _stop: oneshot::Sender<()>,
+    stop: oneshot::Sender<()>,
+    served: tokio::task::JoinHandle<()>,
 }
 
 fn write_files(dir: &Path, mirror: &Mirror) {
@@ -95,7 +96,7 @@ async fn start_pulls<P: Pulls>(pulls: P) -> Server {
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
     let (fetching, fetched) = mpsc::unbounded_channel();
-    tokio::spawn(serve(listener, tls, Arc::new(pulls), fetching, async {
+    let served = tokio::spawn(serve(listener, tls, Arc::new(pulls), fetching, async {
         // An error means the sender went with the test: stop too.
         let _ = stopped.await;
     }));
@@ -104,7 +105,8 @@ async fn start_pulls<P: Pulls>(pulls: P) -> Server {
         directory,
         mirror,
         fetched,
-        _stop: stop,
+        stop,
+        served,
     }
 }
 
@@ -787,4 +789,46 @@ async fn upstreams_refusal_is_a_429_with_its_retry_after_or_a_502_and_counted_as
     ] {
         assert!(text.lines().any(|l| l == line), "no `{line}` in\n{text}");
     }
+}
+
+#[tokio::test]
+async fn once_stopped_every_request_is_a_404_and_the_mirror_ends_after_the_body_in_flight() {
+    let held = digest_of(1);
+    let large = pattern(64 << 20);
+    let mut server = start(Fake(HashMap::from([(held.clone(), large.clone())]))).await;
+    let config = client_config(&server.mirror, Some(&server.mirror));
+    let mut busy = client(&server).await;
+    let request = Request::get(blob_path(&held))
+        .header("host", "mirror")
+        .body(Empty::new())
+        .unwrap();
+    let first = busy.send_request(request).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let mut idle = client(&server).await;
+    assert_eq!(get(&mut idle, "/v2/").await.status, StatusCode::OK);
+    server.stop.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut server.served)
+            .await
+            .is_err(),
+        "a body is in flight"
+    );
+    // The idle connection closed at once; a new one is answered 404, the runtime's cue to pull upstream.
+    assert!(idle.ready().await.is_err(), "an idle connection stays");
+    let mut late = connect(server.address, config).await.unwrap();
+    for path in ["/v2/".to_owned(), blob_path(&held)] {
+        assert_eq!(
+            get(&mut late, &path).await.status,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let body = first.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body, large);
+    // The connection opened once stopped, still open, is not waited for; the listener closes with the mirror.
+    tokio::time::timeout(Duration::from_secs(5), server.served)
+        .await
+        .expect("the mirror ends once its body is sent")
+        .unwrap();
+    assert!(TcpStream::connect(server.address).await.is_err());
 }
