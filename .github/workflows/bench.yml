@@ -1,7 +1,7 @@
 name: bench
 
-# D35's kind tier (D106): `just bench` on the e2e cluster of containerd 2.4 and the newest Kubernetes, nightly,
-# natively on each architecture, with the tables in the job summary. Dispatch runs the same, until the real-cluster
+# D35's kind tier (D106, D178): `just bench` on the e2e cluster of containerd 2.4 and the newest Kubernetes, nightly,
+# natively on each architecture, speculaire's gate in audit, with the tables in the job summary. Dispatch runs the same, until the real-cluster
 # tier has a cluster.
 on:
   schedule:
@@ -25,6 +25,11 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      # protoc: `just e2e-up` and the bench's `histogram` build the e2e crate, whose fixtures' runtime client compiles
+      # its .proto at build time (D141).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,6 +38,9 @@ jobs:
         with:
           # renovate: datasource=crate depName=just
           just-version: "1.59.0"
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
       - env:
           TARGET: ${{ matrix.target }}
         run: just musl "$TARGET"

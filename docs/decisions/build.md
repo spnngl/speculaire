@@ -470,7 +470,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a leg passes 20 minutes (then the dual-stack pass and the slowest peer suites move to a nightly workflow), or kind's balancer image changes.
 
 
-## D106: The bench's kind tier runs speculaire without gate or policy, with the e2e cluster's reflectors (amends D35; amended by D114)
+## D106: The bench's kind tier runs speculaire without gate or policy, with the e2e cluster's reflectors (amends D35; amended by D114, D178)
 
 - **Decision:**
   - **Image sets:** `just bench <kubeconfig> [<set>...]` runs the tool's `measure` once per set, each set being `<size>-<layers>`, 10 MB and 100 MB in 1 and 4 layers by default. `suite` always adds the 1 GB sets.
@@ -774,3 +774,29 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - busybox is already every node's test image (D112) and ships both platforms the e2e legs run; `COPY` onto it needs no emulator.
 - **Measured (M6 step 04, run 44767333052, 2026-11-20):** `fixtures/sigstore/` holds 4.4 MB, `layouts/runnable/` 4.1 MB of it. The run's `trusted_root.json` and `tuf/` targets are byte for byte the committed ones; only `tuf/timestamp.json` changed (version 837 to 839).
 - **Revisit when:** a newer trusted root no longer verifies an older case; the fixtures near 6 MB; a gate suite needs a runnable image with attestations.
+
+
+## D178: The bench's speculaire run gates in audit under a policy every bench image fails, reports the gate's p99, and checks each node after its reset (amends D106)
+
+- **Decision:**
+  - **Settings:** D106's, plus `gate.mode = "audit"` written out, and `bench/policy.yaml` at `verify.policy`'s default path: keyless signatures by any identity, for `ghcr.io/spegel-org/benchmark`. The bench images are unsigned, so each pull is verified and each bench container's decision is a rejected verdict audit lets through. Both tiers, kind nightly and a real cluster before a minor release, run these.
+  - **Preconditions:** the run waits until every agent is connected to its reflectors and registered with NRI (`speculaire_nri_connected 1`). After each set it aborts when the agents' `speculaire_gate_total` or `speculaire_verifications_total{result="rejected"}` did not grow: the gate decided nothing, or the policy matched no bench image.
+  - **Gate p99:** before and after each set, the run saves each agent's `/metrics` in the protobuf exposition. `histogram`, a binary of the e2e crate, subtracts each node's `speculaire_gate_seconds` before from after, merges the nodes, and prints the samples and their p99, the upper bound of its native bucket. An agent with fewer samples after than before restarted, and the run aborts. Per set, both phases together: `results.json` gains `gate` (`decisions`, `rejected`, `p99_seconds`), the summary a third table.
+  - **Node check:** after the reset, `bench/node/check.sh` looks once on each node for a `[host.` entry in the `_default` or `ghcr.io` `hosts.toml` and for a `spegel-org/benchmark` blob in containerd's content store. The run aborts with one line per leftover, each naming its node. `e2e/tests/bench.rs` leaves both on a worker and runs the script.
+  - **Inputs:** `just bench <kubeconfig>` builds a missing `just musl` binary itself. `bench.yml` installs protoc: building the e2e crate needs it, and its absence failed the nightly of 2026-11-21 (44894951306).
+- **Because:**
+  - D35's third run prices what an operator turns on first, audit under a policy. A policy no bench image matches leaves each decision `unmatched` and verifies nothing; one they fail prices discovery, verification and the gate's wait for a verdict.
+  - The text exposition omits native histograms (D34): reading the protobuf one reuses the e2e harness's `Native` (D174) over a parser in shell.
+  - One look, apart from the reset, names every leftover at once and runs alone in a test; the reset keeps its wait for containerd's garbage collection.
+- **Measured:** the dispatched run 44945169635 (2026-11-21, Kubernetes 1.37.0, containerd 2.4.2, Spegel v0.8.1) took 16 minutes on arm64 and 20 on amd64, `just bench` 5.3 and 6.3. Per set, 8 decisions over the nodes: on each worker and in each phase, one for the bench image and one `unmatched`. Gate p99 in ms, amd64 / arm64:
+
+    | Set | Gate p99 ms |
+    |---|---|
+    | 10MB-1 | 324 / 324 |
+    | 10MB-4 | 324 / 324 |
+    | 100MB-1 | 0.03 / 0.06 |
+    | 100MB-4 | 297 / 81 |
+
+    A container of an image pulled faster than its verification waits for the verdict, at most `gate.wait`, 0.3 s, in the bucket up to 324 ms; one whose verdict landed during the pull is decided in microseconds. speculaire's create p50 was 0.94 to 2.58 s against Spegel's 1.45 to 5.64. On Docker Desktop arm64 the gate's p99 was 324 ms in every set.
+- **Cost:** `just bench` builds the e2e crate. The gate's p99 on kind carries no release bar, as D106's numbers.
+- **Revisit when:** the bench images are signed, or `spegel-org/benchmark` adds images outside `ghcr.io/spegel-org/benchmark`: the policy must still match and fail them.

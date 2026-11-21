@@ -300,34 +300,12 @@ impl Cluster {
         )?;
         let unparsable = |detail: &str| fail(&format!("the metrics of {node}"), &detail);
         let bytes = unhex(hex.trim()).ok_or_else(|| unparsable("not hex"))?;
-        let mut rest = bytes.as_slice();
-        let mut native = Native::default();
-        while !rest.is_empty() {
-            let family = Family::decode_length_delimited(&mut rest)
-                .map_err(|err| unparsable(&err.to_string()))?;
-            if family.name != name {
-                continue;
-            }
-            let histograms = family
-                .metric
-                .iter()
-                .filter(|metric| {
-                    metric
-                        .label
-                        .iter()
-                        .any(|pair| (pair.name.as_str(), pair.value.as_str()) == label)
-                })
-                .filter_map(|metric| metric.histogram.as_ref());
-            for histogram in histograms {
-                native.add(histogram).map_err(unparsable)?;
-            }
-        }
-        Ok(native)
+        Native::decode(&bytes, name, Some(label)).map_err(|detail| unparsable(&detail))
     }
 }
 
 /// A native histogram of non-negative samples: its count, and the count of each bucket by index (D34).
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Native {
     /// The samples.
     pub count: u64,
@@ -340,6 +318,86 @@ pub struct Native {
 }
 
 impl Native {
+    /// The series of the native histogram `name` in `exposition`, an agent's `/metrics` in the protobuf exposition,
+    /// summed: those whose labels include `label`, or all of them without one. Empty when it has none.
+    ///
+    /// # Errors
+    ///
+    /// When `exposition` does not parse, or holds histograms of two schemas.
+    pub fn decode(
+        mut exposition: &[u8],
+        name: &str,
+        label: Option<(&str, &str)>,
+    ) -> Result<Self, String> {
+        let mut native = Self::default();
+        while !exposition.is_empty() {
+            let family =
+                Family::decode_length_delimited(&mut exposition).map_err(|err| err.to_string())?;
+            if family.name != name {
+                continue;
+            }
+            let histograms = family
+                .metric
+                .iter()
+                .filter(|metric| {
+                    label.is_none_or(|label| {
+                        metric
+                            .label
+                            .iter()
+                            .any(|pair| (pair.name.as_str(), pair.value.as_str()) == label)
+                    })
+                })
+                .filter_map(|metric| metric.histogram.as_ref());
+            for histogram in histograms {
+                native.add(histogram)?;
+            }
+        }
+        Ok(native)
+    }
+
+    /// The samples recorded after `before`, an earlier reading of the same histogram; `None` when `before` holds a
+    /// sample this does not, as when the agent restarted in between and its histograms started empty.
+    #[must_use]
+    pub fn since(&self, before: &Self) -> Option<Self> {
+        let Some(schema) = before.schema else {
+            return Some(self.clone());
+        };
+        if self.schema != Some(schema) {
+            return None;
+        }
+        let mut buckets = self.buckets.clone();
+        for (index, count) in &before.buckets {
+            let after = buckets.entry(*index).or_default();
+            *after = after.checked_sub(*count)?;
+        }
+        Some(Self {
+            count: self.count.checked_sub(before.count)?,
+            schema: self.schema,
+            zero: self.zero.checked_sub(before.zero)?,
+            buckets,
+        })
+    }
+
+    /// Adds the samples of `other`.
+    ///
+    /// # Errors
+    ///
+    /// When the two have different schemas.
+    pub fn merge(&mut self, other: &Self) -> Result<(), &'static str> {
+        let Some(schema) = other.schema else {
+            return Ok(());
+        };
+        if *self.schema.get_or_insert(schema) != schema {
+            return Err("histograms of two schemas");
+        }
+        self.count += other.count;
+        self.zero += other.zero;
+        for (index, count) in &other.buckets {
+            *self.buckets.entry(*index).or_default() += count;
+        }
+        Ok(())
+    }
+
     /// Adds the buckets of `histogram`, whose spans give each first index after the previous span's end and whose
     /// deltas give each count after the previous one.
     fn add(&mut self, histogram: &Histogram) -> Result<(), &'static str> {
@@ -546,7 +604,9 @@ impl Metrics {
 
 #[cfg(test)]
 mod tests {
-    use super::{Histogram, Native, Span};
+    use prost::Message as _;
+
+    use super::{Family, Histogram, LabelPair, Native, Series, Span};
 
     #[test]
     fn the_percentile_is_the_upper_bound_of_the_bucket_of_its_rank_across_spans_and_series() {
@@ -580,5 +640,94 @@ mod tests {
             ..histogram
         };
         assert!(native.add(&other).is_err());
+    }
+
+    #[test]
+    fn the_samples_since_a_reading_are_the_difference_and_none_after_a_restart() {
+        // Schema 0: one sample in bucket 0, up to 1, then two more in bucket 2, up to 4.
+        let mut before = Native::default();
+        before
+            .add(&Histogram {
+                sample_count: 1,
+                schema: 0,
+                zero_count: 0,
+                positive_span: vec![Span {
+                    offset: 0,
+                    length: 1,
+                }],
+                positive_delta: vec![1],
+            })
+            .unwrap();
+        let mut after = Native::default();
+        after
+            .add(&Histogram {
+                sample_count: 3,
+                schema: 0,
+                zero_count: 0,
+                positive_span: vec![
+                    Span {
+                        offset: 0,
+                        length: 1,
+                    },
+                    Span {
+                        offset: 1,
+                        length: 1,
+                    },
+                ],
+                positive_delta: vec![1, 1],
+            })
+            .unwrap();
+        let since = after.since(&before).unwrap();
+        assert_eq!(since.count, 2);
+        assert_eq!(since.percentile(1), 4.0);
+        assert_eq!(after.since(&Native::default()).unwrap().count, 3);
+        assert!(before.since(&after).is_none());
+
+        let mut set = since.clone();
+        set.merge(&before).unwrap();
+        assert_eq!(set.count, 3);
+        assert_eq!(set.percentile(34), 4.0);
+        assert_eq!(set.percentile(33), 1.0);
+    }
+
+    #[test]
+    fn the_exposition_gives_the_sum_of_the_named_histogram_over_the_series_with_the_label() {
+        // One sample in bucket 0 per series: two series of `gate`, one of them labelled, and one of `other`.
+        let histogram = Histogram {
+            sample_count: 1,
+            schema: 0,
+            zero_count: 0,
+            positive_span: vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            positive_delta: vec![1],
+        };
+        let series = |label: Vec<LabelPair>| Series {
+            label,
+            histogram: Some(histogram.clone()),
+        };
+        let path = LabelPair {
+            name: "path".to_owned(),
+            value: "nri".to_owned(),
+        };
+        let mut exposition = Vec::new();
+        for family in [
+            Family {
+                name: "other".to_owned(),
+                metric: vec![series(Vec::new())],
+            },
+            Family {
+                name: "gate".to_owned(),
+                metric: vec![series(vec![path]), series(Vec::new())],
+            },
+        ] {
+            family.encode_length_delimited(&mut exposition).unwrap();
+        }
+        assert_eq!(Native::decode(&exposition, "gate", None).unwrap().count, 2);
+        let labelled = Native::decode(&exposition, "gate", Some(("path", "nri"))).unwrap();
+        assert_eq!(labelled.count, 1);
+        assert_eq!(Native::decode(&exposition, "none", None).unwrap().count, 0);
+        assert!(Native::decode(&exposition[1..], "gate", None).is_err());
     }
 }

@@ -1,0 +1,14 @@
+# The policy of D35's speculaire run, /etc/speculaire/policy.yaml on each node: it matches the bench images, which
+# carry no signature, so each verdict is `rejected` and the gate, in audit, lets the container through (D178).
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: bench
+spec:
+  images:
+  - glob: ghcr.io/spegel-org/benchmark
+  authorities:
+  - keyless:
+      identities:
+      - issuerRegExp: ".*"
+        subjectRegExp: ".*"

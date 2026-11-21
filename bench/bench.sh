@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # D35's benchmark, as D106 runs it: spegel-org/benchmark's `measure` of each image set with no mirror, then with
-# Spegel, then with speculaire, on the cluster of a cluster-admin kubeconfig. Each node is reset before each run.
-# Writes the samples and results.json into the output directory, and the tables in Markdown to stdout.
+# Spegel, then with speculaire, its gate in audit with a policy that every bench image fails (D178), on the cluster of a
+# cluster-admin kubeconfig. Each node is reset and checked before each run. Writes the samples and results.json into
+# the output directory, and the tables in Markdown to stdout.
 #
 # Usage, from the repository's root: bench/bench.sh <kubeconfig> <output dir> <set>..., a set being
-# <size>-<layers> such as 100MB-4. kubectl, helm, benchmark and jq come from PATH; BENCH_NODE names the node pod's
+# <size>-<layers> such as 100MB-4. kubectl, helm, benchmark, jq and cargo come from PATH; BENCH_NODE names the node pod's
 # image, SPEGEL_VERSION the Spegel chart's version. Each node's speculaire is the binary of `just musl` for its
-# architecture.
+# architecture, built when missing.
 set -euo pipefail
 
 kubeconfig="$1" out="$2"
@@ -15,7 +16,11 @@ sets=("$@")
 ns=speculaire-bench
 runs=(baseline spegel speculaire)
 
+protobuf='application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited'
+
 k() { kubectl --kubeconfig "$kubeconfig" "$@"; }
+# The samples of a native histogram over a set, and a percentile of them: e2e/src/bin/histogram.rs.
+histogram() { cargo run -p e2e --locked --quiet --bin histogram -- "$@"; }
 log() { echo "bench: $*" >&2; }
 die() {
     log "$*"
@@ -48,6 +53,8 @@ reset() { # every node to no mirror, no bench image, a cold page cache (D35)
     k delete namespace spegel spegel-benchmark --ignore-not-found --wait >/dev/null
     for node in "${nodes[@]}"; do
         on "$node" bash -s <bench/node/reset.sh || die "$node: the reset failed"
+        left="$(on "$node" bash -s -- "$node" <bench/node/check.sh)" ||
+            die "the reset left what the next run would see:"$'\n'"${left:-$node: the check failed}"
     done
 }
 
@@ -63,11 +70,13 @@ install_speculaire() { # the reflectors first, on the control-plane nodes, then 
         members+="${members:+, }{ node = \"$node\", address = \"$(socket "$(jq -r --arg n "$node" \
             '.[] | select(.node == $n) | .address' "$out/reflectors.json")" 7483)\" }"
     done
-    sed -e "s|^#url = \"\"$|url = \"$url\"|" -e "s|^#members = \[\]$|members = [$members]|" packaging/config.toml \
-        >"$out/agent.toml"
+    # Every agent, a reflector being one, gates in audit with bench/policy.yaml (D178).
+    sed -e "s|^#url = \"\"$|url = \"$url\"|" -e "s|^#members = \[\]$|members = [$members]|" \
+        -e 's/^#mode = "audit"$/mode = "audit"/' packaging/config.toml >"$out/agent.toml"
     sed 's/^#role = "agent"$/role = "reflector"/' "$out/agent.toml" >"$out/reflector.toml"
     grep -q '^url = ' "$out/agent.toml"
     grep -q '^members = ' "$out/agent.toml"
+    grep -q '^mode = "audit"$' "$out/agent.toml"
     grep -q '^role = "reflector"$' "$out/reflector.toml"
     for node in "${reflectors[@]}" "${agents[@]}"; do
         bin="$(binary "$node")"
@@ -79,19 +88,59 @@ install_speculaire() { # the reflectors first, on the control-plane nodes, then 
         else
             on "$node" sh -c 'mkdir -p /etc/speculaire && cat >/etc/speculaire/config.toml' <"$out/agent.toml"
         fi
+        on "$node" sh -c 'cat >/etc/speculaire/policy.yaml' <bench/policy.yaml
         on "$node" sh -c 'speculaire configure >/dev/null && systemctl daemon-reload &&
             systemctl enable --quiet --now speculaire.service' </dev/null
     done
-    # Every agent streams to every reflector before the first pull.
+    # Every agent streams to every reflector, and its gate is registered with the runtime's NRI, before the first pull.
     for node in "${nodes[@]}"; do
         for _ in $(seq 60); do
-            connected="$(on "$node" sh -c 'curl -sf http://127.0.0.1:7482/metrics |
-                grep -c "^speculaire_reflector_connected{.*} 1$"' </dev/null || true)"
-            [[ "$connected" == "${#reflectors[@]}" ]] && continue 2
+            on "$node" curl -sf http://127.0.0.1:7482/metrics </dev/null >"$out/metrics" || true
+            connected="$(grep -c '^speculaire_reflector_connected{.*} 1$' "$out/metrics" || true)"
+            registered=no
+            grep -qx 'speculaire_nri_connected 1' "$out/metrics" && registered=yes
+            [[ "$connected" == "${#reflectors[@]}" && "$registered" == yes ]] && continue 2
             sleep 1
         done
-        die "$node: its agent streams to $connected of ${#reflectors[@]} reflectors"
+        die "$node: its agent streams to $connected of ${#reflectors[@]} reflectors; its gate registered with NRI: $registered"
     done
+}
+
+metrics() { # <run> <dir> <before|after>: each node's agent's metrics, in the text and the protobuf exposition
+    local node
+    [[ "$1" == speculaire ]] || return 0
+    for node in "${nodes[@]}"; do
+        on "$node" curl -sf http://127.0.0.1:7482/metrics </dev/null >"$2/metrics-$3-$node.txt"
+        on "$node" curl -sf -H "Accept: $protobuf" http://127.0.0.1:7482/metrics </dev/null >"$2/metrics-$3-$node.pb"
+    done
+}
+
+counter() { # <dir> <pattern>: how much the counters whose series match the pattern grew over the set, on all nodes
+    local node when
+    for node in "${nodes[@]}"; do
+        for when in before after; do
+            awk -v when="$when" -v pattern="$2" '$1 ~ pattern { sum += $2 }
+                END { print (when == "before" ? -sum : sum) }' "$1/metrics-$when-$node.txt"
+        done
+    done | awk '{ sum += $1 } END { print sum + 0 }'
+}
+
+gate() { # <run> <dir>: the gate's decisions over the set and their p99, proving that it gated in audit with a policy
+    local dir="$2" readings=() node decisions seconds rejected
+    if [[ "$1" != speculaire ]]; then
+        echo null
+        return
+    fi
+    for node in "${nodes[@]}"; do
+        readings+=("$dir/metrics-before-$node.pb" "$dir/metrics-after-$node.pb")
+    done
+    read -r decisions seconds < <(histogram speculaire_gate_seconds 99 "${readings[@]}") ||
+        die "$1: no p99 of the gate's decisions"
+    rejected="$(counter "$dir" '^speculaire_verifications_total\\{.*result="rejected"')"
+    ((decisions > 0)) || die "$1: the gate decided no container"
+    ((rejected > 0)) || die "$1: no verification rejected a bench image: does bench/policy.yaml match them?"
+    jq -n --argjson decisions "$decisions" --argjson p99 "$seconds" --argjson rejected "$rejected" \
+        '{ decisions: $decisions, p99_seconds: $p99, rejected: $rejected }'
 }
 
 usage() { # <run>: "<node> <usec>" of the run's agent on each node that runs it
@@ -130,16 +179,19 @@ measure() { # <run>: each set, into $out/<run>/<set>.json
         mkdir -p "$dir"
         log "$run: $set"
         usage "$run" >"$dir/usage-before"
+        metrics "$run" "$dir" before
         sample "$run" "$dir"
         benchmark measure --kubeconfig "$kubeconfig" --output-dir "$dir" \
             --images "ghcr.io/spegel-org/benchmark:v1-$set" "ghcr.io/spegel-org/benchmark:v2-$set" >"$dir/measure.log" 2>&1 ||
             die "$run: $set: benchmark measure failed: $dir/measure.log"
         usage "$run" >"$dir/usage-after"
+        metrics "$run" "$dir" after
         peaks "$dir" >"$dir/memory"
-        # Nearest-rank percentiles of the pull durations, in seconds, and the agent's CPU seconds and peak anon and file
-        # bytes on each node.
+        gate "$run" "$dir" >"$dir/gate"
+        # Nearest-rank percentiles of the pull durations, in seconds, the agent's CPU seconds and peak anon and file bytes
+        # on each node, and the gate's decisions, over both phases.
         jq -n --slurpfile bench <(cat "$dir"/benchmark-*.json) --rawfile before "$dir/usage-before" \
-            --rawfile after "$dir/usage-after" --rawfile memory "$dir/memory" '
+            --rawfile after "$dir/usage-after" --rawfile memory "$dir/memory" --slurpfile gate "$dir/gate" '
             def stats: map(.duration / 1e9) | sort
                 | { p50: .[(length * 0.5 | ceil) - 1], p95: .[(length * 0.95 | ceil) - 1], max: .[-1] };
             def column($n): split("\n") | map(select(. != "") | split(" ") | { (.[0]): (.[$n] | tonumber) })
@@ -147,13 +199,14 @@ measure() { # <run>: each set, into $out/<run>/<set>.json
             ($before | column(1)) as $start
             | { create: ($bench[0].create.samples | stats), update: ($bench[0].update.samples | stats),
                 cpu_seconds: ($after | column(1) | with_entries(.value = (.value - $start[.key]) / 1e6)),
-                memory: { anon: ($memory | column(1)), file: ($memory | column(2)) } }' >"$dir.json"
+                memory: { anon: ($memory | column(1)), file: ($memory | column(2)) }, gate: $gate[0] }' >"$dir.json"
     done
 }
 
-for tool in kubectl helm benchmark jq; do
+for tool in kubectl helm benchmark jq cargo; do
     command -v "$tool" >/dev/null || die "no $tool on PATH"
 done
+cargo build -p e2e --locked --quiet --bin histogram
 mkdir -p "$out"
 k get nodes -o json >"$out/nodes.json"
 mapfile -t nodes < <(jq -r '.items[].metadata.name' "$out/nodes.json")
@@ -165,7 +218,7 @@ mapfile -t reflectors < <(jq -r '.[].node' "$out/reflectors.json")
 mapfile -t agents < <(printf '%s\n' "${nodes[@]}" | grep -vxF -f <(printf '%s\n' "${reflectors[@]}") || true)
 for node in "${nodes[@]}"; do
     bin="$(binary "$node")"
-    [[ -x "$bin" ]] || die "$node: no $bin: run just musl $(basename "$(dirname "$bin")")"
+    [[ -x "$bin" ]] || just musl "$(basename "$(dirname "$bin")")" >&2
 done
 
 sed "s|@image@|$BENCH_NODE|" bench/node.yaml | k apply -f - >/dev/null
@@ -184,7 +237,7 @@ for run in "${runs[@]}"; do
     measure "$run"
 done
 
-# results.json: per run, each set's pull seconds, and the agent's CPU seconds and peak memory per node.
+# results.json: per run, each set's pull seconds, the agent's CPU seconds and peak memory per node, and its gate.
 for run in "${runs[@]}"; do
     for set in "${sets[@]}"; do
         jq --arg run "$run" --arg set "$set" '{ ($run): { sets: { ($set): . } } }' "$out/$run/$set.json"
@@ -218,5 +271,13 @@ jq -r --argjson sets "$(printf '%s\n' "${sets[@]}" | jq -R . | jq -s .)" '
       "|---|\($sets | map("---") | join("|"))|---|---|",
       (("spegel", "speculaire") as $run | $r.runs[$run]
         | "| \($run) | \([$sets[] as $set | .sets[$set].cpu_seconds | most] | join(" | "))"
-          + " | \([.sets[].memory.anon[] / 1048576] | most) | \([.sets[].memory.file[] / 1048576] | most) |")' \
+          + " | \([.sets[].memory.anon[] / 1048576] | most) | \([.sets[].memory.file[] / 1048576] | most) |"),
+      "",
+      "The gate of speculaire per set, both phases, over the nodes: its CreateContainer decisions, and their p99 in ms,",
+      "the upper bound of a native histogram bucket.",
+      "",
+      "| Set | Decisions | Gate p99 ms |",
+      "|---|---|---|",
+      ($sets[] as $set | $r.runs.speculaire.sets[$set].gate
+        | "| \($set) | \(.decisions) | \(.p99_seconds * 1000 | s) |")' \
     "$out/results.json"
