@@ -350,6 +350,8 @@ func (s *nriSession) closePlugins() (any, error) {
 	if s.raw != nil {
 		return Closed{Closed: s.raw.close()}, nil
 	}
+	// Reset first: a plugin that connects again at once may synchronize before the closing ends.
+	s.syncs.reset()
 	closed := 0
 	err := s.eachPlugin(func(plugin reflect.Value, mux multiplex.Mux) {
 		if !unexported(plugin, "closed").Bool() {
@@ -357,7 +359,6 @@ func (s *nriSession) closePlugins() (any, error) {
 			closed++
 		}
 	})
-	s.syncs.reset()
 	return Closed{Closed: closed}, err
 }
 
