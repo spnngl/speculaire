@@ -1,5 +1,5 @@
 //! What the suites do to a node (D94): stop, start or kill its agent, slow its network, cut it off from a host, corrupt
-//! a blob it serves, and read its metrics.
+//! a blob it serves, and read its metrics and audit events.
 
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -247,6 +247,27 @@ impl Cluster {
             ),
         )
         .map(drop)
+    }
+
+    /// The audit events in the node's journal, oldest first, as `journalctl -t speculaire-audit -o json` gives them:
+    /// each the record of its journal fields, such as `F_EVENT` (D37, D173).
+    ///
+    /// # Errors
+    ///
+    /// When `journalctl` fails, or a line is no JSON object.
+    pub fn audit(
+        &self,
+        node: &str,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, Failure> {
+        let journal = self.sh(node, "journalctl -q -t speculaire-audit --no-pager -o json")?;
+        journal
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| match serde_json::from_str(line) {
+                Ok(serde_json::Value::Object(record)) => Ok(record),
+                _ => Err(fail(&format!("the audit journal of {node}"), &line)),
+            })
+            .collect()
     }
 
     /// The node's metrics, as its agent serves them now.

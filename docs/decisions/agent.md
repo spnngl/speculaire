@@ -40,7 +40,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Restoring backups would undo admin edits made after `configure`.
 - **Revisit when:** —
 
-## D37: Logs through `tracing`, with an opt-in audit log (amends D30; amended by D52, D116)
+## D37: Logs through `tracing`, with an opt-in audit log (amends D30; amended by D52, D116, D173)
 
 - **Decision:**
   - **Sinks:** `tracing-subscriber` with `tracing-journald` when `JOURNAL_STREAM` is set, and JSON on stderr otherwise.
@@ -377,3 +377,20 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - With the default `[::]`, an IPv6-disabled node could not start: the status listener opens first (D45), and its socket failed. A node with `bindv6only = 1` served IPv4 neither metrics nor reflectors.
   - Go's `net.Listen("tcp", ":port")`, which node-exporter uses (D45), does the same (go1.26.1 `src/net/ipsock_posix.go:142-150`, `src/net/sockopt_linux.go:17`).
 - **Revisit when:** an admin needs `[::]` to mean IPv6 only; an IPv6 address such as `[fe80::1]` still listens on IPv6 alone.
+
+
+## D173: Audit fields take D37's words in snake_case, and the `gate` event gives the reason `enforce` would (amends D37)
+
+- **Decision:**
+  - **Names:** each field of an audit event is D37's words for it in snake_case: `gate` has `namespace`, `pod`, `container`, `image_name`, `image_identity`, `identity_path`, `matched_policies`, `mode`, `result`, `reason`, `stale` and `exemption`; `verdict` has `image_identity`, `matched_policies`, `trust_root_hash`, `result`, `reason` and `signer_identities`. Each event also has `event`, its name. The table of `docs/operations.md` § Audit events is the one list, and the unit tests of `crates/agent/src/gate/decision/tests.rs` and `crates/verify/src/engine.rs` read it.
+  - **Every field, every time:** a field with nothing to name is empty, such as `image_identity` when an exempt namespace allowed the container before its identity was read, or `exemption` when none applied.
+  - **Values:** `reason` is the rejection reason `enforce` gives, under either mode, and empty when it allows; `result` takes the labels of `speculaire_gate_total`; `exemption` is `namespace` or `image`. A creation the NRI plugin answers at once because 256 are in flight is a `gate` event with `result` `overloaded`.
+  - **Image name:** chosen in `speculaire-runtime` (D90). On containerd, the pod-spec string of `io.kubernetes.cri.image-name`, which it sets on every path (v2.4.2 `internal/cri/server/container_create.go:263-266`). CRI-O passes no pod-spec name: its `io.kubernetes.cri-o.Image` is the image ID kubelet resolved (D65; measured on CRI-O 1.37), so the event names the repositories policies match, those of `Identified::names`.
+  - **Cost:** the gate builds the fields only when an audit event would be written (`tracing::enabled!`), so the default, audit off, costs one check per creation (D107).
+  - **journald:** a field is stored in capitals behind `F_`, the prefix `tracing-journald` gives by default (0.3.2 `src/lib.rs:109`).
+- **Because:**
+  - D37 names the fields in prose; a `journalctl` query and a test need exact keys, and D37's own words keep one vocabulary.
+  - The `verdict` event's `image`, `policies`, `trust_root` and `signers` become the `gate` event's words, so `F_IMAGE_IDENTITY=<digest>` finds both.
+  - `audit` mode is there to show what `enforce` would reject; a reason left empty in `audit` would hide it.
+  - The `F_` prefix keeps the events' fields apart from journald's own, such as `MESSAGE` and `PRIORITY`, and from `CONTAINER_NAME`, which Docker's journald driver writes.
+- **Revisit when:** a log pipeline needs another schema, such as Elastic Common Schema; map these fields to it rather than renaming them.

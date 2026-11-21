@@ -435,12 +435,12 @@ fn the_gate_reads_the_image_identity_by_annotation_on_containerd_2_3_from_nri_on
     );
 }
 
-/// A policy over the unsigned image at `host`: any keyless signer passes it, and it has none.
-fn unsigned_policy(host: &str) -> String {
-    let name = UNSIGNED.split_once(':').expect("a tag").0;
+/// A policy named `name` over the unsigned image at `host`: any keyless signer passes it, and it has none.
+fn unsigned_policy(host: &str, name: &str) -> String {
+    let image = UNSIGNED.split_once(':').expect("a tag").0;
     format!(
-        "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: unsigned\nspec:\n  \
-         images:\n  - glob: {host}/{name}\n  authorities:\n  - keyless:\n      identities:\n      - issuerRegExp: \
+        "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: {name}\nspec:\n  \
+         images:\n  - glob: {host}/{image}\n  authorities:\n  - keyless:\n      identities:\n      - issuerRegExp: \
          \".*\"\n        subjectRegExp: \".*\"\n"
     )
 }
@@ -458,6 +458,54 @@ fn count(worker: &Worker, name: &str, labels: &[&str]) -> u64 {
         .sum()
 }
 
+/// Waits until the agent counts a rejected verification since it started, of `image`.
+fn wait_rejected(worker: &Worker, image: &str) {
+    let start = Instant::now();
+    while count(
+        worker,
+        "speculaire_verifications_total",
+        &[r#"result="rejected""#],
+    ) == 0
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{}: no rejected verification of {image}",
+            worker.node
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Runs `pod`, a container of `image` on the worker, and waits until it is ready.
+fn run(worker: &Worker, pod: &str, image: &str) {
+    let overrides = format!(r#"{{"spec":{{"nodeName":"{}"}}}}"#, worker.node);
+    worker
+        .cluster
+        .kubectl(&[
+            "run",
+            pod,
+            "--image",
+            image,
+            "--image-pull-policy=IfNotPresent",
+            "--restart=Never",
+            &format!("--overrides={overrides}"),
+            "--command",
+            "--",
+            "sleep",
+            "3600",
+        ])
+        .unwrap();
+    worker
+        .cluster
+        .kubectl(&[
+            "wait",
+            "--for=condition=Ready",
+            &format!("pod/{pod}"),
+            "--timeout=120s",
+        ])
+        .unwrap();
+}
+
 /// Deletes the pod, the policy file and the image, and restarts the agent, even when the test fails.
 struct Unsigned<'a> {
     worker: &'a Worker,
@@ -465,12 +513,19 @@ struct Unsigned<'a> {
     image: String,
 }
 
+impl Unsigned<'_> {
+    fn delete_pod(&self) {
+        let _ = self
+            .worker
+            .cluster
+            .kubectl(&["delete", "pod", self.pod, "--now", "--timeout=60s"]);
+    }
+}
+
 impl Drop for Unsigned<'_> {
     fn drop(&mut self) {
-        let Unsigned { worker, pod, image } = self;
-        let _ = worker
-            .cluster
-            .kubectl(&["delete", "pod", pod, "--now", "--timeout=60s"]);
+        self.delete_pod();
+        let Unsigned { worker, image, .. } = self;
         let _ = worker.cluster.exec_output(
             &worker.node,
             &["sh", "-c", &format!("rm -f {POLICY}; crictl rmi {image}")],
@@ -490,7 +545,7 @@ fn in_audit_a_pod_of_a_rejected_image_runs_and_counts_as_rejected() {
         .to_owned();
     worker
         .cluster
-        .policy(&worker.node, &unsigned_policy(&host))
+        .policy(&worker.node, &unsigned_policy(&host, "unsigned"))
         .unwrap();
     let guard = Unsigned {
         worker: &worker,
@@ -500,50 +555,11 @@ fn in_audit_a_pod_of_a_rejected_image_runs_and_counts_as_rejected() {
     worker.cluster.reset_agent(&worker.node).unwrap();
     // The verdict is in before the pod: the first `CreateContainer` finds it, not `Pending`.
     worker.sh(&format!("crictl pull {} >/dev/null", guard.image));
-    let start = Instant::now();
-    while count(
-        &worker,
-        "speculaire_verifications_total",
-        &[r#"result="rejected""#],
-    ) == 0
-    {
-        assert!(
-            start.elapsed() < Duration::from_secs(60),
-            "{}: no rejected verification of {}",
-            worker.node,
-            guard.image
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    wait_rejected(&worker, &guard.image);
     let rejected = [r#"mode="audit""#, r#"result="rejected""#];
     let before = count(&worker, "speculaire_gate_total", &rejected);
 
-    let overrides = format!(r#"{{"spec":{{"nodeName":"{}"}}}}"#, worker.node);
-    worker
-        .cluster
-        .kubectl(&[
-            "run",
-            guard.pod,
-            "--image",
-            &guard.image,
-            "--image-pull-policy=IfNotPresent",
-            "--restart=Never",
-            &format!("--overrides={overrides}"),
-            "--command",
-            "--",
-            "sleep",
-            "3600",
-        ])
-        .unwrap();
-    worker
-        .cluster
-        .kubectl(&[
-            "wait",
-            "--for=condition=Ready",
-            &format!("pod/{}", guard.pod),
-            "--timeout=120s",
-        ])
-        .unwrap();
+    run(&worker, guard.pod, &guard.image);
     let after = count(&worker, "speculaire_gate_total", &rejected);
     assert_eq!(
         after,
@@ -551,5 +567,148 @@ fn in_audit_a_pod_of_a_rejected_image_runs_and_counts_as_rejected() {
         "{:?}",
         worker.series("speculaire_gate_total")
     );
+    drop(guard);
+}
+
+/// The journal field of each field of `event` in `docs/operations.md` § Audit events: its name in capitals behind
+/// `F_`, as `tracing-journald` writes it (D173).
+fn audit_fields(event: &str) -> Vec<String> {
+    let doc = include_str!("../../docs/operations.md");
+    let (_, section) = doc
+        .split_once("## Audit events\n")
+        .expect("operations.md has the section");
+    let section = section.split("\n## ").next().unwrap_or(section);
+    let row = format!("| `{event}` | `");
+    section
+        .lines()
+        .filter_map(|line| line.strip_prefix(row.as_str())?.split_once('`'))
+        .map(|(field, _)| format!("F_{}", field.to_uppercase()))
+        .collect()
+}
+
+/// The audit events `event` in the worker's journal whose field `key` is `value`, each checked to hold every field
+/// `docs/operations.md` names.
+fn audited(
+    worker: &Worker,
+    event: &str,
+    (key, value): (&str, &str),
+) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    let events: Vec<_> = worker
+        .cluster
+        .audit(&worker.node)
+        .unwrap()
+        .into_iter()
+        .filter(|record| {
+            record.get("F_EVENT").is_some_and(|e| e == event)
+                && record.get(key).is_some_and(|v| v == value)
+        })
+        .collect();
+    let fields = audit_fields(event);
+    for record in &events {
+        let missing: Vec<&String> = fields
+            .iter()
+            .filter(|field| !record.contains_key(*field))
+            .collect();
+        assert!(missing.is_empty(), "{missing:?} not in {record:?}");
+    }
+    events
+}
+
+/// A name no earlier run gave a policy, so that its verdicts are new to the agent's cache (D31).
+fn fresh(prefix: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{prefix}-{nanos}")
+}
+
+/// Turns the audit log on and every other log off in the agent's config and restarts the agent, until dropped.
+struct Audit<'a>(&'a Worker);
+
+impl<'a> Audit<'a> {
+    fn on(worker: &'a Worker) -> Self {
+        worker.sh(&format!(
+            "cp {CONFIG} {CONFIG}.e2e && sed -i -e '/^\\[audit\\]/,/^\\[/ s/^#enabled = false$/enabled = true/' -e \
+             '/^\\[log\\]/,/^\\[/ s/^#*filter = .*$/filter = \"off\"/' {CONFIG} && grep -q '^enabled = true$' \
+             {CONFIG} && grep -q '^filter = \"off\"$' {CONFIG}"
+        ));
+        worker.cluster.reset_agent(&worker.node).unwrap();
+        Self(worker)
+    }
+}
+
+impl Drop for Audit<'_> {
+    fn drop(&mut self) {
+        let worker = self.0;
+        let _ = worker
+            .cluster
+            .exec(&worker.node, &["mv", &format!("{CONFIG}.e2e"), CONFIG]);
+        worker.cluster.reset_agent(&worker.node).unwrap();
+    }
+}
+
+/// Writes a policy of a fresh name over the unsigned image, reloads the agent and waits for its rejected verdict;
+/// returns the name.
+fn edit_policy(worker: &Worker, host: &str, image: &str) -> String {
+    let name = fresh("audit");
+    worker
+        .cluster
+        .policy(&worker.node, &unsigned_policy(host, &name))
+        .unwrap();
+    worker.sh("systemctl reload speculaire");
+    wait_rejected(worker, image);
+    name
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn with_the_audit_on_a_creation_and_a_changed_verdict_are_one_event_each_and_with_it_off_none() {
+    let Some(worker) = Worker::new() else { return };
+    let host = worker
+        .cluster
+        .upstream(Kind::Referrers)
+        .address()
+        .to_owned();
+    let guard = Unsigned {
+        worker: &worker,
+        pod: "speculaire-e2e-audit",
+        image: format!("{host}/{UNSIGNED}"),
+    };
+    worker.sh(&format!(
+        "rm -f {POLICY}; crictl pull {} >/dev/null",
+        guard.image
+    ));
+    let audit = Audit::on(&worker);
+
+    // No policy matches the image: `audit` mode allows it, and no verification runs.
+    run(&worker, guard.pod, &guard.image);
+    let created = audited(&worker, "gate", ("F_POD", guard.pod));
+    let [gate] = created.as_slice() else {
+        panic!("not one gate event: {created:?}")
+    };
+    assert_eq!(gate["F_CONTAINER"], guard.pod, "{gate:?}");
+    // CRI-O passes no pod-spec name: the event names the image's repositories (D65, D173).
+    let image_name = match worker.cluster.runtime() {
+        Runtime::Containerd => guard.image.as_str(),
+        Runtime::Crio => guard.image.rsplit_once(':').unwrap().0,
+    };
+    assert_eq!(gate["F_IMAGE_NAME"], image_name, "{gate:?}");
+    assert_eq!(gate["F_MODE"], "audit", "{gate:?}");
+    assert_eq!(gate["F_RESULT"], "unmatched", "{gate:?}");
+
+    let name = edit_policy(&worker, &host, &guard.image);
+    let changed = audited(&worker, "verdict", ("F_MATCHED_POLICIES", &name));
+    let [verdict] = changed.as_slice() else {
+        panic!("not one verdict event: {changed:?}")
+    };
+    assert_eq!(verdict["F_RESULT"], "rejected", "{verdict:?}");
+
+    drop(audit);
+    guard.delete_pod();
+    edit_policy(&worker, &host, &guard.image);
+    run(&worker, guard.pod, &guard.image);
+    let journal = worker.cluster.audit(&worker.node).unwrap();
+    assert!(journal.is_empty(), "{journal:?}");
     drop(guard);
 }

@@ -3,7 +3,8 @@
 //! An exempt namespace allows first, before the image identity is read; then an exempt image, then an image no policy
 //! matches, which `gate.unmatched` decides; else the verdict of the image identity. A verdict missing or `Pending`, or
 //! a CRI-O image ID the list does not name yet, asks the engine to verify the image and waits up to `gate.wait` for it.
-//! `audit` allows every container; `enforce` rejects with the reason texts of `docs/operations.md`.
+//! `audit` allows every container; `enforce` rejects with the reason texts of `docs/operations.md`. Each decision is a
+//! `gate` audit event (D37, D173).
 
 use std::pin::pin;
 use std::sync::Arc;
@@ -18,8 +19,10 @@ use speculaire_verify::engine::{Asked, Asking};
 use speculaire_verify::{Glob, Held, Lookup, Policies, Verdict, Verdicts};
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::Instant;
+use tracing::{Level, info};
 
 use crate::config::{self, Mode, Unmatched};
+use crate::log::AUDIT_TARGET;
 
 /// The reason of a container whose verdict did not land within `gate.wait` (D22).
 pub const PENDING: &str = "verification pending";
@@ -62,11 +65,31 @@ impl Settings {
     }
 }
 
+/// What exempts a container (D18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exemption {
+    /// `gate.exempt.namespaces` names its namespace.
+    Namespace,
+    /// `gate.exempt.images` names its image.
+    Image,
+}
+
+impl Exemption {
+    /// The `exemption` field of the `gate` audit event (D173).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Namespace => "namespace",
+            Self::Image => "image",
+        }
+    }
+}
+
 /// What the gate makes of a `CreateContainer`, before `gate.mode` applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     /// Its namespace or image is exempt (D18).
-    Exempt,
+    Exempt(Exemption),
     /// No policy matches its image (D23).
     Unmatched,
     /// The verdict of its image identity.
@@ -80,7 +103,7 @@ impl Decision {
     #[must_use]
     pub fn result(&self) -> &'static str {
         match self {
-            Self::Exempt => "exempt",
+            Self::Exempt(_) => "exempt",
             Self::Unmatched => "unmatched",
             Self::Verdict(lookup) => lookup.verdict.state(),
             Self::Overloaded => "overloaded",
@@ -107,23 +130,36 @@ impl Decision {
     /// The answer to the runtime under `settings`: `audit` allows all (D54).
     #[must_use]
     pub fn answer(&self, settings: &Settings) -> Answer {
-        if settings.mode == Mode::Audit {
-            return Answer::Allow;
+        match self.reason(settings.unmatched) {
+            Some(reason) if settings.mode == Mode::Enforce => Answer::Reject(reason),
+            _ => Answer::Allow,
         }
+    }
+
+    /// The reason `enforce` rejects with under `unmatched`; none when it allows.
+    fn reason(&self, unmatched: Unmatched) -> Option<String> {
         match self {
-            Self::Exempt => Answer::Allow,
-            Self::Unmatched => match settings.unmatched {
-                Unmatched::Allow => Answer::Allow,
-                Unmatched::Deny => Answer::Reject(UNMATCHED.to_owned()),
+            Self::Exempt(_) => None,
+            Self::Unmatched => match unmatched {
+                Unmatched::Allow => None,
+                Unmatched::Deny => Some(UNMATCHED.to_owned()),
             },
             Self::Verdict(lookup) => match &lookup.verdict {
-                Verdict::Allow => Answer::Allow,
+                Verdict::Allow => None,
                 verdict @ (Verdict::Rejected { .. } | Verdict::Unverifiable { .. }) => {
-                    Answer::Reject(verdict.to_string())
+                    Some(verdict.to_string())
                 }
-                Verdict::Pending => Answer::Reject(PENDING.to_owned()),
+                Verdict::Pending => Some(PENDING.to_owned()),
             },
-            Self::Overloaded => Answer::Reject(PENDING.to_owned()),
+            Self::Overloaded => Some(PENDING.to_owned()),
+        }
+    }
+
+    /// The exemption that applied, if any.
+    fn exemption(&self) -> Option<Exemption> {
+        match self {
+            Self::Exempt(exemption) => Some(*exemption),
+            Self::Unmatched | Self::Verdict(_) | Self::Overloaded => None,
         }
     }
 }
@@ -145,7 +181,7 @@ impl Verifier {
     /// The decision on `identified` as the verdicts stand.
     fn decide(&self, settings: &Settings, identified: &Identified<'_>) -> Decision {
         if settings.exempts(identified) {
-            return Decision::Exempt;
+            return Decision::Exempt(Exemption::Image);
         }
         let root = self.trust.borrow().as_ref().ok().map(|root| root.hash());
         let policies = self.policies.borrow();
@@ -153,6 +189,23 @@ impl Verifier {
             Some(lookup) => Decision::Verdict(lookup),
             None => Decision::Unmatched,
         }
+    }
+
+    /// The names of the policies the names of `identified` match, each once.
+    fn matched(&self, identified: &Identified<'_>) -> Vec<String> {
+        let policies = self.policies.borrow();
+        let mut matched: Vec<String> = Vec::new();
+        let names = identified
+            .names()
+            .filter_map(|name| Reference::parse_normalized_named(name).ok());
+        for name in names {
+            for policy in policies.matching(&name) {
+                if !matched.iter().any(|seen| seen == policy.name()) {
+                    matched.push(policy.name().to_owned());
+                }
+            }
+        }
+        matched
     }
 
     /// Asks the engine to verify each manifest of `identified` that no list named yet (D22).
@@ -219,22 +272,43 @@ impl Decider {
     }
 
     /// The decision on `request` under `settings`, waiting for a pending verdict until `gate.wait` has passed or
-    /// `deadline` comes.
+    /// `deadline` comes; audited.
     pub async fn decide(
         &self,
         request: &CreateContainerRequest,
         settings: &Settings,
         deadline: Instant,
     ) -> Decision {
+        let (decision, identified) = self.read(request, settings, deadline).await;
+        self.audit(request, &decision, identified.as_ref(), settings);
+        decision
+    }
+
+    /// [`Decision::Overloaded`] on `request`, audited.
+    pub fn overloaded(&self, request: &CreateContainerRequest, settings: &Settings) -> Decision {
+        let decision = Decision::Overloaded;
+        self.audit(request, &decision, None, settings);
+        decision
+    }
+
+    /// The decision on `request`, and the image identity it read: none when the namespace is exempt.
+    async fn read<'a>(
+        &'a self,
+        request: &'a CreateContainerRequest,
+        settings: &Settings,
+        deadline: Instant,
+    ) -> (Decision, Option<Identified<'a>>) {
         if let Some(pod) = &request.pod
             && settings.namespaces.contains(&pod.namespace)
         {
-            return Decision::Exempt;
+            return (Decision::Exempt(Exemption::Namespace), None);
         }
         let Some(container) = &request.container else {
-            return self
-                .verifier
-                .decide(settings, &Identified::Unknown(MISSING));
+            let identified = Identified::Unknown(MISSING);
+            return (
+                self.verifier.decide(settings, &identified),
+                Some(identified),
+            );
         };
         // NRI always sends the pod; a missing one is on the default runtime handler, as an empty one.
         let unnamed = PodSandbox::default();
@@ -254,19 +328,54 @@ impl Decider {
             };
             let decision = self.verifier.decide(settings, &current);
             if !decision.pending() || Instant::now() >= until {
-                return decision;
+                return (decision, Some(current));
             }
             if !asked {
                 self.verifier.ask(&current);
                 asked = true;
             }
-            identified = Some(current);
             tokio::select! {
                 () = landed => {}
                 () = listed => {}
-                () = tokio::time::sleep_until(until) => return decision,
+                () = tokio::time::sleep_until(until) => return (decision, Some(current)),
             }
+            identified = Some(current);
         }
+    }
+
+    /// Writes the `gate` audit event of `decision` on `request`, whose image identity reads as `identified`; its fields
+    /// are those of `docs/operations.md` § Audit events (D37, D173).
+    fn audit(
+        &self,
+        request: &CreateContainerRequest,
+        decision: &Decision,
+        identified: Option<&Identified<'_>>,
+        settings: &Settings,
+    ) {
+        // Audit is off by default: the fields cost nothing then (D107).
+        if !tracing::enabled!(target: AUDIT_TARGET, Level::INFO) {
+            return;
+        }
+        let pod = request.pod.as_ref();
+        let container = request.container.as_ref();
+        let identity = identified.and_then(Identified::identity);
+        let policies = identified.map(|identified| self.verifier.matched(identified));
+        info!(
+            target: AUDIT_TARGET,
+            event = "gate",
+            namespace = pod.map_or("", |pod| pod.namespace.as_str()),
+            pod = pod.map_or("", |pod| pod.name.as_str()),
+            container = container.map_or("", |container| container.name.as_str()),
+            image_name = container.map(|container| self.identity.image_name(container, identified)).unwrap_or_default(),
+            image_identity = identity.map(ToString::to_string).unwrap_or_default(),
+            identity_path = self.identity.path(),
+            matched_policies = policies.unwrap_or_default().join(", "),
+            mode = settings.mode.name(),
+            result = decision.result(),
+            reason = decision.reason(settings.unmatched).unwrap_or_default(),
+            stale = decision.stale(),
+            exemption = decision.exemption().map_or("", Exemption::name),
+        );
     }
 }
 

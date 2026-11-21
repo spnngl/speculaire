@@ -58,6 +58,7 @@ fn nri_reads_the_image_digest_and_name() {
         name: "docker.io/library/busybox:1.37",
     };
     assert_eq!(identified, want);
+    assert_eq!(identified.identity(), Some(&digest(1)));
     assert_eq!(identified.digests().collect::<Vec<_>>(), [&digest(1)]);
     assert_eq!(
         identified.names().collect::<Vec<_>>(),
@@ -84,6 +85,7 @@ fn nri_without_an_image_name_or_digest_reads_no_identity() {
         };
         let identified = identify(&Nri, &container);
         assert_eq!(identified, Identified::Unknown(MISSING), "{image:?}");
+        assert_eq!(identified.identity(), None);
         assert_eq!(identified.digests().count(), 0);
         assert_eq!(identified.names().count(), 0);
     }
@@ -111,6 +113,7 @@ fn image_id_reads_the_listed_image_with_every_manifest_and_repository_once() {
             panic!("{image_ref}: {identified:?}");
         };
         assert_eq!(image.id.encoded(), ID);
+        assert_eq!(identified.identity(), Some(&image.id));
         let digests: Vec<_> = identified.digests().collect();
         assert_eq!(digests, [&digest(0xa), &digest(0xb)]);
         let names: Vec<_> = identified.names().collect();
@@ -123,6 +126,8 @@ fn image_id_without_a_listed_image_is_unlisted_until_a_list_names_it() {
     let image_id = ImageId::default();
     let unlisted = annotated(ID);
     assert_eq!(identify(&image_id, &unlisted), Identified::Unlisted);
+    assert_eq!(Identified::Unlisted.identity(), None);
+    assert_eq!(Identified::Mismatched.identity(), None);
     image_id.keep(&listed(ID, &["reg.test/one:1"], &[]));
     let Identified::Image(image) = identify(&image_id, &unlisted) else {
         panic!("the image is listed now");
@@ -178,6 +183,26 @@ fn each_runtime_has_its_path_and_cri_o_alone_keeps_the_list() {
         identify(&image_id, &annotated(ID)),
         Identified::Image(_)
     ));
+}
+
+#[test]
+fn the_image_name_is_containerd_s_annotation_and_on_cri_o_the_names_policies_match() {
+    let mut container = annotated(ID);
+    container
+        .annotations
+        .insert(annotation::IMAGE_NAME.to_owned(), "busybox:1.37".to_owned());
+    let (containerd, _dir) = containerd();
+    assert_eq!(containerd.image_name(&container, None), "busybox:1.37");
+    assert_eq!(containerd.image_name(&Container::default(), None), "");
+
+    let crio = NodeIdentity::crio();
+    crio.keep(&listed(ID, &["reg.test/one:1", "reg.test/two:2"], &[]));
+    let identified = identify(&crio, &container);
+    assert_eq!(
+        crio.image_name(&container, Some(&identified)),
+        "reg.test/one, reg.test/two"
+    );
+    assert_eq!(crio.image_name(&container, None), "");
 }
 
 #[test]

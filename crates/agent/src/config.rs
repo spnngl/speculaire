@@ -355,6 +355,17 @@ pub enum Mode {
     Enforce,
 }
 
+impl Mode {
+    /// The mode as `gate.mode` names it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Audit => "audit",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
 /// `gate.unmatched` (D23).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]

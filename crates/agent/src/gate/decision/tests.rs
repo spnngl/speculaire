@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -197,14 +198,16 @@ fn list() -> List {
     list
 }
 
-/// A `CreateContainer` of the test image in `namespace`.
+/// A `CreateContainer` of the test image, container `c` of pod `p` in `namespace`.
 fn request(namespace: &str) -> CreateContainerRequest {
     CreateContainerRequest {
         pod: Some(PodSandbox {
+            name: "p".to_owned(),
             namespace: namespace.to_owned(),
             ..PodSandbox::default()
         }),
         container: Some(Container {
+            name: "c".to_owned(),
             annotations: HashMap::from([(IMAGE_REF.to_owned(), ID.to_owned())]),
             ..Container::default()
         }),
@@ -240,7 +243,7 @@ async fn an_exempt_namespace_allows_under_enforce_and_an_empty_exemption_exempts
     let decision = decider
         .decide(&request("kube-system"), &exempt, far())
         .await;
-    assert_eq!(decision, Decision::Exempt);
+    assert_eq!(decision, Decision::Exempt(Exemption::Namespace));
     assert_eq!(decision.answer(&exempt), Answer::Allow);
     assert_eq!(decision.result(), "exempt");
     let other = decider.decide(&request("default"), &exempt, far()).await;
@@ -259,11 +262,188 @@ async fn an_exempt_namespace_allows_under_enforce_and_an_empty_exemption_exempts
     ));
     assert_eq!(
         decider.decide(&request("default"), &image, far()).await,
-        Decision::Exempt
+        Decision::Exempt(Exemption::Image)
     );
     let other = settings("mode = \"enforce\"\n[gate.exempt]\nimages = [\"reg.test/other\"]\n");
     let decision = decider.decide(&request("default"), &other, far()).await;
     assert_eq!(decision.result(), "rejected");
+}
+
+/// The fields of `event` in `docs/operations.md` § Audit events.
+fn audit_fields(event: &str) -> Vec<&'static str> {
+    let doc = include_str!("../../../../../docs/operations.md");
+    let (_, section) = doc
+        .split_once("## Audit events\n")
+        .expect("operations.md has the section");
+    let section = section.split("\n## ").next().unwrap_or(section);
+    let row = format!("| `{event}` | `");
+    section
+        .lines()
+        .filter_map(|line| line.strip_prefix(row.as_str())?.split_once('`'))
+        .map(|(field, _)| field)
+        .collect()
+}
+
+/// What a test's subscriber writes.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    /// Makes a subscriber writing the audit events as JSON here this thread's default, until the guard drops.
+    ///
+    /// A second dispatcher stays registered beside it: with one alone, a callsite another test's thread hits first
+    /// caches `never` (tracing-core 0.1.36 `src/callsite.rs:319`, `:546`, `:565`).
+    fn install(&self) -> (tracing::subscriber::DefaultGuard, tracing::Dispatch) {
+        let sink = self.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(Level::INFO)
+            .with_writer(move || sink.clone())
+            .finish();
+        (
+            tracing::subscriber::set_default(subscriber),
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+        )
+    }
+
+    /// The fields of each audit event written.
+    fn events(&self) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        let written = self.0.lock().expect("no test panics holding the capture");
+        String::from_utf8_lossy(&written)
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a JSON event"))
+            .filter(|event| event["target"] == AUDIT_TARGET)
+            .map(|mut event| match event["fields"].take() {
+                serde_json::Value::Object(fields) => fields,
+                other => panic!("the fields are no object: {other}"),
+            })
+            .collect()
+    }
+}
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("no test panics holding the capture")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn each_decision_is_one_gate_event_with_every_field_operations_md_names() {
+    let (verifier, _) = verifier(&policy());
+    keep(
+        &verifier,
+        Verdict::Rejected {
+            reason: "no signature".into(),
+        },
+    );
+    let exempt = settings("mode = \"enforce\"\n[gate.exempt]\nnamespaces = [\"kube-system\"]\n");
+    let decider = decider(verifier, exempt.clone(), true);
+    let capture = Capture::default();
+    {
+        let _guard = capture.install();
+        decider.decide(&request("default"), &exempt, far()).await;
+        decider
+            .decide(&request("kube-system"), &exempt, far())
+            .await;
+        decider.overloaded(
+            &request("default"),
+            &Settings::new(&config::Gate::default()),
+        );
+    }
+    let events = capture.events();
+    let names = audit_fields("gate");
+    assert!(names.len() >= 12, "{names:?}");
+    for event in &events {
+        let mut fields: Vec<&str> = event.keys().map(String::as_str).collect();
+        fields.sort_unstable();
+        let mut want = names.clone();
+        want.push("event");
+        want.sort_unstable();
+        assert_eq!(fields, want);
+        assert_eq!(event["event"], "gate");
+        assert_eq!(event["pod"], "p");
+        assert_eq!(event["container"], "c");
+        assert_eq!(event["identity_path"], "image_id");
+        assert_eq!(event["stale"], false);
+    }
+    let [rejected, exempted, overloaded] = events.as_slice() else {
+        panic!("one event per decision: {events:?}");
+    };
+    assert_eq!(rejected["namespace"], "default");
+    assert_eq!(rejected["image_identity"], format!("sha256:{ID}"));
+    assert_eq!(rejected["image_name"], NAME);
+    assert_eq!(rejected["matched_policies"], "app");
+    assert_eq!(rejected["mode"], "enforce");
+    assert_eq!(rejected["result"], "rejected");
+    assert_eq!(rejected["reason"], "rejected: no signature");
+    assert_eq!(rejected["exemption"], "");
+    assert_eq!(exempted["namespace"], "kube-system");
+    assert_eq!(exempted["image_identity"], "");
+    assert_eq!(exempted["image_name"], "");
+    assert_eq!(exempted["result"], "exempt");
+    assert_eq!(exempted["reason"], "");
+    assert_eq!(exempted["exemption"], "namespace");
+    assert_eq!(overloaded["mode"], "audit");
+    assert_eq!(overloaded["result"], "overloaded");
+    assert_eq!(overloaded["reason"], PENDING);
+    assert_eq!(overloaded["matched_policies"], "");
+}
+
+#[tokio::test]
+async fn the_gate_event_names_an_exempt_image_and_each_matched_policy_once() {
+    let two = format!(
+        "{}---\n{}",
+        policy(),
+        policy().replace("name: app", "name: other")
+    );
+    let (verifier, _) = verifier(&two);
+    let image = settings(&format!("[gate.exempt]\nimages = [\"{NAME}\"]\n"));
+    let decider = decider(verifier, image.clone(), true);
+    let capture = Capture::default();
+    {
+        let _guard = capture.install();
+        decider.decide(&request("default"), &image, far()).await;
+    }
+    let events = capture.events();
+    let [exempted] = events.as_slice() else {
+        panic!("one event: {events:?}");
+    };
+    assert_eq!(exempted["exemption"], "image");
+    assert_eq!(exempted["matched_policies"], "app, other");
+    assert_eq!(Exemption::Image.name(), "image");
+}
+
+#[tokio::test]
+async fn a_request_without_a_container_is_unverifiable_and_its_gate_event_names_no_image() {
+    let (verifier, _) = verifier(&policy());
+    let decider = decider(verifier, enforce(), true);
+    let request = CreateContainerRequest {
+        container: None,
+        ..request("default")
+    };
+    let capture = Capture::default();
+    let decision = {
+        let _guard = capture.install();
+        decider.decide(&request, &enforce(), far()).await
+    };
+    let reason = format!("unverifiable: {MISSING}");
+    assert_eq!(decision.answer(&enforce()), Answer::Reject(reason.clone()));
+    let events = capture.events();
+    let [event] = events.as_slice() else {
+        panic!("one event: {events:?}");
+    };
+    assert_eq!(event["container"], "");
+    assert_eq!(event["image_name"], "");
+    assert_eq!(event["matched_policies"], "");
+    assert_eq!(event["reason"], reason);
 }
 
 #[tokio::test]
