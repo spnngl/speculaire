@@ -17,6 +17,11 @@ pub const POLICY: &str = "/etc/speculaire/policy.yaml";
 /// The trusted root each node pins: the one recorded with the Sigstore fixtures (D141).
 pub const TRUSTED_ROOT: &str = "/etc/speculaire/trusted_root.json";
 
+/// A shell function `state` that prints the agent's `/readyz` status and `speculaire_nri_connected` as one line: `200 1`
+/// when registered, `000 ` before the listener opens.
+pub const STATE: &str = "state() { echo \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7482/readyz) \
+                         $(curl -s http://127.0.0.1:7482/metrics | sed -n 's/^speculaire_nri_connected //p')\"; }";
+
 /// See [`TRUSTED_ROOT`].
 const RECORDED_ROOT: &str = include_str!("../../fixtures/sigstore/trusted_root.json");
 
@@ -215,6 +220,107 @@ impl Cluster {
             std::thread::sleep(Duration::from_millis(500));
         }
         Ok(())
+    }
+
+    /// Runs `command` on the node in the background, and returns each change of the agent's [`STATE`] from before
+    /// the command until the agent is registered again after being away, or 30 s, as `<ms since the command> <state>`.
+    ///
+    /// # Errors
+    ///
+    /// When the node's command fails.
+    pub fn watch(&self, node: &str, command: &str) -> Result<Vec<String>, Failure> {
+        // Polled on the node: a registration takes milliseconds, less than an exec from the host.
+        let changes = self.sh(
+            node,
+            &format!(
+                "{STATE}
+                 last=$(state); echo \"0 $last\"; away=0
+                 start=$(date +%s%N); end=$((start + 30000000000))
+                 {command} &
+                 while [ \"$(date +%s%N)\" -lt \"$end\" ]; do
+                     s=$(state)
+                     if [ \"$s\" != \"$last\" ]; then echo \"$((($(date +%s%N) - start) / 1000000)) $s\"; last=$s; fi
+                     if [ \"$s\" = '200 1' ]; then [ $away = 1 ] && break; else away=1; fi
+                     sleep 0.02
+                 done
+                 wait"
+            ),
+        )?;
+        Ok(changes.lines().map(str::to_owned).collect())
+    }
+
+    /// Restarts the node's runtime, waits until it answers again, and returns the agent's changes of state, as
+    /// [`Cluster::watch`] does.
+    ///
+    /// # Errors
+    ///
+    /// When the node's command fails, or the runtime does not answer within 90 s.
+    pub fn restart_runtime(&self, node: &str) -> Result<Vec<String>, Failure> {
+        let changes = self.watch(node, &format!("systemctl restart {}", self.runtime.unit()))?;
+        self.wait_runtime(node)?;
+        Ok(changes)
+    }
+
+    /// Waits until the node's runtime answers, so that kubelet and the next suite find it.
+    ///
+    /// # Errors
+    ///
+    /// When it does not within 90 s.
+    pub fn wait_runtime(&self, node: &str) -> Result<(), Failure> {
+        let check = match self.runtime {
+            Runtime::Containerd => "crictl version",
+            Runtime::Crio => "crictl version && crio status config | grep -q nri",
+        };
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while !self.exec_output(node, &["sh", "-c", check])?.success {
+            if Instant::now() > deadline {
+                return Err(fail(node, &"the runtime is not back after 90 s"));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Ok(())
+    }
+
+    /// Waits until the creation of `pod`'s container fails with a message that holds `reason`, then deletes the pod, and
+    /// returns the message.
+    ///
+    /// # Errors
+    ///
+    /// When `kubectl` fails, or no such failure shows within 90 s.
+    pub fn rejected(&self, namespace: &str, pod: &str, reason: &str) -> Result<String, Failure> {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let mut state = String::new();
+        while Instant::now() < deadline {
+            state = self.kubectl(&[
+                "get",
+                "pod",
+                "-n",
+                namespace,
+                pod,
+                "-o",
+                r#"jsonpath={.status.containerStatuses[0].state.waiting.reason}{"\n"}{.status.containerStatuses[0].state.waiting.message}"#,
+            ])?;
+            if let Some(("CreateContainerError", message)) = state.split_once('\n')
+                && message.contains(reason)
+            {
+                let message = message.to_owned();
+                self.kubectl(&[
+                    "delete",
+                    "pod",
+                    "-n",
+                    namespace,
+                    pod,
+                    "--now",
+                    "--timeout=60s",
+                ])?;
+                return Ok(message);
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Err(fail(
+            pod,
+            &format!("no creation error holding {reason:?}, last {state:?}"),
+        ))
     }
 
     /// Puts `tc netem <args>`, such as `delay 200ms` or `loss 100%`, on what leaves the node through kind's network.
