@@ -1,21 +1,27 @@
 //! The image identity of a container the runtime creates, and the names policies match, read from NRI's
-//! `CreateContainer` (D15, D65, D169).
+//! `CreateContainer` (D15, D65, D169, D170).
 //!
 //! The gate holds the [`NodeIdentity`] of the node's runtime, which its `Configure` names, and asks it for each
-//! container. On containerd 2.4 the request names the digest the image was listed with; on CRI-O it names the
-//! image ID, which the agent's copy of the image list maps to the image's listed manifests and names.
+//! container. On containerd 2.4 the request names the digest the image was listed with; on containerd 2.3 it names the
+//! image by the name the pod asked for, which containerd's image store resolves; on CRI-O it names the image ID, which
+//! the agent's copy of the image list maps to the image's listed manifests and names.
+
+pub mod annotation;
 
 use std::collections::HashMap;
-use std::future::{Future, ready};
+use std::future::{Future, pending, ready};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
+use speculaire_nri::NriVersion;
 use speculaire_nri::api::Container;
 use speculaire_oci::reference::Digest;
 use speculaire_oci::tagged::Tagged;
 
-use crate::detect::Runtime;
+use self::annotation::Annotation;
 use crate::images::{Image, List, RepoDigest, image_id};
+use crate::version::Release;
 
 /// The annotation CRI-O puts its image ID in, after the pod's own (v1.37.2 `internal/annotations/annotations.go`).
 pub const IMAGE_REF: &str = "io.kubernetes.cri-o.ImageRef";
@@ -26,6 +32,12 @@ pub const MISSING: &str = "no image identity in the request";
 /// Why a CRI-O image ID has no identity: no image the runtime lists has it, so no listed manifest has that config
 /// digest (D65); an `Unverifiable` reason.
 pub const NOT_CONFIG: &str = "image ID is not a config digest";
+
+/// Why a container is rejected whose snapshot is not its image's: a `Rejected` reason (D15).
+pub const MISMATCH: &str = "image identity mismatch";
+
+/// The NRI version from which `Container.image` names the image (D15).
+const IMAGE_FIELD: Release = Release::new(0, 12, 2);
 
 /// What a request says about the image of the container it creates.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +51,8 @@ pub enum Identified<'a> {
     },
     /// CRI-O's: the image of the ID, as last listed; its repository digests are its listed manifests (D65).
     Image(Arc<Image>),
+    /// containerd 2.3's: the container's snapshot does not rest on the image its name resolves to; [`MISMATCH`].
+    Mismatched,
     /// No identity, and why, as an `Unverifiable` reason.
     Unknown(&'static str),
 }
@@ -49,7 +63,7 @@ impl Identified<'_> {
         let (listed, repo_digests): (_, &[RepoDigest]) = match self {
             Self::Listed { digest, .. } => (Some(digest), &[]),
             Self::Image(image) => (None, &image.repo_digests),
-            Self::Unknown(_) => (None, &[]),
+            Self::Mismatched | Self::Unknown(_) => (None, &[]),
         };
         let unique = repo_digests
             .iter()
@@ -69,7 +83,7 @@ impl Identified<'_> {
         let (listed, image) = match self {
             Self::Listed { name, .. } => (Some(*name), None),
             Self::Image(image) => (None, Some(image.as_ref())),
-            Self::Unknown(_) => (None, None),
+            Self::Mismatched | Self::Unknown(_) => (None, None),
         };
         let repositories = image.into_iter().flat_map(repositories);
         listed.into_iter().chain(repositories)
@@ -169,30 +183,67 @@ impl Identity for ImageId {
 
 /// The [`Identity`] of the node's runtime: one type, as [`NodeContent`](crate::NodeContent) is, because `Identity` has
 /// no `dyn` form.
+///
+/// The runtime's name chooses between containerd's paths and CRI-O's (D169): CRI-O announces NRI v0.12.2 from 1.37 yet
+/// fills no `Container.image`, and 1.35 and 1.36 announce none NRI reads. containerd's NRI version, announced or
+/// inferred, chooses between its two at each `Configure` (D170).
 #[derive(Debug)]
 pub enum NodeIdentity {
-    /// containerd's.
-    Nri(Nri),
+    /// containerd's: `nri` until a `Configure` names an NRI version below v0.12.2, `annotation` from then on.
+    Containerd {
+        /// The `annotation` path, boxed as it is the larger by far.
+        annotation: Box<Annotation>,
+        /// Whether the last `Configure` chose it.
+        annotated: AtomicBool,
+    },
     /// CRI-O's.
     ImageId(ImageId),
 }
 
 impl NodeIdentity {
-    /// The path of `runtime`, by its name and not its NRI version (D169): CRI-O announces NRI v0.12.2 from 1.37 yet
-    /// fills no `Container.image`, and 1.35 and 1.36 announce none NRI reads.
+    /// containerd's paths, `annotation` reading its image store and snapshots through `annotation`.
     #[must_use]
-    pub fn of(runtime: Runtime) -> Self {
-        match runtime {
-            Runtime::Containerd => Self::Nri(Nri),
-            Runtime::CriO => Self::ImageId(ImageId::default()),
+    pub fn containerd(annotation: Annotation) -> Self {
+        Self::Containerd {
+            annotation: Box::new(annotation),
+            annotated: AtomicBool::new(false),
         }
+    }
+
+    /// CRI-O's path.
+    #[must_use]
+    pub fn crio() -> Self {
+        Self::ImageId(ImageId::default())
+    }
+
+    /// Chooses containerd's path by the NRI version `Configure` names: `nri` from v0.12.2, `annotation` below it or when
+    /// the version is unknown, since containerd annotates every version's containers (D170). Returns the path.
+    pub fn configure(&self, nri_version: &NriVersion) -> &'static str {
+        if let Self::Containerd {
+            annotation,
+            annotated,
+        } = self
+        {
+            let version = match nri_version {
+                NriVersion::Announced(version) => Release::parse(version),
+                NriVersion::Inferred(version) => Release::parse(version),
+                NriVersion::Unknown { .. } => None,
+            };
+            let annotate = version.is_none_or(|version| version < IMAGE_FIELD);
+            if annotate {
+                annotation.configure();
+            }
+            annotated.store(annotate, Ordering::Relaxed);
+        }
+        self.path()
     }
 
     /// The path, as `speculaire_identity_path` labels it.
     #[must_use]
     pub fn path(&self) -> &'static str {
         match self {
-            Self::Nri(_) => "nri",
+            Self::Containerd { annotated, .. } if annotated.load(Ordering::Relaxed) => "annotation",
+            Self::Containerd { .. } => "nri",
             Self::ImageId(_) => "image_id",
         }
     }
@@ -200,16 +251,29 @@ impl NodeIdentity {
     /// Gives the path the runtime's image list, at each change: CRI-O's maps image IDs with it.
     pub fn keep(&self, list: &List) {
         match self {
-            Self::Nri(_) => {}
+            Self::Containerd { .. } => {}
             Self::ImageId(image_id) => image_id.keep(list),
         }
+    }
+
+    /// Follows what the path reads besides the image list, until the agent stops: containerd's image store, so that it
+    /// is current when a `Configure` chooses `annotation`. Never returns.
+    pub async fn follow(&self) {
+        if let Self::Containerd { annotation, .. } = self {
+            annotation.follow().await;
+        }
+        pending::<()>().await;
     }
 }
 
 impl Identity for NodeIdentity {
     async fn identify<'a>(&'a self, container: &'a Container) -> Identified<'a> {
         match self {
-            Self::Nri(nri) => nri.identify(container).await,
+            Self::Containerd {
+                annotation,
+                annotated,
+            } if annotated.load(Ordering::Relaxed) => annotation.identify(container).await,
+            Self::Containerd { .. } => Nri.identify(container).await,
             Self::ImageId(image_id) => image_id.identify(container).await,
         }
     }

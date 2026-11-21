@@ -792,6 +792,34 @@ fn certificates() -> String {
     )
 }
 
+/// containerd 2.3 announces NRI v0.12.0, which names no image: the gate takes the `annotation` path and warns of its
+/// gap at registration; 2.4 takes `nri`, silently (D15, D170).
+#[test]
+fn the_gate_takes_the_annotation_path_below_nri_v0_12_2_and_warns_of_its_gap() {
+    for (version, nri_version, path) in [
+        ("v2.3.7", "v0.12.0", "annotation"),
+        ("v2.4.2", "v0.12.3", "nri"),
+    ] {
+        let mut answers = Answers::containerd(version);
+        answers.nri_version = nri_version.to_owned();
+        let agent = Agent::spawn_on(Node::new(answers, None), "", &[]);
+        wait_until(|| get(agent.port, "/readyz", "").is_some_and(|r| r.status == 200));
+        let text = agent.get("/metrics", "").text();
+        let paths: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("speculaire_identity_path{"))
+            .collect();
+        assert_eq!(
+            paths,
+            [format!(r#"speculaire_identity_path{{path="{path}"}} 1"#)],
+            "{version}"
+        );
+        let (_, lines) = agent.stop();
+        let warned = lines.iter().any(|l| l.contains("identity gap, D15"));
+        assert_eq!(warned, path == "annotation", "{version}: {lines:#?}");
+    }
+}
+
 const IMAGES: &str = "[plugins.'io.containerd.cri.v1.images']";
 const NRI: &str = "[plugins.'io.containerd.nri.v1.nri']";
 

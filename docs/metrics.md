@@ -66,7 +66,7 @@ Every metric speculaire exports or will export. A row whose `Planned` cell names
 |---|---|---|---|---|
 | `speculaire_gate_total` | counter | `mode` = `audit`\|`enforce`; `result` = `allow`\|`rejected`\|`unverifiable`\|`pending`\|`unmatched`\|`exempt`; `stale` = `true`\|`false` | Gate decisions (D18, D21, D23) | M6 |
 | `speculaire_gate_seconds` | histogram | `path` = `nri`\|`annotation`\|`image_id` | `CreateContainer` handling time (target: p99 under 5 ms on a cached verdict) | M6 |
-| `speculaire_identity_path` | gauge | `path` = `nri`\|`annotation`\|`image_id` | 1 for the image-identity path in use, set at NRI's `Configure`; `image_id` on CRI-O (D15, D169) | |
+| `speculaire_identity_path` | gauge | `path` = `nri`\|`annotation`\|`image_id` | 1 for the image-identity path in use, set at NRI's `Configure`, and 0 for the one it replaces: `nri` on containerd from NRI v0.12.2, `annotation` below, `image_id` on CRI-O (D15, D169, D170) | |
 | `speculaire_nri_connected` | gauge | — | 1 while registered with the runtime's NRI: from its `Configure` until the connection ends (D41, D64, D168) | |
 
 ## Process

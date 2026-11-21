@@ -2,11 +2,14 @@
 
 use futures_util::FutureExt as _;
 use speculaire_nri::api;
+use speculaire_nri::version::InferError;
+use speculaire_oci::platform::Host;
 
 use super::*;
+use crate::containerd::Containerd;
 use crate::cri::ListedImage;
-use crate::detect::Runtime;
 use crate::images::Update;
+use crate::paths::Paths;
 
 const ID: &str = "ad4f11f7c85f87c0a6d6c0fe492ad53f9cdcff6e8c88b881360c70eff701c67b";
 
@@ -148,18 +151,79 @@ fn image_id_without_a_listed_image_reads_no_identity() {
     );
 }
 
+fn containerd() -> (NodeIdentity, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let containerd = Containerd::new(
+        Paths::under(dir.path()),
+        dir.path().join("containerd.sock"),
+        None,
+    );
+    let identity = NodeIdentity::containerd(Annotation::new(containerd, Host::current()));
+    (identity, dir)
+}
+
 #[test]
 fn each_runtime_has_its_path_and_cri_o_alone_keeps_the_list() {
     let list = listed(ID, &[], &[&format!("reg.test/one@{}", digest(0xa))]);
-    let nri = NodeIdentity::of(Runtime::Containerd);
+    let (nri, _dir) = containerd();
     nri.keep(&list);
     assert_eq!(nri.path(), "nri");
     assert_eq!(identify(&nri, &annotated(ID)), Identified::Unknown(MISSING));
-    let image_id = NodeIdentity::of(Runtime::CriO);
+    let image_id = NodeIdentity::crio();
     image_id.keep(&list);
     assert_eq!(image_id.path(), "image_id");
+    assert_eq!(
+        image_id.configure(&NriVersion::Announced("v0.12.0".to_owned())),
+        "image_id",
+        "CRI-O's path is by name"
+    );
     assert!(matches!(
         identify(&image_id, &annotated(ID)),
         Identified::Image(_)
     ));
+}
+
+#[test]
+fn containerd_reads_the_annotation_below_nri_v0_12_2_or_an_unknown_version() {
+    let (identity, _dir) = containerd();
+    let unknown = NriVersion::Unknown {
+        announced: String::new(),
+        error: InferError::NoMatch("v1.7.0".to_owned()),
+    };
+    for (version, path) in [
+        (NriVersion::Announced("v0.12.0".to_owned()), "annotation"),
+        (NriVersion::Announced("v0.12.2".to_owned()), "nri"),
+        (NriVersion::Inferred("v0.11.0"), "annotation"),
+        (NriVersion::Announced("v0.12.3".to_owned()), "nri"),
+        (unknown, "annotation"),
+        (NriVersion::Inferred("v0.12.2"), "nri"),
+        (NriVersion::Announced("v0.12.1".to_owned()), "annotation"),
+        (NriVersion::Announced("v1.0.0".to_owned()), "nri"),
+        (NriVersion::Announced("devel".to_owned()), "annotation"),
+    ] {
+        assert_eq!(identity.configure(&version), path, "{version:?}");
+        assert_eq!(identity.path(), path, "{version:?}");
+    }
+    let container = Container {
+        image: Some(api::Image {
+            name: "docker.io/library/busybox:1.37".to_owned(),
+            digest: digest(1).to_string(),
+            config_digest: digest(2).to_string(),
+        }),
+        ..Container::default()
+    };
+    assert_eq!(
+        identify(&identity, &container),
+        Identified::Unknown(MISSING),
+        "the annotation path reads no `Container.image`"
+    );
+    identity.configure(&NriVersion::Announced("v0.12.3".to_owned()));
+    assert_eq!(
+        identify(&identity, &container),
+        Identified::Listed {
+            digest: digest(1),
+            name: "docker.io/library/busybox:1.37",
+        },
+        "the nri path reads `Container.image` again"
+    );
 }

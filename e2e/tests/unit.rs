@@ -2,7 +2,7 @@
 //! Each test leaves the unit running and unchanged; `unit_reload.rs` and `unit_restart.rs`, test binaries of their
 //! own, reload and stop it.
 
-use e2e::{Cluster, Failure};
+use e2e::{Cluster, Failure, Runtime};
 use serde_json::Value;
 
 /// `systemd-analyze security` entries of D53's settings that stay unset by design: `@system-service` includes
@@ -159,6 +159,14 @@ fn every_scraped_metric_is_in_the_catalog() {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn the_journal_holds_structured_entries_and_nothing_at_warning() {
     let cluster = Cluster::from_env();
+    // containerd 2.3's NRI names no image: the gate warns of the identity gap at each registration (D15, D170).
+    let expected = |entry: &[&str]| {
+        cluster.runtime() == Runtime::Containerd
+            && cluster.release().starts_with("2.3.")
+            && entry.iter().any(|l| {
+                l.trim_start().starts_with("MESSAGE=") && l.ends_with("(identity gap, D15)")
+            })
+    };
     for node in cluster.nodes().unwrap() {
         let node = node.name;
         let journal = |args: &[&str]| {
@@ -168,14 +176,27 @@ fn the_journal_holds_structured_entries_and_nothing_at_warning() {
         };
         // Each entry's time, then its message, target and the agent's fields, such as `F_ERROR`.
         let verbose = journal(&["-p", "warning", "-o", "verbose"]);
-        let warnings: Vec<&str> = verbose
-            .lines()
-            .filter(|l| match l.strip_prefix("    ") {
-                Some(field) => ["MESSAGE=", "TARGET=", "F_"]
-                    .iter()
-                    .any(|p| field.starts_with(p)),
-                None => !l.trim().is_empty(),
-            })
+        let mut entries: Vec<Vec<&str>> = Vec::new();
+        for line in verbose.lines() {
+            match line.strip_prefix("    ") {
+                Some(field) => {
+                    if ["MESSAGE=", "TARGET=", "F_"]
+                        .iter()
+                        .any(|p| field.starts_with(p))
+                        && let Some(entry) = entries.last_mut()
+                    {
+                        entry.push(line);
+                    }
+                }
+                None if !line.trim().is_empty() => entries.push(vec![line]),
+                None => {}
+            }
+        }
+        let warnings: Vec<&str> = entries
+            .iter()
+            .filter(|entry| !expected(entry))
+            .flatten()
+            .copied()
             .collect();
         assert!(warnings.is_empty(), "{node}:\n{}", warnings.join("\n"));
         // The agent's own entries, from tracing-journald: its fields carry the `F_` prefix.
