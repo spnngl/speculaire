@@ -213,6 +213,8 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 const CONFIG: &str = "/etc/speculaire/config.toml";
 const NRI_SOCKET: &str = "/var/run/nri/nri.sock";
+const MIRROR: &str = "https://127.0.0.1:7480";
+const MIRROR_DIR: &str = "/var/lib/speculaire/mirror";
 /// Where a test points `nri.socket`, to hold the agent before its registration.
 const HELD: &str = "/run/speculaire-e2e/nri.sock";
 /// The agent's `/readyz` and `speculaire_nri_connected`, as one line: `200 1` when registered.
@@ -727,10 +729,13 @@ struct Enforced<'a> {
 
 impl<'a> Enforced<'a> {
     fn on(worker: &'a Worker, policy: &str, images: Vec<String>) -> Self {
+        // The drain, long enough for [`stopping`]'s pods, ends within `TimeoutStopSec=20s` (D39, D69).
         worker.sh(&format!(
             "cp {CONFIG} {CONFIG}.e2e && sed -i -e '/^\\[gate\\]/,/^\\[/ s/^#mode = \"audit\"$/mode = \"enforce\"/' -e \
-             '/^\\[gate.exempt\\]/,/^\\[/ s/^#namespaces = \\[\\]$/namespaces = [\"kube-system\"]/' {CONFIG} && grep -q \
-             '^mode = \"enforce\"$' {CONFIG} && grep -q '^namespaces = \\[\"kube-system\"\\]$' {CONFIG}"
+             '/^\\[gate.exempt\\]/,/^\\[/ s/^#namespaces = \\[\\]$/namespaces = [\"kube-system\"]/' -e \
+             '/^\\[shutdown\\]/,/^\\[/ s/^#drain_timeout = 10$/drain_timeout = 15/' {CONFIG} && grep -q \
+             '^mode = \"enforce\"$' {CONFIG} && grep -q '^namespaces = \\[\"kube-system\"\\]$' {CONFIG} && grep -q \
+             '^drain_timeout = 15$' {CONFIG}"
         ));
         let enforced = Self { worker, images };
         worker.cluster.policy(&worker.node, policy).unwrap();
@@ -787,10 +792,11 @@ impl Drop for Enforced<'_> {
             "--now",
             "--timeout=60s",
         ]);
+        // A case that failed while the agent was stopped left it stopped.
         let unrequire = match worker.cluster.runtime() {
             Runtime::Containerd => format!("mv {CONTAINERD}.e2e {CONTAINERD}"),
             Runtime::Crio => format!("rm -f {CRIO_REQUIRED}"),
-        };
+        } + "; systemctl reset-failed speculaire; systemctl start speculaire";
         let _ = worker
             .cluster
             .exec_output(&worker.node, &["sh", "-c", &unrequire]);
@@ -1213,8 +1219,12 @@ fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refuse
     restarted(&enforced, &runnable);
     lap("agent restarted during a rollout");
 
+    let stop = stopping(&worker, &runnable, (&unsigned, &signed));
+    lap(&format!(
+        "containers created while the agent stops, in {stop:?}"
+    ));
+
     // The runtime requires the plugin: without the agent, nothing starts (D64).
-    worker.cluster.stop_agent(&worker.node).unwrap();
     create(&worker, "default", "speculaire-e2e-stopped", &signed);
     let message = rejected(
         &worker,
@@ -1230,6 +1240,80 @@ fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refuse
     drop(enforced);
     lap("restored");
 }
+
+/// Stops the agent with a mirror transfer in flight, which [`Enforced::on`]'s `shutdown.drain_timeout` waits for, and
+/// returns how long the stop took. While the agent stops, the mirror answers 404, and the gate decides from memory until
+/// it leaves NRI, last (D39, D177): `runnable` runs, and `unsigned` is rejected with its reason, not for a missing
+/// plugin.
+fn stopping(worker: &Worker, runnable: &str, (unsigned, signed): (&str, &str)) -> Duration {
+    // Pulled before the stop, so that no pull delays the containers past it. Alone: the signed image has the same image
+    // ID, and while both are on the node the runtime may name either as the container's image (D169).
+    assert!(remove(worker, signed) && remove(worker, unsigned));
+    worker.sh(&format!("crictl pull {unsigned} >/dev/null"));
+    let upstream = worker.cluster.upstream(Kind::Plain);
+    let repository = "speculaire-e2e-held";
+    let image = upstream.push(repository, 32 << 20).unwrap();
+    let layer = image.blobs.last().unwrap();
+    let host = upstream.address();
+    // containerd names the registry in `ns`, CRI-O first in the path (D66).
+    let path = match worker.cluster.runtime() {
+        Runtime::Containerd => format!("/v2/{repository}/blobs/{layer}?ns={host}"),
+        Runtime::Crio => format!("/v2/{host}/{repository}/blobs/{layer}"),
+    };
+    let curl = format!("curl -s --cacert {MIRROR_DIR}/ca.crt --cert {MIRROR_DIR}/client.pem");
+    let held = "/tmp/speculaire-e2e-held";
+    // Pulled first, the node holds the layer, which the mirror then serves on either runtime; at 1 MiB/s, its 32 MiB
+    // outlast the drain.
+    let reference = &image.reference;
+    worker.sh(&format!(
+        "crictl pull {reference} >/dev/null && rm -f {held}
+         nohup {curl} --limit-rate 1M -o {held} '{MIRROR}{path}' >/dev/null 2>&1 &
+         for _ in $(seq 100); do [ -s {held} ] && exit 0; sleep 0.1; done; exit 1"
+    ));
+    let cut = logged(worker, CUT).len();
+    let begun = Instant::now();
+    worker.sh(
+        "systemctl stop --no-block speculaire
+         for _ in $(seq 100); do [ \"$(systemctl is-active speculaire)\" = deactivating ] && exit 0; sleep 0.02; done
+         exit 1",
+    );
+    let answer = worker.sh(&format!(
+        "{curl} -o /dev/null -w '%{{http_code}}' {MIRROR}/v2/; true"
+    ));
+    assert_eq!(answer, "404", "the mirror while the agent stops");
+    start(
+        worker,
+        "default",
+        "speculaire-e2e-stopping-unsigned",
+        unsigned,
+    );
+    start(worker, "default", "speculaire-e2e-stopping", runnable);
+    rejected(
+        worker,
+        "default",
+        "speculaire-e2e-stopping-unsigned",
+        "rejected: no signature",
+    );
+    let failures = ready(worker, "default", "speculaire-e2e-stopping");
+    assert!(failures.is_empty(), "{failures:?}");
+    // Within `TimeoutStopSec`: systemd did not kill the agent.
+    let result = worker.sh(
+        "while [ \"$(systemctl is-active speculaire)\" = deactivating ]; do sleep 0.1; done
+         systemctl show -p Result --value speculaire",
+    );
+    let stop = begun.elapsed();
+    assert_eq!(result.trim(), "success");
+    assert_eq!(
+        logged(worker, CUT).len(),
+        cut + 1,
+        "no transfer held the agent"
+    );
+    worker.sh(&format!("rm -f {held}; crictl rmi {reference} >/dev/null"));
+    stop
+}
+
+/// What the agent logs when `shutdown.drain_timeout` cuts transfers (D39 step 4).
+const CUT: &str = "transfers still in flight at shutdown.drain_timeout are cut";
 
 /// On containerd 2.3, a container whose image name another image took after the kubelet resolved it, as a retag between
 /// the pull and the creation does, is rejected (D15, D170). The container is created as the kubelet creates it: from

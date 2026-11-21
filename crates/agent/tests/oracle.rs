@@ -239,6 +239,21 @@ fn socket(dir: &tempfile::TempDir) -> PathBuf {
     dir.path().join("nri.sock")
 }
 
+/// One keyless policy over `reg.test/*`.
+fn reg_policies() -> Policies {
+    Policies::parse(
+        "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: reg\nspec:\n  images:\n  \
+         - glob: \"reg.test/*\"\n  authorities:\n  - keyless:\n      identities:\n      - issuer: https://issuer.test\n        \
+         subject: someone\n",
+    )
+    .expect("the policy parses")
+}
+
+/// A digest of `byte` repeated.
+fn digest(byte: u8) -> String {
+    format!("sha256:{}", format!("{byte:02x}").repeat(32))
+}
+
 #[test]
 fn the_gate_registers_again_at_once_and_within_2_s_of_a_runtime_that_comes_back() {
     let Some(oracle) = oracle() else { return };
@@ -413,13 +428,16 @@ fn a_runtime_that_is_not_the_nodes_is_refused_until_the_agent_restarts() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one Synchronize followed through, read in order; the `/*` of the policy it held fooled the lint's count"
+)]
 fn the_containers_synchronize_lists_are_verified_and_the_one_no_policy_allows_is_warned_of_once() {
     let Some(oracle) = oracle() else { return };
     let dir = tempfile::tempdir().unwrap();
     let mut nri = oracle.nri_runtime().unwrap();
     nri.start(&Start::new(socket(&dir), "containerd", "v2.4.2"))
         .unwrap();
-    let digest = |byte: u8| format!("sha256:{}", format!("{byte:02x}").repeat(32));
     let containers = ["app", "db", "unsigned"]
         .iter()
         .zip(1..)
@@ -448,12 +466,7 @@ fn the_containers_synchronize_lists_are_verified_and_the_one_no_policy_allows_is
         containers: containers.collect(),
     })
     .unwrap();
-    let policies = Policies::parse(
-        "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: reg\nspec:\n  images:\n  \
-         - glob: \"reg.test/*\"\n  authorities:\n  - keyless:\n      identities:\n      - issuer: https://issuer.test\n        \
-         subject: someone\n",
-    )
-    .unwrap();
+    let policies = reg_policies();
     let matched = MatchHash::of(policies.iter());
     let (verifier, mut asks) = verifier(policies);
     let verdicts = Arc::clone(&verifier.verdicts);
@@ -539,4 +552,87 @@ fn the_containers_synchronize_lists_are_verified_and_the_one_no_policy_allows_is
         );
     }
     assert!(asks.try_recv().is_err(), "a root is asked for twice");
+}
+
+#[test]
+fn a_container_created_while_the_agent_stops_gets_its_verdict_and_the_gate_leaves_nri_last() {
+    let Some(oracle) = oracle() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut nri = oracle.nri_runtime().unwrap();
+    nri.start(&Start::new(socket(&dir), "containerd", "v2.4.2"))
+        .unwrap();
+    let policies = reg_policies();
+    let matched = MatchHash::of(policies.iter());
+    let (verifier, _asks) = verifier(policies);
+    for (byte, verdict) in [
+        (1, Verdict::Allow),
+        (
+            2,
+            Verdict::Rejected {
+                reason: "no signature".into(),
+            },
+        ),
+    ] {
+        let root = Digest::parse(&digest(byte)).unwrap();
+        let key = Key {
+            image: &root,
+            policies: matched,
+            root: None,
+        };
+        verifier.verdicts.keep(key, verdict);
+    }
+    let mut agent = Agent::verifying(&socket(&dir), Runtime::Containerd, verifier);
+    agent.until_registered(true, SETTLE);
+    nri.wait(1, SETTLE).unwrap();
+    let gate = agent.gate.take().unwrap();
+    gate.set(&config::parse("[gate]\nmode = \"enforce\"\n").unwrap().gate);
+
+    // SIGTERM: the agent stops, the gate last; the steps before it, the drain and the last save, are held here.
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let stopped = agent.runtime.spawn(gate.stop_after(async {
+        let _ = released.await;
+    }));
+    let create = |name: &str, byte: u8| {
+        let image = format!("reg.test/{name}:1");
+        nri::Create {
+            pod: Pod {
+                id: "pod".to_owned(),
+                name: "web".to_owned(),
+                uid: "uid".to_owned(),
+                namespace: "shop".to_owned(),
+                annotations: [].into(),
+            },
+            container: nri::Container {
+                id: name.to_owned(),
+                pod_id: String::new(),
+                name: name.to_owned(),
+                image: Some(nri::Image {
+                    name: image.clone(),
+                    digest: digest(byte),
+                    config_digest: digest(byte + 0x10),
+                }),
+                annotations: [(IMAGE_NAME.to_owned(), image)].into(),
+            },
+        }
+    };
+    assert_eq!(
+        nri.create(&create("app", 1)).unwrap(),
+        nri::Verdict::Allowed
+    );
+    match nri.create(&create("unsigned", 2)).unwrap() {
+        nri::Verdict::Rejected(message) => {
+            assert!(message.contains("rejected: no signature"), "{message}");
+        }
+        nri::Verdict::Allowed => panic!("the rejected image was allowed while the agent stops"),
+    }
+    assert_eq!(
+        nri.report().unwrap().plugins.len(),
+        1,
+        "the gate left before the save"
+    );
+
+    // The save done, the gate leaves NRI.
+    release.send(()).unwrap();
+    agent.runtime.block_on(stopped).unwrap();
+    nri.wait(0, SETTLE).unwrap();
 }

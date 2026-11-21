@@ -90,7 +90,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - D33's target puts the server's lookup p99 at 500 µs; with a LAN round trip, 20 ms is far past the normal answer, so the hedge fires only for a slow or gone member.
 - **Revisit when:** D33's load test shows snapshots at reconnect dominate, or the agents' `speculaire_lookup_seconds` p99 exceeds 20 ms without a member down.
 
-## D103: Outages fall through, counted, and a stopping agent sends what it started (amends D39, D98, D100, D102)
+## D103: Outages fall through, counted, and a stopping agent sends what it started (amends D39, D98, D100, D102; amended by D177)
 
 - **Decision:**
   - **Counted:** a lookup made while no stream is up asks nobody and counts in `speculaire_lookup_seconds` with `result="no_reflector"`; D102 counted none.

@@ -59,7 +59,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A separate filter keeps a `log.filter` change from silently dropping the audit trail.
 - **Revisit when:** someone needs OpenTelemetry traces or log export; add `tracing-opentelemetry` as a layer behind a cargo feature.
 
-## D39: Shutdown withdraws first, drains, saves, and leaves NRI last (amended by D69, D103)
+## D39: Shutdown withdraws first, drains, saves, and leaves NRI last (amended by D69, D103, D177)
 
 - **Decision:** on SIGTERM, the agent:
   1. sends `STOPPING=1` to systemd, and `/readyz` returns 503;
@@ -394,3 +394,18 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - `audit` mode is there to show what `enforce` would reject; a reason left empty in `audit` would hide it.
   - The `F_` prefix keeps the events' fields apart from journald's own, such as `MESSAGE` and `PRIORITY`, and from `CONTAINER_NAME`, which Docker's journald driver writes.
 - **Revisit when:** a log pipeline needs another schema, such as Elastic Common Schema; map these fields to it rather than renaming them.
+
+
+## D177: A stopping agent answers new connections until its own have closed, and the gate leaves NRI after the save (amends D39, D100, D103)
+
+- **Decision:**
+  - **Mirror (D39 step 2):** from SIGTERM, the mirror answers every request `404`, `/v2/` included, and counts none in `speculaire_mirror_*`: they are neither hits nor misses.
+  - **Listeners (D39 step 4):** the mirror's and the peer API's listeners stay open through the drain, so that a connection opened while the agent stops gets the mirror's `404` or the peer API's `503` (D100), not a refusal. The drain waits only for the connections open at SIGTERM; a listener closes once they have closed, or with the process when `shutdown.drain_timeout` cuts them. D103 closed the listeners at the start of the drain.
+  - **Order (D39 steps 5 and 6):** `Gate::stop_after` holds the gate's NRI connection until the drain and the last save (D176) are done, and the gate decides from memory until then.
+  - **Test:** `crates/agent/tests/oracle.rs` creates containers on `speculaire-oracle nri-runtime` while the gate's stop is held; the gate suite's e2e stops the agent with a mirror transfer in flight, `shutdown.drain_timeout = 15`, and creates pods while it stops, from images pulled before.
+- **Because:**
+  - D39 asks for the `404`. With the listener closed, a pull during the drain met a refused connection: containerd still tries the next host on any error (v2.3.7 `core/remotes/docker/resolver.go:320-330`, `core/remotes/docker/fetcher.go:341-355`), but logs it as a failure, where a `404` is an ordinary miss (`resolver.go:334-341`).
+  - D100's `503` reached only the connections already open.
+  - A connection opened while the agent stops is not waited for, so a busy runtime cannot hold the stop past `shutdown.drain_timeout`.
+  - Measured on kind (arm64), a 32 MiB mirror transfer held at 1 MiB/s and `shutdown.drain_timeout = 15`: `systemctl stop` took 15.18 s on containerd 2.4 and 15.17 s on CRI-O 1.37, within `TimeoutStopSec=20s`. Pods created meanwhile got their verdicts from memory, and the mirror answered `404` where main refused the connection. The gate suite took 88 s and 96 s.
+- **Revisit when:** a runtime stops falling through on a `404` from its mirror.

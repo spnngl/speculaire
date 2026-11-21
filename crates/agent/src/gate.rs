@@ -97,6 +97,13 @@ impl Gate {
         self.settings.send_replace(Arc::new(Settings::new(gate)));
     }
 
+    /// Decides from memory until `before` ends, then closes the connection: NRI goes last, so that a container created
+    /// while the agent stops still gets its verdict (D39).
+    pub async fn stop_after(self, before: impl Future<Output = ()>) {
+        before.await;
+        self.stop().await;
+    }
+
     /// Closes the connection (D39 step 6).
     pub async fn stop(self) {
         // An error means the task already ended, which its join says.

@@ -283,7 +283,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Revisit when:** a CRI-O whose `crio.sock` does not serve `GET /config`, or M5 needs the trait to give a registry's whole host list rather than the sources of one image.
 
 
-## D100: The peer API shares the mirror's parser, caps blob bodies, and opens on the address the first stream fixes (amends D24, D36; amended by D103, D123, D124)
+## D100: The peer API shares the mirror's parser, caps blob bodies, and opens on the address the first stream fixes (amends D24, D36; amended by D103, D123, D124, D177)
 
 - **Decision:**
   - **Routes:** `speculaire_mirror::peer` answers `GET` and `HEAD` of `/v2/<name>/manifests/<digest>` and `/v2/<name>/blobs/<digest>`, with one `Range` at most, through the mirror's own request parser and responses (D85). The name is not read: content is keyed by digest. Everything else is a 404: `/v2/`, tags, referrers, other methods, and a digest the node no longer holds, as when containerd's garbage collector deleted it without an event (D99).
