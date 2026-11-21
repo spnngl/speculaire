@@ -1,5 +1,5 @@
-# D35's reset of a node, run in its host namespaces: no mirror, no bench image, a cold page cache. It fails, naming
-# the file, when a mirror entry or a bench blob is left.
+# D35's reset of a node, run in its host namespaces: no mirror, no bench image, a cold page cache. check.sh then
+# checks what it left.
 set -euo pipefail
 
 if systemctl cat speculaire.service >/dev/null 2>&1; then
@@ -19,26 +19,11 @@ if [[ -n "$images" ]]; then
     crictl rmi $images >/dev/null
 fi
 
-config_path="$(containerd config dump 2>/dev/null | awk -F "[\"']" '$1 ~ /^ *config_path = $/ { print $2; exit }')"
-if [[ -n "$config_path" ]]; then
-    for file in "$config_path/_default/hosts.toml" "$config_path/ghcr.io/hosts.toml"; do
-        if [[ -f "$file" ]] && grep -q '^\[host\.' "$file"; then
-            echo "$file: a mirror entry is left" >&2
-            exit 1
-        fi
-    done
-fi
-
 # containerd's garbage collector removes the blobs of a removed image a moment later.
 for _ in $(seq 30); do
-    left="$(ctr -n k8s.io content ls | grep -c 'spegel-org/benchmark' || true)"
-    [[ "$left" == 0 ]] && break
+    [[ "$(ctr -n k8s.io content ls | grep -c 'spegel-org/benchmark' || true)" == 0 ]] && break
     sleep 1
 done
-if [[ "$left" != 0 ]]; then
-    echo "containerd's content store holds $left blobs of spegel-org/benchmark" >&2
-    exit 1
-fi
 
 sync
 echo 3 >/proc/sys/vm/drop_caches
