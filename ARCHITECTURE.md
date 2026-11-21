@@ -74,8 +74,8 @@ The verifier works asynchronously, so the gate never waits on the network.
 1. **Triggers** (D22), earliest first:
    - the mirror asked for a manifest by digest, or serving one by tag, before the runtime lists it (D152); the store keeps what it names for `artifacts.grace` (D153);
    - a change of the runtime's image list, which containerd's `/images/*` events and CRI-O's `images.json` signal (D65, D121);
-   - NRI `Synchronize`, which lists the containers already running;
-   - a gate cache miss.
+   - NRI `Synchronize`, which lists the containers already running; the gate warns of each one a verdict does not allow, and stops none (D175);
+   - a gate cache miss (D172).
 2. **Discover** referrers for the index digest and the platform manifest digest. Try sources in this order (D126):
    1. the artifact store;
    2. peers, through the reflector;

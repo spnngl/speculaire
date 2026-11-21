@@ -18,13 +18,16 @@ use speculaire_agent::gate::decision::Verifier;
 use speculaire_agent::status::Status;
 use speculaire_agent::{config, telemetry};
 use speculaire_mirror::listed::Listed;
+use speculaire_oci::reference::Digest;
 use speculaire_oracle_harness::Oracle;
-use speculaire_oracle_harness::nri::Start;
+use speculaire_oracle_harness::nri::{self, Pod, Start, State};
 use speculaire_runtime::Node;
 use speculaire_runtime::detect::{Runtime, Sockets};
+use speculaire_runtime::identity::annotation::IMAGE_NAME;
 use speculaire_runtime::images::{Images, Update};
 use speculaire_runtime::paths::Paths;
-use speculaire_verify::{Absent, Policies, Verdicts};
+use speculaire_verify::engine::{Asked, Asking};
+use speculaire_verify::{Absent, Key, MatchHash, Policies, Verdict, Verdicts};
 use tokio::sync::{mpsc, watch};
 
 /// A plugin connects, registers and synchronizes well within this.
@@ -91,14 +94,17 @@ impl Images for Unlisted {
     }
 }
 
-/// A verifier with no policy and no trust root, whose engine is not running.
-fn verifier() -> Verifier {
-    Verifier {
+/// A verifier with `policies` and no trust root, whose engine is not running, and the engine's end of its asks.
+fn verifier(policies: Policies) -> (Verifier, mpsc::UnboundedReceiver<Asked>) {
+    let (asker, asks) = mpsc::unbounded_channel();
+    let verifier = Verifier {
         verdicts: Arc::new(Verdicts::default()),
-        policies: watch::channel(Arc::new(Policies::default())).1,
+        policies: watch::channel(Arc::new(policies)).1,
         trust: watch::channel(Err(Absent::new("none in this test"))).1,
-        asker: mpsc::unbounded_channel().0,
-    }
+        asker,
+        synchronized: Arc::default(),
+    };
+    (verifier, asks)
 }
 
 /// A gate on `socket`, on a runtime of its own, with the process's recorder and logs.
@@ -112,8 +118,14 @@ struct Agent {
 }
 
 impl Agent {
-    /// Starts the gate of a node that runs `runtime`, its mirror listening: `/readyz` waits for the gate alone.
+    /// Starts the gate of a node that runs `runtime`, with no policy, its mirror listening: `/readyz` waits for the
+    /// gate alone.
     fn start(socket: &Path, runtime: Runtime) -> Self {
+        Self::verifying(socket, runtime, verifier(Policies::default()).0)
+    }
+
+    /// Starts the gate as [`Agent::start`] does, deciding through `verifier`.
+    fn verifying(socket: &Path, runtime: Runtime, verifier: Verifier) -> Self {
         let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         let logs = LOGS
             .get_or_init(|| {
@@ -145,7 +157,7 @@ impl Agent {
                 socket.to_owned(),
                 runtime,
                 (node.identity(), Listed::follow(Arc::new(Unlisted))),
-                verifier(),
+                verifier,
                 &config::Gate::default(),
                 Arc::clone(&status),
             )
@@ -398,4 +410,133 @@ fn a_runtime_that_is_not_the_nodes_is_refused_until_the_agent_restarts() {
         "{}",
         refusals[0]
     );
+}
+
+#[test]
+fn the_containers_synchronize_lists_are_verified_and_the_one_no_policy_allows_is_warned_of_once() {
+    let Some(oracle) = oracle() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut nri = oracle.nri_runtime().unwrap();
+    nri.start(&Start::new(socket(&dir), "containerd", "v2.4.2"))
+        .unwrap();
+    let digest = |byte: u8| format!("sha256:{}", format!("{byte:02x}").repeat(32));
+    let containers = ["app", "db", "unsigned"]
+        .iter()
+        .zip(1..)
+        .map(|(name, byte)| {
+            let image = format!("reg.test/{name}:1");
+            nri::Container {
+                id: (*name).to_owned(),
+                pod_id: "pod".to_owned(),
+                name: (*name).to_owned(),
+                image: Some(nri::Image {
+                    name: image.clone(),
+                    digest: digest(byte),
+                    config_digest: digest(byte + 0x10),
+                }),
+                annotations: [(IMAGE_NAME.to_owned(), image)].into(),
+            }
+        });
+    nri.state(&State {
+        pods: vec![Pod {
+            id: "pod".to_owned(),
+            name: "web".to_owned(),
+            uid: "uid".to_owned(),
+            namespace: "shop".to_owned(),
+            annotations: [].into(),
+        }],
+        containers: containers.collect(),
+    })
+    .unwrap();
+    let policies = Policies::parse(
+        "apiVersion: policy.sigstore.dev/v1beta1\nkind: ClusterImagePolicy\nmetadata:\n  name: reg\nspec:\n  images:\n  \
+         - glob: \"reg.test/*\"\n  authorities:\n  - keyless:\n      identities:\n      - issuer: https://issuer.test\n        \
+         subject: someone\n",
+    )
+    .unwrap();
+    let matched = MatchHash::of(policies.iter());
+    let (verifier, mut asks) = verifier(policies);
+    let verdicts = Arc::clone(&verifier.verdicts);
+    let agent = Agent::verifying(&socket(&dir), Runtime::Containerd, verifier);
+    let before = agent.logs.text().len();
+    agent.until_registered(true, SETTLE);
+    let report = nri.wait(1, SETTLE).unwrap();
+    assert_eq!(report.plugins[0].events, ["CREATE_CONTAINER"]);
+
+    // The engine's part: each root the gate asks for gets its verdict, and the unsigned image's rejects it.
+    let mut asked = Vec::new();
+    let start = Instant::now();
+    while asked.len() < 3 {
+        assert!(start.elapsed() < SETTLE, "asked only {asked:?}");
+        let Ok(Asked { root, names, by }) = asks.try_recv() else {
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        };
+        assert_eq!(by, Asking::Synchronize);
+        let verdict = if names == ["reg.test/unsigned"] {
+            Verdict::Rejected {
+                reason: "no signature".into(),
+            }
+        } else {
+            Verdict::Allow
+        };
+        let key = Key {
+            image: &root,
+            policies: matched,
+            root: None,
+        };
+        verdicts.keep(key, verdict);
+        asked.push(root);
+    }
+    asked.sort();
+    let want: Vec<Digest> = (1..=3)
+        .map(|byte| Digest::parse(&digest(byte)).unwrap())
+        .collect();
+    assert_eq!(asked, want);
+
+    let warning = "a container running since before the gate registered";
+    let warnings = || {
+        let logs = agent.logs.text().split_off(before);
+        logs.lines()
+            .filter(|l| l.contains(warning))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let start = Instant::now();
+    while warnings().is_empty() {
+        assert!(
+            start.elapsed() < SETTLE,
+            "no warning in\n{}",
+            agent.logs.text()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Verdicts landing again change none of the three: no second warning.
+    for root in &want {
+        verdicts.keep(
+            Key {
+                image: root,
+                policies: matched,
+                root: None,
+            },
+            Verdict::Allow,
+        );
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    let warnings = warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    for field in [
+        r#"namespace="shop""#,
+        r#"pod="web""#,
+        r#"container="unsigned""#,
+        r#"image="reg.test/unsigned:1""#,
+        r#"reason="rejected: no signature""#,
+    ] {
+        assert!(
+            warnings[0].contains(field),
+            "{field} not in {}",
+            warnings[0]
+        );
+    }
+    assert!(asks.try_recv().is_err(), "a root is asked for twice");
 }

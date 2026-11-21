@@ -21,6 +21,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
 
+use self::decision::running::Running;
 use self::decision::{Decider, Decision, Settings, Verifier};
 use crate::config;
 use crate::status::Status;
@@ -54,6 +55,7 @@ impl Gate {
         let (settings, read) = watch::channel(Arc::new(Settings::new(gate)));
         let (stop, stopped) = oneshot::channel();
         let decider = Arc::new(Decider::new(Arc::new(identity), verifier, read));
+        let (synchronized, running) = watch::channel(Arc::default());
         let plugin = Plugin {
             runtime,
             decider: Arc::clone(&decider),
@@ -61,6 +63,7 @@ impl Gate {
             versions: Mutex::new(Versions::default()),
             path: Mutex::new(None),
             refused: Notify::new(),
+            synchronized,
         };
         let task = tokio::spawn(async move {
             // The list and containerd's image store outlive a connection, so a new one finds them already read. Once
@@ -79,6 +82,7 @@ impl Gate {
                 () = connect(socket, plugin, stopped) => {}
                 () = keep => {}
                 () = decider.identity().follow() => {}
+                () = decider.watch_running(running) => {}
             }
         });
         Self {
@@ -171,6 +175,8 @@ struct Plugin {
     path: Mutex<Option<&'static str>>,
     /// Notified when `Configure` names a runtime that is not the node's.
     refused: Notify,
+    /// The containers of the latest `Synchronize` (D175).
+    synchronized: watch::Sender<Arc<Vec<Running>>>,
 }
 
 impl Plugin {
@@ -258,8 +264,11 @@ impl Handler for Plugin {
         self.registered(true);
     }
 
-    // The gate is ready without it (Q4), and nothing needs the containers that exist yet.
-    fn synchronize(&self, _: Vec<PodSandbox>, _: Vec<Container>) {}
+    // The gate is ready without it (Q4).
+    fn synchronize(&self, pods: Vec<PodSandbox>, containers: Vec<Container>) {
+        self.synchronized
+            .send_replace(Arc::new(Running::listed(pods, containers)));
+    }
 
     async fn create_container(
         &self,

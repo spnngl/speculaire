@@ -10,6 +10,7 @@ use speculaire_runtime::identity::{IMAGE_REF, MISMATCH, NOT_CONFIG};
 use speculaire_runtime::images::{Image, RepoDigest, Update};
 use speculaire_verify::{Absent, Key, MatchHash};
 
+use super::running::Running;
 use super::*;
 
 /// The image ID of the test image, and its config digest.
@@ -97,6 +98,7 @@ fn verifier(policies: &str) -> (Verifier, mpsc::UnboundedReceiver<Asked>) {
         policies: watch::channel(Arc::new(policies)).1,
         trust: watch::channel(Err(Absent::new("none in this test"))).1,
         asker,
+        synchronized: Arc::default(),
     };
     (verifier, asks)
 }
@@ -308,11 +310,24 @@ impl Capture {
 
     /// The fields of each audit event written.
     fn events(&self) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        self.written(|event| event["target"] == AUDIT_TARGET)
+    }
+
+    /// The fields of each warning written.
+    fn warnings(&self) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        self.written(|event| event["level"] == "WARN")
+    }
+
+    /// The fields of each event written that `kept` keeps.
+    fn written(
+        &self,
+        kept: impl Fn(&serde_json::Value) -> bool,
+    ) -> Vec<serde_json::Map<String, serde_json::Value>> {
         let written = self.0.lock().expect("no test panics holding the capture");
         String::from_utf8_lossy(&written)
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a JSON event"))
-            .filter(|event| event["target"] == AUDIT_TARGET)
+            .filter(|event| kept(event))
             .map(|mut event| match event["fields"].take() {
                 serde_json::Value::Object(fields) => fields,
                 other => panic!("the fields are no object: {other}"),
@@ -532,4 +547,113 @@ async fn an_image_id_no_list_names_by_gate_wait_is_pending() {
     let decider = decider(verifier, short.clone(), false);
     let decision = decider.decide(&request("default"), &short, far()).await;
     assert_eq!(decision.answer(&short), Answer::Reject(PENDING.to_owned()));
+}
+
+/// Container `c` of pod `p` in each of `namespaces`, running the test image, as `Synchronize` lists them.
+fn running(namespaces: &[&str]) -> Vec<Running> {
+    let (pods, containers) = namespaces
+        .iter()
+        .map(|namespace| {
+            let request = request(namespace);
+            let pod = PodSandbox {
+                id: (*namespace).to_owned(),
+                ..request.pod.expect("the request has a pod")
+            };
+            let container = Container {
+                pod_sandbox_id: (*namespace).to_owned(),
+                ..request.container.expect("the request has a container")
+            };
+            (pod, container)
+        })
+        .unzip();
+    Running::listed(pods, containers)
+}
+
+#[tokio::test]
+async fn a_running_container_is_asked_for_under_synchronize_and_warned_of_once_per_verdict_change()
+{
+    let (verifier, mut asks) = verifier(&policy());
+    let exempt = settings("mode = \"enforce\"\n[gate.exempt]\nnamespaces = [\"kube-system\"]\n");
+    let decider = decider(verifier.clone(), exempt, false);
+    let (synchronized, listed) = watch::channel(Arc::default());
+    let capture = Capture::default();
+    let _guard = capture.install();
+    let rejected = Verdict::Rejected {
+        reason: "no signature".into(),
+    };
+    let unverifiable = Verdict::Unverifiable {
+        reason: "offline".into(),
+        retry_at: Instant::now(),
+    };
+    // A fresh rejection is final: it comes last.
+    let verdicts = [
+        unverifiable.clone(),
+        unverifiable.clone(),
+        Verdict::Pending,
+        Verdict::Allow,
+        unverifiable,
+        rejected,
+    ];
+    let lands = async {
+        let untold = async || {
+            let told = verifier.synchronized.notified();
+            tokio::time::timeout(Duration::from_millis(1), told)
+                .await
+                .is_err()
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(untold().await, "the list started before any `Synchronize`");
+        synchronized.send_replace(Arc::new(running(&["default", "kube-system"])));
+        // No image list yet: the gate reads the identity again, and the list waits.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            asks.try_recv().is_err(),
+            "asked before the identity was read"
+        );
+        assert!(untold().await, "the list started before the gate asked");
+        decider.identity().keep(&list());
+        let asked = asks.recv().await.expect("the gate asks");
+        assert_eq!((&asked.root, asked.by), (&digest(0xa), Asking::Synchronize));
+        tokio::time::timeout(Duration::from_secs(1), verifier.synchronized.notified())
+            .await
+            .expect("the gate tells the image list once it asked");
+        // A list kept wakes the watch, which reads again only the containers it has no identity of.
+        decider.keep(&list());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        for verdict in verdicts {
+            keep(&verifier, verdict);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        () = decider.watch_running(listed) => panic!("the watch ends"),
+        () = lands => {}
+    }
+    assert!(
+        asks.try_recv().is_err(),
+        "a container asked for twice, or the exempt one"
+    );
+    let warnings = capture.warnings();
+    let reasons: Vec<&serde_json::Value> =
+        warnings.iter().map(|fields| &fields["reason"]).collect();
+    assert_eq!(
+        reasons,
+        [
+            "unverifiable: offline",
+            "unverifiable: offline",
+            "rejected: no signature"
+        ]
+    );
+    for fields in &warnings {
+        assert_eq!(
+            (&fields["namespace"], &fields["pod"], &fields["container"]),
+            (&"default".into(), &"p".into(), &"c".into())
+        );
+        assert!(
+            fields["image"]
+                .as_str()
+                .is_some_and(|image| !image.is_empty()),
+            "{fields:?}"
+        );
+    }
 }
