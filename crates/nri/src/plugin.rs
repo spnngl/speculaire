@@ -10,7 +10,7 @@ use std::pin::pin;
 use std::time::Duration;
 
 use futures_util::future::{self, Either};
-use futures_util::stream::{self, FuturesUnordered, StreamExt};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use prost::Message as _;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Instant;
@@ -103,6 +103,12 @@ pub trait Handler: Sync {
         request: &create::Request<'_>,
         deadline: Instant,
     ) -> impl Future<Output = Answer> + Send;
+
+    /// The answer to a CreateContainer request when the handler has it without waiting; none hands the request to
+    /// [`Self::create_container`]. Answered here, a request costs neither a task nor a copy (D189).
+    fn answer_now(&self, _request: &create::Request<'_>) -> Option<Answer> {
+        None
+    }
 
     /// The answer, given at once, to a CreateContainer request past [`MAX_IN_FLIGHT`] requests answered at once.
     fn overloaded(&self, request: &create::Request<'_>) -> Answer;
@@ -258,15 +264,17 @@ struct Session {
     shutdown: bool,
 }
 
+/// What the plugin's service waited for: an answer to write, or the next request read.
+enum Event<'a> {
+    Answered((u32, Reply)),
+    Read(Result<Request<'a>, RequestError>),
+}
+
 /// Serves NRI's plugin service until the connection ends or a request cannot be read.
 async fn serve_requests<H: Handler>(plugin_service: Connection, handler: &H) -> Stop {
     let (reader, mut writer) = tokio::io::split(plugin_service);
-    // A stream, unlike a future recreated on each loop, keeps a message read halfway when an answer is written.
-    let requests = stream::unfold((reader, Vec::new()), |(mut reader, mut body)| async move {
-        let read = ttrpc::read_request(&mut reader, &mut body).await;
-        Some((read, (reader, body)))
-    });
-    let mut requests = pin!(requests);
+    // Cancel safe: a message read halfway is kept while an answer is written.
+    let mut requests = ttrpc::Reader::new(reader);
     let mut in_flight = FuturesUnordered::new();
     let mut buf = Vec::new();
     let mut session = Session {
@@ -276,39 +284,72 @@ async fn serve_requests<H: Handler>(plugin_service: Connection, handler: &H) -> 
         shutdown: false,
     };
     loop {
-        let (stream, answer) = tokio::select! {
+        let event = tokio::select! {
             biased;
-            Some(answered) = in_flight.next(), if !in_flight.is_empty() => answered,
-            read = requests.next() => match read {
-                None | Some(Err(RequestError::Io(_))) => return Stop::Trunk { shutdown: session.shutdown },
-                Some(Err(RequestError::Oversize { length })) => return Stop::Failed(End::Oversize { length }),
-                Some(Err(RequestError::Decode { stream, source })) => {
-                    (stream, Err(ttrpc::status(code::INVALID_ARGUMENT, format!("unmarshal request error: {source}"))))
-                }
-                Some(Ok(Request { stream, timeout, call })) => match call {
-                    Call::CreateContainer(payload) => match create::Request::read(&payload) {
-                        Err(err) => (stream, Err(ttrpc::status(code::INVALID_ARGUMENT, format!("unmarshal request error: {err}")))),
-                        Ok(request) if in_flight.len() >= MAX_IN_FLIGHT => (stream, reply(handler.overloaded(&request))),
-                        Ok(_) => {
-                            let deadline = Instant::now() + timeout.unwrap_or(session.request_timeout);
+            Some(answered) = in_flight.next(), if !in_flight.is_empty() => Event::Answered(answered),
+            read = requests.next() => Event::Read(read),
+        };
+        let (stream, answer) = match event {
+            Event::Answered(answered) => answered,
+            Event::Read(Err(RequestError::Io(_))) => {
+                return Stop::Trunk {
+                    shutdown: session.shutdown,
+                };
+            }
+            Event::Read(Err(RequestError::Oversize { length })) => {
+                return Stop::Failed(End::Oversize { length });
+            }
+            Event::Read(Err(RequestError::Decode { stream, source })) => {
+                (stream, Err(unmarshal(source)))
+            }
+            Event::Read(Ok(Request {
+                stream,
+                timeout,
+                call,
+            })) => match call {
+                Call::CreateContainer(payload) => match create::Request::read(payload) {
+                    Err(err) => (stream, Err(unmarshal(err))),
+                    Ok(request) => match handler.answer_now(&request) {
+                        Some(answer) => (stream, reply(answer)),
+                        None if in_flight.len() >= MAX_IN_FLIGHT => {
+                            (stream, reply(handler.overloaded(&request)))
+                        }
+                        None => {
+                            let deadline =
+                                Instant::now() + timeout.unwrap_or(session.request_timeout);
+                            // The request outlives the message it was read from.
+                            let payload = payload.to_vec();
                             in_flight.push(async move {
-                                let request = create::Request::read(&payload).expect("the request read above");
-                                let answer = tokio::time::timeout_at(deadline, handler.create_container(&request, deadline));
-                                (stream, answer.await.map_or_else(|_| Err(deadline_exceeded()), reply))
+                                let request = create::Request::read(&payload)
+                                    .expect("the request read above");
+                                let answer = tokio::time::timeout_at(
+                                    deadline,
+                                    handler.create_container(&request, deadline),
+                                );
+                                (
+                                    stream,
+                                    answer
+                                        .await
+                                        .map_or_else(|_| Err(deadline_exceeded()), reply),
+                                )
                             });
                             continue;
                         }
                     },
-                    Call::Configure(request) => (stream, Ok(session.configure(request, handler))),
-                    Call::Synchronize(request) => (stream, Ok(session.synchronize(request, handler))),
-                    Call::Shutdown => {
-                        session.shutdown = true;
-                        (stream, Ok(Empty {}.encode_to_vec()))
-                    }
-                    Call::Other { service, method } => {
-                        (stream, Err(ttrpc::status(code::UNIMPLEMENTED, format!("method {service}/{method}"))))
-                    }
                 },
+                Call::Configure(request) => (stream, Ok(session.configure(request, handler))),
+                Call::Synchronize(request) => (stream, Ok(session.synchronize(request, handler))),
+                Call::Shutdown => {
+                    session.shutdown = true;
+                    (stream, Ok(Empty {}.encode_to_vec()))
+                }
+                Call::Other { service, method } => (
+                    stream,
+                    Err(ttrpc::status(
+                        code::UNIMPLEMENTED,
+                        format!("method {service}/{method}"),
+                    )),
+                ),
             },
         };
         if ttrpc::respond(&mut writer, &mut buf, stream, answer)
@@ -320,6 +361,14 @@ async fn serve_requests<H: Handler>(plugin_service: Connection, handler: &H) -> 
             };
         }
     }
+}
+
+/// The refusal of a request that does not decode, in ttrpc's words (v1.2.7 `server.go:458`).
+fn unmarshal(err: impl std::fmt::Display) -> Status {
+    ttrpc::status(
+        code::INVALID_ARGUMENT,
+        format!("unmarshal request error: {err}"),
+    )
 }
 
 /// A call's answer: a response's protobuf or a refusal.
@@ -408,8 +457,8 @@ mod tests {
 
     const SECOND: Duration = Duration::from_secs(1);
 
-    /// Records what it is given, and answers by container name: `hold` never, `slow` after a second, `reject` with
-    /// a rejection, any other with Allow.
+    /// Records what it is given, and answers by container name: `now` at once with a rejection, `hold` never, `slow`
+    /// after a second, `reject` with a rejection, any other with Allow.
     #[derive(Debug, Default)]
     struct Recorder {
         configured: Mutex<Vec<Configuration>>,
@@ -451,6 +500,11 @@ mod tests {
                     _ => Answer::Allow,
                 }
             }
+        }
+
+        fn answer_now(&self, request: &create::Request<'_>) -> Option<Answer> {
+            let now = request.container.is_some_and(|c| c.name == "now");
+            now.then(|| Answer::Reject("at once".to_owned()))
         }
 
         fn overloaded(&self, _: &create::Request<'_>) -> Answer {
@@ -496,25 +550,21 @@ mod tests {
         }
 
         async fn register(&mut self, answer: Result<(), Status>) {
-            let request = ttrpc::read_request(&mut self.registration, &mut self.buf)
-                .await
-                .unwrap();
+            let mut requests = ttrpc::Reader::new(&mut self.registration);
+            let request = requests.next().await.unwrap();
             assert_eq!(
                 request.call,
                 Call::Other {
-                    service: ttrpc::RUNTIME_SERVICE.to_owned(),
-                    method: "RegisterPlugin".to_owned()
+                    service: ttrpc::RUNTIME_SERVICE,
+                    method: "RegisterPlugin"
                 }
             );
+            let stream = request.stream;
+            drop(requests);
             let answer = answer.map(|()| Empty {}.encode_to_vec());
-            ttrpc::respond(
-                &mut self.registration,
-                &mut self.buf,
-                request.stream,
-                answer,
-            )
-            .await
-            .unwrap();
+            ttrpc::respond(&mut self.registration, &mut self.buf, stream, answer)
+                .await
+                .unwrap();
         }
 
         /// Sends a request for `method` and returns its stream; `timeout` zero leaves the plugin's default.
@@ -754,6 +804,15 @@ mod tests {
         assert_eq!(
             response.status.unwrap(),
             ttrpc::status(code::FAILED_PRECONDITION, "overloaded")
+        );
+        let now = runtime
+            .send("CreateContainer", &create("now"), 60 * SECOND)
+            .await;
+        let (answered, response) = runtime.answer().await;
+        assert_eq!(answered, now, "an answer at once needs no room");
+        assert_eq!(
+            response.status.unwrap(),
+            ttrpc::status(code::FAILED_PRECONDITION, "at once")
         );
         assert_eq!(recorder.deadlines.lock().unwrap().len(), MAX_IN_FLIGHT);
 

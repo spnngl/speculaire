@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use metrics::{Counter, Histogram};
 use speculaire_mirror::listed::Listed;
 use speculaire_nri::api::{Container, PodSandbox};
 use speculaire_nri::{
@@ -25,7 +26,9 @@ use self::decision::running::Running;
 use self::decision::{Decider, Decision, Settings, Verifier};
 use crate::config;
 use crate::status::Status;
-use crate::telemetry::{self, GATE_SECONDS, GATE_TOTAL, IDENTITY_PATH, NRI_CONNECTED, Versions};
+use crate::telemetry::{
+    self, GATE_SECONDS, GATE_TOTAL, Handles, IDENTITY_PATH, NRI_CONNECTED, Versions,
+};
 
 /// How long the gate waits between two connections, unless the last one lasted longer (D41).
 const RETRY: Duration = Duration::from_secs(1);
@@ -64,6 +67,8 @@ impl Gate {
             path: Mutex::new(None),
             refused: Notify::new(),
             synchronized,
+            decisions: Handles::default(),
+            seconds: Handles::default(),
         };
         let task = tokio::spawn(async move {
             // The list and containerd's image store outlive a connection, so a new one finds them already read. Once
@@ -184,9 +189,26 @@ struct Plugin {
     refused: Notify,
     /// The containers of the latest `Synchronize` (D175).
     synchronized: watch::Sender<Arc<Vec<Running>>>,
+    /// `speculaire_gate_total`, by `mode`, `result` and `stale`.
+    decisions: Decisions,
+    /// `speculaire_gate_seconds`, by `path`.
+    seconds: Handles<&'static str, Histogram>,
 }
 
+/// `speculaire_gate_total`'s handles, by `mode`, `result` and `stale`.
+type Decisions = Handles<(&'static str, &'static str, &'static str), Counter>;
+
 impl Plugin {
+    /// Records how long a `CreateContainer` took from `started`, under the path in use.
+    fn took(&self, started: Instant) {
+        let path = self.decider.identity().path();
+        let seconds = self.seconds.get(
+            path,
+            |path| metrics::histogram!(GATE_SECONDS, "path" => path),
+        );
+        seconds.record(started.elapsed());
+    }
+
     /// Records whether the plugin is registered, for `/readyz` and `speculaire_nri_connected`.
     fn registered(&self, registered: bool) {
         self.status.nri_registered(registered);
@@ -281,23 +303,34 @@ impl Handler for Plugin {
         let started = Instant::now();
         let settings = self.decider.settings();
         let decision = self.decider.decide(request, &settings, deadline).await;
-        let path = self.decider.identity().path();
-        metrics::histogram!(GATE_SECONDS, "path" => path).record(started.elapsed());
-        answer(&decision, &settings)
+        self.took(started);
+        answer(&decision, &settings, &self.decisions)
+    }
+
+    // A stored verdict, on a path that reads the identity from memory: no task, and nothing allocated (D189).
+    fn answer_now(&self, request: &create::Request<'_>) -> Option<Answer> {
+        let started = Instant::now();
+        let settings = self.decider.settings();
+        let decision = self.decider.decide_now(request, &settings)?;
+        self.took(started);
+        Some(answer(&decision, &settings, &self.decisions))
     }
 
     fn overloaded(&self, request: &create::Request<'_>) -> Answer {
         let settings = self.decider.settings();
-        answer(&self.decider.overloaded(request, &settings), &settings)
+        let decision = self.decider.overloaded(request, &settings);
+        answer(&decision, &settings, &self.decisions)
     }
 }
 
-/// The answer `decision` gets under `settings`, counted under `speculaire_gate_total`.
-fn answer(decision: &Decision, settings: &Settings) -> Answer {
+/// The answer `decision` gets under `settings`, counted under `speculaire_gate_total` through `decisions`.
+fn answer(decision: &Decision, settings: &Settings, decisions: &Decisions) -> Answer {
     let stale = if decision.stale() { "true" } else { "false" };
-    let mode = settings.mode.name();
-    metrics::counter!(GATE_TOTAL, "mode" => mode, "result" => decision.result(), "stale" => stale)
-        .increment(1);
+    let labels = (settings.mode.name(), decision.result(), stale);
+    let total = decisions.get(labels, |(mode, result, stale)| {
+        metrics::counter!(GATE_TOTAL, "mode" => mode, "result" => result, "stale" => stale)
+    });
+    total.increment(1);
     decision.answer(settings)
 }
 

@@ -17,7 +17,12 @@ use crate::pattern::Pattern;
 #[derive(Clone, Debug, Default)]
 pub struct Policies {
     policies: Vec<Policy>,
+    /// The indices of `policies`, by digest: the order [`MatchHash::of`] hashes them in.
+    by_digest: Vec<usize>,
 }
+
+/// The most policies [`Policies::match_hash`] hashes from the stack.
+const STACKED: usize = 16;
 
 /// One `ClusterImagePolicy`: the images it covers and what they need to pass it.
 #[derive(Clone, Debug)]
@@ -212,7 +217,12 @@ impl Policies {
                 digest: sha256(value.to_string().as_bytes()),
             });
         }
-        Ok(Self { policies })
+        let mut by_digest: Vec<usize> = (0..policies.len()).collect();
+        by_digest.sort_unstable_by_key(|&index| policies[index].digest);
+        Ok(Self {
+            policies,
+            by_digest,
+        })
     }
 
     /// The policies, in file order.
@@ -225,11 +235,43 @@ impl Policies {
         let name = reference.name();
         self.policies
             .iter()
-            .filter(move |policy| policy.images.iter().any(|glob| glob.is_match(name)))
+            .filter(move |policy| policy.matches(name))
+    }
+
+    /// [`MatchHash::of`] the policies that match `name`, a [`Reference::name`]; none when none does. Up to 16 policies,
+    /// it allocates nothing (D107, D189).
+    #[must_use]
+    pub fn match_hash(&self, name: &str) -> Option<MatchHash> {
+        let mut digests = [[0; 32]; STACKED];
+        let mut matched = 0;
+        for policy in self
+            .by_digest
+            .iter()
+            .filter_map(|&index| self.policies.get(index))
+        {
+            if policy.matches(name) {
+                if let Some(slot) = digests.get_mut(matched) {
+                    *slot = policy.digest;
+                }
+                matched += 1;
+            }
+        }
+        match digests.get(..matched) {
+            Some([]) => None,
+            Some(stacked) => Some(MatchHash(sha256(stacked.as_flattened()))),
+            None => Some(MatchHash::of(
+                self.policies.iter().filter(|policy| policy.matches(name)),
+            )),
+        }
     }
 }
 
 impl Policy {
+    /// Whether a glob of the policy matches `name`, a [`Reference::name`].
+    fn matches(&self, name: &str) -> bool {
+        self.images.iter().any(|glob| glob.is_match(name))
+    }
+
     /// The policy's `metadata.name`, unique in its file.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -855,6 +897,36 @@ mod tests {
         assert_ne!(forward, hash(&org));
         assert_eq!(forward.to_string().len(), 64);
         assert_eq!(MatchHash::of([]).as_bytes(), &sha256(b""));
+    }
+
+    #[test]
+    fn a_name_hashes_the_policies_it_matches_however_many() {
+        for count in [1, STACKED, STACKED + 1, 2 * STACKED + 3] {
+            // Every policy matches ghcr.io/myorg/app, every other one ghcr.io/other/app.
+            let text: Vec<String> = (0..count)
+                .map(|i| {
+                    let glob = if i % 2 == 0 {
+                        "ghcr.io/*/app"
+                    } else {
+                        "ghcr.io/myorg/**"
+                    };
+                    policy(&format!("p{i}"), glob, KEYLESS, "")
+                })
+                .collect();
+            let policies = Policies::parse(&text.join("---\n")).unwrap();
+            for name in [
+                "ghcr.io/myorg/app",
+                "ghcr.io/other/app",
+                "docker.io/library/nginx",
+            ] {
+                let matched: Vec<&Policy> = policies.matching(&reference(name)).collect();
+                assert_eq!(
+                    policies.match_hash(name),
+                    (!matched.is_empty()).then(|| MatchHash::of(matched)),
+                    "{count} policies, {name}"
+                );
+            }
+        }
     }
 
     #[test]

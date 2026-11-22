@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use arc_swap::ArcSwap;
 use speculaire_nri::NriVersion;
 use speculaire_nri::create::{Container, Pod};
-use speculaire_oci::reference::{Digest, Reference};
+use speculaire_oci::reference::{Digest, Repository};
 use speculaire_oci::tagged::Tagged;
 
 use self::annotation::Annotation;
@@ -184,16 +184,16 @@ impl Nri {
             _ => return Identified::Unknown(MISSING),
         };
         let asked = container.annotations.get(annotation::IMAGE_NAME);
-        let repository = asked.and_then(|asked| Reference::parse_normalized_named(asked).ok());
+        let repository = asked.and_then(|asked| Repository::parse(asked).ok());
         let listed = image_id(image.config_digest).and_then(|id| self.images.get(&id));
         if let (Some(asked), Some(repository), Some(listed)) = (asked, &repository, &listed)
-            && repositories(listed).any(|name| name == repository.name())
+            && repositories(listed).any(|name| name == repository.as_str())
         {
             // containerd's digest is its first name's: of the pod's repository, a manifest the list gives it stands in.
             let mut pulled = listed
                 .repo_digests
                 .iter()
-                .filter(|pulled| pulled.repository == repository.name())
+                .filter(|pulled| pulled.repository == repository.as_str())
                 .map(|pulled| &pulled.digest);
             let digest = if pulled.clone().any(|pulled| *pulled == digest) {
                 digest
@@ -205,9 +205,9 @@ impl Nri {
                 name: asked,
             };
         }
-        let first = Reference::parse_normalized_named(image.name).ok();
+        let first = Repository::parse(image.name).ok();
         let mut names: Vec<String> = Vec::new();
-        let all = repository.iter().chain(&first).map(Reference::name);
+        let all = repository.iter().chain(&first).map(Repository::as_str);
         for name in all.chain(listed.iter().flat_map(|listed| repositories(listed))) {
             if !names.iter().any(|seen| seen == name) {
                 names.push(name.to_owned());
@@ -334,6 +334,26 @@ impl NodeIdentity {
         }
     }
 
+    /// The identity of `container` on a path that reads it from memory, `nri` or `image_id`; none on `annotation`, which
+    /// asks containerd's snapshots. On a listed image, it allocates nothing (D189).
+    #[must_use]
+    pub fn identify_now<'a>(&'a self, container: &Container<'a>) -> Option<Identified<'a>> {
+        self.read(container).ok()
+    }
+
+    /// The identity of `container` read from memory, or the `annotation` path that asks for it.
+    fn read<'a>(&'a self, container: &Container<'a>) -> Result<Identified<'a>, &'a Annotation> {
+        match self {
+            Self::Containerd {
+                annotation,
+                annotated,
+                ..
+            } if annotated.load(Ordering::Relaxed) => Err(annotation),
+            Self::Containerd { nri, .. } => Ok(nri.read(container)),
+            Self::ImageId(image_id) => Ok(image_id.read(container)),
+        }
+    }
+
     /// The image name of `container` for the `gate` audit event (D173, D179): the names policies and exemptions matched
     /// in `identified`, comma-separated; on containerd, its pod-spec string when `identified` has none.
     #[must_use]
@@ -376,14 +396,9 @@ impl NodeIdentity {
 
 impl Identity for NodeIdentity {
     async fn identify<'a>(&'a self, pod: &Pod<'_>, container: &Container<'a>) -> Identified<'a> {
-        match self {
-            Self::Containerd {
-                annotation,
-                annotated,
-                ..
-            } if annotated.load(Ordering::Relaxed) => annotation.identify(pod, container).await,
-            Self::Containerd { nri, .. } => nri.identify(pod, container).await,
-            Self::ImageId(image_id) => image_id.identify(pod, container).await,
+        match self.read(container) {
+            Ok(identified) => identified,
+            Err(annotation) => annotation.identify(pod, container).await,
         }
     }
 }

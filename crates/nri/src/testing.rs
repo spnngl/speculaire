@@ -83,13 +83,20 @@ impl Runtime {
         let mut plugin = connections.plugin_service;
         let mut registration = connections.runtime_service;
         let mut buf = Vec::new();
-        let register = ttrpc::read_request(&mut registration, &mut buf)
+        let mut requests = ttrpc::Reader::new(&mut registration);
+        let register = requests
+            .next()
             .await
             .map_err(|e| Error(format!("the registration: {e}")))?;
-        if !matches!(&register.call, Call::Other { service, method } if service == RUNTIME_SERVICE && method == "RegisterPlugin")
-        {
+        let Call::Other {
+            service: RUNTIME_SERVICE,
+            method: "RegisterPlugin",
+        } = register.call
+        else {
             return Err(Error(format!("not a registration: {:?}", register.call)));
-        }
+        };
+        let registered = register.stream;
+        drop(requests);
         let timeout = self.request_timeout;
         let configure = ConfigureRequest {
             runtime_name: self.name.clone(),
@@ -110,7 +117,7 @@ impl Runtime {
         ttrpc::respond(
             &mut registration,
             &mut buf,
-            register.stream,
+            registered,
             Ok(Empty {}.encode_to_vec()),
         )
         .await

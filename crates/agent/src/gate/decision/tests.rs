@@ -19,6 +19,7 @@ use speculaire_verify::{Absent, Key, MatchHash, Signatures};
 use super::running::Running;
 use super::*;
 use crate::capture::Capture;
+use crate::telemetry::Handles;
 
 /// The image ID of the test image, and its config digest.
 const ID: &str = "ad4f11f7c85f87c0a6d6c0fe492ad53f9cdcff6e8c88b881360c70eff701c67b";
@@ -165,15 +166,18 @@ fn a_stale_allow_allows_and_counts_as_stale() {
         verdict: Verdict::Allow,
         stale: false,
     });
-    for decision in [&stale, &fresh] {
-        let answer =
-            metrics::with_local_recorder(&recorder, || crate::gate::answer(decision, &enforce()));
+    let decisions = Handles::default();
+    for decision in [&stale, &fresh, &stale] {
+        let answer = metrics::with_local_recorder(&recorder, || {
+            crate::gate::answer(decision, &enforce(), &decisions)
+        });
         assert_eq!(answer, Answer::Allow);
     }
     let rendered = handle.render();
-    for stale in ["true", "false"] {
-        let counted =
-            format!(r#"speculaire_gate_total{{mode="enforce",result="allow",stale="{stale}"}} 1"#);
+    for (stale, count) in [("true", 2), ("false", 1)] {
+        let counted = format!(
+            r#"speculaire_gate_total{{mode="enforce",result="allow",stale="{stale}"}} {count}"#
+        );
         assert!(rendered.contains(&counted), "{counted} in {rendered}");
     }
 }
@@ -715,6 +719,37 @@ async fn an_image_id_no_list_names_by_gate_wait_is_pending() {
         .decide(&(&request("default")).into(), &short, far())
         .await;
     assert_eq!(decision.answer(&short), Answer::Reject(PENDING.to_owned()));
+}
+
+#[test]
+fn a_decision_without_a_wait_is_made_at_once_and_audited_and_a_pending_one_is_left_untouched() {
+    let (verifier, mut asks) = verifier(&policy());
+    let exempt = settings("mode = \"enforce\"\n[gate.exempt]\nnamespaces = [\"kube-system\"]\n");
+    let decider = decider(verifier.clone(), exempt.clone(), true);
+    let request = request("default");
+    let capture = Capture::default();
+    let _guard = capture.install();
+    assert_eq!(decider.decide_now(&(&request).into(), &exempt), None);
+    assert!(asks.try_recv().is_err(), "nothing asked");
+    assert_eq!(capture.events().len(), 0, "nothing audited");
+
+    keep(&verifier, Verdict::Allow);
+    let answers = [
+        (request, Answer::Allow),
+        (self::request("kube-system"), Answer::Allow),
+        (
+            CreateContainerRequest {
+                container: None,
+                ..self::request("default")
+            },
+            Answer::Reject(format!("unverifiable: {MISSING}")),
+        ),
+    ];
+    for (request, answer) in answers {
+        let decision = decider.decide_now(&(&request).into(), &exempt);
+        assert_eq!(decision.map(|d| d.answer(&exempt)), Some(answer));
+    }
+    assert_eq!(capture.events().len(), 3, "each decision audited");
 }
 
 /// Container `c` of pod `p` in each of `namespaces`, running the test image, as `Synchronize` lists them.

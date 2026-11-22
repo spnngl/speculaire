@@ -11,6 +11,7 @@
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::io::Write as _;
 
 /// `NameTotalLengthMax`: the longest repository path.
 const PATH_LENGTH_MAX: usize = 255;
@@ -21,6 +22,8 @@ const LEGACY_DEFAULT_DOMAIN: &str = "index.docker.io";
 const OFFICIAL_REPO_PREFIX: &str = "library/";
 /// The tag of a name that has neither tag nor digest.
 const DEFAULT_TAG: &str = "latest";
+/// The longest tag.
+const TAG_MAX: usize = 128;
 
 /// A reference that is not valid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -229,13 +232,7 @@ impl Reference {
     ///
     /// As [`Reference::parse_docker_ref`].
     pub fn parse_normalized_named(text: &str) -> Result<Self, ReferenceError> {
-        if is_image_id(text) {
-            return Err(ReferenceError::ImageId);
-        }
-        let (domain, prefix, remote) = split_docker_domain(text);
-        if crate::has_upper(remote.split(':').next().unwrap_or(remote)) {
-            return Err(ReferenceError::Uppercase);
-        }
+        let (domain, prefix, remote) = normalize(text)?;
         // Room for `parse_docker_ref`'s default tag, so that it does not grow the string again.
         let mut normalized = String::with_capacity(
             domain.len() + 1 + prefix.len() + remote.len() + 1 + DEFAULT_TAG.len(),
@@ -250,23 +247,12 @@ impl Reference {
     /// `Parse`: the reference as written, without normalization. Its `ErrNameEmpty` is left out: the text always has
     /// a domain and a slash.
     fn parse(mut text: String) -> Result<Self, ReferenceError> {
-        let Some((name, tag, digest)) = split_reference(&text) else {
-            return Err(if split_reference(&crate::go_lower(&text)).is_some() {
-                ReferenceError::Uppercase
-            } else {
-                ReferenceError::InvalidFormat
-            });
-        };
-        let (domain, path) = split_name(name).unwrap_or(("", name));
-        if path.len() > PATH_LENGTH_MAX {
-            return Err(ReferenceError::TooLong);
-        }
-        let (domain, name, end) = (
-            domain.len(),
-            name.len(),
-            name.len() + tag.map_or(0, |tag| 1 + tag.len()),
-        );
-        let digest = digest.map(Digest::parse).transpose()?;
+        let Split {
+            domain,
+            name,
+            end,
+            digest,
+        } = split(&text)?;
         text.truncate(end);
         Ok(Self {
             text,
@@ -316,6 +302,133 @@ impl fmt::Display for Reference {
         }
         Ok(())
     }
+}
+
+/// The longest reference on Docker Hub [`Repository`] normalizes: `docker.io/`, a path, a tag and a sha512 digest.
+const HUB_MAX: usize =
+    DEFAULT_DOMAIN.len() + 1 + PATH_LENGTH_MAX + 1 + TAG_MAX + 1 + "sha512:".len() + HEX_MAX;
+
+/// The repository name of a reference, normalized as [`Reference::parse_normalized_named`] normalizes it, without
+/// allocating (D107, D189).
+///
+/// A name already normalized is borrowed. One on Docker Hub written short, such as `nginx`, is normalized into a
+/// buffer inside the value.
+#[derive(Clone, Copy)]
+pub struct Repository<'a>(Name<'a>);
+
+#[derive(Clone, Copy)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the buffer keeps a short name off the heap (D107)"
+)]
+enum Name<'a> {
+    /// The text is its own normalized form, and the name its start.
+    Text(&'a str),
+    /// The normalized text, the name its first `len` bytes.
+    Hub { text: [u8; HUB_MAX], len: usize },
+}
+
+impl<'a> Repository<'a> {
+    /// Parses `text` as [`Reference::parse_normalized_named`] does, and keeps its [`Reference::name`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Reference::parse_normalized_named`].
+    ///
+    /// # Panics
+    ///
+    /// Never: the buffer is written from strings.
+    pub fn parse(text: &'a str) -> Result<Self, ReferenceError> {
+        let (domain, prefix, remote) = normalize(text)?;
+        let rest = text
+            .strip_prefix(domain)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .and_then(|rest| rest.strip_prefix(prefix));
+        if rest == Some(remote) {
+            let Split { name, .. } = split(text)?;
+            return Ok(Self(Name::Text(&text[..name])));
+        }
+        let mut buffer = [0; HUB_MAX];
+        let mut free = buffer.as_mut_slice();
+        let written = [domain, "/", prefix, remote]
+            .into_iter()
+            .try_for_each(|part| free.write_all(part.as_bytes()));
+        let len = HUB_MAX - free.len();
+        if written.is_err() {
+            // Longer than any valid reference on Docker Hub: the owned parse tells why.
+            return Err(Reference::parse_normalized_named(text)
+                .err()
+                .unwrap_or(ReferenceError::TooLong));
+        }
+        let normalized = str::from_utf8(&buffer[..len]).expect("written from strings");
+        let Split { name, .. } = split(normalized)?;
+        Ok(Self(Name::Hub {
+            text: buffer,
+            len: name,
+        }))
+    }
+
+    /// The repository name, `domain/path`, as [`Reference::name`] has it: what policies match (D11).
+    ///
+    /// # Panics
+    ///
+    /// Never: the name is written from strings, and ends where `Parse` splits it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match &self.0 {
+            Name::Text(name) => name,
+            Name::Hub { text, len } => str::from_utf8(&text[..*len]).expect("written from strings"),
+        }
+    }
+}
+
+impl fmt::Debug for Repository<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Repository").field(&self.as_str()).finish()
+    }
+}
+
+/// `ParseNormalizedNamed`'s first checks, and the parts of `text`'s normalized form: `domain/prefix+remote`.
+fn normalize(text: &str) -> Result<(&str, &'static str, &str), ReferenceError> {
+    if is_image_id(text) {
+        return Err(ReferenceError::ImageId);
+    }
+    let (domain, prefix, remote) = split_docker_domain(text);
+    if crate::has_upper(remote.split(':').next().unwrap_or(remote)) {
+        return Err(ReferenceError::Uppercase);
+    }
+    Ok((domain, prefix, remote))
+}
+
+/// Where `Parse` splits a normalized reference: the lengths of its domain, its name and its name with the tag, and
+/// its digest.
+struct Split {
+    domain: usize,
+    name: usize,
+    end: usize,
+    digest: Option<Digest>,
+}
+
+/// `Parse`: the reference as written, without normalization. Its `ErrNameEmpty` is left out: a normalized text always
+/// has a domain and a slash.
+fn split(text: &str) -> Result<Split, ReferenceError> {
+    let Some((name, tag, digest)) = split_reference(text) else {
+        return Err(if split_reference(&crate::go_lower(text)).is_some() {
+            ReferenceError::Uppercase
+        } else {
+            ReferenceError::InvalidFormat
+        });
+    };
+    let (domain, path) = split_name(name).unwrap_or(("", name));
+    if path.len() > PATH_LENGTH_MAX {
+        return Err(ReferenceError::TooLong);
+    }
+    Ok(Split {
+        domain: domain.len(),
+        name: name.len(),
+        end: name.len() + tag.map_or(0, |tag| 1 + tag.len()),
+        digest: digest.map(Digest::parse).transpose()?,
+    })
 }
 
 /// `splitDockerDomain`: the registry of a name, and the repository below it, as a prefix and the rest of the name. A
@@ -450,7 +563,7 @@ fn is_path_component(part: &str) -> bool {
 fn is_tag(text: &str) -> bool {
     let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     let bytes = text.as_bytes();
-    (1..=128).contains(&bytes.len())
+    (1..=TAG_MAX).contains(&bytes.len())
         && word(bytes[0])
         && bytes[1..]
             .iter()
@@ -502,6 +615,107 @@ mod tests {
     }
 
     const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn a_repository_is_the_name_of_the_reference_parse_normalized_named_gives() {
+        let long = |length: usize| "a".repeat(length);
+        let domains = [
+            "",
+            "docker.io/",
+            "index.docker.io/",
+            "localhost/",
+            "localhost:5000/",
+            "reg.test:5000/",
+            "my_registry.example/",
+            "Reg.Test/",
+            "[::1]:5000/",
+            "a:b/",
+        ];
+        let paths = [
+            String::new(),
+            "nginx".to_owned(),
+            "library/nginx".to_owned(),
+            "myuser/app".to_owned(),
+            "a/b/c".to_owned(),
+            "Up".to_owned(),
+            "a__b-c.d".to_owned(),
+            "a/".to_owned(),
+            "a".repeat(64),
+            long(247),
+            long(248),
+            format!("myuser/{}", long(248)),
+            format!("myuser/{}", long(249)),
+        ];
+        let tags = [
+            String::new(),
+            ":1".to_owned(),
+            ":Tag-1.0_x".to_owned(),
+            ":".to_owned(),
+            ":-x".to_owned(),
+            format!(":{}", long(128)),
+            format!(":{}", long(129)),
+        ];
+        let digests = [
+            String::new(),
+            format!("@{SHA}"),
+            format!("@sha512:{}", long(128)),
+            "@sha256:abc".to_owned(),
+            format!("@md5:{}", long(32)),
+        ];
+        for domain in domains {
+            for path in &paths {
+                for tag in &tags {
+                    for digest in &digests {
+                        let text = format!("{domain}{path}{tag}{digest}");
+                        let owned = Reference::parse_normalized_named(&text);
+                        assert_eq!(
+                            Repository::parse(&text)
+                                .map(|repository| repository.as_str().to_owned()),
+                            owned.map(|reference| reference.name().to_owned()),
+                            "{text}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_repository_already_normalized_is_borrowed_and_a_short_one_is_written_out() {
+        let text = "reg.test/app:1";
+        let Repository(Name::Text(name)) = Repository::parse(text).unwrap() else {
+            panic!("{text} is normalized");
+        };
+        assert_eq!(name, "reg.test/app");
+        assert!(std::ptr::eq(name.as_ptr(), text.as_ptr()));
+        let longest = format!(
+            "{}:{}@sha512:{}",
+            "a".repeat(247),
+            "a".repeat(128),
+            "a".repeat(128)
+        );
+        assert_eq!(
+            format!("docker.io/library/{longest}").len(),
+            HUB_MAX,
+            "the longest reference on Docker Hub fills the buffer"
+        );
+        for (text, name) in [
+            ("nginx", "docker.io/library/nginx"),
+            ("index.docker.io/x/y", "docker.io/x/y"),
+            (
+                longest.as_str(),
+                &format!("docker.io/library/{}", "a".repeat(247)),
+            ),
+        ] {
+            let repository = Repository::parse(text).unwrap();
+            assert!(matches!(repository.0, Name::Hub { .. }), "{text}");
+            assert_eq!(repository.as_str(), name);
+        }
+        assert_eq!(
+            format!("{:?}", Repository::parse("nginx").unwrap()),
+            r#"Repository("docker.io/library/nginx")"#
+        );
+    }
 
     fn docker(text: &str) -> String {
         Reference::parse_docker_ref(text)

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use speculaire_nri::Answer;
-use speculaire_nri::create::Request;
-use speculaire_oci::reference::Reference;
+use speculaire_nri::create::{Container, Request};
+use speculaire_oci::reference::{Reference, Repository};
 use speculaire_runtime::identity::{Identified, Identity, MISSING, NodeIdentity};
 use speculaire_runtime::images::List;
 use speculaire_verify::engine::{Asked, Asking};
@@ -63,8 +63,8 @@ impl Settings {
         !self.images.is_empty()
             && names.peek().is_some()
             && names.all(|name| {
-                Reference::parse_normalized_named(name)
-                    .is_ok_and(|name| self.images.iter().any(|glob| glob.matches(&name)))
+                Repository::parse(name)
+                    .is_ok_and(|name| self.images.iter().any(|glob| glob.is_match(name.as_str())))
             })
     }
 }
@@ -234,6 +234,9 @@ impl Verifier {
     }
 }
 
+/// A decision, and the image identity it read: none when the namespace is exempt.
+type Read<'a> = (Decision, Option<Identified<'a>>);
+
 /// Decides each `CreateContainer` of the node's runtime.
 #[derive(Debug)]
 pub struct Decider {
@@ -291,6 +294,25 @@ impl Decider {
         decision
     }
 
+    /// The decision on `request` when it needs no wait, audited: of an exempt namespace, or of an identity read from
+    /// memory whose verdict is not pending. None leaves `request` to [`Self::decide`], untouched. On a stored verdict, it
+    /// allocates nothing (D189).
+    pub fn decide_now(&self, request: &Request<'_>, settings: &Settings) -> Option<Decision> {
+        let (decision, identified) = match self.container(request, settings) {
+            Err(read) => read,
+            Ok(container) => {
+                let identified = self.identity.identify_now(&container)?;
+                let decision = self.verifier.decide(settings, &identified);
+                if decision.pending() {
+                    return None;
+                }
+                (decision, Some(identified))
+            }
+        };
+        self.audit(request, &decision, identified.as_ref(), settings);
+        Some(decision)
+    }
+
     /// [`Decision::Overloaded`] on `request`, audited.
     pub fn overloaded(&self, request: &Request<'_>, settings: &Settings) -> Decision {
         let decision = Decision::Overloaded;
@@ -304,21 +326,10 @@ impl Decider {
         request: &Request<'a>,
         settings: &Settings,
         deadline: Instant,
-    ) -> (Decision, Option<Identified<'a>>) {
-        if let Some(pod) = request.pod
-            && settings
-                .namespaces
-                .iter()
-                .any(|namespace| namespace == pod.namespace)
-        {
-            return (Decision::Exempt(Exemption::Namespace), None);
-        }
-        let Some(container) = request.container else {
-            let identified = Identified::Unknown(MISSING);
-            return (
-                self.verifier.decide(settings, &identified),
-                Some(identified),
-            );
+    ) -> Read<'a> {
+        let container = match self.container(request, settings) {
+            Ok(container) => container,
+            Err(read) => return read,
         };
         // NRI always sends the pod; a missing one is on the default runtime handler, as an empty one.
         let pod = request.pod.unwrap_or_default();
@@ -350,6 +361,34 @@ impl Decider {
             }
             identified = Some(current);
         }
+    }
+
+    /// The container of `request` to identify; or the decision on a request that needs no identity, of an exempt
+    /// namespace or without a container.
+    #[expect(
+        clippy::result_large_err,
+        reason = "read once by its caller: boxing would allocate on the gate's path (D107)"
+    )]
+    fn container<'a>(
+        &self,
+        request: &Request<'a>,
+        settings: &Settings,
+    ) -> Result<Container<'a>, Read<'a>> {
+        if let Some(pod) = request.pod
+            && settings
+                .namespaces
+                .iter()
+                .any(|namespace| namespace == pod.namespace)
+        {
+            return Err((Decision::Exempt(Exemption::Namespace), None));
+        }
+        request.container.ok_or_else(|| {
+            let identified = Identified::Unknown(MISSING);
+            (
+                self.verifier.decide(settings, &identified),
+                Some(identified),
+            )
+        })
     }
 
     /// Writes the `gate` audit event of `decision` on `request`, whose image identity reads as `identified`; its fields

@@ -248,6 +248,9 @@ fn each_runtime_has_its_path() {
     nri.keep(&list);
     assert_eq!(nri.path(), "nri");
     assert_eq!(identify(&nri, &annotated(ID)), Identified::Unknown(MISSING));
+    let container = annotated(ID);
+    let view = (&container).into();
+    assert_eq!(nri.identify_now(&view), Some(Identified::Unknown(MISSING)));
     let image_id = NodeIdentity::crio();
     image_id.keep(&list);
     assert_eq!(image_id.path(), "image_id");
@@ -259,6 +262,10 @@ fn each_runtime_has_its_path() {
     assert!(matches!(
         identify(&image_id, &annotated(ID)),
         Identified::Image(_)
+    ));
+    assert!(matches!(
+        image_id.identify_now(&view),
+        Some(Identified::Image(_))
     ));
 }
 
@@ -331,10 +338,20 @@ fn containerd_reads_the_annotation_below_nri_v0_12_2_or_an_unknown_version() {
         Identified::Unknown(MISSING),
         "the annotation path reads no `Container.image`"
     );
+    let view = (&container).into();
+    assert_eq!(
+        identity.identify_now(&view),
+        None,
+        "the annotation path asks containerd"
+    );
     identity.configure(&NriVersion::Announced("v0.12.3".to_owned()));
     assert_eq!(
         identify(&identity, &container),
         unconfirmed(&["docker.io/library/busybox"]),
         "the nri path reads `Container.image` again"
+    );
+    assert_eq!(
+        identity.identify_now(&view),
+        Some(unconfirmed(&["docker.io/library/busybox"]))
     );
 }
