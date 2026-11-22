@@ -448,7 +448,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
 
 
-## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159)
+## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159, D190)
 
 - **Decision:**
   - **Reflectors:** the agents of the control plane and of the first worker run `role = "reflector"` (D2 puts reflectors on control-plane nodes; kind's second control plane would add an etcd member and kind's own balancer for nothing the peer suites test). Both are in every agent's `reflector.members`, by node name and kind-network address, port 7483; the second worker is the client no reflector runs on.
@@ -549,7 +549,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** two more images from ghcr.io, and 10 to 20 s for the test images, in each `just e2e-up`.
 - **Revisit when:** registry:3 gains the referrers API, or cosign drops the legacy `.sig` and `.att` formats.
 
-## D113: Pull requests run the newest containerd and CRI-O legs; main runs all 14 (amends D63, D94; amended by D160)
+## D113: Pull requests run the newest containerd and CRI-O legs; main runs all 14 (amends D63, D94; amended by D160, D190)
 
 - **Decision:**
   - On a pull request, `ci.yml`'s `e2e` runs 4 of D63's 14 legs: containerd 2.4 and CRI-O 1.37, both on Kubernetes 1.37, on both architectures, each with both of D94's passes. A push to `main` runs all 14.
@@ -716,7 +716,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Measured** (locally, before the first run): `syft` lists 461 packages for the two binaries. `speculaire verify` in a container without a runtime, with this policy pointed at the fixtures' recorded provenance and `attest-sbom` cases, prints `allow`, with the provenance and SBOM checks passing.
 - **Revisit when:** the tag's run gains packages, tarballs or the reproducible double build; GitHub's attestations leave the public-good Sigstore instance; a node needs an image that runs without root.
 
-## D159: The e2e suites wait less, CRI-O's relay suite runs in the IPv4 pass only, and the suites build while the cluster comes up (amends D94, D130)
+## D159: The e2e suites wait less, CRI-O's relay suite runs in the IPv4 pass only, and the suites build while the cluster comes up (amends D94, D130; amended by D190)
 
 - **Decision:**
   - **Shorter waits:** the rate-limit suite's window is 45 s, not 120 s: still longer than discovery's first backoff step, 30 s (D128), so a pause that ignored `Retry-After` still shows. A test that waits for an agent to read a changed file sets that node's `config.poll_interval` to 1 s while it lives: the relay suite on CRI-O, the reflector's rotated certificate, the outage suite's late certificate. The corrupted-blob test of `fetch.rs` delays C by 300 ms, not 1 s; the relay's kill test throttles its proxy to 5 MB/s, not 2. Each still checks what it did.
@@ -818,3 +818,15 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Measured:** locally on Docker Desktop arm64, the IPv4 pass of `just e2e`: CRI-O 1.37 took 12.3 min, with 132 scrapes holding all 39 rows required; containerd 2.4 12.4 min, with 106 scrapes holding all 37. A scrape takes 92 ms, about 12 s per pass. No row needed a new case. With `speculaire_reflector_resync_seconds`'s row removed, the protobuf forward check failed on the control plane, and main's, on the text exposition, passed.
 - **Cost:** a row the suites stop exercising fails every leg until a case emits it again or this decision excludes it. A family seen under any label passes, so a label value never set goes unnoticed. A stop that bypasses `systemctl`, or a crash, loses the families since the last scrape.
 - **Revisit when:** a suite stops an agent other than through `systemctl`, or a metric is emitted only on some runtime versions of a leg.
+
+## D190: Pull requests run the e2e suites in the IPv4 pass only; main runs both passes (amends D94, D113, D159)
+
+- **Decision:**
+  - On a pull request, each of D113's 4 legs runs D94's IPv4 pass and D182's catalog check, and skips the dual-stack pass: the step's `if` is `github.event_name != 'pull_request'`. A push to `main` runs both passes on all 14 legs.
+  - The slowest peer suites stay on pull requests: D159's revisit moved them too, but no single suite outweighs the dual-stack pass.
+- **Because:**
+  - With M7's prewarm suite (`e2e/tests/prewarm.rs`, IPv4 only, 2.2 min on CRI-O x86_64), three of the 4 PR legs passed D159's 18 min. Its waits are the protocol's own: a member's start wave 60 s after it starts (D186), a seed's retry backoff (D188).
+  - The dual-stack pass costs 3.8 to 5.1 min per leg and changes only the balancer's and the reflectors' addresses (D94): it runs the IPv4 pass's code paths over other addresses (D182).
+- **Measured:** in CI, the 4 PR legs before the prewarm suite (run 45055897010), with it in both passes (run 45063817399), then in the IPv4 pass only (run 45068768077), minutes, IPv4 and dual-stack steps in brackets: CRI-O 1.37 x86_64 17.2 (12.1, 4.6), 18.2 (13.7, 3.8), 14.7 (14.3); arm64 16.7 (11.9, 4.3), 19.6 (14.5, 4.5), 14.1 (13.8); containerd 2.4 x86_64 14.5 (9.5, 4.5), 18.9 (13.1, 5.4), 13.3 (12.8); arm64 15.4 (9.9, 5.0), 17.9 (12.3, 5.1), 12.9 (12.5).
+- **Cost:** a regression only an IPv6 address shows reaches `main` before CI sees it, as D113's older legs do. Whoever merges watches `main`'s run and fixes forward.
+- **Revisit when:** a PR leg without the dual-stack pass passes 18 min (then the slowest peer suites move to main), or `main` breaks on the dual-stack pass alone twice in a milestone.

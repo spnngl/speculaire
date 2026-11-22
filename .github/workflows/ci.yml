@@ -238,8 +238,9 @@ jobs:
           VERSION: ${{ matrix.leg.version }}
           KUBERNETES: ${{ matrix.leg.kubernetes }}
         run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
-      # The same suites on a dual-stack cluster (D94).
-      - env:
+      # The same suites on a dual-stack cluster (D94), on main only (D190).
+      - if: github.event_name != 'pull_request'
+        env:
           RUNTIME: ${{ matrix.leg.runtime }}
           VERSION: ${{ matrix.leg.version }}
           KUBERNETES: ${{ matrix.leg.kubernetes }}
