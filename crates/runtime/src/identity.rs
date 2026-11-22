@@ -334,11 +334,19 @@ impl NodeIdentity {
         }
     }
 
-    /// The identity of `container` on a path that reads it from memory, `nri` or `image_id`; none on `annotation`, which
-    /// asks containerd's snapshots. On a listed image, it allocates nothing (D189).
+    /// The identity of `container`, created in `pod`, when it needs no call to the runtime: always on `nri` and
+    /// `image_id`, on `annotation` when the image's chain ID is kept and the snapshot's prepare event read. On a listed
+    /// image, it allocates nothing on `nri` and `image_id` (D189).
     #[must_use]
-    pub fn identify_now<'a>(&'a self, container: &Container<'a>) -> Option<Identified<'a>> {
-        self.read(container).ok()
+    pub fn identify_now<'a>(
+        &'a self,
+        pod: &Pod<'_>,
+        container: &Container<'a>,
+    ) -> Option<Identified<'a>> {
+        match self.read(container) {
+            Ok(identified) => Some(identified),
+            Err(annotation) => annotation.identify_now(pod, container),
+        }
     }
 
     /// The identity of `container` read from memory, or the `annotation` path that asks for it.

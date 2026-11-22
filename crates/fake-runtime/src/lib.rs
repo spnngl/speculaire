@@ -15,6 +15,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use bytes::Bytes;
+use containerd_client::events::SnapshotPrepare;
 use containerd_client::services::v1::snapshots::{self, StatSnapshotRequest, StatSnapshotResponse};
 use containerd_client::services::v1::{
     GetImageRequest, GetImageResponse, Info, ListContentRequest, ListContentResponse,
@@ -366,6 +367,22 @@ impl Fake {
     pub fn publish(&self, envelope: Envelope) {
         // No subscriber: nobody hears it, as with containerd.
         let _ = self.shared.events.send(envelope);
+    }
+
+    /// Publishes the `/snapshot/prepare` event of `snapshot` in `k8s.io`, as containerd's metadata store does when it
+    /// prepares one (v2.3.7 `core/metadata/snapshot.go:282`).
+    pub fn prepared(&self, snapshot: &Snapshot) {
+        let event = SnapshotPrepare {
+            key: snapshot.key.clone(),
+            parent: snapshot.parent.clone(),
+            snapshotter: snapshot.snapshotter.clone(),
+        };
+        self.publish(Envelope {
+            timestamp: None,
+            namespace: "k8s.io".to_owned(),
+            topic: "/snapshot/prepare".to_owned(),
+            event: Some(containerd_client::to_any(&event)),
+        });
     }
 
     /// The live `Subscribe` streams.

@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 
 use speculaire_agent::config;
 use speculaire_oci::platform::{self as oci_platform, Host, Matcher};
-use speculaire_oci::reference::{Reference, Repository};
+use speculaire_oci::reference::{DockerRef, Reference, Repository};
 use speculaire_oci::tagged::Tagged;
 use speculaire_registry_config::containerd::config::{self as containerd_config_file, Registry};
 use speculaire_registry_config::containerd::hosts;
@@ -216,12 +216,13 @@ fn round_trip(text: &str) {
 /// An image reference as the CRI plugin parses it (D11, D81), and as a tag the agent announces (D123).
 ///
 /// A reference that parses prints as text that parses to the same reference, and never has a tag together with a
-/// digest. A tag that parses prints as text that parses to the same tag, with the same key. A repository parses as
-/// the reference does, to its name (D189).
+/// digest. A tag that parses prints as text that parses to the same tag, with the same key. A repository and a docker
+/// reference parse as the reference does, to its name and to its text (D189).
 ///
 /// # Panics
 ///
-/// When parsing panics, a parsed reference is not a fixed point, or a repository differs from its reference's name.
+/// When parsing panics, a parsed reference is not a fixed point, or a repository or a docker reference differs
+/// from its reference's name or text.
 pub fn reference(data: &[u8]) {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
@@ -229,6 +230,11 @@ pub fn reference(data: &[u8]) {
     assert_eq!(
         Repository::parse(text).map(|repository| repository.as_str().to_owned()),
         Reference::parse_normalized_named(text).map(|reference| reference.name().to_owned()),
+        "{text}"
+    );
+    assert_eq!(
+        DockerRef::parse(text).map(|docker| docker.as_str().to_owned()),
+        Reference::parse_docker_ref(text).map(|reference| reference.to_string()),
         "{text}"
     );
     if let Ok(parsed) = Reference::parse_docker_ref(text) {

@@ -1,8 +1,12 @@
+use std::time::Duration;
+
+use containerd_client::events::{SnapshotCommit, SnapshotPrepare, SnapshotRemove};
 use containerd_client::tonic::Code;
+use containerd_client::types::Envelope;
 use speculaire_fake_runtime::{Answers, Fake, Snapshot};
 use speculaire_oci::reference::Digest;
 
-use super::Error;
+use super::{Error, PREPARED, Prepared};
 use crate::containerd::Containerd;
 use crate::paths::Paths;
 
@@ -143,4 +147,111 @@ async fn a_restarted_containerd_is_reached_again_after_one_failed_stat() {
         .snapshot_base("overlayfs", "container", &chain())
         .await;
     assert_eq!(base.unwrap(), CHAIN);
+}
+
+/// containerd's envelope of `event`, under `topic` in `namespace`.
+fn envelope(namespace: &str, topic: &str, event: &impl prost::Name) -> Envelope {
+    Envelope {
+        timestamp: None,
+        namespace: namespace.to_owned(),
+        topic: topic.to_owned(),
+        event: Some(containerd_client::to_any(event)),
+    }
+}
+
+fn prepare(key: &str, parent: &str) -> Envelope {
+    let event = SnapshotPrepare {
+        key: key.to_owned(),
+        parent: parent.to_owned(),
+        snapshotter: "overlayfs".to_owned(),
+    };
+    envelope("k8s.io", "/snapshot/prepare", &event)
+}
+
+#[test]
+fn a_prepared_snapshot_rests_on_its_digest_parent_until_committed_or_removed() {
+    let prepared = Prepared::default();
+    let other = Digest::parse(&CHAIN.replace('c', "d")).unwrap();
+    prepared.apply(&prepare("container", CHAIN));
+    assert!(prepared.rests_on("overlayfs", "container", &chain()));
+    assert!(
+        !prepared.rests_on("native", "container", &chain()),
+        "another snapshotter"
+    );
+    assert!(
+        !prepared.rests_on("overlayfs", "container", &other),
+        "another parent"
+    );
+    assert!(
+        !prepared.rests_on("overlayfs", "other", &chain()),
+        "another key"
+    );
+
+    let removed = SnapshotRemove {
+        key: "container".to_owned(),
+        snapshotter: "overlayfs".to_owned(),
+    };
+    prepared.apply(&envelope("k8s.io", "/snapshot/remove", &removed));
+    assert!(!prepared.rests_on("overlayfs", "container", &chain()));
+
+    prepared.apply(&prepare("extract", CHAIN));
+    let committed = SnapshotCommit {
+        key: "extract".to_owned(),
+        name: "layer".to_owned(),
+        snapshotter: "overlayfs".to_owned(),
+    };
+    prepared.apply(&envelope("k8s.io", "/snapshot/commit", &committed));
+    assert!(!prepared.rests_on("overlayfs", "extract", &chain()));
+
+    // A remapped copy is no digest: `Stat` reads what it rests on. So is a re-preparation on one.
+    prepared.apply(&prepare("container", CHAIN));
+    prepared.apply(&prepare("container", &format!("{CHAIN}-remapped")));
+    assert!(!prepared.rests_on("overlayfs", "container", &chain()));
+
+    let elsewhere = SnapshotPrepare {
+        key: "container".to_owned(),
+        parent: CHAIN.to_owned(),
+        snapshotter: "overlayfs".to_owned(),
+    };
+    prepared.apply(&envelope("default", "/snapshot/prepare", &elsewhere));
+    assert!(
+        !prepared.rests_on("overlayfs", "container", &chain()),
+        "another namespace"
+    );
+}
+
+#[test]
+fn past_the_bound_the_prepared_snapshots_are_dropped() {
+    let prepared = Prepared::default();
+    for key in 0..PREPARED {
+        prepared.apply(&prepare(&key.to_string(), CHAIN));
+    }
+    assert!(prepared.rests_on("overlayfs", "0", &chain()));
+    prepared.apply(&prepare("last", CHAIN));
+    assert!(!prepared.rests_on("overlayfs", "0", &chain()));
+    assert!(prepared.rests_on("overlayfs", "last", &chain()));
+}
+
+#[tokio::test]
+async fn the_prepared_snapshots_follow_containerd_s_events_from_each_subscription() {
+    let (fake, containerd, _dir) = snapshots("overlayfs", &[]);
+    let prepared = Prepared::default();
+    prepared.apply(&prepare("before", CHAIN));
+    tokio::select! {
+        () = containerd.keep_prepared(&prepared) => panic!("following ends only when the agent stops"),
+        () = async {
+            while fake.subscribers() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            fake.publish(prepare("container", CHAIN));
+            while !prepared.rests_on("overlayfs", "container", &chain()) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        } => {}
+    }
+    assert!(
+        !prepared.rests_on("overlayfs", "before", &chain()),
+        "what came before the subscription is dropped"
+    );
+    assert_eq!(fake.stats(), 0);
 }

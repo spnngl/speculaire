@@ -294,14 +294,15 @@ impl Decider {
         decision
     }
 
-    /// The decision on `request` when it needs no wait, audited: of an exempt namespace, or of an identity read from
-    /// memory whose verdict is not pending. None leaves `request` to [`Self::decide`], untouched. On a stored verdict, it
+    /// The decision on `request` when it needs no wait, audited: of an exempt namespace, or of an identity known without
+    /// a call to the runtime whose verdict is not pending. None leaves `request` to [`Self::decide`], untouched. On a stored verdict, it
     /// allocates nothing (D189).
     pub fn decide_now(&self, request: &Request<'_>, settings: &Settings) -> Option<Decision> {
         let (decision, identified) = match self.container(request, settings) {
             Err(read) => read,
             Ok(container) => {
-                let identified = self.identity.identify_now(&container)?;
+                let pod = request.pod.unwrap_or_default();
+                let identified = self.identity.identify_now(&pod, &container)?;
                 let decision = self.verifier.decide(settings, &identified);
                 if decision.pending() {
                     return None;
