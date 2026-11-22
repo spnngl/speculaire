@@ -9,10 +9,11 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use speculaire_reflect::prewarm::Plan;
 use speculaire_verify::Glob;
 pub use value::{
     Absolute, ByteSize, Interval, InvalidValue, LogFilter, Loopback, MaxUploads, NodeName,
-    PeerAddress, ReflectorUrl, RegistryName, Span, TrustedRoot, TufUrl,
+    PeerAddress, PrewarmImages, ReflectorUrl, RegistryName, Span, TrustedRoot, TufUrl,
 };
 
 /// Where the agent reads its settings when `--config` names no other file (D30).
@@ -142,10 +143,13 @@ impl Config {
                     members,
                     listen,
                 },
-            prewarm: Prewarm {
-                images: _,
-                seeds: _,
-            },
+            prewarm:
+                Prewarm {
+                    images: _,
+                    seeds: _,
+                    seed_timeout: _,
+                    refresh: _,
+                },
             log: Log {
                 filter: _,
                 timings: _,
@@ -622,17 +626,36 @@ pub struct Member {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Prewarm {
-    /// Image references every node pulls ahead of use, checked when the reflector resolves them (D26).
-    pub images: Vec<String>,
+    /// Image references every node pulls ahead of use, checked when the agent pulls them (D26, D187).
+    pub images: PrewarmImages,
     /// How many agents pull each image from upstream before the rest pull from peers (D51).
     pub seeds: NonZeroU32,
+    /// How long a round of a wave waits for its agents to announce the image before the next is sent it (D185).
+    pub seed_timeout: Interval,
+    /// How often a tag is resolved again, a new wave starting when its platform manifests changed (D186).
+    pub refresh: Interval,
+}
+
+impl Prewarm {
+    /// What the reflector runs its waves by.
+    #[must_use]
+    pub fn plan(&self) -> Plan {
+        Plan {
+            images: self.images.get().clone(),
+            seeds: self.seeds,
+            seed_timeout: self.seed_timeout.get(),
+            refresh: self.refresh.get(),
+        }
+    }
 }
 
 impl Default for Prewarm {
     fn default() -> Self {
         Self {
-            images: Vec::new(),
+            images: PrewarmImages::default(),
             seeds: NonZeroU32::new(2).expect("2 is not zero"),
+            seed_timeout: Interval::from_secs(300),
+            refresh: Interval::from_secs(3600),
         }
     }
 }

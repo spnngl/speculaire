@@ -34,7 +34,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Native Alpine builds avoid cross-toolchain drift for C dependencies (rs-coding `musl.md`). dedens rejected QEMU, cross and zigbuild for the same reason (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50, D61, D109, D116, D182)
+## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50, D61, D109, D116, D182, D186)
 
 - **Decision:**
   - **Catalog:** `docs/metrics.md` lists every metric with its type, labels and meaning. A test renders `/metrics` after the e2e suite and fails if a metric is missing from the catalog, or listed there but never emitted.

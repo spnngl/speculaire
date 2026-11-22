@@ -917,6 +917,7 @@ pub fn referrers(data: &[u8]) {
                 index.attestations(manifest).into_iter().for_each(digest);
             }
         }
+        index.images().for_each(digest);
     }
 }
 

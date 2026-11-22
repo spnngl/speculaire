@@ -43,7 +43,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - The user set the 500 µs and 256 MiB figures and accepted the others.
 - **Revisit when:** a target fails. Then revisit D2.
 
-## D51: Every member picks the same prewarm seeds (amends D2; amended by D181)
+## D51: Every member picks the same prewarm seeds (amends D2; amended by D181, D185, D186)
 
 - **Decision:**
   - For each image of `prewarm.images`, every member picks the same seeds: the `prewarm.seeds` agents (default 2, live) with the highest rendezvous hash of (image reference, node identity), among the agents streaming to it.
@@ -220,3 +220,31 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - A version 1 agent drops a `Prewarm` and does not know `PrewarmList`. The version tells the reflector whom a push reaches, and queueing nothing for the others costs nothing.
   - Reflectors upgrade first (D40), so a reflector of version 2 meets agents of 1 and 2, and an agent of 2 never meets a reflector of 1.
 - **Revisit when:** something other than a member must push, or a third protocol version drops version 1.
+
+
+## D185: A wave is released in rounds, each once the one before announced the image or `prewarm.seed_timeout` passed (amends D51)
+
+- **Decision:**
+  - **Resolution:** a member resolves each `prewarm.images` entry through the *registry config* (D17), its own mirror left out, to the image's platform manifests and their layer digests. An index gives its image manifests, at most 32; a nested index is an error. The member checks each manifest's digest, and nothing else: the agents verify what they pull (D26).
+  - **Announced:** an agent has announced an image once it announced every layer of one of its platform manifests. A `Hello` names no platform, so any one counts.
+  - **Rounds:** a wave sends `Prewarm` to the seeds (D51, D181) first. Once every agent of the last round announced the image, or `prewarm.seed_timeout` (default `300` s, live) passed since it was sent, the member releases the next round: up to 4 agents for each agent sent the image so far, picked by D181's rank among the agents not sent it yet. With 2 seeds, rounds hold 8, 40, 200 and so on, until every agent streaming was sent it. An agent of a round whose stream closed no longer holds the round. The factor 4 is a constant, not a setting.
+  - **Metrics:** `speculaire_reflector_prewarm_rounds_total{release}` counts rounds ended, `announced` or `timeout`; `speculaire_reflector_prewarm_sent_total{stage}` counts `Prewarm`s queued, `seed` or `release` (D34).
+- **Because:**
+  - A member knows only the image reference; layers are what agents announce (D97), and a platform manifest names the layers one node pulls.
+  - A peer that holds a blob serves at most `peer.max_uploads` at once and answers `503` past it, and the pull then falls through to upstream (D102, `crates/mirror/src/fetch.rs:595`). Releasing every agent at once on 2 seeds would send most of them upstream; growing by 4 per holder keeps each holder's load near its upload limit, and reaches 10k nodes in 6 rounds.
+  - The rank and the rounds depend only on the stream set and the list, so members with the same stream set send the same `Prewarm`s and an agent drops the copies (D51).
+  - A silent seed or round, a node that cannot pull, would otherwise hold the wave forever.
+- **Revisit when:** benchmarks show a round of 4 per holder slower than upstream, or holders refusing uploads during a wave.
+
+## D186: A wave starts on a list change, on a moved tag, and a minute after a member starts; a late agent gets released images at once (amends D34, D51)
+
+- **Decision:**
+  - **Start:** a new `prewarm.images` entry starts its wave at once. The list a member starts with waits 60 s, so agents reconnect and resync first (D33). The wave's first resolution starts it, and its seeds are picked once some agent streams.
+  - **Refresh:** a tag is resolved again every `prewarm.refresh` (default `3600` s, live), with a `HEAD` first; a tag whose platform manifests changed starts a new wave. An entry by digest is never resolved again.
+  - **Failures:** a failed resolution is tried again after 10 s, doubled at each failure in a row up to 300 s; the warning log names the reference.
+  - **Late agents:** once a wave sent to every agent streaming, an agent whose stream opens later gets its `Prewarm` after its `Hello`. One that opens mid-wave joins a later round. Every stream gets the member's `PrewarmList` after its `Hello` and at each list change. An entry removed from the list is no longer sent.
+  - **Metrics:** `speculaire_reflector_prewarm_waves_total{cause}`, `list`, `refresh` or `start`, and `speculaire_reflector_prewarm_resolve_failures_total` (D34). A member reads its waves once a second, and never as it answers a `Lookup` (D107).
+- **Because:**
+  - Right after a member starts, few agents stream to it, so its seeds would be picked among a few and differ from the other members'.
+  - Docker Hub counts manifest `GET`s against its pull limit, and not `HEAD`s; a tag that moved upstream would otherwise stay cold until the list changed.
+- **Revisit when:** a list grows past what one resolution a second per entry can follow, or an agent's restart mid-wave shows in upstream pulls.

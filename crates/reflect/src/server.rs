@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use speculaire_pki::node::{Credentials, node_subject};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
@@ -22,8 +22,10 @@ use crate::index::Index;
 use crate::message::{Lookup, Request};
 use crate::metrics::{self, Reason, ServerSeries};
 use crate::outbox::{Outbox, Pending, Pushes, Streams};
+use crate::prewarm::{Plan, Resolve};
 use crate::proto::{self, reflector_message};
 use crate::session::{Rejection, Reply, Session};
+use crate::wave::{self, Waves};
 
 /// The protocol version this reflector speaks (D97, D184).
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -105,6 +107,8 @@ pub struct Reflector {
     accept: JoinHandle<()>,
     /// Ends once every connection has dropped its [`Api`], whose sender it holds.
     ended: mpsc::Receiver<()>,
+    /// The task of [`Reflector::prewarm`].
+    waves: Option<JoinHandle<()>>,
 }
 
 impl Reflector {
@@ -156,7 +160,23 @@ impl Reflector {
             stop,
             accept,
             ended,
+            waves: None,
         })
+    }
+
+    /// Runs the waves of the plan `plans` holds, then of each it changes to, with the images `resolver` resolves
+    /// (D51, D185, D186), until the reflector stops. A second call replaces the first.
+    pub fn prewarm(&mut self, resolver: Arc<dyn Resolve>, plans: watch::Receiver<Plan>) {
+        let waves = Waves::new(
+            plans.borrow().clone(),
+            tokio::time::Instant::now(),
+            Arc::clone(&self.index),
+            Arc::clone(self.pushes.streams()),
+        );
+        let task = tokio::spawn(wave::run(waves, resolver, plans, self.stop.clone()));
+        if let Some(replaced) = self.waves.replace(task) {
+            replaced.abort();
+        }
     }
 
     /// Where the reflector listens.
@@ -178,6 +198,11 @@ impl Reflector {
         self.index.close();
         if let Err(err) = self.accept.await {
             warn!(error = %err, "reflector task ended abnormally");
+        }
+        if let Some(waves) = self.waves
+            && let Err(err) = waves.await
+        {
+            warn!(error = %err, "prewarm task ended abnormally");
         }
         // Nothing is ever sent: `recv` returns `None` once the last sender drops.
         while self.ended.recv().await.is_some() {}

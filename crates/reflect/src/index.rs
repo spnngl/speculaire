@@ -248,6 +248,23 @@ impl Index {
             .collect()
     }
 
+    /// Whether `node`'s stream announced every digest of `keys` (D185).
+    pub(crate) fn holds(&self, node: &str, keys: &[Key]) -> bool {
+        let inner = self.lock();
+        let Some(agent) = inner
+            .nodes
+            .get(node)
+            .and_then(|&slot| inner.agents[at(slot)].as_ref())
+        else {
+            return false;
+        };
+        keys.iter().all(|key| {
+            inner
+                .find(key)
+                .is_some_and(|number| agent.digests.contains(number))
+        })
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         // The index holds no invariant a panic can break halfway that a later stream cannot repair.
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)

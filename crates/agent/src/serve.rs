@@ -21,6 +21,7 @@ use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
 use speculaire_reflect::client::{self, Client, Holdings, LookupError, Lookups, Source};
+use speculaire_reflect::prewarm::{Plan, Resolve};
 use speculaire_reflect::{Member, Reflector, Settings};
 use speculaire_runtime::content::Content;
 use speculaire_runtime::inventory::{Change, Inventory, Update};
@@ -42,6 +43,7 @@ use crate::gate::decision::running::SYNCHRONIZE_WAIT;
 use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
+use crate::prewarm::Resolver;
 use crate::status::{self, Status};
 use crate::{listen, systemd, telemetry, trust};
 
@@ -176,8 +178,21 @@ async fn serve(
         &config.gate,
         Arc::clone(&status),
     );
+    // The reflector resolves `prewarm.images` as the node pulls, its own mirror left out (D17, D185).
+    let resolver: Arc<dyn Resolve> = Arc::new(Resolver::new(
+        Arc::clone(&registries),
+        config.mirror.address.get().get().to_string(),
+    ));
+    let (plan, plans) = tokio::sync::watch::channel(config.prewarm.plan());
     let mut reflector = None;
-    open_reflector(&config, &identity, &mut reflector, &status).await;
+    open_reflector(
+        &config,
+        &identity,
+        (&resolver, &plans),
+        &mut reflector,
+        &status,
+    )
+    .await;
     let mut sharing = None;
     open_sharing(
         &config,
@@ -206,7 +221,7 @@ async fn serve(
                 identity.reload();
                 policy.reload(config.verify.policy.get());
                 trust.reload();
-                open_reflector(&config, &identity, &mut reflector, &status).await;
+                open_reflector(&config, &identity, (&resolver, &plans), &mut reflector, &status).await;
                 open_sharing(&config, &identity, &mirror, &node, &store, up.as_ref(), &mut sharing);
             }
             _ = poll.tick() => {
@@ -221,7 +236,7 @@ async fn serve(
                 identity.poll();
                 policy.poll(config.verify.policy.get());
                 trust.poll();
-                open_reflector(&config, &identity, &mut reflector, &status).await;
+                open_reflector(&config, &identity, (&resolver, &plans), &mut reflector, &status).await;
                 open_sharing(&config, &identity, &mirror, &node, &store, up.as_ref(), &mut sharing);
             }
         }
@@ -229,6 +244,8 @@ async fn serve(
             .verdicts
             .set_stale_max(config.verify.stale_max.get());
         gate.set(&config.gate);
+        // The waves take an unchanged plan as a no-op.
+        plan.send_replace(config.prewarm.plan());
         if config.config.poll_interval.get() != period {
             period = config.config.poll_interval.get();
             poll = polls(period);
@@ -738,6 +755,7 @@ impl Peers {
 async fn open_reflector(
     config: &Config,
     identity: &Identity,
+    (resolver, plans): (&Arc<dyn Resolve>, &tokio::sync::watch::Receiver<Plan>),
     reflector: &mut Option<Reflector>,
     status: &Status,
 ) {
@@ -763,7 +781,8 @@ async fn open_reflector(
         Err(err) => Err(err),
     };
     match opened {
-        Ok(opened) => {
+        Ok(mut opened) => {
+            opened.prewarm(Arc::clone(resolver), plans.clone());
             *reflector = Some(opened);
             status.reflector_listening();
         }

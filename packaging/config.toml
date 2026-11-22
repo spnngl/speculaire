@@ -121,10 +121,14 @@
 #listen = "[::]:7483"
 
 [prewarm]
-# Image references every node pulls ahead of use; read only with role = "reflector" (D47).
+# Image references every node pulls ahead of use, at most 64; read only with role = "reflector" (D47, D187).
 #images = []
 # How many agents pull each image from upstream before the others pull from peers (D51).
 #seeds = 2
+# Seconds a round of a wave waits for its agents to announce the image before the next round (D185).
+#seed_timeout = 300
+# Seconds between resolutions of a tag; changed platform manifests start a new wave (D186).
+#refresh = 3600
 
 [log]
 # Which diagnostic events reach the log, in EnvFilter syntax without spaces around a directive (D37, D137).

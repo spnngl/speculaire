@@ -41,7 +41,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21; amended by D165, D176)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104)
-- D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109, D116, D182)
+- D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109, D116, D182, D186)
 - D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower (amended by D106, D114)
 - D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56, D100)
 - D37 [agent](agent.md): logs through `tracing` to journald or JSON, default `warn`; an audit log of gate decisions and verdict changes, off by default; secrets never logged (amends D30; amended by D52, D116, D173)
@@ -54,11 +54,11 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation
 - D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror, artifact store, a reflector's API and NRI registration (amends D42; amended by D161, D168)
 - D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13)
-- D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60, D91)
+- D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60, D91, D187)
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29; amended by D72)
 - D49 [verification](verification.md): a BuildKit SBOM inside a signed index is D43's one exception (amends D43)
 - D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34; amended by D121)
-- D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2; amended by D181)
+- D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2; amended by D181, D185, D186)
 - D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37; amended by D102)
 - D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69, D88)
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64, D86, D180)
@@ -67,7 +67,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62, D116, D118, D125, D140)
 - D58 [build](build.md): CI runs the check on the runner with prebuilt tools, and the musl build in the build image; `ci` jobs land with their content (amends D27, D57)
 - D59 [build](build.md): e2e is a Rust test crate of `#[ignore]`d suites on a kind cluster managed by `just e2e <minor>`, with pinned containerd, kind and kubectl (amends D27; amended by D63)
-- D60 [agent](agent.md): config values parse into types that print back canonically; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47; amended by D87, D135, D137, D138)
+- D60 [agent](agent.md): config values parse into types that print back canonically; names `role`, `identity.*`, `reflector.url` and `reflector.members`; tests hold `packaging/config.toml` to the code and the docs (amends D16, D47; amended by D87, D135, D137, D138, D187)
 - D61 [build](build.md): `speculaire_build_info` exists from startup with empty runtime versions; every build has `protoc` (amends D34; amended by D68, D168)
 - D62 [build](build.md): binaries in `apps/`, libraries in `crates/` as `speculaire-<name>` (amends D57; amended by D156)
 - D63 [build](build.md): e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships, 14 legs; `just e2e <runtime> <version>` (amends D27, D40, D59; amended by D94, D113, D120, D130)
@@ -194,5 +194,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D182 [build](build.md): each e2e leg fails unless protobuf scrapes, taken before each agent stop and after the suites, hold every catalog row of its runtime; rows name their runtime; the forward check reads protobuf too (amends D34, D109)
 - D183 [reflector](reflector.md): a reflector queues pushes in one outbox per stream, the latest `PrewarmList` and at most 64 images waiting for a `Prewarm`, written after each reply by the connection's one task; nothing is dropped, a 65th image is refused to the caller (amends D105)
 - D184 [reflector](reflector.md): protocol version 2 takes pushes; the agent takes them only on its streams to members, parses them at the boundary and hands them to a channel; a version 1 agent gets none (amends D2, D97)
+- D185 [reflector](reflector.md): a member resolves each prewarm image to its platform manifests'' layers and releases its wave in rounds of up to 4 agents per agent sent it, each once the round before announced every layer of one platform or `prewarm.seed_timeout` passed (amends D51)
+- D186 [reflector](reflector.md): a wave starts on a new list entry, on a tag whose platform manifests changed at a `prewarm.refresh`, and 60 s after a member starts; a stream opened after the wave gets its `Prewarm` after `Hello`; four prewarm counters (amends D34, D51)
+- D187 [agent](agent.md): `prewarm.images` parses into at most 64 references, a bad list keeping the previous one; `prewarm.seed_timeout` and `prewarm.refresh` are live keys (amends D47, D60)
 
-Next free number: D185.
+Next free number: D188.

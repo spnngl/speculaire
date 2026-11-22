@@ -127,6 +127,13 @@ A reflector ends an agent's `Announce` stream with a `Refused` frame naming the 
 | `digests` | The node announces more than 100k digests | Prune the node's images, or report it if it holds that many legitimately |
 | `malformed` | A frame does not decode, or holds a message the protocol does not allow there, such as a second `Hello` or a string that is not a digest | Report a bug |
 
+## Prewarm
+
+A reflector resolves each `prewarm.images` entry through the node''s *registry config*, sends it to the seeds, then releases it in rounds (D185, D186). `speculaire_reflector_prewarm_waves_total{cause}` counts the waves started, and `speculaire_reflector_prewarm_sent_total{stage}` the `Prewarm`s queued.
+
+- **A round timed out** (`speculaire_reflector_prewarm_rounds_total{release="timeout"}`): some agent sent the image did not announce every layer of one platform manifest within `prewarm.seed_timeout`, and the next round went out anyway. Check that agent''s pull: a seed that cannot reach upstream, or a node whose platform the image lacks.
+- **A resolution failed** (`speculaire_reflector_prewarm_resolve_failures_total`): the reflector could not fetch the image''s manifests from upstream, and tries again, waiting up to 5 min; the warning log `cannot resolve a prewarm.images entry` names the reference and the error. Check the reference and the control-plane node''s registry config and credentials.
+
 ## Tags from peers
 
 A pull by tag asks the peers whose runtime lists that tag before upstream, so it works while upstream is down (D123). A peer can name any image for a tag, and a tag moved upstream keeps resolving to the image peers hold (`docs/security.md`). To resolve every tag upstream, as before, set `mirror.resolve_tags = false` and reload: the next tag request answers 404 and the runtime asks upstream. No restart and no `configure` is needed; containerd's `hosts.toml` keeps `resolve`. `speculaire_tag_lookups_total{result}` counts the tags peers resolved (`peer`) and missed (`miss`). On containerd, a node configured by an earlier release sends the mirror no tag until `speculaire configure` runs again and adds `resolve` to its `hosts.toml` entry (D82).
@@ -205,6 +212,8 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | `speculaire_identity_expiry_timestamp_seconds` | Less than a tenth of the certificate's lifetime away: kubelet renews it once 70 to 90% of its lifetime has passed, so it stopped renewing; once it passes, P2P stops on the node (D95) |
 | `speculaire_reflector_connected` | 0 for any `member` for more than 5 min |
 | `speculaire_reflector_announce_rejected_total` | It increases: a reflector refuses an agent's stream, whose announcements are then missing from lookups (§ Reflector refusals) |
+| `speculaire_reflector_prewarm_rounds_total{release="timeout"}` | It increases: an agent sent a prewarmed image did not announce it within `prewarm.seed_timeout` (§ Prewarm) |
+| `speculaire_reflector_prewarm_resolve_failures_total` | It increases: a reflector cannot resolve a `prewarm.images` entry, and its wave does not start (§ Prewarm) |
 | `speculaire_nri_connected` | 0 for more than 1 min: with `required_plugins`, container creation is rejected (D41) |
 | `speculaire_gate_seconds` | p99 above half of `plugin_request_timeout`: a timeout lets a container start ungated (D41) |
 
