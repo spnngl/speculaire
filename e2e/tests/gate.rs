@@ -1045,6 +1045,106 @@ fn cold(worker: &Worker, runnable: &str) {
     assert!(failures.is_empty() || missed > 0, "{verifications:?}");
 }
 
+/// A prewarmed node (§ M7, question 16): `runnable` is not held, and the agent starts with no verdict of it, until the
+/// reflectors' `prewarm.images` names it. The agent's pull verifies it (D22, D188), and the first pod of it starts from
+/// the stored Allow: no verification under `gate_miss` and no pending decision, the wait it would cost (D174).
+fn prewarmed(worker: &Worker, runnable: &str) {
+    let cluster = &worker.cluster;
+    let elsewhere: Vec<String> = cluster
+        .nodes()
+        .unwrap()
+        .into_iter()
+        .map(|node| node.name)
+        .filter(|node| *node != worker.node && !cluster.lists(node, runnable).unwrap())
+        .collect();
+    assert!(
+        remove(worker, runnable),
+        "{runnable} stays on {}",
+        worker.node
+    );
+    cluster.stop_agent(&worker.node).unwrap();
+    worker.sh("rm -f /run/speculaire/cache.bin");
+    cluster.start_agent(&worker.node).unwrap();
+
+    let prewarm = cluster.prewarm().unwrap();
+    let written = prewarm.write(&[runnable], 300).unwrap();
+    // The pull's fetch through the mirror verifies it (D152); the images held at the start verify under `event`.
+    let allowed = || {
+        count(
+            worker,
+            "speculaire_verifications_total",
+            &[r#"result="allow""#, r#"trigger="manifest""#],
+        )
+    };
+    let deadline = written + Duration::from_secs(30);
+    let held = |node: &String| cluster.lists(node, runnable).unwrap();
+    let waves = || {
+        cluster.reflectors().map(|reflector| {
+            cluster
+                .metrics(&reflector)
+                .unwrap()
+                .get(r#"speculaire_reflector_prewarm_waves_total{cause="list"}"#)
+        })
+    };
+    let before = waves();
+    while !(held(&worker.node) && allowed() > 0 && elsewhere.iter().all(held)) {
+        assert!(
+            Instant::now() < deadline,
+            "{}: {:?}, list waves {before:?} then {:?}",
+            worker.node,
+            worker.series("speculaire_verifications_total"),
+            waves()
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    eprintln!(
+        "{}: prewarmed {:?} after the write",
+        worker.node,
+        written.elapsed()
+    );
+    // Only `runnable` is allowed among the images the worker holds; the others may still verify.
+    let allows = |worker: &Worker| {
+        count(
+            worker,
+            "speculaire_verifications_total",
+            &[r#"result="allow""#],
+        )
+    };
+    let verified = allows(worker);
+    let decided = |result: &str| {
+        count(
+            worker,
+            "speculaire_gate_total",
+            &[r#"mode="enforce""#, &format!(r#"result="{result}""#)],
+        )
+    };
+    let gated = decided("allow");
+
+    start(worker, "default", "speculaire-e2e-prewarmed", runnable);
+    let failures = ready(worker, "default", "speculaire-e2e-prewarmed");
+    let verifications = worker.series("speculaire_verifications_total");
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(allows(worker), verified, "{verifications:?}");
+    let missed = count(
+        worker,
+        "speculaire_verifications_total",
+        &[r#"trigger="gate_miss""#],
+    );
+    assert_eq!(missed, 0, "{verifications:?}");
+    assert_eq!(decided("pending"), 0);
+    assert!(decided("allow") > gated);
+
+    drop(prewarm);
+    // The other nodes pulled it too: leave them as they were.
+    for node in elsewhere {
+        let id =
+            format!("$(crictl inspecti -o go-template --template '{{{{.status.id}}}}' {runnable})");
+        cluster
+            .exec(&node, &["sh", "-c", &format!("crictl rmi {id}")])
+            .unwrap();
+    }
+}
+
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refused() {
@@ -1152,6 +1252,9 @@ fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refuse
 
     cold(&worker, &runnable);
     lap("cold node");
+
+    prewarmed(&worker, &runnable);
+    lap("prewarmed");
     drop(enforced);
     lap("restored");
 }

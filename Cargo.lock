@@ -668,6 +668,7 @@ dependencies = [
  "serde_json",
  "speculaire-artifacts",
  "speculaire-oci",
+ "speculaire-reflect",
  "speculaire-runtime",
  "tempfile",
  "tokio",
