@@ -21,7 +21,11 @@ fn every_node_is_ready_on_the_pinned_runtime_and_kubernetes() {
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     };
-    assert_eq!(nodes.len(), 3, "e2e/kind.yaml has 3 nodes: {nodes:?}");
+    assert_eq!(
+        nodes.len(),
+        3,
+        "the suites run on a control plane and 2 workers: {nodes:?}"
+    );
     let kubelet = format!("v{}.", cluster.kubernetes());
     for node in &nodes {
         assert!(node.ready, "{node:?}");

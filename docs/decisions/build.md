@@ -269,7 +269,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `e2e/` and `oracle/` stay at the top level.
 - **Because:** the user asked for libraries and binaries apart. A library holds code a fuzz target, a test or another binary can reuse; a binary-only crate cannot be linked by them.
 
-## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94, D113, D120, D130)
+## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94, D113, D120, D130, D193)
 
 - **Decision:**
   - **Runtimes:** containerd and CRI-O. cri-dockerd has no NRI, so the gate cannot run there.

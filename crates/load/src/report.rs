@@ -3,27 +3,29 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use crate::{Scenario, Targets};
+use crate::{Scenario, Targets, Wave};
 
 /// What a run measured. A `None` was not measured: the run never got that far, or the value never came.
 #[derive(Clone, Debug, Default)]
 pub struct Measured {
-    /// The reflector's peak resident set, `VmHWM` of `/proc/<pid>/status` before each stop, in bytes.
+    /// The reflectors' largest peak resident set, `VmHWM` of `/proc/<pid>/status` before each stop, in bytes.
     pub peak_rss: Option<u64>,
-    /// The resident set at the end of the steady phase, `VmRSS`, in bytes.
+    /// The largest resident set at the end of the steady phase, `VmRSS`, in bytes.
     pub steady_rss: Option<u64>,
-    /// The p99 of `speculaire_reflector_lookup_seconds` over the steady phase: its bucket's upper bound.
+    /// The largest p99 of `speculaire_reflector_lookup_seconds` over the steady phase: its bucket's upper bound.
     pub lookup_p99: Option<Duration>,
-    /// The lookups the reflector answered per second over the steady phase.
+    /// The lookups the reflectors answered per second over the steady phase.
     pub lookups_per_second: Option<f64>,
     /// The deltas the agents sent per second over the steady phase.
     pub deltas_per_second: Option<f64>,
     /// Lookups that failed over the steady phase, at the agents.
     pub failed_lookups: Option<u64>,
-    /// From the first agent's start to the reflector holding every agent's digests.
+    /// From the first agent's start to the reflectors holding every agent's digests.
     pub first_fill: Option<Duration>,
-    /// From the reflector's restart to it holding every agent's digests again.
+    /// From the reflector's restart to it holding every agent's digests again; with one reflector only.
     pub resync: Option<Duration>,
+    /// What the prewarm wave did, with [`Scenario::prewarm`].
+    pub wave: Option<Wave>,
 }
 
 /// A run's scenario, targets and measures; the targets missed are what fails it.
@@ -35,7 +37,7 @@ pub struct Report {
     pub targets: Targets,
     /// What came out.
     pub measured: Measured,
-    /// The CPUs this machine has, which the reflector and the agents share.
+    /// The CPUs this machine has, which the reflectors and the agents share.
     pub cpus: usize,
 }
 
@@ -69,7 +71,7 @@ impl Report {
         let floor = |value: Option<f64>, target: u32| {
             verdict(value.is_some_and(|value| value >= f64::from(target) * RATE_FLOOR))
         };
-        vec![
+        let mut rows = vec![
             Row {
                 measure: "Reflector peak RSS",
                 value: mib(measured.peak_rss),
@@ -91,12 +93,6 @@ impl Report {
                 verdict: at_most(measured.lookup_p99, targets.lookup_p99),
             },
             Row {
-                measure: "Resync after a reflector restart",
-                value: duration(measured.resync),
-                target: format!("≤ {:?}", targets.resync),
-                verdict: at_most(measured.resync, targets.resync),
-            },
-            Row {
                 measure: "Lookups answered",
                 value: rate(measured.lookups_per_second),
                 target: format!("≥ {:.0}/s", f64::from(scenario.lookups) * RATE_FLOOR),
@@ -108,15 +104,31 @@ impl Report {
                 target: format!("≥ {:.0}/s", f64::from(scenario.deltas) * RATE_FLOOR),
                 verdict: floor(measured.deltas_per_second, scenario.deltas),
             },
-        ]
+        ];
+        if scenario.prewarm {
+            rows.extend(wave_rows(measured.wave.as_ref()));
+        } else {
+            rows.push(Row {
+                measure: "Resync after a reflector restart",
+                value: duration(measured.resync),
+                target: format!("≤ {:?}", targets.resync),
+                verdict: at_most(measured.resync, targets.resync),
+            });
+        }
+        rows
     }
 
     /// The report as Markdown, for a terminal or a workflow's job summary.
     #[must_use]
     pub fn markdown(&self) -> String {
         let s = &self.scenario;
+        let title = if s.prewarm {
+            "two reflectors and a prewarm wave (D33, D193)"
+        } else {
+            "one reflector (D33)"
+        };
         let mut out = format!(
-            "## Load: one reflector (D33)\n\n{} agents × {} blobs from {} digests, {} lookups/s and {} deltas/s for \
+            "## Load: {title}\n\n{} agents × {} blobs from {} digests, {} lookups/s and {} deltas/s for \
              {:?} after {:?} of warm-up, on {} CPUs.\n\n| Measure | Value | Target | Result |\n|---|---|---|---|\n",
             s.agents, s.blobs, s.pool, s.lookups, s.deltas, s.steady, s.warmup, self.cpus
         );
@@ -137,13 +149,17 @@ impl Report {
         let m = &self.measured;
         let _ = write!(
             out,
-            "\nAlso: RSS {} at the end of the steady phase; {} lookups failed at the agents; the first fill took {}.\n\n{}\n",
+            "\nAlso: RSS {} at the end of the steady phase; {} lookups failed at the agents; the first fill took {}.{}\n\n{}\n",
             m.steady_rss
                 .map_or("not measured".into(), |b| format!("{} MiB", b >> 20)),
             m.failed_lookups
                 .map_or("not measured".into(), |n| n.to_string()),
             m.first_fill
                 .map_or("not measured".into(), |d| format!("{d:.1?}")),
+            m.wave.as_ref().map_or(String::new(), |wave| format!(
+                " The wave took {:.1?}, in rounds of {:?} by reflector.",
+                wave.took, wave.rounds
+            )),
             if self.passed() {
                 "**Every target met.**"
             } else {
@@ -160,6 +176,33 @@ struct Row {
     value: Option<String>,
     target: String,
     verdict: Verdict,
+}
+
+/// The rows of a prewarm wave: D185's rules, from what the agents received.
+fn wave_rows(wave: Option<&Wave>) -> [Row; 3] {
+    [
+        Row {
+            measure: "Prewarm seeds, the same on each reflector",
+            value: wave.map(|w| if w.seeds_agree { "yes" } else { "no" }.to_owned()),
+            target: "D181's 2 by rank".to_owned(),
+            verdict: verdict(wave.is_some_and(|w| w.seeds_agree)),
+        },
+        Row {
+            measure: "Agents sent one Prewarm by each reflector",
+            value: wave.map(|w| w.once_each.to_string()),
+            target: wave.map_or("every agent".to_owned(), |w| w.agents.to_string()),
+            verdict: verdict(wave.is_some_and(|w| w.once_each == w.agents)),
+        },
+        Row {
+            measure: "Largest round per agent sent before",
+            value: wave.map(|w| {
+                w.fanout
+                    .map_or("no round after the seeds".to_owned(), |f| format!("{f:.2}"))
+            }),
+            target: "≤ 4".to_owned(),
+            verdict: verdict(wave.is_some_and(|w| w.fanout.is_none_or(|f| f <= 4.0))),
+        },
+    ]
 }
 
 fn verdict(met: bool) -> Verdict {
@@ -189,6 +232,7 @@ mod tests {
             failed_lookups: Some(0),
             first_fill: Some(Duration::from_secs(12)),
             resync: Some(Duration::from_secs(60)),
+            wave: None,
         }
     }
 

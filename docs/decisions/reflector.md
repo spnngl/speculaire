@@ -43,7 +43,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - The user set the 500 µs and 256 MiB figures and accepted the others.
 - **Revisit when:** a target fails. Then revisit D2.
 
-## D51: Every member picks the same prewarm seeds (amends D2; amended by D181, D185, D186, D188, D192)
+## D51: Every member picks the same prewarm seeds (amends D2; amended by D181, D185, D186, D188, D192, D193)
 
 - **Decision:**
   - For each image of `prewarm.images`, every member picks the same seeds: the `prewarm.seeds` agents (default 2, live) with the highest rendezvous hash of (image reference, node identity), among the agents streaming to it.
@@ -105,7 +105,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 - **Measured (M3 step 06):** `e2e/tests/outage.rs` passes on containerd 2.4 and CRI-O 1.37 in 33 s. After a reflector restarts, its lookups find every holder 0.6 to 5.3 s after it is ready: the agents' 0 to 5 s wait after a drop (D33). An agent started with both reflectors down opens its peer API 0.6 to 3.9 s after one is ready, and 9.4 to 9.5 s after its certificate appears (`config.poll_interval`, 10 s). Stopping an agent that serves a 16 MiB layer at 32 Mbit/s takes it out of lookups in 160 to 350 ms, and the unit stops in 3.1 to 3.8 s while the peer's pull completes from it. Before the drain change, that pull went upstream.
 - **Revisit when:** a reflector keeps its index across restarts.
 
-## D104: The load scenario is a library under `speculaire-loadgen`, and the reflector bounds what each agent costs it (amends D27, D33, D97; amended by D105, D116)
+## D104: The load scenario is a library under `speculaire-loadgen`, and the reflector bounds what each agent costs it (amends D27, D33, D97; amended by D105, D116, D193)
 
 - **Decision:**
   - **Place:** `apps/loadgen`, the package `speculaire-loadgen`, parses arguments and prints the report (D62). The library `crates/load`, `speculaire-load`, holds the scenario. It makes a test CA with `speculaire-pki`'s `testing` feature, starts the reflector as a child `speculaire agent` with `role = "reflector"` on a fake containerd, and runs one `crates/reflect` client per simulated agent, each with its own node certificate.
@@ -283,3 +283,17 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Pinning only listed images keeps GC's say over everything else: a member's list holds at most 64 images (D187).
 - **Measured:** in e2e on containerd 2.4, kind arm64, a list that drops the image unpins it on all 3 nodes 0.54 s after the write; the case takes 2.2 to 2.5 s.
 - **Revisit when:** CRI-O gains a pin that does not edit its configuration, or the kubelet frees pinned images.
+
+## D193: Prewarm at scale is checked nightly on a 20-node kind cluster, and at D33's 10k agents by the load scenario (amends D51, D63, D104)
+
+- **Decision:**
+  - **Cluster:** `scale.yml` runs the prewarm suite each night on kind with one control plane and 19 workers, containerd 2.4 and the newest Kubernetes, on an amd64 runner. `SPECULAIRE_E2E_WORKERS` (default 2) sets the workers `e2e-up` writes into the kind config, and `SPECULAIRE_E2E_SUITE` the one suite `e2e-test` runs. The reflectors stay on the control plane and the first worker (D94), and the suites read the nodes from the cluster. The other suites and the CRI-O legs keep 3 nodes. The workflow is dispatchable, with `workers` as input.
+  - **Load:** `speculaire-loadgen --prewarm` runs D33's scenario against two reflectors of one member set, and starts a wave of one image over the steady phase: it writes the image into `prewarm.images` of both and sends each a `SIGHUP`, their only reload, as `poll_interval` is a day. A local registry serves the image's manifest, of 8 layers. Each simulated agent announces the layers 4 s after its first `Prewarm`, as a pull would. The steady phase lasts until every agent announced them. The report adds three checks, read from the `Prewarm`s the agents received: each reflector's first round is the 2 seeds D181's rank picks, each agent gets one `Prewarm` from each reflector, and no round is larger than 4 per agent sent the image before (D185). The memory and lookup targets apply to the larger of the two reflectors. Only the run of one reflector restarts it and checks the resync target. `load.yml` runs both scenarios on both architectures each night.
+  - **Manual:** a real 20-node cluster is checked by hand before a release that changes prewarm, and blocks nothing.
+- **Because:**
+  - A runner of 4 CPUs and 16 GiB holds 20 kind nodes with room to spare (measured below), so the criterion runs at its own size.
+  - Two reflectors share the runner's 4 CPUs with twice the streams, and a restart there resyncs in 62 to 72 s, past D33's 60 s: both restarted took 62.5 s on arm64, the first alone 72.2 s on amd64. The run of one reflector resyncs in 40 to 60 s.
+  - A poll would start the wave on each member up to `poll_interval` apart. The later member's rounds, whose agents already hold the image, then come a second apart and run together (a first round of 50 on arm64).
+  - A round's `Prewarm`s come together, and the next round only after each agent of it announced, 4 s later at least. A pause of 2 s between two `Prewarm`s of one member tells the rounds apart without the reflectors' metrics.
+- **Measured** on `ubuntu-26.04`, 4 CPUs and 16 GiB, Kubernetes 1.37 and containerd 2.4.2: `e2e-up` with 20 nodes, the node image and the suites' build included, took 278 s at 4.3 GiB used and 78 % CPU; the prewarm suite took 144 s at 5.2 GiB and 29 %. The wave at 10k agents took 27 to 28 s in rounds of 2, 8, 40, 200, 1000, 5000 and 3750 on each reflector, on amd64 and arm64 alike; the larger reflector peaked at 462 to 477 MiB, with a lookup p99 of 20 to 86 µs.
+- **Revisit when:** the scale run nears its 60 minutes, or a wave at 10k agents misses a D33 target.

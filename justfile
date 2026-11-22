@@ -514,12 +514,19 @@ e2e runtime version kubernetes="": e2e-tools
         cargo run -p e2e --locked --quiet --bin catalog -- '{{ runtime }}' "$scrapes"
     fi
 
-# Build the node image and start the cluster, for debugging: just e2e-up containerd 2.4 1.35
+# Build the node image and start the cluster, for debugging: just e2e-up containerd 2.4 1.35. The cluster has one
+# control plane and SPECULAIRE_E2E_WORKERS workers, 2 by default; the prewarm suite alone runs on more (D193).
 e2e-up runtime version kubernetes="": e2e-tools
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{ e2e_path }}:$PATH"
     eval "$({{ just_executable() }} e2e-cluster {{ runtime }} {{ version }} {{ quote(kubernetes) }})"
+    # The reflectors take the control plane and the first worker (D94); the prewarm suite needs a node that is neither.
+    workers="${SPECULAIRE_E2E_WORKERS:-2}"
+    if [[ ! "$workers" =~ ^[1-9][0-9]*$ ]] || (( workers < 2 )); then
+        echo "e2e: SPECULAIRE_E2E_WORKERS is $workers: 2 or more" >&2
+        exit 1
+    fi
     bin='target/musl/{{ arch() }}-unknown-linux-musl/speculaire'
     if [[ ! -x "$bin" ]]; then
         echo "e2e: no $bin: run just musl {{ arch() }}-unknown-linux-musl" >&2
@@ -550,6 +557,10 @@ e2e-up runtime version kubernetes="": e2e-tools
         if [[ "$family" == dual ]]; then
             printf 'networking:\n  ipFamily: dual\n'
         fi
+        printf 'nodes:\n  - role: control-plane\n'
+        for ((i = 0; i < workers; i++)); do
+            printf '  - role: worker\n'
+        done
         cat e2e/kind.yaml
         if [[ '{{ runtime }}' == crio ]]; then
             cat e2e/node/crio/kind-patches.yaml
@@ -640,7 +651,8 @@ e2e-up runtime version kubernetes="": e2e-tools
     # kind's --wait covers the control plane only.
     kubectl --context "kind-$cluster" wait --for=condition=Ready nodes --all --timeout=180s
 
-# Run the suites against the cluster of `just e2e-up`; arguments go to the test binary: just e2e-test crio 1.37 '' a_pod_runs
+# Run the suites against the cluster of `just e2e-up`; arguments go to the test binary: just e2e-test crio 1.37 '' a_pod_runs.
+# SPECULAIRE_E2E_SUITE names the one suite to run, such as `prewarm`.
 e2e-test runtime version kubernetes="" *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -648,7 +660,7 @@ e2e-test runtime version kubernetes="" *args:
     export PATH="{{ e2e_path }}:$PATH"
     SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' SPECULAIRE_E2E_RELEASE="$release" \
         SPECULAIRE_E2E_KUBERNETES="$kubernetes" SPECULAIRE_E2E_IP_FAMILY="$family" SPECULAIRE_E2E_SCRAPES="$scrapes" \
-        cargo test -p e2e --locked -- --ignored {{ args }}
+        cargo test -p e2e --locked ${SPECULAIRE_E2E_SUITE:+--test "$SPECULAIRE_E2E_SUITE"} -- --ignored {{ args }}
     # The suites scrape each agent before they stop it; this scrapes the agents the last suite left running (D182).
     mkdir -p "$scrapes"
     accept='Accept: application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited'

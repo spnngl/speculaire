@@ -22,9 +22,9 @@ async fn a_blob_comes_whole_from_a_peer_each_time() {
     assert!(!markdown.contains(" 0.0 ms"), "{markdown}");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_small_load_meets_loose_targets() {
-    let settings = Settings {
+/// A small load, with a prewarm wave or without.
+fn small(prewarm: bool) -> Settings {
+    Settings {
         scenario: Scenario {
             agents: 20,
             blobs: 50,
@@ -35,6 +35,7 @@ async fn a_small_load_meets_loose_targets() {
             warmup: Duration::from_millis(500),
             steady: Duration::from_secs(2),
             seed: 1,
+            prewarm,
         },
         targets: Targets {
             rss: 1 << 30,
@@ -44,8 +45,12 @@ async fn a_small_load_meets_loose_targets() {
             resync: Duration::from_secs(30),
         },
         reflector: vec![env!("CARGO_BIN_EXE_speculaire").into()],
-    };
-    let report = speculaire_load::run(&settings).await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_small_load_meets_loose_targets() {
+    let report = speculaire_load::run(&small(false)).await.unwrap();
     let markdown = report.markdown();
     assert!(report.passed(), "{markdown}");
     let measured = &report.measured;
@@ -56,6 +61,20 @@ async fn a_small_load_meets_loose_targets() {
     assert_eq!(measured.failed_lookups, Some(0), "{markdown}");
     assert!(
         markdown.contains("goal missed (reported only)"),
+        "{markdown}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_small_wave_over_two_reflectors_keeps_to_its_rounds() {
+    let report = speculaire_load::run(&small(true)).await.unwrap();
+    let markdown = report.markdown();
+    assert!(report.passed(), "{markdown}");
+    let wave = report.measured.wave.as_ref().unwrap();
+    // 2 seeds, then up to 4 agents for each agent sent the image before: 8, then the last 10.
+    assert_eq!(wave.rounds, [vec![2, 8, 10], vec![2, 8, 10]], "{markdown}");
+    assert!(
+        markdown.starts_with("## Load: two reflectors"),
         "{markdown}"
     );
 }

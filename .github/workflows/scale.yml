@@ -1,0 +1,101 @@
+name: scale
+
+# The prewarm suite on the largest kind cluster a runner holds (D193): containerd 2.4, the newest Kubernetes, one
+# control plane and `workers` workers, amd64, nightly. The job summary holds the cluster's creation time, the runner's
+# peak memory and its CPU while the suite ran.
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: The cluster's workers, SPECULAIRE_E2E_WORKERS
+        type: string
+        default: "19"
+
+# Each job grants only what it needs.
+permissions: {}
+
+jobs:
+  prewarm:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      # protoc: `just e2e-up` builds the e2e crate, whose fixtures' runtime client compiles its .proto at build time
+      # (D141).
+      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
+      PROTOC_VERSION: "36.2"
+      SPECULAIRE_E2E_WORKERS: ${{ inputs.workers || '19' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
+      - run: just musl x86_64-unknown-linux-musl
+      # Each kind node runs systemd, kubelet and the runtime, which watch files: the defaults run out past a few nodes.
+      - run: sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=1048576
+      # A sample every 5 s, `<unix time> <MiB used> <CPU idle %>`, summed up in the job summary.
+      - shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/scale
+          while :; do
+              idle="$(vmstat 5 2 | tail -1 | awk '{print $15}')"
+              echo "$(date +%s) $(free -m | awk '/^Mem:/{print $3}') $idle"
+          done >target/scale/samples 2>/dev/null &
+      - shell: bash
+        run: |
+          set -euo pipefail
+          start="$(date +%s)"
+          just e2e-up containerd 2.4
+          echo "$start $(date +%s)" >target/scale/up
+      - shell: bash
+        env:
+          SPECULAIRE_E2E_SUITE: prewarm
+        run: |
+          set -euo pipefail
+          start="$(date +%s)"
+          just e2e-test containerd 2.4
+          echo "$start $(date +%s)" >target/scale/test
+      - if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          # The peak memory and the mean CPU busy over a phase of `<start> <end>`.
+          phase() {
+              [[ -f "$2" ]] || { echo "| $1 | did not finish | | |"; return; }
+              read -r from to <"$2"
+              awk -v from="$from" -v to="$to" -v name="$1" '
+                  $1 >= from && $1 <= to { n++; busy += 100 - $3; if ($2 > peak) peak = $2 }
+                  END { printf "| %s | %d s | %d MiB | %.0f %% |\n", name, to - from, peak, n ? busy / n : 0 }
+              ' target/scale/samples
+          }
+          {
+              echo "## Scale: kind, 1 control plane and $SPECULAIRE_E2E_WORKERS workers (D193)"
+              echo
+              echo "$(nproc) CPUs, $(free -m | awk '/^Mem:/{print $2}') MiB."
+              echo
+              echo '| Phase | Took | Peak memory used | Mean CPU busy |'
+              echo '| --- | --- | --- | --- |'
+              phase 'cluster up, just e2e-up' target/scale/up
+              phase 'prewarm suite' target/scale/test
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: failure()
+        run: just e2e-journals containerd 2.4
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scale
+          path: |
+            target/scale
+            target/e2e/journals
+          if-no-files-found: ignore
+          retention-days: 7

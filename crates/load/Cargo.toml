@@ -1,6 +1,6 @@
 [package]
 name = "speculaire-load"
-description = "D33's load scenario against one reflector, and whether it meets the targets"
+description = "D33's load scenario against one reflector or two with a prewarm wave, and whether it meets the targets"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
