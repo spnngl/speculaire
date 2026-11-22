@@ -43,7 +43,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - The user set the 500 µs and 256 MiB figures and accepted the others.
 - **Revisit when:** a target fails. Then revisit D2.
 
-## D51: Every member picks the same prewarm seeds (amends D2; amended by D181, D185, D186)
+## D51: Every member picks the same prewarm seeds (amends D2; amended by D181, D185, D186, D188)
 
 - **Decision:**
   - For each image of `prewarm.images`, every member picks the same seeds: the `prewarm.seeds` agents (default 2, live) with the highest rendezvous hash of (image reference, node identity), among the agents streaming to it.
@@ -209,12 +209,12 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Dropping a `Prewarm` would leave the node cold with no sign of it; a caller told `Full` knows what was not queued.
 - **Revisit when:** a reflector pushes anything else, or an outbox's writes show in D33's lookup p99.
 
-## D184: Only a member pushes, to an agent of protocol version 2 (amends D2, D97)
+## D184: Only a member pushes, to an agent of protocol version 2 (amends D2, D97; amended by D188)
 
 - **Decision:**
   - **Version:** protocol version 2 takes `Prewarm` and `PrewarmList`. A reflector sends them only on a stream whose `Hello` says 2 or later, and still accepts version 1 (D2).
   - **Trust:** the agent takes pushes only on its `Announce` streams, each dialled to a member of the `Members` list expecting the member's node (D98). A push on the `Members` connection is ignored.
-  - **Client:** `Client::spawn` takes a channel; each push, parsed into `push::Push` (an image `PullImage` would take, as containerd's CRI plugin parses it, or a list of at most 64), goes to it with the member's node, as `Pushed`. A push that does not parse is logged and dropped, and the stream stays. A full channel holds the stream, lookups' answers included, so the agent reads it at once. Until the agent acts on pushes, it passes a closed channel, which drops each one.
+  - **Client:** `Client::spawn` takes a channel; each push, parsed into `push::Push` (an image `PullImage` would take, as containerd's CRI plugin parses it, or a list of at most 64), goes to it with the member's node, as `Pushed`. A push that does not parse is logged and dropped, and the stream stays. A full channel holds the stream, lookups' answers included, so the agent reads it at once. The agent's prewarm worker reads it (D188).
 - **Because:**
   - A push makes the node pull. Only a member, a control-plane node whose certificate the agent checked (`docs/security.md`), may ask for that.
   - A version 1 agent drops a `Prewarm` and does not know `PrewarmList`. The version tells the reflector whom a push reaches, and queueing nothing for the others costs nothing.
@@ -248,3 +248,22 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Right after a member starts, few agents stream to it, so its seeds would be picked among a few and differ from the other members'.
   - Docker Hub counts manifest `GET`s against its pull limit, and not `HEAD`s; a tag that moved upstream would otherwise stay cold until the list changed.
 - **Revisit when:** a list grows past what one resolution a second per entry can follow, or an agent's restart mid-wave shows in upstream pulls.
+
+## D188: An agent pulls what members push through its runtime's CRI, one image at a time, below a disk limit (amends D34, D39, D47, D51, D90, D184)
+
+- **Decision:**
+  - **Pull:** the agent pulls a pushed image with CRI `PullImage` on the runtime's socket, the same call on containerd and CRI-O, behind the `Pull` trait a `Node` hands out (D90). The request carries no credentials: a registry that needs them is prewarmed only where the registry config holds them (D17). A pull is cut after 30 minutes.
+  - **Drop:** a `Prewarm` of an image `Images` lists, or that is queued, pulling, waiting for a retry, or pulled in the last 60 s, counts `dropped` (D51).
+  - **Order:** one pull at a time, in the order the pushes came, ahead of any retry. The worker reads the channel while it pulls, so a push never holds a stream (D184).
+  - **Retry:** a failed or skipped pull is tried again after 30 s, doubling up to 10 minutes, while some member's latest `PrewarmList` names the image. A new `PrewarmList` makes those retries due at once and forgets the images no list names.
+  - **Disk:** before each pull, the agent reads the usage of the image filesystem: `statvfs` on the mount point of `ImageFsInfo`'s first entry, asked once, counted as the kubelet counts it. Above `prewarm.max_disk_percent` (default 80, live) the pull is skipped and counts `no_space`, with one warning until a pull goes through. When the usage cannot be read, the agent warns and pulls.
+  - **Metric:** `speculaire_prewarm_pulls_total{result}`, `result` one of `ok`, `failed`, `dropped`, `no_space`, each series at zero from startup.
+  - **Stop:** the worker stops before the client closes its streams (D39 step 3). The pull in flight is cut, and the runtime cancels it with the call.
+- **Because:**
+  - `PullImage` is the kubelet's own call, so the image lands where the kubelet looks, through the mirror and the registry config like any other pull.
+  - One pull at a time leaves the link and the disk to the pods' own pulls. Pushes come in the order the member's waves reach the agent (D185).
+  - The runtime's image list shows a pull only at its next event or relist, up to 60 s later (D121). Without the window, the same image pushed by the second member after the pull would be pulled again.
+  - The kubelet's image garbage collection starts at 85 % by default (kubernetes v1.37.0 `pkg/kubelet/apis/config/v1beta1/defaults.go:157`, usage as `pkg/kubelet/images/image_gc_manager.go:392`). Stopping at 80 % keeps prewarm from making it delete images that pods use.
+  - CRI-O walks its image store to answer `ImageFsInfo` (cri-o v1.37.2 `server/image_fs_info.go:15`), and the mount point does not move; `statvfs` reads the usage at no cost. containerd's kubelet-facing first entry is its snapshotter's (containerd v2.4.2 `internal/cri/server/images/imagefs_info.go:55`).
+  - CRI-O sets no pull progress timeout (cri-o v1.37.2 `pkg/config/config.go:1192`), so a stalled pull would hold the worker; 30 minutes covers a large image on a slow link.
+- **Revisit when:** prewarm pulls slow the pods' own pulls, or nodes need a registry credential that only the kubelet holds.

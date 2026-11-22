@@ -249,6 +249,10 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
     ("prewarm.seed_timeout", SPANS),
     ("prewarm.refresh", SPANS),
     (
+        "prewarm.max_disk_percent",
+        &["80", "0", "100", "101", "255", "256", "-1", r#""80""#],
+    ),
+    (
         "log.filter",
         &[
             r#""warn""#,

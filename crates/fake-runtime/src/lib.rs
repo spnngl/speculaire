@@ -1,5 +1,5 @@
 //! A fake containerd or CRI-O, for tests that run where there is no runtime (the CI runner, macOS): it answers the CRI's
-//! `Version`, `ListImages` and `ListContainers`, containerd's introspection `Plugins`, content `List` and `Info`, images
+//! `Version`, `ListImages`, `ListContainers`, `PullImage` and `ImageFsInfo`, containerd's introspection `Plugins`, content `List` and `Info`, images
 //! `List` and `Get`, snapshots `Stat` and events `Subscribe`, and CRI-O's `GET /config` on a Unix socket, which is all
 //! preflight, the registry config, the inventory, the image store, the mirror and the engine ask (D86, D99). On its NRI
 //! socket, it registers the plugin that connects (D168).
@@ -77,6 +77,52 @@ struct Image {
     repo_digests: Vec<String>,
 }
 
+/// `PullImageRequest` of the CRI, its image alone.
+#[derive(Clone, PartialEq, prost::Message)]
+struct PullImageRequest {
+    #[prost(message, optional, tag = "1")]
+    image: Option<ImageSpec>,
+}
+
+/// `ImageSpec` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ImageSpec {
+    #[prost(string, tag = "1")]
+    image: String,
+}
+
+/// `PullImageResponse` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct PullImageResponse {
+    #[prost(string, tag = "1")]
+    image_ref: String,
+}
+
+/// `ImageFsInfoRequest` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ImageFsInfoRequest {}
+
+/// `ImageFsInfoResponse` of the CRI, its image filesystems alone.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ImageFsInfoResponse {
+    #[prost(message, repeated, tag = "1")]
+    image_filesystems: Vec<FilesystemUsage>,
+}
+
+/// `FilesystemUsage` of the CRI, its identifier alone.
+#[derive(Clone, PartialEq, prost::Message)]
+struct FilesystemUsage {
+    #[prost(message, optional, tag = "2")]
+    fs_id: Option<FilesystemIdentifier>,
+}
+
+/// `FilesystemIdentifier` of the CRI.
+#[derive(Clone, PartialEq, prost::Message)]
+struct FilesystemIdentifier {
+    #[prost(string, tag = "1")]
+    mountpoint: String,
+}
+
 /// `ListContainersRequest` of the CRI, its filter by state alone.
 #[derive(Clone, PartialEq, prost::Message)]
 struct ListContainersRequest {
@@ -136,6 +182,10 @@ pub struct Answers {
     pub images: Vec<(String, Vec<String>, Vec<String>)>,
     /// The containers of `ListContainers`: the image ID, and whether it runs; a filter by state is applied.
     pub containers: Vec<(String, bool)>,
+    /// Whether `PullImage` fails, as a pull the registry refuses does. A pull adds no image to `images`.
+    pub pull_fails: bool,
+    /// The mount point of `ImageFsInfo`'s one image filesystem: `/`, which exists wherever the tests run.
+    pub image_filesystem: String,
     /// The body of CRI-O's `GET /config`, its merged TOML; `None` answers 503.
     pub crio_config: Option<String>,
     /// The digests of containerd's content `List`, whatever the namespace; `Info` finds nothing: the fake holds no
@@ -176,6 +226,8 @@ impl Answers {
             plugins_unavailable: false,
             images: Vec::new(),
             containers: Vec::new(),
+            pull_fails: false,
+            image_filesystem: "/".to_owned(),
             content: Vec::new(),
             image_store: Vec::new(),
             image_get_unavailable: false,
@@ -195,6 +247,8 @@ impl Answers {
             plugins_unavailable: false,
             images: Vec::new(),
             containers: Vec::new(),
+            pull_fails: false,
+            image_filesystem: "/".to_owned(),
             content: Vec::new(),
             image_store: Vec::new(),
             image_get_unavailable: false,
@@ -217,6 +271,8 @@ struct Shared {
     cut: tokio::sync::watch::Sender<u64>,
     /// The snapshots `Stat` calls answered so far.
     stats: AtomicUsize,
+    /// The image of each `PullImage` so far, failed or not.
+    pulls: Mutex<Vec<String>>,
 }
 
 /// A fake runtime listening on a socket until it is dropped.
@@ -256,6 +312,7 @@ impl Fake {
             events: tokio::sync::broadcast::channel(64).0,
             cut: tokio::sync::watch::channel(0).0,
             stats: AtomicUsize::new(0),
+            pulls: Mutex::new(Vec::new()),
         });
         let served = Arc::clone(&shared);
         let thread = std::thread::spawn(move || {
@@ -326,6 +383,16 @@ impl Fake {
     #[must_use]
     pub fn stats(&self) -> usize {
         self.shared.stats.load(Ordering::Relaxed)
+    }
+
+    /// The image of each `PullImage` so far, in order, failed or not.
+    #[must_use]
+    pub fn pulls(&self) -> Vec<String> {
+        self.shared
+            .pulls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -463,6 +530,8 @@ async fn route(
                 .await
         }
         "/runtime.v1.RuntimeService/ListContainers" => containers(answers, request).await,
+        "/runtime.v1.ImageService/PullImage" => pull(shared, answers, request).await,
+        "/runtime.v1.ImageService/ImageFsInfo" => image_filesystem(answers, request).await,
         "/containerd.services.content.v1.Content/List" => content(answers, request).await,
         "/containerd.services.content.v1.Content/Info" => {
             Status::not_found("the fake runtime holds no bytes").into_http()
@@ -476,6 +545,55 @@ async fn route(
         "/containerd.services.events.v1.Events/Subscribe" => events(shared, request).await,
         other => Status::unimplemented(format!("the fake runtime has no {other}")).into_http(),
     }
+}
+
+/// The CRI's `PullImage`: recorded, then failed or answered with the reference asked.
+async fn pull(
+    shared: &Arc<Shared>,
+    answers: Arc<Answers>,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let shared = Arc::clone(shared);
+    let service = tower::service_fn(move |request: Request<PullImageRequest>| {
+        let image = request.into_inner().image.unwrap_or_default().image;
+        shared
+            .pulls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(image.clone());
+        let fails = answers.pull_fails;
+        async move {
+            if fails {
+                return Err(Status::unknown(format!(
+                    "the fake runtime fails to pull {image}"
+                )));
+            }
+            Ok(Response::new(PullImageResponse { image_ref: image }))
+        }
+    });
+    Grpc::new(ProstCodec::<PullImageResponse, PullImageRequest>::default())
+        .unary(service, request)
+        .await
+}
+
+/// The CRI's `ImageFsInfo`: one image filesystem, at `Answers::image_filesystem`.
+async fn image_filesystem(
+    answers: Arc<Answers>,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let service = tower::service_fn(move |_: Request<ImageFsInfoRequest>| {
+        let mountpoint = answers.image_filesystem.clone();
+        async move {
+            Ok::<_, Status>(Response::new(ImageFsInfoResponse {
+                image_filesystems: vec![FilesystemUsage {
+                    fs_id: Some(FilesystemIdentifier { mountpoint }),
+                }],
+            }))
+        }
+    });
+    Grpc::new(ProstCodec::<ImageFsInfoResponse, ImageFsInfoRequest>::default())
+        .unary(service, request)
+        .await
 }
 
 /// containerd's content `List`: every digest of `Answers::content`, in one message.

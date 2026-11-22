@@ -1,7 +1,7 @@
 //! The runtime of this node, chosen once at startup, and what it hands out (D90).
 //!
 //! [`Node`] is built from the [`Runtime`] that [`detect`](crate::detect) found, and gives each concern as a trait:
-//! [`Wiring`], [`Settings`], [`Registries`], [`Content`], [`Inventory`] and [`Images`]. Nothing outside this crate matches on the runtime to do
+//! [`Wiring`], [`Settings`], [`Registries`], [`Content`], [`Inventory`], [`Images`] and [`Pull`]. Nothing outside this crate matches on the runtime to do
 //! a runtime's job; the one thing a trait does not hide is [`Fallback`].
 
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ use crate::identity::annotation::Annotation;
 use crate::images::Images;
 use crate::inventory::Inventory;
 use crate::paths::Paths;
+use crate::pull::{CriPull, Pull};
 use crate::registries::{ContainerdRegistries, CrioRegistries, Registries};
 use crate::settings::Settings;
 use crate::wiring::Wiring;
@@ -158,6 +159,12 @@ impl Node {
             Kind::Containerd(containerd) => Arc::new(containerd.clone()),
             Kind::CriO(crio) => Arc::new(crio.clone()),
         }
+    }
+
+    /// Pulls images as the kubelet does, the same CRI call on either runtime (D188).
+    #[must_use]
+    pub fn pull(&self) -> Arc<dyn Pull> {
+        Arc::new(CriPull::new(self.socket()))
     }
 
     /// The image identity the gate reads from NRI's `CreateContainer` (D169, D170).

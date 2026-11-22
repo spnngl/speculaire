@@ -11,6 +11,7 @@ mod listen;
 pub mod log;
 pub mod node;
 mod prewarm;
+mod pulls;
 mod serve;
 pub mod status;
 mod systemd;

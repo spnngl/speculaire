@@ -44,6 +44,7 @@ use crate::identity::Identity;
 use crate::log::{self, Logs};
 use crate::node::Node;
 use crate::prewarm::Resolver;
+use crate::pulls::Prewarm;
 use crate::status::{self, Status};
 use crate::{listen, systemd, telemetry, trust};
 
@@ -246,6 +247,9 @@ async fn serve(
         gate.set(&config.gate);
         // The waves take an unchanged plan as a no-op.
         plan.send_replace(config.prewarm.plan());
+        if let Some(sharing) = &sharing {
+            sharing.prewarm.set_limit(config.prewarm.max_disk_percent);
+        }
         if config.config.poll_interval.get() != period {
             period = config.config.poll_interval.get();
             poll = polls(period);
@@ -283,9 +287,17 @@ async fn shut_down(
 ) {
     mirror.uploads.stop();
     let mirror = mirror.stop();
-    let (client, peers) = sharing
-        .map(|sharing| (sharing.client, sharing.peers))
-        .unzip();
+    let (client, peers, prewarm) = match sharing {
+        Some(Sharing {
+            client,
+            peers,
+            prewarm,
+        }) => (Some(client), Some(peers), Some(prewarm)),
+        None => (None, None, None),
+    };
+    if let Some(prewarm) = prewarm {
+        prewarm.stop().await;
+    }
     if let Some(client) = client {
         client.stop().await;
     }
@@ -825,11 +837,15 @@ fn follow_inventory(holdings: &Arc<Holdings>, source: Source, inventory: Arc<dyn
     });
 }
 
-/// The agent's part in P2P: announcing what the node holds, and serving it.
+/// The agent's part in P2P: announcing what the node holds, serving it, and pulling what members push.
 struct Sharing {
     client: Client,
     peers: Peers,
+    prewarm: Prewarm,
 }
+
+/// The pushes the client hands the prewarm worker before it waits for the worker to take one.
+const PUSHES: usize = 16;
 
 /// Starts following what the node holds and announcing it to the reflectors of `reflector.url`, when one is set, once
 /// the identity allows peer links, then serves it on the peer address the client fixes (D2, D16, D36, D99, D124).
@@ -847,6 +863,14 @@ fn open_sharing(
     }
     if let Some(settings) = client_config(config) {
         let credentials = Arc::clone(identity.credentials());
+        let (pushes, taken) = tokio::sync::mpsc::channel(PUSHES);
+        let listed = mirror.listed.clone();
+        let prewarm = Prewarm::spawn(
+            taken,
+            node.pull(),
+            move |image| listed.holds(image),
+            config.prewarm.max_disk_percent,
+        );
         let client = Client::spawn(
             settings,
             Arc::clone(&credentials),
@@ -855,8 +879,7 @@ fn open_sharing(
                 Arc::clone(store),
                 mirror.listed.clone(),
             ),
-            // The agent takes no pushes yet: a closed channel drops them.
-            tokio::sync::mpsc::channel(1).0,
+            pushes,
         );
         mirror.fetcher.link(
             Arc::new(Holders(client.lookups())),
@@ -880,7 +903,11 @@ fn open_sharing(
             client.fixed_peer_address(),
             credentials,
         );
-        *sharing = Some(Sharing { client, peers });
+        *sharing = Some(Sharing {
+            client,
+            peers,
+            prewarm,
+        });
     }
 }
 

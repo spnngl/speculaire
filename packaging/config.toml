@@ -129,6 +129,8 @@
 #seed_timeout = 300
 # Seconds between resolutions of a tag; changed platform manifests start a new wave (D186).
 #refresh = 3600
+# How full the image filesystem may be, in percent, for this agent to start a prewarm pull (D188).
+#max_disk_percent = 80
 
 [log]
 # Which diagnostic events reach the log, in EnvFilter syntax without spaces around a directive (D37, D137).

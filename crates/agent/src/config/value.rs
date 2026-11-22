@@ -380,6 +380,41 @@ impl From<MaxUploads> for Raw {
     }
 }
 
+/// A share in percent, from 0 to 100.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "i64", into = "i64")]
+pub struct Percent(u8);
+
+impl Percent {
+    /// `n` percent, if `n` is at most 100.
+    #[must_use]
+    pub const fn new(n: u8) -> Option<Self> {
+        if n <= 100 { Some(Self(n)) } else { None }
+    }
+
+    /// The share, from 0 to 100.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<i64> for Percent {
+    type Error = InvalidValue;
+    fn try_from(n: i64) -> Result<Self, InvalidValue> {
+        u8::try_from(n)
+            .ok()
+            .and_then(Self::new)
+            .ok_or_else(|| InvalidValue(format!("expected an integer from 0 to 100, found {n}")))
+    }
+}
+
+impl From<Percent> for i64 {
+    fn from(v: Percent) -> Self {
+        Self::from(v.0)
+    }
+}
+
 /// An absolute path: the agent runs from `/`, so a relative path would depend on how it was started.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -870,6 +905,11 @@ mod tests {
             Some(MaxUploads::Fixed(NonZeroU32::new(8).unwrap()))
         );
         assert!(MaxUploads::try_from(Raw::Number(0)).is_err());
+        assert_eq!(Percent::try_from(0).ok().map(Percent::get), Some(0));
+        assert_eq!(Percent::try_from(100).ok().map(Percent::get), Some(100));
+        assert!(Percent::try_from(101).is_err());
+        assert!(Percent::try_from(-1).is_err());
+        assert_eq!(i64::from(Percent::new(80).unwrap()), 80);
         assert!(MaxUploads::try_from(Raw::Number(-1)).is_err());
     }
 
