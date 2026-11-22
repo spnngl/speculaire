@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
-use speculaire_nri::api::{self, Container, PodSandbox};
+use speculaire_nri::api::{self, Container, CreateContainerRequest, PodSandbox};
 use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_oci::tagged::Tagged;
@@ -250,12 +250,14 @@ async fn an_exempt_namespace_allows_under_enforce_and_an_empty_exemption_exempts
     let exempt = settings("mode = \"enforce\"\n[gate.exempt]\nnamespaces = [\"kube-system\"]\n");
     let decider = decider(verifier.clone(), exempt.clone(), true);
     let decision = decider
-        .decide(&request("kube-system"), &exempt, far())
+        .decide(&(&request("kube-system")).into(), &exempt, far())
         .await;
     assert_eq!(decision, Decision::Exempt(Exemption::Namespace));
     assert_eq!(decision.answer(&exempt), Answer::Allow);
     assert_eq!(decision.result(), "exempt");
-    let other = decider.decide(&request("default"), &exempt, far()).await;
+    let other = decider
+        .decide(&(&request("default")).into(), &exempt, far())
+        .await;
     assert_eq!(
         other.answer(&exempt),
         Answer::Reject("rejected: no signature".to_owned())
@@ -263,18 +265,24 @@ async fn an_exempt_namespace_allows_under_enforce_and_an_empty_exemption_exempts
 
     let none = enforce();
     for namespace in ["kube-system", "default", ""] {
-        let decision = decider.decide(&request(namespace), &none, far()).await;
+        let decision = decider
+            .decide(&(&request(namespace)).into(), &none, far())
+            .await;
         assert_eq!(decision.result(), "rejected", "{namespace:?}");
     }
     let image = settings(&format!(
         "mode = \"enforce\"\n[gate.exempt]\nimages = [\"{NAME}\"]\n"
     ));
     assert_eq!(
-        decider.decide(&request("default"), &image, far()).await,
+        decider
+            .decide(&(&request("default")).into(), &image, far())
+            .await,
         Decision::Exempt(Exemption::Image)
     );
     let other = settings("mode = \"enforce\"\n[gate.exempt]\nimages = [\"reg.test/other\"]\n");
-    let decision = decider.decide(&request("default"), &other, far()).await;
+    let decision = decider
+        .decide(&(&request("default")).into(), &other, far())
+        .await;
     assert_eq!(decision.result(), "rejected");
 }
 
@@ -307,12 +315,14 @@ async fn each_decision_is_one_gate_event_with_every_field_operations_md_names() 
     let capture = Capture::default();
     {
         let _guard = capture.install();
-        decider.decide(&request("default"), &exempt, far()).await;
         decider
-            .decide(&request("kube-system"), &exempt, far())
+            .decide(&(&request("default")).into(), &exempt, far())
+            .await;
+        decider
+            .decide(&(&request("kube-system")).into(), &exempt, far())
             .await;
         decider.overloaded(
-            &request("default"),
+            &(&request("default")).into(),
             &Settings::new(&config::Gate::default()),
         );
     }
@@ -368,7 +378,9 @@ async fn the_gate_event_names_an_exempt_image_and_each_matched_policy_once() {
     let capture = Capture::default();
     {
         let _guard = capture.install();
-        decider.decide(&request("default"), &image, far()).await;
+        decider
+            .decide(&(&request("default")).into(), &image, far())
+            .await;
     }
     let events = capture.events();
     let [exempted] = events.as_slice() else {
@@ -390,7 +402,7 @@ async fn a_request_without_a_container_is_unverifiable_and_its_gate_event_names_
     let capture = Capture::default();
     let decision = {
         let _guard = capture.install();
-        decider.decide(&request, &enforce(), far()).await
+        decider.decide(&(&request).into(), &enforce(), far()).await
     };
     let reason = format!("unverifiable: {MISSING}");
     assert_eq!(decision.answer(&enforce()), Answer::Reject(reason.clone()));
@@ -410,7 +422,9 @@ async fn an_image_no_policy_matches_is_unmatched() {
     let settings = enforce();
     let decider = decider(verifier, settings.clone(), true);
     assert_eq!(
-        decider.decide(&request("default"), &settings, far()).await,
+        decider
+            .decide(&(&request("default")).into(), &settings, far())
+            .await,
         Decision::Unmatched
     );
 }
@@ -617,7 +631,7 @@ async fn answer(crio: bool, list: &List, asked: &str, over: &[&str], text: &str)
     let (decider, _dir) = on(crio, verifier, settings.clone(), list);
     let request = asking(&format!("{asked}:1"));
     decider
-        .decide(&request, &settings, far())
+        .decide(&(&request).into(), &settings, far())
         .await
         .answer(&settings)
 }
@@ -633,7 +647,8 @@ async fn a_verdict_landing_within_gate_wait_is_used() {
     };
     let request = request("default");
     let started = Instant::now();
-    let (decision, ()) = tokio::join!(decider.decide(&request, &settings, far()), lands);
+    let read = (&request).into();
+    let (decision, ()) = tokio::join!(decider.decide(&read, &settings, far()), lands);
     assert_eq!(decision, verdict(Verdict::Allow));
     assert!(
         started.elapsed() < Duration::from_secs(4),
@@ -658,14 +673,14 @@ async fn a_verdict_missing_at_gate_wait_or_at_the_deadline_is_pending() {
     let decider = decider(verifier, short.clone(), true);
     let request = request("default");
     let started = Instant::now();
-    let decision = decider.decide(&request, &short, far()).await;
+    let decision = decider.decide(&(&request).into(), &short, far()).await;
     assert!(started.elapsed() >= Duration::from_millis(100));
     assert_eq!(decision.answer(&short), Answer::Reject(PENDING.to_owned()));
 
     let long = settings("mode = \"enforce\"\nwait = 5\n");
     let started = Instant::now();
     let soon = Instant::now() + Duration::from_millis(20);
-    let decision = decider.decide(&request, &long, soon).await;
+    let decision = decider.decide(&(&request).into(), &long, soon).await;
     assert!(
         started.elapsed() < Duration::from_secs(4),
         "{:?}",
@@ -685,7 +700,8 @@ async fn an_image_id_the_list_names_within_gate_wait_gets_its_verdict() {
         decider.keep(&list());
     };
     let request = request("default");
-    let (decision, ()) = tokio::join!(decider.decide(&request, &settings, far()), lists);
+    let read = (&request).into();
+    let (decision, ()) = tokio::join!(decider.decide(&read, &settings, far()), lists);
     assert_eq!(decision, verdict(Verdict::Allow));
 }
 
@@ -695,7 +711,9 @@ async fn an_image_id_no_list_names_by_gate_wait_is_pending() {
     keep(&verifier, Verdict::Allow);
     let short = settings("mode = \"enforce\"\nwait = 0.05\n");
     let decider = decider(verifier, short.clone(), false);
-    let decision = decider.decide(&request("default"), &short, far()).await;
+    let decision = decider
+        .decide(&(&request("default")).into(), &short, far())
+        .await;
     assert_eq!(decision.answer(&short), Answer::Reject(PENDING.to_owned()));
 }
 

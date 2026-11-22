@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use speculaire_fake_runtime::{Answers, Fake, Snapshot};
+use speculaire_nri::api::{Container, PodSandbox};
 use speculaire_oci::hash;
 use speculaire_oci::referrers::{INDEX, MANIFEST};
 use speculaire_registry_config::containerd::config::DEFAULT_SNAPSHOTTER;
@@ -129,6 +130,14 @@ fn node(image: &Image, snapshots: Vec<Snapshot>) -> (Fake, Annotation, tempfile:
     (fake, annotation, dir)
 }
 
+async fn identify<'a>(
+    annotation: &Annotation,
+    pod: &PodSandbox,
+    container: &'a Container,
+) -> Identified<'a> {
+    annotation.identify(&pod.into(), &container.into()).await
+}
+
 /// A pod run by `handler`.
 fn pod(handler: &str) -> PodSandbox {
     PodSandbox {
@@ -156,7 +165,7 @@ async fn a_container_on_its_image_s_layers_is_identified_by_the_image_s_target_a
         vec![snapshot(CONTAINER, &image.amd64.to_string(), false)],
     );
     let container = container(Some(NAME));
-    let identified = annotation.identify(&pod(""), &container).await;
+    let identified = identify(&annotation, &pod(""), &container).await;
     assert_eq!(
         identified,
         Identified::Listed {
@@ -175,7 +184,7 @@ async fn a_container_on_another_image_s_layers_is_a_mismatch() {
         vec![snapshot(CONTAINER, &image.arm64.to_string(), false)],
     );
     assert_eq!(
-        annotation.identify(&pod(""), &container(Some(NAME))).await,
+        identify(&annotation, &pod(""), &container(Some(NAME))).await,
         Identified::Mismatched
     );
 }
@@ -201,7 +210,7 @@ async fn a_user_namespaced_container_is_checked_on_its_grandparent_in_two_stats(
             ],
         );
         assert_eq!(
-            annotation.identify(&pod(""), &container(Some(NAME))).await,
+            identify(&annotation, &pod(""), &container(Some(NAME))).await,
             want
         );
         assert_eq!(fake.stats(), 2);
@@ -230,7 +239,7 @@ async fn the_name_is_normalised_as_containerd_names_its_images() {
         let container = container(Some(name));
         assert!(
             matches!(
-                annotation.identify(&pod(""), &container).await,
+                identify(&annotation, &pod(""), &container).await,
                 Identified::Listed { .. }
             ),
             "{name}"
@@ -243,30 +252,26 @@ async fn each_missing_link_is_its_own_unverifiable_reason() {
     let image = image();
     let (_fake, annotation, dir) = node(&image, Vec::new());
     assert_eq!(
-        annotation.identify(&pod(""), &container(None)).await,
+        identify(&annotation, &pod(""), &container(None)).await,
         Identified::Unknown(MISSING)
     );
     assert_eq!(
-        annotation
-            .identify(&pod(""), &container(Some("Not A Name")))
-            .await,
+        identify(&annotation, &pod(""), &container(Some("Not A Name"))).await,
         Identified::Unknown(MISSING)
     );
     assert_eq!(
-        annotation
-            .identify(&pod(""), &container(Some("reg.test/app:2")))
-            .await,
+        identify(&annotation, &pod(""), &container(Some("reg.test/app:2"))).await,
         Identified::Unknown(NOT_STORED)
     );
     assert_eq!(
-        annotation.identify(&pod(""), &container(Some(NAME))).await,
+        identify(&annotation, &pod(""), &container(Some(NAME))).await,
         Identified::Unknown(NO_SNAPSHOT),
         "the container has no snapshot"
     );
     std::fs::remove_dir_all(dir.path().join("var/lib/containerd")).unwrap();
     annotation.chains().clear();
     assert_eq!(
-        annotation.identify(&pod(""), &container(Some(NAME))).await,
+        identify(&annotation, &pod(""), &container(Some(NAME))).await,
         Identified::Unknown(NO_CHAIN),
         "the image's blobs are gone"
     );
@@ -289,7 +294,7 @@ async fn an_image_s_chain_id_is_read_once() {
     let containers = [container(Some(NAME)), container(Some("reg.test/app:2"))];
     for container in &containers {
         assert!(matches!(
-            annotation.identify(&pod(""), container).await,
+            identify(&annotation, &pod(""), container).await,
             Identified::Listed { .. }
         ));
     }
@@ -297,7 +302,7 @@ async fn an_image_s_chain_id_is_read_once() {
     for container in &containers {
         assert!(
             matches!(
-                annotation.identify(&pod(""), container).await,
+                identify(&annotation, &pod(""), container).await,
                 Identified::Listed { .. }
             ),
             "the chain ID of each target is kept"
@@ -314,7 +319,7 @@ async fn an_image_without_a_manifest_for_the_node_has_no_chain_id() {
     );
     annotation.host.arch = "riscv64".to_owned();
     assert_eq!(
-        annotation.identify(&pod(""), &container(Some(NAME))).await,
+        identify(&annotation, &pod(""), &container(Some(NAME))).await,
         Identified::Unknown(NO_CHAIN)
     );
 }
@@ -329,7 +334,7 @@ async fn a_single_platform_image_is_read_from_its_manifest() {
     let manifest = amd64_manifest(&image);
     annotation.store = [(NAME.to_owned(), manifest.clone())].into_iter().collect();
     assert_eq!(
-        annotation.identify(&pod(""), &container(Some(NAME))).await,
+        identify(&annotation, &pod(""), &container(Some(NAME))).await,
         Identified::Listed {
             digest: manifest,
             name: NAME
@@ -380,20 +385,20 @@ async fn the_snapshotter_is_the_image_service_s_or_the_default() {
     };
     annotation.configure();
     assert_eq!(
-        annotation.identify(&pod(""), &container).await,
+        identify(&annotation, &pod(""), &container).await,
         Identified::Mismatched,
         "no config"
     );
     std::fs::write(&config, images("native")).unwrap();
     annotation.configure();
     assert_eq!(
-        annotation.identify(&pod(""), &container).await,
+        identify(&annotation, &pod(""), &container).await,
         listed(&image)
     );
     std::fs::write(&config, images("")).unwrap();
     annotation.configure();
     assert_eq!(
-        annotation.identify(&pod(""), &container).await,
+        identify(&annotation, &pod(""), &container).await,
         Identified::Mismatched,
         "empty"
     );
@@ -402,14 +407,14 @@ async fn the_snapshotter_is_the_image_service_s_or_the_default() {
     std::fs::write(&config, "version = \n").unwrap();
     annotation.configure();
     assert_eq!(
-        annotation.identify(&pod(""), &container).await,
+        identify(&annotation, &pod(""), &container).await,
         listed(&image),
         "unreadable: containerd runs on the config it read"
     );
     std::fs::remove_file(&config).unwrap();
     annotation.configure();
     assert_eq!(
-        annotation.identify(&pod(""), &container).await,
+        identify(&annotation, &pod(""), &container).await,
         Identified::Mismatched,
         "removed"
     );
@@ -426,13 +431,13 @@ async fn a_runtime_handler_s_snapshotter_comes_before_the_image_service_s() {
     annotation.configure();
     let container = container(Some(NAME));
     assert_eq!(
-        annotation.identify(&pod("kata"), &container).await,
+        identify(&annotation, &pod("kata"), &container).await,
         listed(&image)
     );
     assert_eq!(fake.stats(), 1);
     for handler in ["runc", "", "unknown"] {
         assert_eq!(
-            annotation.identify(&pod(handler), &container).await,
+            identify(&annotation, &pod(handler), &container).await,
             Identified::Mismatched,
             "{handler:?}: the image service's"
         );
@@ -446,7 +451,7 @@ async fn a_runtime_handler_s_snapshotter_comes_before_the_image_service_s() {
         ..pod("")
     };
     assert_eq!(
-        annotation.identify(&untrusted, &container).await,
+        identify(&annotation, &untrusted, &container).await,
         Identified::Unknown(NO_SNAPSHOT),
         "an untrusted workload runs on the `untrusted` handler"
     );
@@ -460,7 +465,7 @@ async fn a_runtime_handler_s_snapshotter_comes_before_the_image_service_s() {
     .unwrap();
     annotation.configure();
     assert_eq!(
-        annotation.identify(&pod(""), &container).await,
+        identify(&annotation, &pod(""), &container).await,
         listed(&image),
         "no handler: the default one"
     );
@@ -478,11 +483,11 @@ async fn a_version_2_config_names_handlers_in_the_cri_plugin() {
     annotation.configure();
     let container = container(Some(NAME));
     assert_eq!(
-        annotation.identify(&pod("kata"), &container).await,
+        identify(&annotation, &pod("kata"), &container).await,
         listed(&image)
     );
     assert_eq!(
-        annotation.identify(&pod("runc"), &container).await,
+        identify(&annotation, &pod("runc"), &container).await,
         Identified::Mismatched
     );
 }
@@ -504,7 +509,7 @@ async fn the_store_follows_containerd_s_images() {
         () = annotation.follow() => panic!("following ends only when the agent stops"),
         identified = async {
             loop {
-                if let identified @ Identified::Listed { .. } = annotation.identify(&pod(""), &container).await {
+                if let identified @ Identified::Listed { .. } = identify(&annotation, &pod(""), &container).await {
                     break identified;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;

@@ -1,5 +1,6 @@
 //! NRI's runtime side, as much as a plugin needs to register: for tests that run where there is no runtime (D168).
 
+use std::collections::HashMap;
 use std::io;
 use std::pin::pin;
 use std::time::Duration;
@@ -8,10 +9,10 @@ use prost::Message as _;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 use zerocopy::IntoBytes as _;
 
-use crate::api::{ConfigureRequest, Empty, SynchronizeRequest};
+use crate::api::{self, ConfigureRequest, Empty, SynchronizeRequest};
 use crate::mux::{ConnId, Connections, Mux};
 use crate::ttrpc::{self, Call, PLUGIN_SERVICE, RUNTIME_SERVICE, code};
-use crate::{Answer, MAX_PAYLOAD, frame};
+use crate::{Answer, MAX_PAYLOAD, create, frame};
 
 /// What a runtime tells the plugin in `Configure`.
 #[derive(Clone, Debug)]
@@ -183,6 +184,39 @@ pub async fn answer<R: AsyncRead + Unpin>(trunk: &mut R, buf: &mut Vec<u8>) -> i
     }
 }
 
+/// Whether `read` holds the fields of `decoded` it reads: what prost decoded of the same `CreateContainerRequest`.
+#[must_use]
+pub fn agrees(read: &create::Request<'_>, decoded: &api::CreateContainerRequest) -> bool {
+    fn same(annotations: create::Annotations<'_>, decoded: &HashMap<String, String>) -> bool {
+        let read: HashMap<&str, &str> = annotations.iter().collect();
+        read.len() == decoded.len()
+            && decoded
+                .iter()
+                .all(|(key, value)| annotations.get(key) == Some(value.as_str()))
+    }
+    let pods = match (read.pod, &decoded.pod) {
+        (None, None) => true,
+        (Some(pod), Some(decoded)) => {
+            pod.name == decoded.name
+                && pod.namespace == decoded.namespace
+                && pod.runtime_handler == decoded.runtime_handler
+                && same(pod.annotations, &decoded.annotations)
+        }
+        _ => false,
+    };
+    let containers = match (read.container, &decoded.container) {
+        (None, None) => true,
+        (Some(container), Some(decoded)) => {
+            container.id == decoded.id
+                && container.name == decoded.name
+                && same(container.annotations, &decoded.annotations)
+                && container.image == create::Container::from(decoded).image
+        }
+        _ => false,
+    };
+    pods && containers
+}
+
 fn millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
@@ -207,14 +241,14 @@ mod tests {
 
         fn create_container(
             &self,
-            request: &CreateContainerRequest,
+            request: &create::Request<'_>,
             _: Instant,
         ) -> impl Future<Output = Answer> + Send {
             ready(self.overloaded(request))
         }
 
-        fn overloaded(&self, request: &CreateContainerRequest) -> Answer {
-            match request.container.as_ref() {
+        fn overloaded(&self, request: &create::Request<'_>) -> Answer {
+            match request.container {
                 Some(container) if container.name == "allowed" => Answer::Allow,
                 _ => Answer::Reject("not allowed".to_owned()),
             }

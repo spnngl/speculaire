@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use speculaire_nri::Answer;
-use speculaire_nri::api::{CreateContainerRequest, PodSandbox};
+use speculaire_nri::create::Request;
 use speculaire_oci::reference::Reference;
 use speculaire_runtime::identity::{Identified, Identity, MISSING, NodeIdentity};
 use speculaire_runtime::images::List;
@@ -282,7 +282,7 @@ impl Decider {
     /// `deadline` comes; audited.
     pub async fn decide(
         &self,
-        request: &CreateContainerRequest,
+        request: &Request<'_>,
         settings: &Settings,
         deadline: Instant,
     ) -> Decision {
@@ -292,7 +292,7 @@ impl Decider {
     }
 
     /// [`Decision::Overloaded`] on `request`, audited.
-    pub fn overloaded(&self, request: &CreateContainerRequest, settings: &Settings) -> Decision {
+    pub fn overloaded(&self, request: &Request<'_>, settings: &Settings) -> Decision {
         let decision = Decision::Overloaded;
         self.audit(request, &decision, None, settings);
         decision
@@ -301,16 +301,19 @@ impl Decider {
     /// The decision on `request`, and the image identity it read: none when the namespace is exempt.
     async fn read<'a>(
         &'a self,
-        request: &'a CreateContainerRequest,
+        request: &Request<'a>,
         settings: &Settings,
         deadline: Instant,
     ) -> (Decision, Option<Identified<'a>>) {
-        if let Some(pod) = &request.pod
-            && settings.namespaces.contains(&pod.namespace)
+        if let Some(pod) = request.pod
+            && settings
+                .namespaces
+                .iter()
+                .any(|namespace| namespace == pod.namespace)
         {
             return (Decision::Exempt(Exemption::Namespace), None);
         }
-        let Some(container) = &request.container else {
+        let Some(container) = request.container else {
             let identified = Identified::Unknown(MISSING);
             return (
                 self.verifier.decide(settings, &identified),
@@ -318,8 +321,7 @@ impl Decider {
             );
         };
         // NRI always sends the pod; a missing one is on the default runtime handler, as an empty one.
-        let unnamed = PodSandbox::default();
-        let pod = request.pod.as_ref().unwrap_or(&unnamed);
+        let pod = request.pod.unwrap_or_default();
         let until = (Instant::now() + settings.wait).min(deadline);
         let mut identified = None;
         let mut asked = false;
@@ -330,7 +332,7 @@ impl Decider {
             let mut listed = pin!(self.listed.notified());
             listed.as_mut().enable();
             let current = match identified.take() {
-                None | Some(Identified::Unlisted) => self.identity.identify(pod, container).await,
+                None | Some(Identified::Unlisted) => self.identity.identify(&pod, &container).await,
                 Some(known) => known,
             };
             let decision = self.verifier.decide(settings, &current);
@@ -354,7 +356,7 @@ impl Decider {
     /// are those of `docs/operations.md` § Audit events (D37, D173).
     fn audit(
         &self,
-        request: &CreateContainerRequest,
+        request: &Request<'_>,
         decision: &Decision,
         identified: Option<&Identified<'_>>,
         settings: &Settings,
@@ -363,17 +365,16 @@ impl Decider {
         if !tracing::enabled!(target: AUDIT_TARGET, Level::INFO) {
             return;
         }
-        let pod = request.pod.as_ref();
-        let container = request.container.as_ref();
+        let Request { pod, container } = request;
         let identity = identified.and_then(Identified::identity);
         let policies = identified.map(|identified| self.verifier.matched(identified));
         info!(
             target: AUDIT_TARGET,
             event = "gate",
-            namespace = pod.map_or("", |pod| pod.namespace.as_str()),
-            pod = pod.map_or("", |pod| pod.name.as_str()),
-            container = container.map_or("", |container| container.name.as_str()),
-            image_name = container.map(|container| self.identity.image_name(container, identified)).unwrap_or_default(),
+            namespace = pod.map_or("", |pod| pod.namespace),
+            pod = pod.map_or("", |pod| pod.name),
+            container = container.map_or("", |container| container.name),
+            image_name = container.map(|container| self.identity.image_name(&container, identified)).unwrap_or_default(),
             image_identity = identity.map(ToString::to_string).unwrap_or_default(),
             identity_path = self.identity.path(),
             matched_policies = policies.unwrap_or_default().join(", "),

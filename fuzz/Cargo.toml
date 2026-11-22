@@ -22,7 +22,7 @@ http = "1.5.0"
 libfuzzer-sys = "0.4.13"
 speculaire-agent = { path = "../crates/agent" }
 speculaire-mirror = { path = "../crates/mirror" }
-speculaire-nri = { path = "../crates/nri" }
+speculaire-nri = { path = "../crates/nri", features = ["testing"] }
 speculaire-oci = { path = "../crates/oci" }
 speculaire-pki = { path = "../crates/pki" }
 speculaire-reflect = { path = "../crates/reflect" }
@@ -206,6 +206,13 @@ bench = false
 [[bin]]
 name = "nri_request"
 path = "fuzz_targets/nri_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nri_create"
+path = "fuzz_targets/nri_create.rs"
 test = false
 doc = false
 bench = false

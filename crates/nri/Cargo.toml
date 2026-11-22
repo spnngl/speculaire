@@ -24,6 +24,8 @@ zerocopy = { workspace = true, features = ["derive"] }
 prost-build.workspace = true
 
 [dev-dependencies]
+# D189: the seeded requests the borrowed reader is compared with prost on.
+fastrand.workspace = true
 speculaire-oracle-harness.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = [

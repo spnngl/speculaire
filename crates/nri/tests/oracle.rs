@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use speculaire_nri::api::{Container, CreateContainerRequest, PodSandbox};
+use speculaire_nri::api::{Container, PodSandbox};
 use speculaire_nri::version::{self, InferError};
 use speculaire_nri::{
-    Answer, Configuration, End, Handler, MuxError, NriVersion, REGISTRATION_TIMEOUT, serve,
+    Answer, Configuration, End, Handler, MuxError, NriVersion, REGISTRATION_TIMEOUT, create, serve,
 };
 use speculaire_oracle_harness::Oracle;
 use speculaire_oracle_harness::nri::{
@@ -67,7 +67,7 @@ impl Handler for Recorder {
 
     fn create_container(
         &self,
-        request: &CreateContainerRequest,
+        request: &create::Request<'_>,
         deadline: Instant,
     ) -> impl Future<Output = Answer> + Send {
         self.deadlines
@@ -76,8 +76,7 @@ impl Handler for Recorder {
             .push(deadline - Instant::now());
         let name = request
             .container
-            .as_ref()
-            .map(|c| c.name.clone())
+            .map(|c| c.name.to_owned())
             .unwrap_or_default();
         async move {
             match name.as_str() {
@@ -87,7 +86,7 @@ impl Handler for Recorder {
         }
     }
 
-    fn overloaded(&self, _: &CreateContainerRequest) -> Answer {
+    fn overloaded(&self, _: &create::Request<'_>) -> Answer {
         Answer::Reject("overloaded".to_owned())
     }
 }

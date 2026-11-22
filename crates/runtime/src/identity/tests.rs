@@ -1,7 +1,8 @@
 //! Each path on requests made up for the cases a runtime does not record; `tests/identity.rs` has recorded ones.
 
 use futures_util::FutureExt as _;
-use speculaire_nri::api;
+use speculaire_nri::api::{self, Container};
+use speculaire_nri::create;
 use speculaire_nri::version::InferError;
 use speculaire_oci::platform::Host;
 
@@ -30,7 +31,7 @@ fn listed(id: &str, repo_tags: &[&str], repo_digests: &[&str]) -> List {
 
 fn identify<'a>(identity: &'a impl Identity, container: &'a Container) -> Identified<'a> {
     identity
-        .identify(&api::PodSandbox::default(), container)
+        .identify(&(&api::PodSandbox::default()).into(), &container.into())
         .now_or_never()
         .expect("the path reads the request alone")
 }
@@ -267,9 +268,14 @@ fn the_image_name_is_the_names_policies_match_and_else_containerd_s_annotation()
     container
         .annotations
         .insert(annotation::IMAGE_NAME.to_owned(), "busybox:1.37".to_owned());
+    let crio_container = container.clone();
+    let container = (&container).into();
     let (containerd, _dir) = containerd();
     assert_eq!(containerd.image_name(&container, None), "busybox:1.37");
-    assert_eq!(containerd.image_name(&Container::default(), None), "");
+    assert_eq!(
+        containerd.image_name(&create::Container::default(), None),
+        ""
+    );
     let unknown = Identified::Unknown(MISSING);
     assert_eq!(
         containerd.image_name(&container, Some(&unknown)),
@@ -283,7 +289,7 @@ fn the_image_name_is_the_names_policies_match_and_else_containerd_s_annotation()
 
     let crio = NodeIdentity::crio();
     crio.keep(&listed(ID, &["reg.test/one:1", "reg.test/two:2"], &[]));
-    let identified = identify(&crio, &container);
+    let identified = identify(&crio, &crio_container);
     assert_eq!(
         crio.image_name(&container, Some(&identified)),
         "reg.test/one, reg.test/two"

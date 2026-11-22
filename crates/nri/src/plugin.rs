@@ -16,10 +16,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Instant;
 
 use crate::api::{
-    ConfigureRequest, ConfigureResponse, Container, CreateContainerRequest,
-    CreateContainerResponse, Empty, PodSandbox, RegisterPluginRequest, SynchronizeRequest,
-    SynchronizeResponse,
+    ConfigureRequest, ConfigureResponse, Container, CreateContainerResponse, Empty, PodSandbox,
+    RegisterPluginRequest, SynchronizeRequest, SynchronizeResponse,
 };
+use crate::create;
 use crate::mux::{Connection, Connections, Mux, MuxError};
 use crate::ttrpc::{self, Call, CallError, Request, RequestError, Status, code};
 use crate::version::{self, InferError};
@@ -100,12 +100,12 @@ pub trait Handler: Sync {
     /// future is dropped and the runtime gets `DEADLINE_EXCEEDED`.
     fn create_container(
         &self,
-        request: &CreateContainerRequest,
+        request: &create::Request<'_>,
         deadline: Instant,
     ) -> impl Future<Output = Answer> + Send;
 
     /// The answer, given at once, to a CreateContainer request past [`MAX_IN_FLIGHT`] requests answered at once.
-    fn overloaded(&self, request: &CreateContainerRequest) -> Answer;
+    fn overloaded(&self, request: &create::Request<'_>) -> Answer;
 }
 
 /// Why a session ended.
@@ -286,17 +286,19 @@ async fn serve_requests<H: Handler>(plugin_service: Connection, handler: &H) -> 
                     (stream, Err(ttrpc::status(code::INVALID_ARGUMENT, format!("unmarshal request error: {source}"))))
                 }
                 Some(Ok(Request { stream, timeout, call })) => match call {
-                    Call::CreateContainer(request) if in_flight.len() >= MAX_IN_FLIGHT => {
-                        (stream, reply(handler.overloaded(&request)))
-                    }
-                    Call::CreateContainer(request) => {
-                        let deadline = Instant::now() + timeout.unwrap_or(session.request_timeout);
-                        in_flight.push(async move {
-                            let answer = tokio::time::timeout_at(deadline, handler.create_container(&request, deadline));
-                            (stream, answer.await.map_or_else(|_| Err(deadline_exceeded()), reply))
-                        });
-                        continue;
-                    }
+                    Call::CreateContainer(payload) => match create::Request::read(&payload) {
+                        Err(err) => (stream, Err(ttrpc::status(code::INVALID_ARGUMENT, format!("unmarshal request error: {err}")))),
+                        Ok(request) if in_flight.len() >= MAX_IN_FLIGHT => (stream, reply(handler.overloaded(&request))),
+                        Ok(_) => {
+                            let deadline = Instant::now() + timeout.unwrap_or(session.request_timeout);
+                            in_flight.push(async move {
+                                let request = create::Request::read(&payload).expect("the request read above");
+                                let answer = tokio::time::timeout_at(deadline, handler.create_container(&request, deadline));
+                                (stream, answer.await.map_or_else(|_| Err(deadline_exceeded()), reply))
+                            });
+                            continue;
+                        }
+                    },
                     Call::Configure(request) => (stream, Ok(session.configure(request, handler))),
                     Call::Synchronize(request) => (stream, Ok(session.synchronize(request, handler))),
                     Call::Shutdown => {
@@ -401,6 +403,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::api::CreateContainerRequest;
     use crate::ttrpc::proto::Response;
 
     const SECOND: Duration = Duration::from_secs(1);
@@ -426,7 +429,7 @@ mod tests {
 
         fn create_container(
             &self,
-            request: &CreateContainerRequest,
+            request: &create::Request<'_>,
             deadline: Instant,
         ) -> impl Future<Output = Answer> + Send {
             self.deadlines
@@ -435,8 +438,7 @@ mod tests {
                 .push(deadline - Instant::now());
             let name = request
                 .container
-                .as_ref()
-                .map(|c| c.name.clone())
+                .map(|c| c.name.to_owned())
                 .unwrap_or_default();
             async move {
                 match name.as_str() {
@@ -451,7 +453,7 @@ mod tests {
             }
         }
 
-        fn overloaded(&self, _: &CreateContainerRequest) -> Answer {
+        fn overloaded(&self, _: &create::Request<'_>) -> Answer {
             Answer::Reject("overloaded".to_owned())
         }
     }
@@ -772,9 +774,11 @@ mod tests {
     async fn a_request_that_does_not_decode_is_refused_and_the_session_goes_on() {
         let recorder = Arc::new(Recorder::default());
         let mut runtime = Runtime::registered(&recorder).await;
-        // Field 2 as a number, where ConfigureRequest has a string.
+        // Field 2 as a number, where ConfigureRequest has a string and CreateContainerRequest a message.
         let wrong = ConfigureResponse { events: 5 };
         let (code, _, _) = runtime.call("Configure", &wrong).await;
+        assert_eq!(code, code::INVALID_ARGUMENT);
+        let (code, _, _) = runtime.call("CreateContainer", &wrong).await;
         assert_eq!(code, code::INVALID_ARGUMENT);
         let (code, _, _) = runtime.call("CreateContainer", &create("nginx")).await;
         assert_eq!(code, code::OK);

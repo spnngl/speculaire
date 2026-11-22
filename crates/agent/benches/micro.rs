@@ -17,7 +17,7 @@ use speculaire_agent::{config, telemetry};
 use speculaire_fake_runtime::{Answers, Fake, Snapshot};
 use speculaire_mirror::listed::Listed;
 use speculaire_nri::api::{self, Container, CreateContainerRequest, PodSandbox};
-use speculaire_nri::{Answer, NriVersion, testing};
+use speculaire_nri::{Answer, NriVersion, create, testing};
 use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::containerd::Containerd;
@@ -259,7 +259,7 @@ impl Node {
     fn decide(&self) -> Decision {
         let deadline = Instant::now() + Duration::from_secs(1);
         self.runtime.block_on(self.decider.decide(
-            black_box(&self.request),
+            black_box(&create::Request::from(&self.request)),
             &self.settings,
             deadline,
         ))
