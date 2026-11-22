@@ -2601,6 +2601,7 @@ dependencies = [
 name = "speculaire-nri"
 version = "0.1.0"
 dependencies = [
+ "fastrand",
  "futures-util",
  "prost",
  "prost-build",

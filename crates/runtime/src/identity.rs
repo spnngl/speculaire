@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
 use speculaire_nri::NriVersion;
-use speculaire_nri::api::{Container, PodSandbox};
+use speculaire_nri::create::{Container, Pod};
 use speculaire_oci::reference::{Digest, Reference};
 use speculaire_oci::tagged::Tagged;
 
@@ -136,8 +136,8 @@ pub trait Identity: Send + Sync {
     /// The image identity of `container`, created in `pod`, and its names.
     fn identify<'a>(
         &'a self,
-        pod: &PodSandbox,
-        container: &'a Container,
+        pod: &Pod<'_>,
+        container: &Container<'a>,
     ) -> impl Future<Output = Identified<'a>> + Send;
 }
 
@@ -175,17 +175,17 @@ impl Nri {
         self.images.keep(list);
     }
 
-    fn read<'a>(&self, container: &'a Container) -> Identified<'a> {
-        let Some(image) = &container.image else {
+    fn read<'a>(&self, container: &Container<'a>) -> Identified<'a> {
+        let Some(image) = container.image else {
             return Identified::Unknown(MISSING);
         };
-        let digest = match Digest::parse(&image.digest) {
+        let digest = match Digest::parse(image.digest) {
             Ok(digest) if !image.name.is_empty() => digest,
             _ => return Identified::Unknown(MISSING),
         };
         let asked = container.annotations.get(annotation::IMAGE_NAME);
         let repository = asked.and_then(|asked| Reference::parse_normalized_named(asked).ok());
-        let listed = image_id(&image.config_digest).and_then(|id| self.images.get(&id));
+        let listed = image_id(image.config_digest).and_then(|id| self.images.get(&id));
         if let (Some(asked), Some(repository), Some(listed)) = (asked, &repository, &listed)
             && repositories(listed).any(|name| name == repository.name())
         {
@@ -205,7 +205,7 @@ impl Nri {
                 name: asked,
             };
         }
-        let first = Reference::parse_normalized_named(&image.name).ok();
+        let first = Reference::parse_normalized_named(image.name).ok();
         let mut names: Vec<String> = Vec::new();
         let all = repository.iter().chain(&first).map(Reference::name);
         for name in all.chain(listed.iter().flat_map(|listed| repositories(listed))) {
@@ -220,8 +220,8 @@ impl Nri {
 impl Identity for Nri {
     fn identify<'a>(
         &'a self,
-        _pod: &PodSandbox,
-        container: &'a Container,
+        _pod: &Pod<'_>,
+        container: &Container<'a>,
     ) -> impl Future<Output = Identified<'a>> + Send {
         ready(self.read(container))
     }
@@ -239,7 +239,7 @@ impl ImageId {
         self.images.keep(list);
     }
 
-    fn read(&self, container: &Container) -> Identified<'static> {
+    fn read(&self, container: &Container<'_>) -> Identified<'static> {
         let Some(id) = container.annotations.get(IMAGE_REF) else {
             return Identified::Unknown(MISSING);
         };
@@ -256,8 +256,8 @@ impl ImageId {
 impl Identity for ImageId {
     fn identify<'a>(
         &'a self,
-        _pod: &PodSandbox,
-        container: &'a Container,
+        _pod: &Pod<'_>,
+        container: &Container<'a>,
     ) -> impl Future<Output = Identified<'a>> + Send {
         ready(self.read(container))
     }
@@ -337,7 +337,11 @@ impl NodeIdentity {
     /// The image name of `container` for the `gate` audit event (D173, D179): the names policies and exemptions matched
     /// in `identified`, comma-separated; on containerd, its pod-spec string when `identified` has none.
     #[must_use]
-    pub fn image_name(&self, container: &Container, identified: Option<&Identified<'_>>) -> String {
+    pub fn image_name(
+        &self,
+        container: &Container<'_>,
+        identified: Option<&Identified<'_>>,
+    ) -> String {
         let names = identified
             .map(|identified| identified.names().collect::<Vec<_>>().join(", "))
             .unwrap_or_default();
@@ -345,8 +349,8 @@ impl NodeIdentity {
             Self::Containerd { .. } if names.is_empty() => container
                 .annotations
                 .get(annotation::IMAGE_NAME)
-                .cloned()
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .to_owned(),
             Self::Containerd { .. } | Self::ImageId(_) => names,
         }
     }
@@ -371,7 +375,7 @@ impl NodeIdentity {
 }
 
 impl Identity for NodeIdentity {
-    async fn identify<'a>(&'a self, pod: &PodSandbox, container: &'a Container) -> Identified<'a> {
+    async fn identify<'a>(&'a self, pod: &Pod<'_>, container: &Container<'a>) -> Identified<'a> {
         match self {
             Self::Containerd {
                 annotation,

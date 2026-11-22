@@ -8,7 +8,8 @@ use std::time::Duration;
 use divan::Bencher;
 use futures_util::TryStreamExt as _;
 use speculaire_fake_runtime::{Answers, Fake, Snapshot};
-use speculaire_nri::api::{Container, PodSandbox};
+use speculaire_nri::api::Container;
+use speculaire_nri::create::{self, Pod};
 use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::containerd::Containerd;
@@ -191,15 +192,14 @@ fn identity_check(bencher: Bencher<'_, '_>) {
         .into(),
         ..Container::default()
     };
+    let container = create::Container::from(&container);
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
     let following = Arc::clone(&annotation);
     runtime.spawn(async move { following.follow().await });
     // The store is read, and the chain ID kept, before the first sample.
     runtime.block_on(async {
         while !matches!(
-            annotation
-                .identify(&PodSandbox::default(), &container)
-                .await,
+            annotation.identify(&Pod::default(), &container).await,
             Identified::Listed { .. }
         ) {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -207,7 +207,7 @@ fn identity_check(bencher: Bencher<'_, '_>) {
     });
     bencher.bench_local(|| {
         let identified =
-            runtime.block_on(annotation.identify(&PodSandbox::default(), black_box(&container)));
+            runtime.block_on(annotation.identify(&Pod::default(), black_box(&container)));
         assert!(matches!(identified, Identified::Listed { .. }));
     });
 }

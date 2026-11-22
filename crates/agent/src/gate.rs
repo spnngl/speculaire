@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use speculaire_mirror::listed::Listed;
-use speculaire_nri::api::{Container, CreateContainerRequest, PodSandbox};
+use speculaire_nri::api::{Container, PodSandbox};
 use speculaire_nri::{
-    Answer, Configuration, End, Handler, NriVersion, REGISTRATION_TIMEOUT, serve,
+    Answer, Configuration, End, Handler, NriVersion, REGISTRATION_TIMEOUT, create, serve,
 };
 use speculaire_runtime::detect::Runtime;
 use speculaire_runtime::identity::NodeIdentity;
@@ -277,11 +277,7 @@ impl Handler for Plugin {
             .send_replace(Arc::new(Running::listed(pods, containers)));
     }
 
-    async fn create_container(
-        &self,
-        request: &CreateContainerRequest,
-        deadline: Instant,
-    ) -> Answer {
+    async fn create_container(&self, request: &create::Request<'_>, deadline: Instant) -> Answer {
         let started = Instant::now();
         let settings = self.decider.settings();
         let decision = self.decider.decide(request, &settings, deadline).await;
@@ -290,7 +286,7 @@ impl Handler for Plugin {
         answer(&decision, &settings)
     }
 
-    fn overloaded(&self, request: &CreateContainerRequest) -> Answer {
+    fn overloaded(&self, request: &create::Request<'_>) -> Answer {
         let settings = self.decider.settings();
         answer(&self.decider.overloaded(request, &settings), &settings)
     }

@@ -4,8 +4,7 @@
 //! name, and `crictl images -o json` on the node right after.
 
 use futures_util::FutureExt as _;
-use prost::Message as _;
-use speculaire_nri::api::{Container, CreateContainerRequest, PodSandbox};
+use speculaire_nri::create::{Container, Pod, Request};
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::cri::ListedImage;
 use speculaire_runtime::identity::{Identified, Identity, ImageId, Nri};
@@ -23,8 +22,8 @@ fn recorded(path: &str) -> Vec<u8> {
     std::fs::read(path).expect("a recording")
 }
 
-fn container(path: &str) -> Container {
-    let request = CreateContainerRequest::decode(recorded(path).as_slice()).expect("a request");
+fn container(request: &[u8]) -> Container<'_> {
+    let request = Request::read(request).expect("a request");
     request.container.expect("a container")
 }
 
@@ -52,9 +51,9 @@ fn list(path: &str) -> List {
     list
 }
 
-fn identify<'a>(identity: &'a impl Identity, container: &'a Container) -> Identified<'a> {
+fn identify<'a>(identity: &'a impl Identity, container: &Container<'a>) -> Identified<'a> {
     identity
-        .identify(&PodSandbox::default(), container)
+        .identify(&Pod::default(), container)
         .now_or_never()
         .expect("the path reads the request alone")
 }
@@ -79,7 +78,8 @@ fn nri_on_containerd_2_4_2_reads_the_index_the_image_was_listed_with_and_the_pod
         ("containerd-2.4.2/tag.pb", "busybox:1.37"),
         ("containerd-2.4.2/digest.pb", &format!("busybox@{ARM64}")),
     ] {
-        let container = container(path);
+        let request = recorded(path);
+        let container = container(&request);
         let identified = identify(&nri, &container);
         let want = Identified::Listed {
             digest: digest(INDEX),
@@ -99,7 +99,8 @@ fn image_id_on_cri_o_1_37_2_reads_every_manifest_and_name_of_the_image() {
     let image_id = ImageId::default();
     image_id.keep(&list("crio-1.37.2/images.json"));
     for path in ["crio-1.37.2/tag.pb", "crio-1.37.2/mirror.pb"] {
-        let container = container(path);
+        let request = recorded(path);
+        let container = container(&request);
         assert!(container.image.is_none(), "CRI-O fills no Container.image");
         let identified = identify(&image_id, &container);
         let Identified::Image(image) = &identified else {
@@ -118,7 +119,8 @@ fn image_id_on_cri_o_1_37_2_reads_every_manifest_and_name_of_the_image() {
 /// so the path is chosen by the runtime's name.
 #[test]
 fn nri_on_cri_o_1_37_2_reads_no_identity() {
-    let container = container("crio-1.37.2/tag.pb");
+    let request = recorded("crio-1.37.2/tag.pb");
+    let container = container(&request);
     let nri = Nri::default();
     assert!(matches!(identify(&nri, &container), Identified::Unknown(_)));
 }

@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zerocopy::big_endian::U32;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::api::{ConfigureRequest, CreateContainerRequest, Empty, SynchronizeRequest};
+use crate::api::{ConfigureRequest, Empty, SynchronizeRequest};
 
 #[expect(unreachable_pub, reason = "generated: prost makes every message `pub`")]
 pub(crate) mod proto {
@@ -70,8 +70,8 @@ pub enum Call {
     Configure(ConfigureRequest),
     /// One part of the pods and containers that exist.
     Synchronize(SynchronizeRequest),
-    /// A container is about to be created.
-    CreateContainer(Box<CreateContainerRequest>),
+    /// A container is about to be created: the `CreateContainerRequest`, left for [`crate::create::Request::read`].
+    CreateContainer(Vec<u8>),
     /// The runtime is shutting down.
     Shutdown,
     /// A method this crate does not implement.
@@ -142,15 +142,12 @@ fn decode_request(stream: u32, body: &[u8]) -> Result<Request, prost::DecodeErro
         payload,
         timeout_nano,
     } = proto::Request::decode(body)?;
-    let payload = payload.as_slice();
     let call = if service == PLUGIN_SERVICE {
         match method.as_str() {
-            "Configure" => Some(Call::Configure(ConfigureRequest::decode(payload)?)),
-            "Synchronize" => Some(Call::Synchronize(SynchronizeRequest::decode(payload)?)),
-            "CreateContainer" => Some(Call::CreateContainer(Box::new(
-                CreateContainerRequest::decode(payload)?,
-            ))),
-            "Shutdown" => Empty::decode(payload).map(|Empty {}| Some(Call::Shutdown))?,
+            "Configure" => Some(Call::Configure(ConfigureRequest::decode(&*payload)?)),
+            "Synchronize" => Some(Call::Synchronize(SynchronizeRequest::decode(&*payload)?)),
+            "CreateContainer" => Some(Call::CreateContainer(payload)),
+            "Shutdown" => Empty::decode(&*payload).map(|Empty {}| Some(Call::Shutdown))?,
             _ => None,
         }
     } else {
@@ -222,7 +219,7 @@ fn encode_message(
 }
 
 /// The message of a call of the plugin service's `method` on `stream`, whose request is the protobuf `payload`.
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn request_message(
     stream: u32,
     method: &str,
@@ -245,7 +242,7 @@ pub(crate) fn request_message(
 /// # Errors
 ///
 /// When the message is not a response.
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn response_status(message: &[u8]) -> Option<io::Result<Status>> {
     let (header, body) = Header::read_from_prefix(message).ok()?;
     let body = body.get(..usize::try_from(header.length.get()).ok()?)?;
@@ -348,6 +345,7 @@ pub(crate) fn status(code: i32, message: impl Into<String>) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{Container, CreateContainerRequest};
 
     #[tokio::test]
     async fn a_request_round_trips_and_other_messages_are_skipped() {
@@ -356,7 +354,13 @@ mod tests {
         respond(&mut wire, &mut buf, 7, Ok(Vec::new()))
             .await
             .unwrap();
-        let request = CreateContainerRequest::default();
+        let request = CreateContainerRequest {
+            pod: None,
+            container: Some(Container {
+                name: "app".to_owned(),
+                ..Container::default()
+            }),
+        };
         let timeout = Duration::from_millis(1500);
         write_request(
             &mut wire,
@@ -385,7 +389,7 @@ mod tests {
             Request {
                 stream: 3,
                 timeout: Some(timeout),
-                call: Call::CreateContainer(Box::default()),
+                call: Call::CreateContainer(request.encode_to_vec()),
             }
         );
         let other = read_request(&mut reader, &mut buf).await.unwrap();

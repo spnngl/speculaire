@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use speculaire_nri::api::{Container, PodSandbox};
+use speculaire_nri::create::{Container, Pod};
 use speculaire_oci::index::Index;
 use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::platform::Host;
@@ -100,7 +100,7 @@ impl Annotation {
 
     /// The identity of `container`, created in `pod`: its image's target digest and the name it was asked by, when its
     /// snapshot rests on the image's chain ID.
-    pub async fn identify<'a>(&self, pod: &PodSandbox, container: &'a Container) -> Identified<'a> {
+    pub async fn identify<'a>(&self, pod: &Pod<'_>, container: &Container<'a>) -> Identified<'a> {
         let Some(name) = container.annotations.get(IMAGE_NAME) else {
             return Identified::Unknown(MISSING);
         };
@@ -114,20 +114,16 @@ impl Annotation {
             return Identified::Unknown(NO_CHAIN);
         };
         // An untrusted workload names no handler or this one (v2.3.7 `internal/cri/config/config.go:731-748`).
-        let handler = if pod
-            .annotations
-            .get(UNTRUSTED_WORKLOAD)
-            .is_some_and(|value| value == "true")
-        {
+        let handler = if pod.annotations.get(UNTRUSTED_WORKLOAD) == Some("true") {
             UNTRUSTED_RUNTIME
         } else {
-            &pod.runtime_handler
+            pod.runtime_handler
         };
         let snapshotters = self.snapshotters.load_full();
         let snapshotter = snapshotters.of(handler);
         match self
             .containerd
-            .snapshot_base(snapshotter, &container.id, &chain)
+            .snapshot_base(snapshotter, container.id, &chain)
             .await
         {
             Ok(base) if Digest::parse(&base).is_ok_and(|base| base == chain) => {

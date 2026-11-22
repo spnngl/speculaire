@@ -57,6 +57,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("reflect_frame", reflect_frame),
     ("nri_mux", nri_mux),
     ("nri_request", nri_request),
+    ("nri_create", nri_create),
     ("containerd_event", containerd_event),
     ("referrers", referrers),
     ("link", link),
@@ -720,13 +721,12 @@ pub fn nri_mux(data: &[u8]) {
 /// flags, then a protobuf `Request` whose payload is that of the method it names (D166).
 ///
 /// Reading never panics or waits, and refuses a length over the maximum before reading its body. Each request read
-/// encodes back to what decodes to it again. Each container created reads as an image identity on both paths without
-/// waiting, the image ID's path with an image of that ID listed (D169).
+/// encodes back to what decodes to it again; each `CreateContainerRequest` is checked as [`nri_create`] checks one.
 ///
 /// # Panics
 ///
-/// When reading panics or waits, refuses a length within the maximum, a request read does not round-trip, or an
-/// identity read waits or differs from the request.
+/// When reading panics or waits, refuses a length within the maximum, a request read does not round-trip, or
+/// [`nri_create`] panics.
 pub fn nri_request(data: &[u8]) {
     use prost::Message;
     use speculaire_nri::ttrpc::{Call, MAX_MESSAGE, RequestError, read_request};
@@ -742,12 +742,7 @@ pub fn nri_request(data: &[u8]) {
             Ok(request) => match request.call {
                 Call::Configure(request) => round_trips(&request),
                 Call::Synchronize(request) => round_trips(&request),
-                Call::CreateContainer(request) => {
-                    round_trips(&*request);
-                    if let Some(container) = &request.container {
-                        identify(&request.pod.clone().unwrap_or_default(), container);
-                    }
-                }
+                Call::CreateContainer(payload) => nri_create(&payload),
                 Call::Shutdown | Call::Other { .. } => {}
             },
             Err(RequestError::Oversize { length }) => {
@@ -760,19 +755,53 @@ pub fn nri_request(data: &[u8]) {
     }
 }
 
+/// A `CreateContainerRequest` read in place, as the gate reads it (D189).
+///
+/// Reading never panics. It reads what prost decodes, and refuses no request prost decodes but one with a group, which
+/// proto3 never writes. Each container read reads as an image identity on both paths without waiting, the image ID's
+/// path with an image of that ID listed (D169).
+///
+/// # Panics
+///
+/// When reading panics, differs from prost's, or refuses a request prost decodes for another reason than a group; or
+/// an identity read waits or differs from the request.
+pub fn nri_create(data: &[u8]) {
+    use prost::Message as _;
+    use speculaire_nri::api::CreateContainerRequest;
+    use speculaire_nri::create::{Error, Request};
+    use speculaire_nri::testing::agrees;
+
+    let read = Request::read(data);
+    match (&read, CreateContainerRequest::decode(data)) {
+        (Ok(read), Ok(decoded)) => assert!(agrees(read, &decoded), "{read:?} != {decoded:?}"),
+        (Err(err), Ok(_)) => assert!(matches!(err, Error::Unread { wire_type: 3, .. }), "{err}"),
+        (Ok(_) | Err(_), Err(_)) => {}
+    }
+    if let Ok(Request {
+        pod,
+        container: Some(container),
+    }) = read
+    {
+        identify(&pod.unwrap_or_default(), &container);
+    }
+}
+
 /// Reads `container`'s image identity on both paths: a digest read is the request's, a name confirmed is the one the
 /// pod asked for, which a list naming the image by it confirms, and an image ID listed reads as its image.
-fn identify(pod: &speculaire_nri::api::PodSandbox, container: &speculaire_nri::api::Container) {
+fn identify(
+    pod: &speculaire_nri::create::Pod<'_>,
+    container: &speculaire_nri::create::Container<'_>,
+) {
     use speculaire_runtime::cri::ListedImage;
     use speculaire_runtime::identity::annotation::IMAGE_NAME;
     use speculaire_runtime::identity::{IMAGE_REF, Identified, Identity, ImageId, Nri};
     use speculaire_runtime::images::{Image, List, Update};
 
     let asked = container.annotations.get(IMAGE_NAME);
-    let named = container.image.as_ref().and_then(|image| {
+    let named = container.image.and_then(|image| {
         Image::from_listed(&ListedImage {
-            id: image.config_digest.clone(),
-            repo_tags: asked.into_iter().cloned().collect(),
+            id: image.config_digest.to_owned(),
+            repo_tags: asked.into_iter().map(str::to_owned).collect(),
             repo_digests: Vec::new(),
         })
     });
@@ -782,18 +811,12 @@ fn identify(pod: &speculaire_nri::api::PodSandbox, container: &speculaire_nri::a
     nri.keep(&list);
     match ready(nri.identify(pod, container)) {
         Identified::Listed { digest, name } => {
-            let image = container
-                .image
-                .as_ref()
-                .expect("a listed identity has an image");
+            let image = container.image.expect("a listed identity has an image");
             assert_eq!(digest.to_string(), image.digest);
-            assert_eq!(Some(name), asked.map(String::as_str));
+            assert_eq!(Some(name), asked);
         }
         Identified::Unconfirmed { digest, .. } => {
-            let image = container
-                .image
-                .as_ref()
-                .expect("a listed identity has an image");
+            let image = container.image.expect("a listed identity has an image");
             assert_eq!(digest.to_string(), image.digest);
         }
         identified => assert!(
@@ -803,7 +826,7 @@ fn identify(pod: &speculaire_nri::api::PodSandbox, container: &speculaire_nri::a
     }
     let listed = container.annotations.get(IMAGE_REF).and_then(|id| {
         Image::from_listed(&ListedImage {
-            id: id.clone(),
+            id: id.to_owned(),
             repo_tags: Vec::new(),
             repo_digests: Vec::new(),
         })

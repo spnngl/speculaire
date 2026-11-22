@@ -102,7 +102,7 @@ impl Decider {
                 if seen.identified.as_ref().is_none_or(is_early) {
                     let identified = self
                         .identity
-                        .identify(&running.pod, &running.container)
+                        .identify(&(&running.pod).into(), &(&running.container).into())
                         .await;
                     if identified.identity().is_some() {
                         self.verifier.ask(&identified, Asking::Synchronize);
@@ -154,7 +154,7 @@ impl Decider {
                 container = running.container.name,
                 image = self
                     .identity
-                    .image_name(&running.container, Some(identified)),
+                    .image_name(&(&running.container).into(), Some(identified)),
                 reason,
                 "a container running since before the gate registered has a verdict that does not allow it: the gate \
                  leaves it running, and decides its next start (D175)"
