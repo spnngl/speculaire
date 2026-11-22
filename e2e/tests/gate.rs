@@ -1141,16 +1141,14 @@ fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refuse
         "containers created while the agent stops, in {stop:?}"
     ));
 
-    // The runtime requires the plugin: without the agent, nothing starts (D64).
+    // The runtime requires the plugin: without the agent, no new pod starts (D64).
     create(&worker, "default", "speculaire-e2e-stopped", &signed);
-    let message = rejected(
-        &worker,
-        "default",
-        "speculaire-e2e-stopped",
-        r#"required plugin "speculaire" not present"#,
-    );
+    let message = rejected(&worker, "default", "speculaire-e2e-stopped", MISSING);
     worker.cluster.start_agent(&worker.node).unwrap();
     lap(&format!("agent stopped: {message}"));
+
+    after_a_stop_the_first_container_in_a_running_pod_passes(&worker);
+    lap("the first container in a running pod after a stop");
 
     cold(&worker, &runnable);
     lap("cold node");
@@ -1295,6 +1293,61 @@ fn mismatch(worker: &Worker, a: &str, b: &str) {
     ));
     assert!(refused.contains(MISMATCH), "{refused}");
     assert!(remove(worker, id) && remove(worker, b));
+}
+
+/// The validator's message for a container created while the agent is not registered.
+const MISSING: &str = r#"required plugin "speculaire" not present"#;
+
+/// Stops the agent and creates two containers, then starts it. NRI up to v0.12.4 keeps a plugin whose connection closed
+/// in its list until the end of the next request, adds it to that request's validation before calling it, and drops it
+/// without an error when the call fails: the default validator counts it present once (`docs/TODECIDE.md`, the entry on
+/// NRI's required-plugin gap). Every runtime pinned here ships such an NRI. Any request clears the closed plugin, even
+/// a new pod's `RunPodSandbox`: what gets through is a container created in a pod that already runs, as the kubelet's
+/// retry of a rejected container is.
+fn after_a_stop_the_first_container_in_a_running_pod_passes(worker: &Worker) {
+    let runtime = worker.cluster.runtime();
+    // A request of the kubelet's between the stop and the first creation clears the plugin too: try thrice.
+    let first = (0..3)
+        .map(|_| stopped_creations(worker))
+        .find(|first| first.len() == 64 && first.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert!(
+        first.is_some(),
+        "{runtime:?} now rejects the first container created after the agent stops: its NRI drops a closed plugin \
+         before the validator counts it (containerd/nri#338, v0.12.5). Mark the gap closed for it in docs/TODECIDE.md \
+         (the entry on NRI's required-plugin gap), docs/operations.md § Break glass and docs/security.md, and assert \
+         the rejection here."
+    );
+}
+
+/// Stops the agent, creates two containers and starts it. Asserts the second is rejected for the missing plugin, and
+/// returns what creating the first printed: its ID, or the error.
+fn stopped_creations(worker: &Worker) -> String {
+    const GAP: &str = "speculaire-e2e-gap";
+    // One script, so that no other request reaches NRI between the stop and the creations. In kube-proxy's pod, which
+    // runs; of the pause image, which the node holds, in a PID namespace of its own, as kube-proxy's pod has none.
+    let created = worker.sh(&format!(
+        r#"pod=$(crictl pods --namespace kube-system --name kube-proxy --state ready -q | head -1)
+           image=$(crictl images -o json | grep -o '"registry.k8s.io/pause:[^"]*"' | head -1)
+           printf '{{"metadata":{{"name":"{GAP}","namespace":"default","uid":"{GAP}"}}}}' >/tmp/{GAP}-pod.json
+           systemctl stop speculaire
+           for i in 1 2; do
+               printf '{{"metadata":{{"name":"{GAP}-%s"}},"image":{{"image":%s}},"linux":{{"security_context":{{"namespace_options":{{"pid":1}}}}}}}}' \
+                   "$i" "$image" >/tmp/{GAP}.json
+               crictl create "$pod" /tmp/{GAP}.json /tmp/{GAP}-pod.json 2>&1 | tail -1
+           done
+           crictl ps -a -q --name '^{GAP}-' | xargs -r crictl rm >/dev/null; rm -f /tmp/{GAP}*.json"#
+    ));
+    worker.cluster.start_agent(&worker.node).unwrap();
+    let [first, second] = created.lines().collect::<Vec<_>>()[..] else {
+        panic!("two creations: {created}")
+    };
+    // crictl escapes the quotes of the error.
+    assert!(
+        second.replace('\\', "").contains(MISSING),
+        "the second creation: {second}"
+    );
+    eprintln!("the first creation after a stop: {first}");
+    first.to_owned()
 }
 
 /// The agent's warnings in the worker's journal whose field `F_POD` is `pod`.
