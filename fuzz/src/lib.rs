@@ -739,20 +739,46 @@ pub fn nri_request(data: &[u8]) {
     }
 }
 
-/// Reads `container`'s image identity on both paths: a name and digest read are the request's, and an image ID listed
-/// reads as its image.
+/// Reads `container`'s image identity on both paths: a digest read is the request's, a name confirmed is the one the
+/// pod asked for, which a list naming the image by it confirms, and an image ID listed reads as its image.
 fn identify(pod: &speculaire_nri::api::PodSandbox, container: &speculaire_nri::api::Container) {
     use speculaire_runtime::cri::ListedImage;
+    use speculaire_runtime::identity::annotation::IMAGE_NAME;
     use speculaire_runtime::identity::{IMAGE_REF, Identified, Identity, ImageId, Nri};
     use speculaire_runtime::images::{Image, List, Update};
 
-    if let Identified::Listed { digest, name } = ready(Nri.identify(pod, container)) {
-        let image = container
-            .image
-            .as_ref()
-            .expect("a listed identity has an image");
-        assert_eq!(digest.to_string(), image.digest);
-        assert_eq!(name, image.name);
+    let asked = container.annotations.get(IMAGE_NAME);
+    let named = container.image.as_ref().and_then(|image| {
+        Image::from_listed(&ListedImage {
+            id: image.config_digest.clone(),
+            repo_tags: asked.into_iter().cloned().collect(),
+            repo_digests: Vec::new(),
+        })
+    });
+    let mut list = List::default();
+    list.apply(Update::Listing(named.into_iter().collect()));
+    let nri = Nri::default();
+    nri.keep(&list);
+    match ready(nri.identify(pod, container)) {
+        Identified::Listed { digest, name } => {
+            let image = container
+                .image
+                .as_ref()
+                .expect("a listed identity has an image");
+            assert_eq!(digest.to_string(), image.digest);
+            assert_eq!(Some(name), asked.map(String::as_str));
+        }
+        Identified::Unconfirmed { digest, .. } => {
+            let image = container
+                .image
+                .as_ref()
+                .expect("a listed identity has an image");
+            assert_eq!(digest.to_string(), image.digest);
+        }
+        identified => assert!(
+            matches!(identified, Identified::Unknown(_)),
+            "{identified:?}"
+        ),
     }
     let listed = container.annotations.get(IMAGE_REF).and_then(|id| {
         Image::from_listed(&ListedImage {

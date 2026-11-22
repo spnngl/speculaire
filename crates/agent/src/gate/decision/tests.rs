@@ -2,11 +2,17 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
-use speculaire_nri::api::{Container, PodSandbox};
+use speculaire_nri::api::{self, Container, PodSandbox};
+use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
-use speculaire_runtime::identity::annotation::{NO_CHAIN, NO_SNAPSHOT, NOT_STORED};
+use speculaire_oci::tagged::Tagged;
+use speculaire_runtime::containerd::Containerd;
+use speculaire_runtime::identity::annotation::{
+    Annotation, IMAGE_NAME, NO_CHAIN, NO_SNAPSHOT, NOT_STORED,
+};
 use speculaire_runtime::identity::{IMAGE_REF, MISMATCH, NOT_CONFIG};
 use speculaire_runtime::images::{Image, RepoDigest, Update};
+use speculaire_runtime::paths::Paths;
 use speculaire_verify::cache::{self, Current};
 use speculaire_verify::{Absent, Key, MatchHash, Signatures};
 
@@ -407,6 +413,213 @@ async fn an_image_no_policy_matches_is_unmatched() {
         decider.decide(&request("default"), &settings, far()).await,
         Decision::Unmatched
     );
+}
+
+/// One image under two repositories, as the e2e fixtures `e2e/signed:1` and `e2e/unsigned:1` are: containerd sorts its
+/// references, so `Container.image.name` is always the first, `LAX`'s, whichever the pod asked for (D179).
+const LAX: &str = "reg.test/lax";
+const STRICT: &str = "reg.test/strict";
+
+/// The policies over `images`, one each, named after the repository's last segment, as `policy()` is over `NAME`.
+fn policies_over(images: &[&str]) -> String {
+    images
+        .iter()
+        .map(|image| {
+            let name = image.rsplit('/').next().unwrap_or(image);
+            policy()
+                .replace("name: app", &format!("name: {name}"))
+                .replace(NAME, image)
+        })
+        .collect::<Vec<_>>()
+        .join("---\n")
+}
+
+/// Keeps `verdict` for the test manifest under the policies over `image`.
+fn keep_under(verifier: &Verifier, image: &str, verdict: Verdict) {
+    let policies = verifier.policies.borrow();
+    let reference = Reference::parse_normalized_named(image).expect("a name");
+    let key = Key {
+        image: &digest(0xa),
+        policies: MatchHash::of(policies.matching(&reference)),
+        root: None,
+    };
+    verifier.verdicts.keep(key, verdict);
+}
+
+/// The runtime's list: the test image under `LAX:1` and `STRICT:1`, pulled by the manifest of byte 0xa.
+fn both() -> List {
+    let image = Image {
+        id: Digest::parse(&format!("sha256:{ID}")).expect("a digest"),
+        repo_digests: [LAX, STRICT]
+            .map(|repository| RepoDigest {
+                repository: repository.to_owned(),
+                digest: digest(0xa),
+            })
+            .to_vec(),
+        tags: [LAX, STRICT]
+            .map(|repository| Tagged::parse(&format!("{repository}:1")).expect("a tag"))
+            .to_vec(),
+    };
+    let mut list = List::default();
+    list.apply(Update::Listing(vec![image]));
+    list
+}
+
+/// A decider over `verifier` and `settings`, on containerd 2.4's path or CRI-O's, whose list is `list`.
+fn on(
+    crio: bool,
+    verifier: Verifier,
+    settings: Settings,
+    list: &List,
+) -> (Decider, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let identity = if crio {
+        NodeIdentity::crio()
+    } else {
+        let containerd = Containerd::new(
+            Paths::under(dir.path()),
+            dir.path().join("containerd.sock"),
+            None,
+        );
+        NodeIdentity::containerd(Annotation::new(containerd, Host::current()))
+    };
+    let decider = Decider::new(
+        Arc::new(identity),
+        verifier,
+        watch::channel(Arc::new(settings)).1,
+    );
+    decider.keep(list);
+    (decider, dir)
+}
+
+/// A `CreateContainer` of the test image by a pod that asked for `asked`, as each runtime sends it: containerd 2.4 names
+/// `LAX:1` in `Container.image` and `asked` in its annotation, CRI-O the image ID alone.
+fn asking(asked: &str) -> CreateContainerRequest {
+    let mut request = request("default");
+    let container = request.container.as_mut().expect("a container");
+    container
+        .annotations
+        .insert(IMAGE_NAME.to_owned(), asked.to_owned());
+    container.image = Some(api::Image {
+        name: format!("{LAX}:1"),
+        digest: digest(0xa).to_string(),
+        config_digest: format!("sha256:{ID}"),
+    });
+    request
+}
+
+fn no_signature() -> Verdict {
+    Verdict::Rejected {
+        reason: "no signature".into(),
+    }
+}
+
+/// Whatever other name the runtime has for the image, a pod that asked for the strict name gets the strict policy:
+/// not unmatched (a), not the lax policy (b), not exempt (c); on CRI-O, which gives no requested name, every name must
+/// pass and be exempt (D179).
+#[tokio::test]
+async fn the_name_the_pod_asked_for_chooses_the_policies_and_never_another_name_of_its_image() {
+    let mut allowed = Vec::new();
+    for crio in [false, true] {
+        let path = if crio { "image_id" } else { "nri" };
+        let cases = [
+            // (a) The other name matches no policy, and unmatched images are allowed.
+            (
+                "a",
+                answer(crio, &both(), STRICT, &[STRICT], ALLOW_UNMATCHED).await,
+            ),
+            // (b) The other name matches a lax policy, which the image passes.
+            ("b", answer(crio, &both(), STRICT, &[STRICT, LAX], "").await),
+            // (c) The other name is exempt.
+            (
+                "c",
+                answer(crio, &both(), STRICT, &[STRICT], EXEMPT_LAX).await,
+            ),
+        ];
+        for (case, answer) in cases {
+            if answer != rejected() {
+                allowed.push(format!("({case}) on {path}: {answer:?}"));
+            }
+        }
+    }
+    assert!(allowed.is_empty(), "{allowed:#?}");
+}
+
+/// On containerd the lax name the pod asked for is the one matched, once the list names the image by it; until then,
+/// and on CRI-O, every name is, so the strictest policy decides and an exemption must hold for each (D179).
+#[tokio::test]
+async fn a_requested_name_the_list_does_not_name_the_image_by_falls_back_to_every_name() {
+    let none = List::default();
+    let exempt_both = format!("[gate.exempt]\nimages = [\"{LAX}\", \"{STRICT}\"]\n");
+    let both_policies: &[&str] = &[STRICT, LAX];
+    let cases = [
+        (false, &both(), LAX, both_policies, "", Answer::Allow),
+        (
+            false,
+            &both(),
+            LAX,
+            &[STRICT][..],
+            ALLOW_UNMATCHED,
+            Answer::Allow,
+        ),
+        (
+            false,
+            &both(),
+            LAX,
+            &[STRICT][..],
+            EXEMPT_LAX,
+            Answer::Allow,
+        ),
+        (
+            false,
+            &none,
+            STRICT,
+            &[STRICT][..],
+            ALLOW_UNMATCHED,
+            rejected(),
+        ),
+        (false, &none, STRICT, both_policies, "", rejected()),
+        (true, &both(), LAX, both_policies, "", rejected()),
+        (
+            true,
+            &both(),
+            LAX,
+            &[STRICT][..],
+            &exempt_both,
+            Answer::Allow,
+        ),
+    ];
+    for (crio, list, asked, over, text, want) in cases {
+        let got = answer(crio, list, asked, over, text).await;
+        assert_eq!(
+            got,
+            want,
+            "crio {crio}, {} listed, {asked} under {over:?}, {text:?}",
+            list.images().count()
+        );
+    }
+}
+
+const ALLOW_UNMATCHED: &str = "unmatched = \"allow\"\n";
+const EXEMPT_LAX: &str = "[gate.exempt]\nimages = [\"reg.test/lax\"]\n";
+
+fn rejected() -> Answer {
+    Answer::Reject("rejected: no signature".to_owned())
+}
+
+/// The answer to a pod that asked for `asked`, on CRI-O or containerd 2.4 whose list is `list`, under the policies over
+/// `over` and the gate settings `text`: `STRICT`'s policy rejects the image, `LAX`'s allows it.
+async fn answer(crio: bool, list: &List, asked: &str, over: &[&str], text: &str) -> Answer {
+    let (verifier, _) = verifier(&policies_over(over));
+    keep_under(&verifier, STRICT, no_signature());
+    keep_under(&verifier, LAX, Verdict::Allow);
+    let settings = settings(&format!("mode = \"enforce\"\n{text}"));
+    let (decider, _dir) = on(crio, verifier, settings.clone(), list);
+    let request = asking(&format!("{asked}:1"));
+    decider
+        .decide(&request, &settings, far())
+        .await
+        .answer(&settings)
 }
 
 #[tokio::test]

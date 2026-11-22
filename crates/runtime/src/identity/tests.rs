@@ -42,28 +42,103 @@ fn annotated(image_ref: &str) -> Container {
     }
 }
 
-#[test]
-fn nri_reads_the_image_digest_and_name() {
-    let container = Container {
+/// A container of the image of `ID`, listed with digest 1, which containerd names `name` and the pod `asked` for.
+fn nri_container(name: &str, asked: Option<&str>) -> Container {
+    Container {
+        annotations: asked
+            .map(|asked| (annotation::IMAGE_NAME.to_owned(), asked.to_owned()))
+            .into_iter()
+            .collect(),
         image: Some(api::Image {
-            name: "docker.io/library/busybox:1.37".to_owned(),
+            name: name.to_owned(),
             digest: digest(1).to_string(),
-            config_digest: digest(2).to_string(),
+            config_digest: format!("sha256:{ID}"),
         }),
         ..Container::default()
-    };
-    let identified = identify(&Nri, &container);
-    let want = Identified::Listed {
+    }
+}
+
+fn unconfirmed(names: &[&str]) -> Identified<'static> {
+    Identified::Unconfirmed {
         digest: digest(1),
-        name: "docker.io/library/busybox:1.37",
-    };
-    assert_eq!(identified, want);
+        names: names.iter().map(|&name| name.to_owned()).collect(),
+    }
+}
+
+#[test]
+fn nri_reads_the_image_digest_and_the_name_the_pod_asked_for_once_the_list_names_the_image_by_it() {
+    let nri = Nri::default();
+    let two = nri_container("reg.test/one:1", Some("reg.test/two:2"));
+    let identified = identify(&nri, &two);
+    assert_eq!(
+        identified,
+        unconfirmed(&["reg.test/two", "reg.test/one"]),
+        "unlisted: every name"
+    );
     assert_eq!(identified.identity(), Some(&digest(1)));
     assert_eq!(identified.digests().collect::<Vec<_>>(), [&digest(1)]);
     assert_eq!(
         identified.names().collect::<Vec<_>>(),
-        ["docker.io/library/busybox:1.37"]
+        ["reg.test/two", "reg.test/one"]
     );
+
+    let by_digest = format!("reg.test/two@{}", digest(1));
+    nri.keep(&listed(
+        ID,
+        &[
+            "reg.test/one:1",
+            "reg.test/two:2",
+            "docker.io/library/busybox:1.37",
+        ],
+        &[&by_digest],
+    ));
+    let identified = identify(&nri, &two);
+    let want = Identified::Listed {
+        digest: digest(1),
+        name: "reg.test/two:2",
+    };
+    assert_eq!(identified, want);
+    assert_eq!(identified.names().collect::<Vec<_>>(), ["reg.test/two:2"]);
+    for asked in ["busybox:1.37", by_digest.as_str()] {
+        let container = nri_container("reg.test/one:1", Some(asked));
+        let want = Identified::Listed {
+            digest: digest(1),
+            name: asked,
+        };
+        assert_eq!(identify(&nri, &container), want, "{asked}");
+    }
+
+    let every = ["reg.test/one", "reg.test/two", "docker.io/library/busybox"];
+    let three = [&["reg.test/three"][..], &every].concat();
+    for (asked, names) in [
+        (Some("reg.test/three:3"), &three[..]),
+        (Some("not a name"), &every[..]),
+        (None, &every[..]),
+    ] {
+        let container = nri_container("reg.test/one:1", asked);
+        assert_eq!(identify(&nri, &container), unconfirmed(names), "{asked:?}");
+    }
+}
+
+/// containerd's digest is its first name's manifest: the pod's repository has its own, which stands for the image.
+#[test]
+fn nri_takes_the_manifest_listed_for_the_repository_the_pod_asked_for() {
+    let nri = Nri::default();
+    let (one, two) = (
+        format!("reg.test/one@{}", digest(1)),
+        format!("reg.test/two@{}", digest(3)),
+    );
+    nri.keep(&listed(
+        ID,
+        &["reg.test/one:1", "reg.test/two:2"],
+        &[&one, &two],
+    ));
+    let container = nri_container("reg.test/one:1", Some("reg.test/two:2"));
+    let want = Identified::Listed {
+        digest: digest(3),
+        name: "reg.test/two:2",
+    };
+    assert_eq!(identify(&nri, &container), want);
 }
 
 #[test]
@@ -83,7 +158,8 @@ fn nri_without_an_image_name_or_digest_reads_no_identity() {
             image: image.clone(),
             ..Container::default()
         };
-        let identified = identify(&Nri, &container);
+        let nri = Nri::default();
+        let identified = identify(&nri, &container);
         assert_eq!(identified, Identified::Unknown(MISSING), "{image:?}");
         assert_eq!(identified.identity(), None);
         assert_eq!(identified.digests().count(), 0);
@@ -165,7 +241,7 @@ fn containerd() -> (NodeIdentity, tempfile::TempDir) {
 }
 
 #[test]
-fn each_runtime_has_its_path_and_cri_o_alone_keeps_the_list() {
+fn each_runtime_has_its_path() {
     let list = listed(ID, &[], &[&format!("reg.test/one@{}", digest(0xa))]);
     let (nri, _dir) = containerd();
     nri.keep(&list);
@@ -186,7 +262,7 @@ fn each_runtime_has_its_path_and_cri_o_alone_keeps_the_list() {
 }
 
 #[test]
-fn the_image_name_is_containerd_s_annotation_and_on_cri_o_the_names_policies_match() {
+fn the_image_name_is_the_names_policies_match_and_else_containerd_s_annotation() {
     let mut container = annotated(ID);
     container
         .annotations
@@ -194,6 +270,16 @@ fn the_image_name_is_containerd_s_annotation_and_on_cri_o_the_names_policies_mat
     let (containerd, _dir) = containerd();
     assert_eq!(containerd.image_name(&container, None), "busybox:1.37");
     assert_eq!(containerd.image_name(&Container::default(), None), "");
+    let unknown = Identified::Unknown(MISSING);
+    assert_eq!(
+        containerd.image_name(&container, Some(&unknown)),
+        "busybox:1.37"
+    );
+    let every = unconfirmed(&["docker.io/library/busybox", "reg.test/one"]);
+    assert_eq!(
+        containerd.image_name(&container, Some(&every)),
+        "docker.io/library/busybox, reg.test/one"
+    );
 
     let crio = NodeIdentity::crio();
     crio.keep(&listed(ID, &["reg.test/one:1", "reg.test/two:2"], &[]));
@@ -242,10 +328,7 @@ fn containerd_reads_the_annotation_below_nri_v0_12_2_or_an_unknown_version() {
     identity.configure(&NriVersion::Announced("v0.12.3".to_owned()));
     assert_eq!(
         identify(&identity, &container),
-        Identified::Listed {
-            digest: digest(1),
-            name: "docker.io/library/busybox:1.37",
-        },
+        unconfirmed(&["docker.io/library/busybox"]),
         "the nri path reads `Container.image` again"
     );
 }

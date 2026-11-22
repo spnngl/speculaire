@@ -542,7 +542,7 @@ fn the_containers_synchronize_lists_are_verified_and_the_one_no_policy_allows_is
         r#"namespace="shop""#,
         r#"pod="web""#,
         r#"container="unsigned""#,
-        r#"image="reg.test/unsigned:1""#,
+        r#"image="reg.test/unsigned""#,
         r#"reason="rejected: no signature""#,
     ] {
         assert!(
