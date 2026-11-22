@@ -43,7 +43,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - The user set the 500 µs and 256 MiB figures and accepted the others.
 - **Revisit when:** a target fails. Then revisit D2.
 
-## D51: Every member picks the same prewarm seeds (amends D2)
+## D51: Every member picks the same prewarm seeds (amends D2; amended by D181)
 
 - **Decision:**
   - For each image of `prewarm.images`, every member picks the same seeds: the `prewarm.seeds` agents (default 2, live) with the highest rendezvous hash of (image reference, node identity), among the agents streaming to it.
@@ -181,3 +181,17 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - A reflector that refuses every new stream while it stops still gets D33''s backoff, so the drop cannot spin.
 - **Measured:** the relay suite, which restarts the worker''s agent several times a test, 4 runs each on a local CRI-O 1.36 cluster. Before: the control plane''s retries towards the worker reached 58 s, its stream was up 4 to 38 % of each run, and the longest stretch without one was 19 to 66 s. After: retries stayed within 5.3 s except while that reflector was down for 21 s or more, the stream was up 34 to 60 %, and the longest stretch without one was 5 to 41 s.
 - **Revisit when:** a reflector sends `STOPPING` for anything other than its own stop.
+
+## D181: A seed's rank is a SHA-256 of the image reference as written and the node identity (amends D51)
+
+- **Decision:**
+  - A node's rank for an image is the first 8 bytes, big-endian, of SHA-256 over `image ‖ 0x00 ‖ node identity`. The `prewarm.seeds` highest are the seeds, best first; a tie goes to the smaller node name. `speculaire_reflect::seeds` computes it, and its test pins three cases computed with `shasum`.
+  - `image` is the reference exactly as `prewarm.images` writes it, once D60's parse accepts it, with no normalisation: `busybox` and `docker.io/library/busybox:latest` rank apart.
+  - The protocol fixes both: changing either is a breaking change (D40).
+- **Because:**
+  - Members of two versions run side by side during a rolling upgrade (D2); they pick the same seeds only if they hash the same bytes the same way. std's `RandomState` is seeded per process, so it cannot.
+  - aws-lc-rs is already in the build (D88). Over 10k nodes, two 8-byte ranks tie with odds near 3·10⁻¹², and the name order settles a tie anyway.
+  - Normalising would put a reference parser's version into the protocol; the string as written gives every member the same bytes from the same list.
+  - Neither a reference nor a node name holds a 0x00, so the separator keeps `ab`, `c` apart from `a`, `bc`.
+- **Measured:** `just bench-micro`, `speculaire-reflect`'s `seed`, 2 seeds among 10k nodes, on an Apple M5: median 459 µs (46 ns a node), one allocation of 48 B, the result.
+- **Revisit when:** the choice shows in a reflector's profile at a wave's start.

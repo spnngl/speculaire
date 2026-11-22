@@ -1,17 +1,18 @@
 //! The reflector's index lookup in D33's fleet, 10k agents × 2k blobs (D104), and its reading and parsing of a
 //! message: `just bench-micro`.
 
+use std::num::NonZeroU32;
 use std::pin::pin;
 use std::sync::LazyLock;
 use std::task::{Context, Poll, Waker};
 
 use divan::Bencher;
 use prost::Message as _;
-use speculaire_reflect::SNAPSHOT_CHUNK;
 use speculaire_reflect::bench::Filled;
 use speculaire_reflect::frame::{self, Reader};
 use speculaire_reflect::message::Request;
 use speculaire_reflect::proto::{AgentMessage, LookupRequest, Snapshot, agent_message};
+use speculaire_reflect::{SNAPSHOT_CHUNK, seeds};
 
 /// Counts each benchmark''s allocations, which D107 asks a hot path to avoid.
 #[global_allocator]
@@ -23,8 +24,26 @@ static FLEET: LazyLock<Filled> = LazyLock::new(|| {
         .expect("2k digests a node are within the reflector's limit")
 });
 
+/// The node identities of D33's fleet.
+static NODES: LazyLock<Vec<String>> =
+    LazyLock::new(|| (0..10_000).map(|n| format!("agent-{n}")).collect());
+
 fn main() {
     divan::main();
+}
+
+/// The 2 seeds of an image among D33's fleet of 10k agents (D51), as a member picks them for a wave.
+#[divan::bench]
+fn seed(bencher: Bencher<'_, '_>) {
+    let nodes = &*NODES;
+    let count = NonZeroU32::new(2).expect("2 is not zero");
+    bencher.bench_local(|| {
+        seeds(
+            "registry.example/app:1.0",
+            nodes.iter().map(String::as_str),
+            count,
+        )
+    });
 }
 
 #[divan::bench]

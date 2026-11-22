@@ -2219,6 +2219,7 @@ dependencies = [
 name = "speculaire-reflect"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "fastrand",
  "futures-util",
  "hashbrown 0.17.1",

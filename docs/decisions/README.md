@@ -58,7 +58,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29; amended by D72)
 - D49 [verification](verification.md): a BuildKit SBOM inside a signed index is D43's one exception (amends D43)
 - D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34; amended by D121)
-- D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2)
+- D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2; amended by D181)
 - D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37; amended by D102)
 - D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69, D88)
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64, D86, D180)
@@ -190,4 +190,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D179 [gate](gate.md): the name the pod asked for, containerd's `io.kubernetes.cri.image-name` once the runtime's list gives the image its repository, chooses the policies and the image exemptions; otherwise every name of the image does, the strictest verdict wins and an exemption needs every name; the `gate` event's `image_name` is the names matched (amends D169, D172, D173)
 
 - D180 [gate](gate.md): after the agent leaves NRI, the first container created in a running pod passes the required-plugin check until the runtimes ship NRI v0.12.5; documented and asserted by a gate test, no stand-in plugin (amends D9, D54)
-Next free number: D181.
+- D181 [reflector](reflector.md): a seed's rank is the first 8 bytes of SHA-256 over the image reference as written, 0x00 and the node identity, ties to the smaller name; changing it is breaking (amends D51)
+Next free number: D182.

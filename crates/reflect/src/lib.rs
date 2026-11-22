@@ -19,12 +19,14 @@ pub mod frame;
 pub mod message;
 pub mod metrics;
 pub use key::Key;
+pub use seed::seeds;
 pub use server::{
     LOOKUP_PEERS, Limits, Member, PROTOCOL_VERSION, Reflector, SNAPSHOT_CHUNK, Settings,
 };
 
 mod index;
 mod key;
+mod seed;
 mod server;
 mod session;
 mod sync;
