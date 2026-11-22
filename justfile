@@ -508,6 +508,11 @@ e2e runtime version kubernetes="": e2e-tools
         {{ just_executable() }} e2e-down {{ runtime }} {{ version }} {{ quote(kubernetes) }}' EXIT
     {{ just_executable() }} e2e-up {{ runtime }} {{ version }} {{ quote(kubernetes) }}
     {{ just_executable() }} e2e-test {{ runtime }} {{ version }} {{ quote(kubernetes) }}
+    # Every row of docs/metrics.md for the runtime was emitted, checked once per leg, after the IPv4 pass (D182).
+    eval "$({{ just_executable() }} e2e-cluster {{ runtime }} {{ version }} {{ quote(kubernetes) }})"
+    if [[ "$family" == ipv4 ]]; then
+        cargo run -p e2e --locked --quiet --bin catalog -- '{{ runtime }}' "$scrapes"
+    fi
 
 # Build the node image and start the cluster, for debugging: just e2e-up containerd 2.4 1.35
 e2e-up runtime version kubernetes="": e2e-tools
@@ -522,6 +527,10 @@ e2e-up runtime version kubernetes="": e2e-tools
     fi
     # The suites and the upstreams' binary build while the node image and the cluster come up (D159).
     mkdir -p '{{ e2e_dir }}'
+    # A leg's scrapes start with its IPv4 pass; the dual-stack pass adds to them (D182).
+    if [[ "$family" == ipv4 ]]; then
+        rm -rf "$scrapes"
+    fi
     build_log="{{ e2e_dir }}/$cluster-build.log"
     cargo test -p e2e --locked --no-run >"$build_log" 2>&1 &
     build=$!
@@ -636,9 +645,17 @@ e2e-test runtime version kubernetes="" *args:
     #!/usr/bin/env bash
     set -euo pipefail
     eval "$({{ just_executable() }} e2e-cluster {{ runtime }} {{ version }} {{ quote(kubernetes) }})"
-    PATH="{{ e2e_path }}:$PATH" SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' \
-        SPECULAIRE_E2E_RELEASE="$release" SPECULAIRE_E2E_KUBERNETES="$kubernetes" SPECULAIRE_E2E_IP_FAMILY="$family" \
+    export PATH="{{ e2e_path }}:$PATH"
+    SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' SPECULAIRE_E2E_RELEASE="$release" \
+        SPECULAIRE_E2E_KUBERNETES="$kubernetes" SPECULAIRE_E2E_IP_FAMILY="$family" SPECULAIRE_E2E_SCRAPES="$scrapes" \
         cargo test -p e2e --locked -- --ignored {{ args }}
+    # The suites scrape each agent before they stop it; this scrapes the agents the last suite left running (D182).
+    mkdir -p "$scrapes"
+    accept='Accept: application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited'
+    for node in $(kind get nodes --name "$cluster"); do
+        scrape="$scrapes/$node-end-$(date +%s%N).pb"
+        docker exec "$node" curl -sf -H "$accept" http://127.0.0.1:7482/metrics >"$scrape" || rm -f "$scrape"
+    done
 
 # Save each node's journal, the agent's with every field, and the load balancer's log into target/e2e/journals/<cluster>:
 # just e2e-journals crio 1.37
@@ -679,7 +696,7 @@ e2e-down runtime="" version="" kubernetes="":
     docker ps -aq --filter "label=$label" | xargs -r docker rm -f -v >/dev/null
 
 # Print the shell variables of an e2e cluster: `release`, `kubernetes`, `node` (the kindest/node tag and digest),
-# `family` and `cluster`. CRI-O runs on its own Kubernetes minor; containerd on the one named, by default the newest
+# `family`, `cluster`, and `scrapes`, the directory of the leg's metrics scrapes, which both passes share (D182). CRI-O runs on its own Kubernetes minor; containerd on the one named, by default the newest
 # (D63). SPECULAIRE_E2E_IP_FAMILY=dual makes a dual-stack cluster, whose name ends in `-dual` (D94).
 [private]
 e2e-cluster runtime version kubernetes="":
@@ -714,8 +731,9 @@ e2e-cluster runtime version kubernetes="":
         1.37) node='{{ node_1_37 }}' ;;
         *) echo "e2e: no Kubernetes $kubernetes: 1.35, 1.36 or 1.37" >&2; exit 1 ;;
     esac
-    printf 'release=%s\nkubernetes=%s\nnode=%s\nfamily=%s\ncluster=%s\n' "$release" "$kubernetes" "$node" "$family" \
-        "speculaire-{{ runtime }}{{ replace(version, ".", "") }}-k${kubernetes//./}$suffix"
+    leg="speculaire-{{ runtime }}{{ replace(version, ".", "") }}-k${kubernetes//./}"
+    printf 'release=%s\nkubernetes=%s\nnode=%s\nfamily=%s\ncluster=%s\nscrapes=%s\n' "$release" "$kubernetes" "$node" \
+        "$family" "$leg$suffix" '{{ e2e_dir }}/scrapes/'"$leg"
 
 # Download the pinned kind and kubectl into target/e2e, checking their published SHA-256.
 e2e-tools:

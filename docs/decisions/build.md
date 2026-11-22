@@ -34,7 +34,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - Native Alpine builds avoid cross-toolchain drift for C dependencies (rs-coding `musl.md`). dedens rejected QEMU, cross and zigbuild for the same reason (`docs/research/ci-dedens.md` §3).
 - **Revisit when:** —
 
-## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50, D61, D109, D116)
+## D34: Metrics are a fixed catalog, with native histograms over protobuf (amends D13; amended by D50, D61, D109, D116, D182)
 
 - **Decision:**
   - **Catalog:** `docs/metrics.md` lists every metric with its type, labels and meaning. A test renders `/metrics` after the e2e suite and fails if a metric is missing from the catalog, or listed there but never emitted.
@@ -514,7 +514,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** lifetimes in parsed types, and `zerocopy` (a Google crate with no runtime dependencies) to vet (D71).
 - **Revisit when:** a lifetime spreads through more than one crate's public API, which then takes owned or `Bytes` data instead.
 
-## D109: Catalog rows of metrics not built yet name their milestone (amends D34)
+## D109: Catalog rows of metrics not built yet name their milestone (amends D34; amended by D182)
 
 - **Decision:**
   - A row of `docs/metrics.md` whose metric no code emits yet gets a `Planned` cell naming the milestone that builds it (`M4`, …). The change that builds the metric removes the cell.
@@ -800,3 +800,21 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
     A container of an image pulled faster than its verification waits for the verdict, at most `gate.wait`, 0.3 s, in the bucket up to 324 ms; one whose verdict landed during the pull is decided in microseconds. speculaire's create p50 was 0.94 to 2.58 s against Spegel's 1.45 to 5.64. On Docker Desktop arm64 the gate's p99 was 324 ms in every set.
 - **Cost:** `just bench` builds the e2e crate. The gate's p99 on kind carries no release bar, as D106's numbers.
 - **Revisit when:** the bench images are signed, or `spegel-org/benchmark` adds images outside `ghcr.io/spegel-org/benchmark`: the policy must still match and fail them.
+
+## D182: Each e2e leg must emit every catalog row of its runtime, read from protobuf scrapes taken before each agent stop and after the suites (amends D34, D109)
+
+- **Decision:**
+  - **Runtime column:** each row of `docs/metrics.md` names the runtime whose agents emit it: `both`, `containerd` or `CRI-O`. Only `speculaire_blob_cache_bytes` and `speculaire_blob_cache_evictions_total` are `CRI-O` (D67).
+  - **Emitted:** a metric is emitted on a leg when its family name appears in at least one protobuf scrape of any agent of the leg, whatever its labels or value. A counter or gauge described at startup counts at zero; a native histogram counts once it has observed a sample.
+  - **Scrapes:** `just e2e-test` names the leg's directory, `target/e2e/scrapes/<cluster>` without `-dual`, in `SPECULAIRE_E2E_SCRAPES`. The harness saves a node's `/metrics` in the protobuf exposition before each `docker exec` whose command runs `systemctl` on the agent's unit to stop, restart, kill or disable it, and `just e2e-test` saves every node's after the last suite. The agent drops no family while it runs, so these hold every family of every agent process.
+  - **Reverse check:** `catalog`, a binary of the e2e crate, fails naming each row without a `Planned` cell, for `both` or the leg's runtime, that no scrape holds. `just e2e` runs it after the IPv4 pass of every leg, on pull requests and on main. The IPv4 pass clears the directory; the dual-stack pass only adds scrapes to it.
+  - **Forward check:** `e2e/tests/unit.rs` reads each node's protobuf exposition and fails on a family the catalog does not list for the cluster's runtime.
+  - **Exclusions:** a row the suites cannot emit is excluded by name here, with its reason; none is.
+- **Because:**
+  - D34 promised a test failing on a row "listed there but never emitted", and none existed: D109's unit test holds the rows to what the code describes, and a described counter that no path increments, or a histogram no path observes, passed both.
+  - The text exposition omits native histograms (D34), so a check on it could neither see a histogram's row emitted nor a histogram missing from the catalog.
+  - An agent's families live until it stops; a scrape before each stop is the last view of that process, and one after the suites covers the agents left running. Scraping on a schedule would miss a family a short-lived process held.
+  - One check per leg, after the IPv4 pass, needs no second cluster; the dual-stack pass runs the same code paths over other addresses (D94).
+- **Measured:** locally on Docker Desktop arm64, the IPv4 pass of `just e2e`: CRI-O 1.37 took 12.3 min, with 132 scrapes holding all 39 rows required; containerd 2.4 12.4 min, with 106 scrapes holding all 37. A scrape takes 92 ms, about 12 s per pass. No row needed a new case. With `speculaire_reflector_resync_seconds`'s row removed, the protobuf forward check failed on the control plane, and main's, on the text exposition, passed.
+- **Cost:** a row the suites stop exercising fails every leg until a case emits it again or this decision excludes it. A family seen under any label passes, so a label value never set goes unnoticed. A stop that bypasses `systemctl`, or a crash, loses the families since the last scrape.
+- **Revisit when:** a suite stops an agent other than through `systemctl`, or a metric is emitted only on some runtime versions of a leg.
