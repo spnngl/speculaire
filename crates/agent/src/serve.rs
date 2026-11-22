@@ -836,6 +836,8 @@ fn open_sharing(
                 Arc::clone(store),
                 mirror.listed.clone(),
             ),
+            // The agent takes no pushes yet: a closed channel drops them.
+            tokio::sync::mpsc::channel(1).0,
         );
         mirror.fetcher.link(
             Arc::new(Holders(client.lookups())),

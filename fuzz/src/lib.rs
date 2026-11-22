@@ -509,11 +509,11 @@ pub fn node_subject(data: &[u8]) {
     }
 }
 
-/// Every message of the reflector API: the requests the reflector reads from an agent, and the answers the agent
-/// reads (D2, D97, D98, D105).
+/// Every message of the reflector API: the requests the reflector reads from an agent, and the answers and pushes the
+/// agent reads (D2, D97, D98, D105, D184).
 ///
-/// Decoding and parsing never panic. A request that parses encodes back to protobuf that parses to it again, and every
-/// member or peer an answer keeps has a node. Text parses as a digest of a request exactly when it parses as a
+/// Decoding and parsing never panic. A request or a push that parses encodes back to protobuf that parses to it again,
+/// a list holds at most `LIST_CAP` images, and every member or peer an answer keeps has a node. Text parses as a digest of a request exactly when it parses as a
 /// [`Digest`](speculaire_oci::reference::Digest), to the same digest.
 ///
 /// # Panics
@@ -525,7 +525,8 @@ pub fn reflect(data: &[u8]) {
     use speculaire_reflect::Key;
     use speculaire_reflect::client::{members, peers};
     use speculaire_reflect::message::Request;
-    use speculaire_reflect::proto::{AgentMessage, LookupResponse, MembersResponse};
+    use speculaire_reflect::proto::{self, AgentMessage, LookupResponse, MembersResponse};
+    use speculaire_reflect::push::{LIST_CAP, PrewarmList, Push};
     if let Ok(text) = std::str::from_utf8(data) {
         let digest = Digest::parse(text).ok();
         assert_eq!(Key::parse(text), digest.as_ref().map(Key::from));
@@ -545,6 +546,26 @@ pub fn reflect(data: &[u8]) {
     }
     if let Ok(response) = LookupResponse::decode(data) {
         assert!(peers(response).iter().all(|peer| !peer.node.is_empty()));
+    }
+    if let Ok(prewarm) = proto::Prewarm::decode(data)
+        && let Ok(push) = Push::try_from(prewarm)
+    {
+        let Push::Prewarm(image) = &push else {
+            panic!("{push:?} parsed from a Prewarm");
+        };
+        assert_eq!(
+            Push::try_from(proto::Prewarm::from(image)),
+            Ok(push.clone())
+        );
+    }
+    if let Ok(list) = proto::PrewarmList::decode(data)
+        && let Ok(list) = PrewarmList::try_from(list)
+    {
+        assert!(list.images().len() <= LIST_CAP);
+        assert_eq!(
+            PrewarmList::try_from(proto::PrewarmList::from(&list)),
+            Ok(list)
+        );
     }
 }
 

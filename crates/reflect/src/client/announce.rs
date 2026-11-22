@@ -13,11 +13,14 @@ use tracing::{info, warn};
 
 use super::backoff::Backoff;
 use super::holdings::Batch;
-use super::{Ask, CallError, DialError, Outage, PEER_PORT, Peer, QUEUE, Shared, dial, peers};
+use super::{
+    Ask, CallError, DialError, Outage, PEER_PORT, Peer, Pushed, QUEUE, Shared, dial, peers,
+};
 use crate::frame::{self, FrameError, Reader};
 use crate::message::{Announcement, Delta, Hello, Lookup, Request, Snapshot};
 use crate::metrics::{CONNECTED, RECONNECTS};
 use crate::proto::{self, reflector_message};
+use crate::push::{Malformed, PrewarmList, Push};
 use crate::{Key, Member, PROTOCOL_VERSION, SNAPSHOT_CHUNK};
 
 /// How long a connection must have been up for its end to count as a drop rather than a failed attempt (D98).
@@ -158,14 +161,21 @@ async fn connection(
             .await
     };
     tokio::select! {
-        ended = answers(&mut reading, &pending, &resync) => ended,
+        ended = answers(&mut reading, &pending, &resync, &member.node, &shared.pushes) => ended,
         ended = announce => ended,
     }
 }
 
-/// Reads the reflector's frames until the connection ends: it hands each lookup's answer over, and asks for a snapshot
-/// when the reflector does.
-async fn answers<R: AsyncRead + Unpin>(io: &mut R, pending: &Pending, resync: &Notify) -> Ended {
+/// Reads the frames of `member` until the connection ends: it hands each lookup's answer and each push over, and asks
+/// for a snapshot when the member does. Only a member's stream takes pushes (D184): the agent dialled it as the node
+/// the load balancer's `Members` named.
+async fn answers<R: AsyncRead + Unpin>(
+    io: &mut R,
+    pending: &Pending,
+    resync: &Notify,
+    member: &str,
+    pushes: &mpsc::Sender<Pushed>,
+) -> Ended {
     let mut reader = Reader::<proto::ReflectorMessage>::new(frame::LIMIT);
     loop {
         let message = match tokio::time::timeout(frame::SILENCE, reader.next(io)).await {
@@ -189,9 +199,28 @@ async fn answers<R: AsyncRead + Unpin>(io: &mut R, pending: &Pending, resync: &N
             Some(reflector_message::Message::Refused(refused)) => {
                 return CallError::from(refused).into();
             }
-            // `Prewarm` arrives with M7 (D51); `Pong` only keeps the connection alive.
-            Some(_) | None => {}
+            Some(reflector_message::Message::Prewarm(prewarm)) => {
+                hand_over(member, Push::try_from(prewarm), pushes).await;
+            }
+            Some(reflector_message::Message::PrewarmList(list)) => {
+                hand_over(member, PrewarmList::try_from(list).map(Push::List), pushes).await;
+            }
+            // `Pong` only keeps the connection alive, and no request of this stream asks for `Members`.
+            Some(reflector_message::Message::Pong(_) | reflector_message::Message::Members(_))
+            | None => {}
         }
+    }
+}
+
+/// Hands what `member` pushed to the agent; a push that does not parse is logged and dropped, and the stream stays.
+async fn hand_over(member: &str, push: Result<Push, Malformed>, pushes: &mpsc::Sender<Pushed>) {
+    match push {
+        Ok(push) => {
+            let member = member.to_owned();
+            // An agent that takes no pushes closed its receiver.
+            let _ = pushes.send(Pushed { member, push }).await;
+        }
+        Err(err) => warn!(node = member, error = %err, "push from the reflector dropped"),
     }
 }
 
@@ -311,7 +340,7 @@ impl<W: AsyncWrite + Unpin> Announcer<'_, W> {
 
 #[cfg(test)]
 mod tests {
-    use speculaire_oci::reference::Digest;
+    use speculaire_oci::reference::{Digest, Reference};
 
     use super::*;
     use crate::client::{Holdings, Source};
@@ -468,7 +497,8 @@ mod tests {
             .await
             .unwrap();
         let resync = Notify::new();
-        let ended = answers(&mut received.as_slice(), &pending, &resync).await;
+        let (pushes, _) = mpsc::channel(1);
+        let ended = answers(&mut received.as_slice(), &pending, &resync, "b", &pushes).await;
         assert!(matches!(ended, Ended::Call(CallError::Closed)), "{ended}");
         drop(pending);
         let [first, second] = <[_; 2]>::try_from(waiting).unwrap();
@@ -482,6 +512,71 @@ mod tests {
         assert!(
             first.await.is_err(),
             "an unanswered lookup ends with its connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn pushes_reach_the_channel_with_their_member_and_a_malformed_one_is_dropped() {
+        let frames = [
+            reflector_message::Message::Prewarm(proto::Prewarm {
+                image: "Nginx".to_owned(),
+            }),
+            reflector_message::Message::PrewarmList(proto::PrewarmList {
+                images: vec!["nginx".to_owned(); 65],
+            }),
+            reflector_message::Message::Prewarm(proto::Prewarm {
+                image: "nginx".to_owned(),
+            }),
+            reflector_message::Message::PrewarmList(proto::PrewarmList {
+                images: vec!["quay.io/a/b:1".to_owned()],
+            }),
+            reflector_message::Message::Lookup(proto::LookupResponse {
+                id: 0,
+                peers: Vec::new(),
+            }),
+        ];
+        let mut received = Vec::new();
+        for message in frames {
+            let message = proto::ReflectorMessage {
+                message: Some(message),
+            };
+            frame::write(&mut received, &message, frame::LIMIT)
+                .await
+                .unwrap();
+        }
+        let pending = Pending::default();
+        let (answer, answered) = oneshot::channel();
+        pending.lock().unwrap().insert(0, answer);
+        let (pushes, mut handed) = mpsc::channel(4);
+        let ended = answers(
+            &mut received.as_slice(),
+            &pending,
+            &Notify::new(),
+            "b",
+            &pushes,
+        )
+        .await;
+        assert!(matches!(ended, Ended::Call(CallError::Closed)), "{ended}");
+        // The stream read on past the malformed pushes: the lookup's answer after them arrived.
+        assert_eq!(answered.await.unwrap(), []);
+        drop(pushes);
+        let image = |text| Reference::parse_docker_ref(text).unwrap();
+        let mut got = Vec::new();
+        while let Some(push) = handed.recv().await {
+            got.push(push);
+        }
+        assert_eq!(
+            got,
+            [
+                Pushed {
+                    member: "b".to_owned(),
+                    push: Push::Prewarm(image("nginx")),
+                },
+                Pushed {
+                    member: "b".to_owned(),
+                    push: Push::List(PrewarmList::new(vec![image("quay.io/a/b:1")]).unwrap()),
+                },
+            ]
         );
     }
 }

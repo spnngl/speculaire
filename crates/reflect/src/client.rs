@@ -1,6 +1,6 @@
 //! The agent's side of the reflector API (D2, D33, D36, D98, D105): it learns the members through the load balancer,
-//! keeps one connection to each that announces what the node holds, and asks the members it is connected to where a
-//! digest is.
+//! keeps one connection to each that announces what the node holds, asks the members it is connected to where a
+//! digest is, and hands over what they push (D184).
 
 use std::collections::HashMap;
 use std::io;
@@ -26,6 +26,7 @@ use crate::frame::{self, FrameError, Reader};
 use crate::message::Request;
 use crate::metrics::LookupSeries;
 use crate::proto::{self, reflector_message};
+use crate::push::Push;
 use crate::{Key, Member, connect};
 
 mod announce;
@@ -72,6 +73,15 @@ pub struct Peer {
     pub node: String,
     /// Where its peer API listens.
     pub address: SocketAddr,
+}
+
+/// What a member pushed (D184).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pushed {
+    /// The member's node.
+    pub member: String,
+    /// What it pushed.
+    pub push: Push,
 }
 
 /// Why a [`Client::lookup`] has no answer.
@@ -130,6 +140,8 @@ struct Shared {
     config: Config,
     credentials: Arc<Credentials>,
     holdings: Arc<Holdings>,
+    /// Where the streams hand over what members push.
+    pushes: mpsc::Sender<Pushed>,
     /// The lookup queue of each member whose connection is up, by node.
     links: Mutex<HashMap<String, mpsc::Sender<Ask>>>,
     /// The peer address, fixed by the first stream unless set (D36): `None` until then, and never changed after.
@@ -142,14 +154,22 @@ struct Shared {
 }
 
 impl Client {
-    /// Starts asking for the members, and announces `holdings` to each, as this node per `credentials`.
+    /// Starts asking for the members, and announces `holdings` to each, as this node per `credentials`. What a member
+    /// pushes goes to `pushes`, whose receiver the agent reads at once: a full channel holds the member's stream, its
+    /// lookups' answers included, and a closed one drops what follows.
     #[must_use]
-    pub fn spawn(config: Config, credentials: Arc<Credentials>, holdings: Arc<Holdings>) -> Self {
+    pub fn spawn(
+        config: Config,
+        credentials: Arc<Credentials>,
+        holdings: Arc<Holdings>,
+        pushes: mpsc::Sender<Pushed>,
+    ) -> Self {
         let peer = watch::Sender::new(config.peer);
         let shared = Arc::new(Shared {
             config,
             credentials,
             holdings,
+            pushes,
             links: Mutex::default(),
             peer,
             last_up: watch::Sender::new(None),

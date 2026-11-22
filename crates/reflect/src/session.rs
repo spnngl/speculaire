@@ -5,7 +5,8 @@ use std::sync::Arc;
 use crate::index::{Index, Refused, Stream};
 use crate::message::{Announcement, Delta, Hello, Snapshot};
 use crate::metrics::Reason;
-use crate::server::Settings;
+use crate::outbox::{Outbox, Streams};
+use crate::server::{PUSH_VERSION, Settings};
 
 /// Why a stream ends early.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub(crate) enum Reply {
 pub(crate) struct Session {
     index: Arc<Index>,
     settings: Arc<Settings>,
+    streams: Arc<Streams>,
     /// The node of the TLS peer's certificate.
     peer: Arc<str>,
     open: Option<Open>,
@@ -42,13 +44,21 @@ struct Open {
     next: Option<u64>,
     /// Whether a snapshot has ended.
     synced: bool,
+    /// What the reflector sends unasked, when the agent's protocol version takes it (D184).
+    outbox: Option<Arc<Outbox>>,
 }
 
 impl Session {
-    pub(crate) const fn new(index: Arc<Index>, settings: Arc<Settings>, peer: Arc<str>) -> Self {
+    pub(crate) const fn new(
+        index: Arc<Index>,
+        settings: Arc<Settings>,
+        streams: Arc<Streams>,
+        peer: Arc<str>,
+    ) -> Self {
         Self {
             index,
             settings,
+            streams,
             peer,
             open: None,
         }
@@ -57,6 +67,11 @@ impl Session {
     /// The node of the TLS peer.
     pub(crate) fn node(&self) -> &str {
         &self.peer
+    }
+
+    /// What the reflector sends the agent unasked: from its `Hello` on, when its protocol version takes pushes.
+    pub(crate) fn outbox(&self) -> Option<&Outbox> {
+        self.open.as_ref()?.outbox.as_deref()
     }
 
     /// Takes in one message.
@@ -99,6 +114,7 @@ impl Session {
             stream: self.index.join(&self.peer, hello.peer),
             next: None,
             synced: false,
+            outbox: (hello.version >= PUSH_VERSION).then(|| self.streams.open(&self.peer)),
         })
     }
 }
@@ -152,6 +168,9 @@ impl Drop for Session {
     fn drop(&mut self) {
         if let Some(open) = &self.open {
             self.index.leave(&open.stream);
+            if let Some(outbox) = &open.outbox {
+                self.streams.close(&self.peer, outbox);
+            }
         }
     }
 }

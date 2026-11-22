@@ -18,7 +18,9 @@ pub mod client;
 pub mod frame;
 pub mod message;
 pub mod metrics;
+pub mod push;
 pub use key::Key;
+pub use outbox::{PushError, Pushes};
 pub use seed::seeds;
 pub use server::{
     LOOKUP_PEERS, Limits, Member, PROTOCOL_VERSION, Reflector, SNAPSHOT_CHUNK, Settings,
@@ -26,6 +28,7 @@ pub use server::{
 
 mod index;
 mod key;
+mod outbox;
 mod seed;
 mod server;
 mod session;
