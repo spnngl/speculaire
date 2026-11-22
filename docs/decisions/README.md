@@ -16,7 +16,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66, D123)
 - D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73, D102)
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136, D139, D143, D145, D147)
-- D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64, D163, D166)
+- D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64, D163, D166, D180)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136, D142, D149)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node (amended by D150)
@@ -61,7 +61,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2)
 - D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37; amended by D102)
 - D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69, D88)
-- D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64, D86)
+- D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64, D86, D180)
 - D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32; amended by D82, D85)
 - D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47; amended by D82)
 - D57 [build](build.md): one pinned toolchain, one build image (`build/Containerfile`), and `just dev <recipe>` on macOS (amends D13, D19; amended by D58, D62, D116, D118, D125, D140)
@@ -189,4 +189,5 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 
 - D179 [gate](gate.md): the name the pod asked for, containerd's `io.kubernetes.cri.image-name` once the runtime's list gives the image its repository, chooses the policies and the image exemptions; otherwise every name of the image does, the strictest verdict wins and an exemption needs every name; the `gate` event's `image_name` is the names matched (amends D169, D172, D173)
 
-Next free number: D180.
+- D180 [gate](gate.md): after the agent leaves NRI, the first container created in a running pod passes the required-plugin check until the runtimes ship NRI v0.12.5; documented and asserted by a gate test, no stand-in plugin (amends D9, D54)
+Next free number: D181.

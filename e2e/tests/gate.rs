@@ -1300,10 +1300,9 @@ const MISSING: &str = r#"required plugin "speculaire" not present"#;
 
 /// Stops the agent and creates two containers, then starts it. NRI up to v0.12.4 keeps a plugin whose connection closed
 /// in its list until the end of the next request, adds it to that request's validation before calling it, and drops it
-/// without an error when the call fails: the default validator counts it present once (`docs/TODECIDE.md`, the entry on
-/// NRI's required-plugin gap). Every runtime pinned here ships such an NRI. Any request clears the closed plugin, even
-/// a new pod's `RunPodSandbox`: what gets through is a container created in a pod that already runs, as the kubelet's
-/// retry of a rejected container is.
+/// without an error when the call fails: the default validator counts it present once (D180). Every runtime pinned here
+/// ships such an NRI. Any request clears the closed plugin, even a new pod's `RunPodSandbox`: what gets through is a
+/// container created in a pod that already runs, as the kubelet's retry of a rejected container is.
 fn after_a_stop_the_first_container_in_a_running_pod_passes(worker: &Worker) {
     let runtime = worker.cluster.runtime();
     // A request of the kubelet's between the stop and the first creation clears the plugin too: try thrice.
@@ -1313,9 +1312,8 @@ fn after_a_stop_the_first_container_in_a_running_pod_passes(worker: &Worker) {
     assert!(
         first.is_some(),
         "{runtime:?} now rejects the first container created after the agent stops: its NRI drops a closed plugin \
-         before the validator counts it (containerd/nri#338, v0.12.5). Mark the gap closed for it in docs/TODECIDE.md \
-         (the entry on NRI's required-plugin gap), docs/operations.md § Break glass and docs/security.md, and assert \
-         the rejection here."
+         before the validator counts it (containerd/nri#338, v0.12.5). Revisit D180, mark the gap closed for it in \
+         docs/operations.md § Break glass and docs/security.md, and assert the rejection here."
     );
 }
 

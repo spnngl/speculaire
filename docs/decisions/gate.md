@@ -2,7 +2,7 @@
 
 The NRI enforcement point. Index: `docs/decisions/README.md`.
 
-## D9: Enforcement lives in an NRI external plugin (amended by D64, D163, D166)
+## D9: Enforcement lives in an NRI external plugin (amended by D64, D163, D166, D180)
 
 - **Decision:** the agent connects to `/var/run/nri/nri.sock` as an external NRI plugin. We write our own `nri` workspace crate on `ttrpc` 0.10 plus the NRI multiplexer (8-byte header: ConnID + length).
   - Each ConnID is an in-memory `tokio::io::duplex` wrapped by `ttrpc`'s `Socket::new`: ConnID 1 feeds a `Listener::new` stream, ConnID 2 feeds `Client::new`. There is no file descriptor and no `socketpair`.
@@ -103,7 +103,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The annotation is already the accepted escape hatch for static pods (`docs/security.md`).
 - **Revisit when:** containerd offers a way to exempt a plugin's own pod from validation.
 
-## D54: The gate cannot be turned off (amended by D64, D86)
+## D54: The gate cannot be turned off (amended by D64, D86, D180)
 
 - **Decision:** no setting disables the gate. Startup and `speculaire check-config` refuse a containerd config whose NRI plugin is disabled or closed to external plugins (`disable = true` or `disable_connections = true` under `[plugins.'io.containerd.nri.v1.nri']`, v2.3.7 `internal/nri/config.go:30,42`), and the error names the key. `gate.mode = "audit"` and `gate.exempt` (D18) are the ways to let containers through.
 - **Because:** a node that mirrors but never gates looks protected and is not. `audit` keeps the mirror and the verdicts, and the gap stays visible in `speculaire_gate_total{mode="audit"}`.
@@ -354,3 +354,19 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Measured (arm64, `just bench-micro decide`, 2000 samples, on a cached `Allow`):** the `nri` path takes 0.65 µs median and 1.15 µs at worst, with 5 allocations, against 0.45 µs and 4 on `main` on the same machine: the parse of the requested name. The `annotation` path takes 32 µs median against 29 µs, the run-to-run spread D172 measured.
 - **Cost:** a CRI client other than the kubelet that sets no `user_specified_image` gets the image's first reference in the annotation: that name, confirmed by the list, chooses the policies. Until the list follows a pull, a pod's other names on the node add their policies.
 - **Revisit when:** CRI-O passes the requested name.
+
+
+## D180: NRI's required-plugin gap stays open until the runtimes ship NRI v0.12.5; the agent registers no stand-in plugin (amends D9, D54)
+
+- **Decision:**
+  - After the agent leaves NRI, by a stop or a kill, the first container created in a pod that already runs passes the runtime's required-plugin check. speculaire accepts that window and documents it (`docs/operations.md` § Break glass, `docs/security.md`). It does not register a throwaway plugin after leaving NRI or from `ExecStopPost`.
+  - The gate test `after_a_stop_the_first_container_in_a_running_pod_passes` (`e2e/tests/gate.rs`) asserts the gap as it is. It fails once a runtime the e2e matrix pins ships the fix, and then this decision is revisited.
+  - We ask CRI-O and containerd to ship NRI v0.12.5 in their supported branches. The draft request is written outside the repository; the user files it.
+- **Because:**
+  - NRI keeps a plugin whose connection closed in its list until the end of the next request of any kind, or until a plugin registers (containerd/nri v0.12.3 `pkg/adaptation/adaptation.go:327`, `:608-632`, `:698`). `CreateContainer` adds every listed plugin to the validation request before calling it (`:341-345`), and a call that fails on the closed connection closes the plugin and answers nothing, not an error (`pkg/adaptation/plugin.go:757-763`). The default validator then finds the plugin in the request (`pkg/adaptation/builtin/default-validator.go:270-291`).
+  - The window is one request, not a span of time: a new pod's `RunPodSandbox`, a container removal or a plugin registering clears the closed plugin first. New pods are rejected. What passes is one container in a pod that already runs: a kubelet retry, a restart, or an image that finished pulling after the stop.
+  - Every NRI the supported runtimes pin has it: a Go reproduction fails on v0.11.0 (CRI-O 1.35, 1.36), v0.12.0 (containerd 2.3), v0.12.2 (CRI-O 1.37) and v0.12.3 (containerd 2.4), and passes on v0.12.5. It was seen on kind with CRI-O 1.37.2 and containerd 2.4.2, after a graceful stop and after SIGKILL.
+  - NRI v0.12.5 fixes it upstream (containerd/nri#338: `CreateContainer` skips closed plugins). containerd's `release/2.4` carries it, unreleased; CRI-O main pins v0.12.2.
+  - The agent's stop order cannot close it (D177): NRI sees the dropped connection only at its next request. A plugin of another name registering clears the closed entry, which the Go reproduction confirms, but that adds a connection at every stop and a code path in the unit to remove once the runtimes catch up, for one container in a running pod.
+- **Cost:** while the agent is down, one container per node can start ungated if its pod already runs. Break glass and a crash both open it.
+- **Revisit when:** a pinned runtime ships NRI v0.12.5, which the gate test reports. Also when a runtime ships NRI v0.12.4 or later: then the agent answers `ConfigureResponse.failure_policy.fail_request = true` (containerd/nri#329), so a call that fails on speculaire rejects the creation instead of letting it through (`docs/TODECIDE.md`).
