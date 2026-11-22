@@ -3,8 +3,8 @@
 // Ported from containerd/ttrpc v1.2.7 `channel.go:30-155` (the header, `messageLengthMax`), `server.go:340-470` (a
 // request read, its response written) and `services.go:95-160` (a request's payload dispatched by method).
 
-use std::io;
 use std::time::Duration;
+use std::{io, mem};
 
 use prost::Message as _;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -12,6 +12,7 @@ use zerocopy::big_endian::U32;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::api::{ConfigureRequest, Empty, SynchronizeRequest};
+use crate::wire;
 
 #[expect(unreachable_pub, reason = "generated: prost makes every message `pub`")]
 pub(crate) mod proto {
@@ -48,38 +49,41 @@ struct Header {
     flags: u8,
 }
 
+/// A header's length.
+const HEADER: usize = size_of::<Header>();
+
 /// The kinds of message a unary call uses; ttrpc's streams add a third, which this crate skips.
 const REQUEST: u8 = 1;
 const RESPONSE: u8 = 2;
 
-/// A call of NRI's plugin service, read from the runtime.
+/// A call of NRI's plugin service, read from the runtime; it borrows the message read (D107).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Request {
+pub struct Request<'a> {
     /// The ttrpc stream to answer on.
     pub stream: u32,
     /// How long the runtime waits for the answer, when it says.
     pub timeout: Option<Duration>,
     /// The method called and its request.
-    pub call: Call,
+    pub call: Call<'a>,
 }
 
 /// A method of NRI's plugin service and its request.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Call {
+pub enum Call<'a> {
     /// The runtime describes itself and asks which events the plugin wants.
     Configure(ConfigureRequest),
     /// One part of the pods and containers that exist.
     Synchronize(SynchronizeRequest),
     /// A container is about to be created: the `CreateContainerRequest`, left for [`crate::create::Request::read`].
-    CreateContainer(Vec<u8>),
+    CreateContainer(&'a [u8]),
     /// The runtime is shutting down.
     Shutdown,
     /// A method this crate does not implement.
     Other {
         /// The service named.
-        service: String,
+        service: &'a str,
         /// The method named.
-        method: String,
+        method: &'a str,
     },
 }
 
@@ -101,8 +105,19 @@ pub enum RequestError {
         /// The stream it came on.
         stream: u32,
         /// What protobuf refused.
-        source: prost::DecodeError,
+        source: DecodeError,
     },
+}
+
+/// Why a request's protobuf was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    /// ttrpc's `Request`, read in place.
+    #[error(transparent)]
+    Envelope(#[from] crate::wire::Error),
+    /// The method's request, decoded by prost.
+    #[error(transparent)]
+    Method(#[from] prost::DecodeError),
 }
 
 /// Why a call to the runtime has no answer.
@@ -114,52 +129,100 @@ pub(crate) enum CallError {
     Status(Status),
 }
 
-/// The next request of NRI's plugin service, read into `body`, which is kept between calls (D107). Responses and
-/// stream data are skipped.
+/// Reads the requests of NRI's plugin service, each into one buffer kept for the connection's life (D107). Responses
+/// and stream data are skipped.
 ///
-/// # Errors
-///
-/// When the connection ends or fails, a message is over [`MAX_MESSAGE`], or a request does not decode.
-pub async fn read_request<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    body: &mut Vec<u8>,
-) -> Result<Request, RequestError> {
-    loop {
-        let header = read_message(reader, body).await?;
-        if header.kind != REQUEST {
-            continue;
+/// It reads no further than the message it reads, so it can be dropped between two messages.
+#[derive(Debug)]
+pub struct Reader<R> {
+    conn: R,
+    /// The message being read, `filled` bytes of it read; `whole` once [`Self::next`] returned it.
+    buf: Vec<u8>,
+    filled: usize,
+    whole: bool,
+}
+
+impl<R: AsyncRead + Unpin> Reader<R> {
+    /// A reader of `reader`, which it reads from the start of a message.
+    pub const fn new(reader: R) -> Self {
+        Self {
+            conn: reader,
+            buf: Vec::new(),
+            filled: 0,
+            whole: false,
         }
-        let stream = header.stream.get();
-        return decode_request(stream, body)
-            .map_err(|source| RequestError::Decode { stream, source });
+    }
+
+    /// The next request, borrowed until the next call. Cancel safe: dropped before it returns, it loses no byte read.
+    ///
+    /// # Errors
+    ///
+    /// When the connection ends or fails, a message is over [`MAX_MESSAGE`], or a request does not decode.
+    pub async fn next(&mut self) -> Result<Request<'_>, RequestError> {
+        let (stream, end) = loop {
+            if mem::take(&mut self.whole) {
+                self.filled = 0;
+            }
+            let read = self.buf.get(..self.filled).unwrap_or_default();
+            let wanted = match Header::read_from_prefix(read) {
+                Err(_) => HEADER,
+                Ok((header, _)) => {
+                    let length = header.length.get();
+                    let oversize = RequestError::Oversize { length };
+                    if length > MAX_MESSAGE {
+                        return Err(oversize);
+                    }
+                    let end = HEADER + usize::try_from(length).map_err(|_| oversize)?;
+                    if self.filled == end {
+                        self.whole = true;
+                        if header.kind == REQUEST {
+                            break (header.stream.get(), end);
+                        }
+                        continue;
+                    }
+                    end
+                }
+            };
+            self.buf.resize(self.buf.len().max(wanted), 0);
+            let unread = self.buf.get_mut(self.filled..wanted).unwrap_or_default();
+            let length = self.conn.read(unread).await?;
+            if length == 0 {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+            self.filled += length;
+        };
+        let body = self.buf.get(HEADER..end).unwrap_or_default();
+        decode_request(stream, body).map_err(|source| RequestError::Decode { stream, source })
     }
 }
 
-fn decode_request(stream: u32, body: &[u8]) -> Result<Request, prost::DecodeError> {
-    let proto::Request {
-        service,
-        method,
-        payload,
-        timeout_nano,
-    } = proto::Request::decode(body)?;
-    let call = if service == PLUGIN_SERVICE {
-        match method.as_str() {
-            "Configure" => Some(Call::Configure(ConfigureRequest::decode(&*payload)?)),
-            "Synchronize" => Some(Call::Synchronize(SynchronizeRequest::decode(&*payload)?)),
-            "CreateContainer" => Some(Call::CreateContainer(payload)),
-            "Shutdown" => Empty::decode(&*payload).map(|Empty {}| Some(Call::Shutdown))?,
-            _ => None,
+/// The request `body` holds, ttrpc's `Request` read in place as prost decodes it: the last of a repeated field wins,
+/// unknown fields are skipped.
+fn decode_request(stream: u32, body: &[u8]) -> Result<Request<'_>, DecodeError> {
+    let (mut service, mut method, mut payload, mut timeout_nano) = ("", "", &[][..], 0);
+    for field in wire::fields(body) {
+        match field? {
+            (1, value) => service = value.string(1)?,
+            (2, value) => method = value.string(2)?,
+            (3, value) => payload = value.bytes(3)?,
+            (4, value) => timeout_nano = value.varint(4)?,
+            _ => {}
         }
-    } else {
-        None
+    }
+    let call = match (service, method) {
+        (PLUGIN_SERVICE, "Configure") => Call::Configure(ConfigureRequest::decode(payload)?),
+        (PLUGIN_SERVICE, "Synchronize") => Call::Synchronize(SynchronizeRequest::decode(payload)?),
+        (PLUGIN_SERVICE, "CreateContainer") => Call::CreateContainer(payload),
+        (PLUGIN_SERVICE, "Shutdown") => Empty::decode(payload).map(|Empty {}| Call::Shutdown)?,
+        (service, method) => Call::Other { service, method },
     };
     Ok(Request {
         stream,
-        timeout: u64::try_from(timeout_nano)
-            .ok()
-            .filter(|&nanos| nanos > 0)
+        // An int64 on the wire: a negative timeout is none.
+        timeout: Some(timeout_nano)
+            .filter(|&nanos| (1..=i64::MAX.unsigned_abs()).contains(&nanos))
             .map(Duration::from_nanos),
-        call: call.unwrap_or(Call::Other { service, method }),
+        call,
     })
 }
 
@@ -344,6 +407,8 @@ pub(crate) fn status(code: i32, message: impl Into<String>) -> Status {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::FutureExt as _;
+
     use super::*;
     use crate::api::{Container, CreateContainerRequest};
 
@@ -382,26 +447,30 @@ mod tests {
         )
         .await
         .unwrap();
+        let payload = request.encode_to_vec();
         let mut reader = wire.as_slice();
-        let read = read_request(&mut reader, &mut buf).await.unwrap();
+        let mut requests = Reader::new(&mut reader);
         assert_eq!(
-            read,
+            requests.next().await.unwrap(),
             Request {
                 stream: 3,
                 timeout: Some(timeout),
-                call: Call::CreateContainer(request.encode_to_vec()),
+                call: Call::CreateContainer(&payload),
             }
         );
-        let other = read_request(&mut reader, &mut buf).await.unwrap();
+        drop(requests);
+        // A reader dropped between two messages loses none.
+        let mut requests = Reader::new(reader);
+        let other = requests.next().await.unwrap();
         assert_eq!(other.timeout, None);
         assert_eq!(
             other.call,
             Call::Other {
-                service: "other".to_owned(),
-                method: "Method".to_owned()
+                service: "other",
+                method: "Method"
             }
         );
-        let end = read_request(&mut reader, &mut buf).await.unwrap_err();
+        let end = requests.next().await.unwrap_err();
         assert!(matches!(end, RequestError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof));
     }
 
@@ -414,9 +483,7 @@ mod tests {
             flags: 0,
         };
         let mut reader = header.as_bytes();
-        let err = read_request(&mut reader, &mut Vec::new())
-            .await
-            .unwrap_err();
+        let err = Reader::new(&mut reader).next().await.unwrap_err();
         assert!(matches!(err, RequestError::Oversize { length } if length == MAX_MESSAGE + 1));
         // One of the maximum is read, and skipped as a response.
         let mut wire = Header {
@@ -428,9 +495,7 @@ mod tests {
         .as_bytes()
         .to_vec();
         wire.resize(wire.len() + (4 << 20), 0);
-        let end = read_request(&mut wire.as_slice(), &mut Vec::new())
-            .await
-            .unwrap_err();
+        let end = Reader::new(wire.as_slice()).next().await.unwrap_err();
         assert!(matches!(end, RequestError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof));
         let mut buf = Vec::new();
         let big = proto::Response {
@@ -459,9 +524,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = read_request(&mut wire.as_slice(), &mut buf)
-            .await
-            .unwrap_err();
+        let err = Reader::new(wire.as_slice()).next().await.unwrap_err();
         assert!(
             matches!(err, RequestError::Decode { stream: 9, .. }),
             "{err}"
@@ -496,6 +559,65 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(&err, CallError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_dropped_halfway_keeps_what_it_read() {
+        let mut message = Vec::new();
+        let timeout = Duration::from_nanos(7);
+        let method = (PLUGIN_SERVICE, "Shutdown");
+        write_request(&mut message, &mut Vec::new(), 3, method, &Empty {}, timeout)
+            .await
+            .unwrap();
+        let (mut runtime, plugin) = tokio::io::duplex(64);
+        let mut requests = Reader::new(plugin);
+        for byte in message {
+            assert!(requests.next().now_or_never().is_none());
+            runtime.write_all(&[byte]).await.unwrap();
+        }
+        assert_eq!(
+            requests.next().await.unwrap(),
+            Request {
+                stream: 3,
+                timeout: Some(timeout),
+                call: Call::Shutdown,
+            }
+        );
+    }
+
+    #[test]
+    fn a_request_reads_as_prost_decodes_it() {
+        let request = |service: &str, method: &str, timeout_nano| {
+            proto::Request {
+                service: service.to_owned(),
+                method: method.to_owned(),
+                payload: Vec::new(),
+                timeout_nano,
+            }
+            .encode_to_vec()
+        };
+        // The last of a field wins, a negative timeout is none, an unknown field is skipped.
+        let mut body = request("other", "Method", -1);
+        body.extend(request(PLUGIN_SERVICE, "Shutdown", 0));
+        body.extend([5 << 3, 1]);
+        let read = decode_request(1, &body).unwrap();
+        assert_eq!((read.timeout, read.call), (None, Call::Shutdown));
+        let longest = request("other", "Method", i64::MAX);
+        assert_eq!(
+            decode_request(1, &longest).unwrap().timeout,
+            Some(Duration::from_nanos(i64::MAX.unsigned_abs()))
+        );
+        let err = decode_request(1, &[4 << 3 | 2, 0]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DecodeError::Envelope(wire::Error::WireType {
+                    field: 4,
+                    wire_type: 2
+                })
+            ),
             "{err}"
         );
     }

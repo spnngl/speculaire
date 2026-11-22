@@ -1,5 +1,6 @@
 //! The metrics recorder (D34); `docs/metrics.md` lists every metric it may hold.
 
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use metrics::{Gauge, counter, describe_counter, describe_gauge, describe_histogram, gauge};
@@ -39,6 +40,30 @@ pub const RUNTIME_GLOBAL_QUEUE_DEPTH: &str = "speculaire_runtime_global_queue_de
 
 /// How often the recorder drains histogram samples; the exporter's own listener uses the same period.
 pub const UPKEEP_PERIOD: Duration = Duration::from_secs(5);
+
+/// Metric handles by their labels' values, each registered at its first use (D189). A macro given a label value not
+/// known at compile time builds the series' key at each record, which allocates.
+#[derive(Debug)]
+pub struct Handles<L, H>(Mutex<Vec<(L, H)>>);
+
+impl<L, H> Default for Handles<L, H> {
+    fn default() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+}
+
+impl<L: Copy + PartialEq, H: Clone> Handles<L, H> {
+    /// The handle of `labels`, from `register` the first time.
+    pub fn get(&self, labels: L, register: impl FnOnce(L) -> H) -> H {
+        let mut handles = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, handle)) = handles.iter().find(|(held, _)| *held == labels) {
+            return handle.clone();
+        }
+        let handle = register(labels);
+        handles.push((labels, handle.clone()));
+        handle
+    }
+}
 
 /// Installs the global recorder and sets the series that exist from startup.
 ///

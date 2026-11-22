@@ -290,7 +290,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Tested:** a unit test against the fake containerd, whose snapshots belong to one snapshotter, proves the handler's snapshotter is the one asked. No e2e: a RuntimeClass whose handler names another snapshotter needs a second snapshotter in the kind node.
 - **Revisit when:** containerd 2.3 reaches end of life, with D170.
 
-## D172: The gate decides each container from its verdict, waits up to `gate.wait` for a missing one, and on CRI-O keeps only the manifests whose config digest is the image ID (amends D18, D65, D169; amended by D174, D175, D179)
+## D172: The gate decides each container from its verdict, waits up to `gate.wait` for a missing one, and on CRI-O keeps only the manifests whose config digest is the image ID (amends D18, D65, D169; amended by D174, D175, D179, D189)
 
 - **Decision:**
   - **Order:** `gate::decision::Decider::decide` takes each `CreateContainer`. A pod namespace in `gate.exempt.namespaces` is `exempt` before any lookup. Then the identity is read (D169, D170); an image whose names match a `gate.exempt.images` glob is `exempt`. Then `Verdicts::identified` gives the verdict, and its `None`, no matching policy, is `unmatched` (D23). A verdict served stale is counted `stale="true"` (D21).
@@ -372,16 +372,25 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Revisit when:** a pinned runtime ships NRI v0.12.5, which the gate test reports. Also when a runtime ships NRI v0.12.4 or later: then the agent answers `ConfigureResponse.failure_policy.fail_request = true` (containerd/nri#329), so a call that fails on speculaire rejects the creation instead of letting it through (`docs/TODECIDE.md`).
 
 
-## D189: The gate reads `CreateContainerRequest` in place, borrowing the fields it uses and skipping the rest (amends D166)
+## D189: The gate reads `CreateContainerRequest` in place, and answers a request it decides without waiting with no allocation (amends D107, D166, D172)
 
 - **Decision:**
   - **Reader:** `speculaire_nri::create::Request::read(&payload)` reads a `CreateContainerRequest` in one pass over the ttrpc payload, safe Rust and no allocation. It keeps the fields the gate reads as `&str` borrowed from the message: the pod's name, namespace, annotations and runtime handler, the container's ID, name, annotations and image (name, digest, config digest), with NRI v0.12.3's field numbers. Annotations stay in the message; `Annotations::get` scans them for a key, the last written winning. Every other field is skipped by its wire type, unchecked. A message written twice merges as protobuf merges it.
   - **Refusals:** a truncated field, a field the gate reads of the wrong wire type or not UTF-8, a key of field 0, a varint over 10 bytes, a group, or wire type 6 or 7 answers `INVALID_ARGUMENT`, as a request prost refuses did (D166). proto3 writes no groups; prost skips them, the reader refuses them.
   - **prost stays** for every other message, `Synchronize`'s pods and containers included; `Pod`, `Container` and `Request` also view a prost value (`From<&api::…>`), so the gate and the identity read one type.
+  - **At once:** `Handler::answer_now` answers a CreateContainer before a task is spawned for it. The agent's `Decider::decide_now` answers when the decision needs no wait: an exempt namespace, no container, or an identity in memory (`NodeIdentity::identify_now`: the `nri` and `image_id` paths) whose verdict is kept. It audits and counts that decision as `decide` would. Otherwise, a pending verdict or the `annotation` path, it returns none, having asked nothing, and the request is copied into a task as before (D166).
+  - **No allocation on that path:** ttrpc's `Reader` reads each message into one buffer per connection, cancel safe, and the envelope in place (`Call<'_>`). The multiplexer refills two spare payload buffers of up to 64 KiB. Names are checked as `speculaire_oci::reference::Repository`, the normalized name borrowed or written on the stack (530 bytes at most), for exempt images, the requested name (D179) and the policy match. `Policies::match_hash` hashes up to 16 matched policies on the stack with one-shot SHA-256; `Verdicts::identified` keeps up to 8 policy groups on the stack. Each metric handle is registered at its first label set (`telemetry::Handles`), and the answer is written into the connection's buffer.
+  - **Guard:** `crates/agent/tests/allocations.rs` counts the allocations of its thread, where every task runs, through a counting global allocator (the test's own `unsafe`, under `#![expect(unsafe_code)]`). 256 requests after 64 warm ones, on `nri` and on `image_id`, with the runtime's side, allocate exactly the 4 histogram blocks below.
+  - **Exceptions:** `speculaire_gate_seconds` keeps samples until a scrape in blocks of 64 (metrics-util 0.20.4): one allocation per 64 requests, freed at the scrape. The `gate` audit event, off by default (D37), adds 8 allocations: its formatted fields and tracing's JSON layer.
   - **Checks:** `crates/nri/src/create/tests.rs` compares the reader with prost on 512 seeded messages with unknown fields and split parts, and on merges and groups. The fuzz target `nri_create` asserts that the reader agrees with prost (`testing::agrees`) and refuses nothing prost decodes but a group; its seeds are the recorded runtime requests. `nri_request` hands it each CreateContainer payload.
 - **Because:**
   - prost decodes the whole container: environment, mounts, Linux resources and two string maps per message, about 130 allocations for a typical pod, all dropped unread. The gate reads 10 fields.
   - A hand-written reader of one message is about 400 lines besides tests (`wire.rs`, `create.rs`); a borrowed decoder crate (`quick-protobuf`, `micropb`) adds a code generator and a crate to vet for the same subset.
-- **Measured (`cargo bench -p speculaire-agent --bench micro request`, 2000 samples, Apple M5, audit off):** from frame bytes to answer frame bytes, nri 10.4 µs and 151 allocations before, 8.5 µs and 17 after; image ID 10.4 µs and 154, 8.0 µs and 16; annotation 32.9 µs and 187, 27.1 µs and 56.
+  - A kept verdict is the common case, and every container start waits on it. A task per request costs its allocation and a copy of the request, which the answer at once skips; each allocation left on the path is a lock in the allocator under a burst of starts.
+  - Exact counts make a regression a failing test rather than a slower benchmark.
+- **Measured (`cargo bench -p speculaire-agent --bench micro request`, 2000 samples, Apple M5, audit off):** from frame bytes to answer frame bytes, median, slowest and allocations per request; before, with the reader, and answered at once:
+  - nri: 10.4 µs, 69.7 µs, 151; 8.5 µs, 93.6 µs, 17; 5.7 µs, 20.4 µs, 0.
+  - image ID: 10.4 µs, 30.7 µs, 154; 8.0 µs, 89.7 µs, 16; 5.5 µs, 22.2 µs, 0.
+  - annotation: 32.9 µs, 75.4 µs, 187; 27.1 µs, 710 µs, 56; 29.0 µs, 151.5 µs, 42.
 - **Cost:** a field the gate does not read is not validated: a request with a malformed environment, which prost refused, is decided. The runtime built it from its own state.
-- **Revisit when:** the gate reads a field outside the 10, or NRI renumbers one.
+- **Revisit when:** the gate reads a field outside the 10, or NRI renumbers one; or a dependency on the path, the metrics recorder above all, starts allocating per call: the guard names it.

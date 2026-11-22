@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 
 use speculaire_agent::config;
 use speculaire_oci::platform::{self as oci_platform, Host, Matcher};
-use speculaire_oci::reference::Reference;
+use speculaire_oci::reference::{Reference, Repository};
 use speculaire_oci::tagged::Tagged;
 use speculaire_registry_config::containerd::config::{self as containerd_config_file, Registry};
 use speculaire_registry_config::containerd::hosts;
@@ -216,15 +216,21 @@ fn round_trip(text: &str) {
 /// An image reference as the CRI plugin parses it (D11, D81), and as a tag the agent announces (D123).
 ///
 /// A reference that parses prints as text that parses to the same reference, and never has a tag together with a
-/// digest. A tag that parses prints as text that parses to the same tag, with the same key.
+/// digest. A tag that parses prints as text that parses to the same tag, with the same key. A repository parses as
+/// the reference does, to its name (D189).
 ///
 /// # Panics
 ///
-/// When parsing panics, or a parsed reference is not a fixed point.
+/// When parsing panics, a parsed reference is not a fixed point, or a repository differs from its reference's name.
 pub fn reference(data: &[u8]) {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
+    assert_eq!(
+        Repository::parse(text).map(|repository| repository.as_str().to_owned()),
+        Reference::parse_normalized_named(text).map(|reference| reference.name().to_owned()),
+        "{text}"
+    );
     if let Ok(parsed) = Reference::parse_docker_ref(text) {
         assert!(
             parsed.tag().is_none() || parsed.digest().is_none(),
@@ -729,20 +735,19 @@ pub fn nri_mux(data: &[u8]) {
 /// [`nri_create`] panics.
 pub fn nri_request(data: &[u8]) {
     use prost::Message;
-    use speculaire_nri::ttrpc::{Call, MAX_MESSAGE, RequestError, read_request};
+    use speculaire_nri::ttrpc::{Call, MAX_MESSAGE, Reader, RequestError};
 
     fn round_trips<M: Message + Default + PartialEq>(message: &M) {
         assert!(M::decode(message.encode_to_vec().as_slice()).as_ref() == Ok(message));
     }
 
-    let mut reader = data;
-    let mut body = Vec::new();
+    let mut requests = Reader::new(data);
     loop {
-        match ready(read_request(&mut reader, &mut body)) {
+        match ready(requests.next()) {
             Ok(request) => match request.call {
                 Call::Configure(request) => round_trips(&request),
                 Call::Synchronize(request) => round_trips(&request),
-                Call::CreateContainer(payload) => nri_create(&payload),
+                Call::CreateContainer(payload) => nri_create(payload),
                 Call::Shutdown | Call::Other { .. } => {}
             },
             Err(RequestError::Oversize { length }) => {

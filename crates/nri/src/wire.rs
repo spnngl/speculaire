@@ -59,6 +59,17 @@ impl<'a> Value<'a> {
         str::from_utf8(self.bytes(field)?).map_err(|_| Error::Utf8 { field })
     }
 
+    /// The value of field `field` as an integer of wire type 0, as written.
+    pub(crate) fn varint(self, field: u32) -> Result<u64, Error> {
+        match self {
+            Self::Varint(value) => Ok(value),
+            other => Err(Error::WireType {
+                field,
+                wire_type: other.wire_type(),
+            }),
+        }
+    }
+
     /// The value of field `field` as bytes or a message.
     pub(crate) fn bytes(self, field: u32) -> Result<&'a [u8], Error> {
         match self {

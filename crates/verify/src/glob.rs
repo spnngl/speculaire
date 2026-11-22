@@ -81,8 +81,10 @@ impl Glob {
         self.is_match(reference.name())
     }
 
-    /// Whether the glob matches `name`, a [`Reference::name`].
-    pub(crate) fn is_match(&self, name: &str) -> bool {
+    /// Whether the glob matches `name`, a [`Reference::name`] or a
+    /// [`Repository::as_str`](speculaire_oci::reference::Repository::as_str).
+    #[must_use]
+    pub fn is_match(&self, name: &str) -> bool {
         self.regex.is_match(name)
     }
 }

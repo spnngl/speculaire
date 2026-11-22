@@ -1,4 +1,5 @@
 //! A connection's bounded queue of payloads: the trunk's reader pushes without waiting, the connection pops (D163).
+//! Payloads read are handed back, and the reader fills them again (D107).
 
 use std::collections::VecDeque;
 use std::sync::PoisonError;
@@ -14,6 +15,11 @@ pub(crate) enum End {
     /// The trunk failed, broke the protocol, or its multiplexer was dropped.
     Aborted,
 }
+
+/// The most payloads read a queue keeps for the reader to fill again: one being read, one being filled.
+const SPARES: usize = 2;
+/// The largest payload a queue keeps: a few frames of requests, not a whole list of containers (D163).
+const SPARE_MAX: usize = 64 << 10;
 
 /// The queue holds as many payloads as it may.
 #[derive(Debug)]
@@ -33,6 +39,8 @@ struct Inner {
     detached: bool,
     /// The connection's task, waiting for a payload or the end.
     waker: Option<Waker>,
+    /// Payloads read, emptied, for [`Queue::spare`].
+    spares: Vec<Vec<u8>>,
 }
 
 impl Queue {
@@ -60,6 +68,26 @@ impl Queue {
         inner.payloads.push_back(payload);
         inner.wake();
         Ok(())
+    }
+
+    /// An empty buffer for the next payload: one read and handed back when there is one.
+    pub(crate) fn spare(&self) -> Vec<u8> {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        inner.spares.pop().unwrap_or_default()
+    }
+
+    /// Keeps `payload`, read, for [`Self::spare`], unless the queue keeps enough, or it holds no buffer or one too large
+    /// to keep.
+    pub(crate) fn recycle(&self, mut payload: Vec<u8>) {
+        if !(1..=SPARE_MAX).contains(&payload.capacity()) {
+            return;
+        }
+        payload.clear();
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if inner.spares.len() < SPARES {
+            inner.spares.reserve_exact(SPARES);
+            inner.spares.push(payload);
+        }
     }
 
     /// Ends the queue, unless it has already ended: the payloads queued are still popped first.
@@ -95,5 +123,32 @@ impl Inner {
         if let Some(waker) = self.waker.take() {
             waker.wake();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_payload_read_is_filled_again_unless_it_holds_nothing_or_too_much_or_is_one_too_many() {
+        let queue = Queue::new(4);
+        assert_eq!(queue.spare().capacity(), 0, "no payload read yet");
+        let payload = vec![1; 10];
+        let buffer = payload.as_ptr();
+        queue.recycle(payload);
+        let spare = queue.spare();
+        assert_eq!(spare, []);
+        assert_eq!(spare.as_ptr(), buffer, "the buffer read is filled again");
+        queue.recycle(Vec::new());
+        queue.recycle(vec![0; SPARE_MAX + 1]);
+        assert_eq!(queue.spare().capacity(), 0);
+        for _ in 0..=SPARES {
+            queue.recycle(vec![0; SPARE_MAX]);
+        }
+        let kept = std::iter::from_fn(|| Some(queue.spare()))
+            .take_while(|spare| spare.capacity() > 0)
+            .count();
+        assert_eq!(kept, SPARES);
     }
 }

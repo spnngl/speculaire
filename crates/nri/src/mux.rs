@@ -1,10 +1,10 @@
 //! NRI's multiplexer, as `pkg/net/multiplex/mux.go` at v0.12.5 behaves (D9, D163): frames on the trunk, one bounded
 //! queue per ConnID, and the trunk closed on a frame no peer writes or on a full queue.
 
-use std::io;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
+use std::{io, mem};
 
 use futures_util::future::{self, Either};
 use tokio::io::{
@@ -196,12 +196,16 @@ async fn receive<R: AsyncRead + Unpin>(mut trunk: R, queues: &Queues) -> Result<
             .read_exact(bytes.get_mut(first..).unwrap_or_default())
             .await?;
         let length = header.length()?;
-        let mut payload = vec![0; length];
+        let conn = ConnId::from_id(header.conn());
+        // An unknown ConnID's payload is read into a spare of ConnID 1's queue, and handed back to it.
+        let queue = queues.get(conn.unwrap_or(ConnId::PluginService));
+        let mut payload = queue.spare();
+        payload.resize(length, 0);
         trunk.read_exact(&mut payload).await?;
-        let Some(conn) = ConnId::from_id(header.conn()) else {
+        let Some(conn) = conn else {
+            queue.recycle(payload);
             continue;
         };
-        let queue = queues.get(conn);
         queue.push(payload).map_err(|Full| MuxError::QueueFull {
             conn,
             length,
@@ -264,7 +268,7 @@ impl AsyncRead for Connection {
         while this.read == this.payload.len() {
             match ready!(this.queue.poll_pop(cx)) {
                 Ok(payload) => {
-                    this.payload = payload;
+                    this.queue.recycle(mem::replace(&mut this.payload, payload));
                     this.read = 0;
                 }
                 Err(End::Clean) => return Poll::Ready(Ok(())),

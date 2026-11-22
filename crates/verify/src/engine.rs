@@ -12,7 +12,7 @@ use std::time::Duration;
 use speculaire_artifacts::discover::{Error, Reason};
 use speculaire_artifacts::follow::{Found, Roots};
 use speculaire_artifacts::{Artifact, Discovery, Store};
-use speculaire_oci::reference::{Digest, Reference};
+use speculaire_oci::reference::{Digest, Reference, Repository};
 use tokio::sync::futures::Notified;
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinSet;
@@ -1016,10 +1016,13 @@ fn matching<'a>(policies: &'a Policies, name: &str) -> Vec<&'a Policy> {
     policies.matching(&reference).collect()
 }
 
-/// The hash of the policies `name` matches; none when it matches none.
+/// The hash of the policies `name` matches; none when it matches none or does not parse. It allocates nothing (D189).
 pub(crate) fn match_hash(policies: &Policies, name: &str) -> Option<MatchHash> {
-    let matched = matching(policies, name);
-    (!matched.is_empty()).then(|| MatchHash::of(matched))
+    let Ok(repository) = Repository::parse(name) else {
+        warn!(%name, "an image name the runtime lists does not parse: no policy matches it");
+        return None;
+    };
+    policies.match_hash(repository.as_str())
 }
 
 /// The groups of the policies `names` match, once per hash; a name no policy matches has none.

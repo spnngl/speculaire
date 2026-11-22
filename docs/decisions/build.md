@@ -501,7 +501,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** the gate and the policy exist (then D35's third run applies in full), or a run passes 45 minutes.
 
 
-## D107: Hot paths borrow, reuse and keep fixed sizes on the stack; each change shows its saving (amends D13)
+## D107: Hot paths borrow, reuse and keep fixed sizes on the stack; each change shows its saving (amends D13; amended by D189)
 
 - **Decision:** code on a per-request, per-blob, per-frame or per-agent path follows these rules, in this order:
   - **Borrow:** parse into types that borrow the input (`&str`, `&[u8]`) and convert to owned data once, where it must outlive the input. Share a buffer that outlives one owner as `bytes::Bytes`, sliced, never copied.

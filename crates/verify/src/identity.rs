@@ -34,19 +34,18 @@ impl Verdicts {
             }
             Identified::Listed { .. } | Identified::Unconfirmed { .. } | Identified::Image(_) => {}
         }
-        let mut hashes: Vec<MatchHash> = Vec::new();
-        for name in identified.names() {
-            if let Some(hash) = match_hash(policies, name)
-                && !hashes.contains(&hash)
-            {
-                hashes.push(hash);
-            }
+        let mut groups = Groups::new();
+        for hash in identified
+            .names()
+            .filter_map(|name| match_hash(policies, name))
+        {
+            groups.insert(hash);
         }
-        if hashes.is_empty() {
+        if groups.is_empty() {
             return None;
         }
         let manifest = |image| {
-            let lookups = hashes.iter().map(|&policies| {
+            let lookups = groups.iter().map(|policies| {
                 self.get(Key {
                     image,
                     policies,
@@ -105,6 +104,51 @@ fn hope(verdict: &Verdict) -> u8 {
         Verdict::Rejected { .. } => 1,
         Verdict::Pending => 2,
         Verdict::Allow => 3,
+    }
+}
+
+/// The most policy groups [`Groups`] holds on the stack.
+const STACKED: usize = 8;
+
+/// The distinct policy groups of a container's names, the first eight on the stack (D107, D189).
+struct Groups {
+    stacked: [MatchHash; STACKED],
+    len: usize,
+    spilled: Vec<MatchHash>,
+}
+
+impl Groups {
+    fn new() -> Self {
+        Self {
+            stacked: [MatchHash([0; 32]); STACKED],
+            len: 0,
+            spilled: Vec::new(),
+        }
+    }
+
+    /// Adds `hash` unless it is already held.
+    fn insert(&mut self, hash: MatchHash) {
+        if self.iter().any(|held| held == hash) {
+            return;
+        }
+        match self.stacked.get_mut(self.len) {
+            Some(slot) => {
+                *slot = hash;
+                self.len += 1;
+            }
+            None => self.spilled.push(hash),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn iter(&self) -> impl Iterator<Item = MatchHash> {
+        self.stacked[..self.len]
+            .iter()
+            .chain(&self.spilled)
+            .copied()
     }
 }
 
