@@ -41,7 +41,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21; amended by D165, D176)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84)
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104)
-- D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109, D116)
+- D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109, D116, D182)
 - D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower (amended by D106, D114)
 - D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56, D100)
 - D37 [agent](agent.md): logs through `tracing` to journald or JSON, default `warn`; an audit log of gate decisions and verdict changes, off by default; secrets never logged (amends D30; amended by D52, D116, D173)
@@ -116,7 +116,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D106 [build](build.md): the bench's kind tier `measure`s the 10 MB and 100 MB sets on the e2e cluster nightly on both architectures, speculaire with its default settings, reflectors on the control-plane nodes and no gate or policy until M5 and M6 (amends D35; amended by D114, D178)
 - D107 [build](build.md): hot paths borrow their input, reuse buffers, keep fixed sizes on the stack and read fixed binary layouts through `zerocopy`; a change made for speed or memory names its measure (amends D13)
 - D108 [distribution](distribution.md): the mirror reloads its certificates when a D93 stamp of their files changes, at most once a second (amends D85, D93)
-- D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34)
+- D109 [build](build.md): catalog rows of metrics not built yet name their milestone; a unit test holds the described metrics to the other rows (amends D34; amended by D182)
 - D110 [distribution](distribution.md): the content directory is `io.containerd.content.v1.content` below the `root` of containerd's config, `/var/lib/containerd` when it names none; an agent test serves a blob from a temporary root (amends D5, D85)
 - D111 [distribution](distribution.md): every request of the upstream client carries `User-Agent: speculaire/<version>` (amends D88)
 - D112 [build](build.md): `just e2e-up` starts four upstreams, plain, referrers API (zot), private behind a token server and public on TLS, with a test image signed offline by cosign and copied with its referrers to each; the proxy throttles with `429`, and a node can lose an upstream (amends D94; amended by D120, D141, D164)
@@ -191,4 +191,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 
 - D180 [gate](gate.md): after the agent leaves NRI, the first container created in a running pod passes the required-plugin check until the runtimes ship NRI v0.12.5; documented and asserted by a gate test, no stand-in plugin (amends D9, D54)
 - D181 [reflector](reflector.md): a seed's rank is the first 8 bytes of SHA-256 over the image reference as written, 0x00 and the node identity, ties to the smaller name; changing it is breaking (amends D51)
-Next free number: D182.
+- D182 [build](build.md): each e2e leg fails unless protobuf scrapes, taken before each agent stop and after the suites, hold every catalog row of its runtime; rows name their runtime; the forward check reads protobuf too (amends D34, D109)
+
+Next free number: D183.

@@ -232,6 +232,7 @@ jobs:
       - env:
           TARGET: ${{ matrix.platform.target }}
         run: chmod +x "target/musl/$TARGET/speculaire"
+      # The suites, then the catalog check over their scrapes (D181).
       - env:
           RUNTIME: ${{ matrix.leg.runtime }}
           VERSION: ${{ matrix.leg.version }}
@@ -244,12 +245,14 @@ jobs:
           KUBERNETES: ${{ matrix.leg.kubernetes }}
           SPECULAIRE_E2E_IP_FAMILY: dual
         run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
-      # The journals `just e2e` saved before deleting a cluster whose suites failed.
+      # The journals `just e2e` saved before deleting a cluster whose suites failed, and the scrapes of the catalog check.
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-journals-${{ matrix.leg.runtime }}-${{ matrix.leg.version }}-k${{ matrix.leg.kubernetes }}-${{ matrix.platform.os }}
-          path: target/e2e/journals
+          path: |
+            target/e2e/journals
+            target/e2e/scrapes
           if-no-files-found: ignore
           retention-days: 7
 

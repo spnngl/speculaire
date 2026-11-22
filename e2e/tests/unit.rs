@@ -128,28 +128,24 @@ fn the_unit_has_every_hardening_setting() {
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn every_scraped_metric_is_in_the_catalog() {
-    let catalog =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/metrics.md"))
-            .unwrap();
     let cluster = Cluster::from_env();
+    let runtime = cluster.runtime();
+    let catalog = e2e::catalog::rows().unwrap();
     for node in cluster.nodes().unwrap() {
         let node = node.name;
-        let text = cluster
-            .exec(&node, &["curl", "-sf", "http://127.0.0.1:7482/metrics"])
-            .unwrap();
-        let names: Vec<&str> = text
-            .lines()
-            .filter_map(|l| l.strip_prefix("# TYPE "))
-            .filter_map(|l| l.split(' ').next())
-            .collect();
+        // The protobuf exposition, the only one with native histograms (D34).
+        let exposition = cluster.exposition(&node).unwrap().unwrap();
+        let names = e2e::node::families(&exposition).unwrap();
         assert!(
-            names.contains(&"speculaire_build_info"),
+            names.iter().any(|name| name == "speculaire_build_info"),
             "{node}: {names:?}"
         );
         for name in names {
             assert!(
-                catalog.contains(&format!("| `{name}` |")),
-                "{node}: {name} is not in docs/metrics.md (D34)"
+                catalog
+                    .iter()
+                    .any(|row| row.name == name && row.on(runtime)),
+                "{node}: {name} is not in docs/metrics.md for {runtime:?} (D34)"
             );
         }
     }

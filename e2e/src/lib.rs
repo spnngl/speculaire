@@ -9,9 +9,12 @@
 //! for the peer suites, and [`reflector`] calls a reflector.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::process::Command;
+use std::str::FromStr;
 
 pub mod balancer;
+pub mod catalog;
 pub mod hub;
 pub mod node;
 pub mod reflector;
@@ -50,6 +53,19 @@ impl Runtime {
     }
 }
 
+impl FromStr for Runtime {
+    type Err = String;
+
+    /// `containerd` or `crio`, as `just e2e` names them.
+    fn from_str(name: &str) -> Result<Self, String> {
+        match name {
+            "containerd" => Ok(Self::Containerd),
+            "crio" => Ok(Self::Crio),
+            other => Err(format!("{other:?} is no runtime: containerd or crio")),
+        }
+    }
+}
+
 /// The addresses of the cluster's nodes, which `SPECULAIRE_E2E_IP_FAMILY` picks (D94).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IpFamily {
@@ -67,6 +83,8 @@ pub struct Cluster {
     runtime: Runtime,
     release: String,
     kubernetes: String,
+    /// The directory of the leg's scrapes, which [`Cluster::scrape`] adds to (D182).
+    scrapes: Option<PathBuf>,
 }
 
 impl Cluster {
@@ -86,11 +104,9 @@ impl Cluster {
                 panic!("{name} is unset: run the suites with just e2e <runtime> <version>")
             })
         };
-        let runtime = match var("SPECULAIRE_E2E_RUNTIME").as_str() {
-            "containerd" => Runtime::Containerd,
-            "crio" => Runtime::Crio,
-            other => panic!("SPECULAIRE_E2E_RUNTIME is {other:?}, not containerd or crio"),
-        };
+        let runtime = var("SPECULAIRE_E2E_RUNTIME")
+            .parse()
+            .unwrap_or_else(|err| panic!("SPECULAIRE_E2E_RUNTIME: {err}"));
         let family = match var("SPECULAIRE_E2E_IP_FAMILY").as_str() {
             "ipv4" => IpFamily::Ipv4,
             "dual" => IpFamily::Dual,
@@ -104,6 +120,8 @@ impl Cluster {
             runtime,
             release: var("SPECULAIRE_E2E_RELEASE"),
             kubernetes: var("SPECULAIRE_E2E_KUBERNETES"),
+            // Unset for the upstreams' binary, which runs before the agents.
+            scrapes: std::env::var_os("SPECULAIRE_E2E_SCRAPES").map(PathBuf::from),
         }
     }
 
@@ -158,6 +176,7 @@ impl Cluster {
     ///
     /// When `docker` cannot start or the command exits non-zero.
     pub fn exec(&self, node: &str, command: &[&str]) -> Result<String, Failure> {
+        self.scrape_before(node, command)?;
         run(Command::new("docker").arg("exec").arg(node).args(command))
     }
 
@@ -167,6 +186,7 @@ impl Cluster {
     ///
     /// When `docker` cannot start.
     pub fn exec_output(&self, node: &str, command: &[&str]) -> Result<Output, Failure> {
+        self.scrape_before(node, command)?;
         let mut docker = Command::new("docker");
         docker.arg("exec").arg(node).args(command);
         let out = docker.output().map_err(|e| Failure {

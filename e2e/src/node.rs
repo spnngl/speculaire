@@ -3,11 +3,12 @@
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 use prost::Message as _;
 
-use crate::reflector::unhex;
 use crate::registry::{docker, fail};
 use crate::upstream::Digest;
 use crate::{Cluster, Failure, Runtime};
@@ -388,8 +389,72 @@ impl Cluster {
             .map(Metrics)
     }
 
+    /// The node's metrics as its agent serves them now in the protobuf exposition, the only one with native histograms
+    /// (D34); `None` when the agent does not answer.
+    ///
+    /// # Errors
+    ///
+    /// When `docker` cannot start.
+    pub fn exposition(&self, node: &str) -> Result<Option<Vec<u8>>, Failure> {
+        let mut docker = Command::new("docker");
+        docker.args([
+            "exec",
+            node,
+            "curl",
+            "-sf",
+            "-H",
+            "Accept: application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited",
+            "http://127.0.0.1:7482/metrics",
+        ]);
+        let out = docker.output().map_err(|e| Failure {
+            command: format!("{docker:?}"),
+            detail: e.to_string(),
+        })?;
+        Ok(out.status.success().then_some(out.stdout))
+    }
+
+    /// Adds the node's metrics in the protobuf exposition to the leg's scrapes, one file each, for the catalog check
+    /// (D182); nothing when the agent does not answer or `just e2e-test` named no directory.
+    ///
+    /// # Errors
+    ///
+    /// When `docker` cannot start, or the file cannot be written.
+    pub fn scrape(&self, node: &str) -> Result<(), Failure> {
+        static SCRAPES: AtomicU64 = AtomicU64::new(0);
+        let Some(dir) = &self.scrapes else {
+            return Ok(());
+        };
+        let Some(exposition) = self.exposition(node)? else {
+            return Ok(());
+        };
+        let since = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = dir.join(format!(
+            "{node}-{since}-{}.pb",
+            SCRAPES.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(dir)
+            .and_then(|()| std::fs::write(&path, exposition))
+            .map_err(|e| fail(&path.display().to_string(), &e))
+    }
+
+    /// Scrapes the node first when `command` may stop its agent, whose metrics go with it (D182): a `systemctl` that
+    /// names the agent's unit and stops, restarts, kills or disables something. A command that only seems to stop it
+    /// costs one scrape.
+    pub(crate) fn scrape_before(&self, node: &str, command: &[&str]) -> Result<(), Failure> {
+        let line = command.join(" ");
+        let stops = line.contains("systemctl")
+            && line.contains("speculaire")
+            && ["stop", "restart", "kill", "--now"]
+                .iter()
+                .any(|verb| line.contains(verb));
+        if stops { self.scrape(node) } else { Ok(()) }
+    }
+
     /// The series of the native histogram `name` whose labels include `label`, summed, as the node's agent serves them
-    /// now in the protobuf exposition, the only one with native histograms (D34); empty when it has none.
+    /// now; empty when it has none.
     ///
     /// # Errors
     ///
@@ -400,14 +465,27 @@ impl Cluster {
         name: &str,
         label: (&str, &str),
     ) -> Result<Native, Failure> {
-        let hex = self.sh(
-            node,
-            "curl -sf -H 'Accept: application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited' http://127.0.0.1:7482/metrics | od -An -v -tx1 | tr -d ' \\n'",
-        )?;
-        let unparsable = |detail: &str| fail(&format!("the metrics of {node}"), &detail);
-        let bytes = unhex(hex.trim()).ok_or_else(|| unparsable("not hex"))?;
-        Native::decode(&bytes, name, Some(label)).map_err(|detail| unparsable(&detail))
+        let metrics = format!("the metrics of {node}");
+        let exposition = self
+            .exposition(node)?
+            .ok_or_else(|| fail(&metrics, &"the agent does not answer"))?;
+        Native::decode(&exposition, name, Some(label)).map_err(|detail| fail(&metrics, &detail))
     }
+}
+
+/// The names of the metric families in `exposition`, an agent's `/metrics` in the protobuf exposition.
+///
+/// # Errors
+///
+/// When `exposition` does not parse.
+pub fn families(mut exposition: &[u8]) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    while !exposition.is_empty() {
+        let family =
+            Family::decode_length_delimited(&mut exposition).map_err(|err| err.to_string())?;
+        names.push(family.name);
+    }
+    Ok(names)
 }
 
 /// A native histogram of non-negative samples: its count, and the count of each bucket by index (D34).
@@ -571,7 +649,7 @@ pub fn addresses(container: &str) -> Result<Vec<IpAddr>, Failure> {
     .collect()
 }
 
-/// What [`Cluster::histogram`] reads of a `MetricFamily` of Prometheus' `metrics.proto`.
+/// What [`Cluster::histogram`] and [`families`] read of a `MetricFamily` of Prometheus' `metrics.proto`.
 #[derive(Clone, PartialEq, prost::Message)]
 struct Family {
     #[prost(string, tag = "1")]
