@@ -2651,6 +2651,7 @@ dependencies = [
 name = "speculaire-reflect"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "divan",
  "fastrand",
  "futures-util",
