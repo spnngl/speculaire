@@ -1,4 +1,4 @@
-//! `speculaire-loadgen`: D33's load scenario against one reflector, and D116's pulls from a peer, through
+//! `speculaire-loadgen`: D33's load scenario against one reflector or two with a prewarm wave (D193), and D116's pulls from a peer, through
 //! `speculaire-load` (D62, D104).
 
 // D46: on musl, mimalloc in its secure mode replaces musl's allocator.
@@ -13,7 +13,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use speculaire_load::{Pulls, Scenario, Settings, Targets};
 
-/// Run D33's load against one reflector, print the report as Markdown, and exit 1 when a target is missed. Every
+/// Run D33's load against one reflector, or two with `--prewarm`, print the report as Markdown, and exit 1 when a target is missed. Every
 /// option defaults to D33's value; Linux only.
 #[derive(Parser)]
 #[command(
@@ -74,6 +74,9 @@ struct Load {
     /// Seed of every random choice.
     #[arg(long)]
     seed: Option<u64>,
+    /// Run two reflectors, and a prewarm wave of one image over the steady phase (D193).
+    #[arg(long)]
+    prewarm: bool,
     /// Target of the reflector's peak RSS, in MiB.
     #[arg(long)]
     rss_mib: Option<u64>,
@@ -128,6 +131,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             warmup: cli.warmup.unwrap_or(d33.warmup),
             steady: cli.steady.unwrap_or(d33.steady),
             seed: cli.seed.unwrap_or(d33.seed),
+            prewarm: cli.prewarm,
         },
         targets: Targets {
             rss: cli.rss_mib.map_or(targets.rss, |mib| mib << 20),

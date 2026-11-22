@@ -29,9 +29,10 @@ exclude_re = [
   'agents\.rs:\d+:\d+: replace (/ with [*%]|\* with \+) in pace$',
   # The settling log every 5 s.
   'node\.rs:\d+:\d+: replace >= with < in Agent::settled$',
-  # A reflector settled at once, or dropped instead of stopped, which `kill_on_drop` kills: the small run goes on and
-  # meets its loose targets. The settling logs and the exit status of D33's run tell them apart.
+  # A reflector, or all of them, settled at once, or one dropped instead of stopped, which `kill_on_drop` kills: the
+  # small run goes on and meets its loose targets. The settling logs and the exit status of D33's run tell them apart.
   'node\.rs:\d+:\d+: replace Agent::settled -> anyhow::Result<Option<Duration>> with Ok\(Some\(Default::default\(\)\)\)$',
+  'lib\.rs:\d+:\d+: replace settled -> anyhow::Result<Option<Duration>> with Ok\(Some\(Default::default\(\)\)\)$',
   'node\.rs:\d+:\d+: replace Agent::stop -> anyhow::Result<\(\)> with Ok\(\(\)\)$',
   # The engine's one-line calls into discovery: `crates/artifacts` tests `Discovery::discover` and `again`, the e2e test
   # of an unverifiable verdict sees the engine call `discover`, and an engine test of them would need a registry (D151).

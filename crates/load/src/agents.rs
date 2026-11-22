@@ -11,7 +11,8 @@ use anyhow::Context as _;
 use speculaire_oci::reference::Digest;
 use speculaire_pki::node::Credentials;
 use speculaire_pki::testing::Cluster;
-use speculaire_reflect::client::{Client, Config, Holdings, Lookups, Source};
+use speculaire_reflect::client::{Client, Config, Holdings, Lookups, Pushed, Source};
+use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
@@ -55,10 +56,7 @@ impl Fleet {
         );
         let mut rng = fastrand::Rng::with_seed(scenario.seed);
         let pool: Arc<[Digest]> = (0..scenario.pool)
-            .map(|_| {
-                let [a, b, c, d] = std::array::from_fn::<u64, 4, _>(|_| rng.u64(..));
-                Digest::parse(&format!("sha256:{a:016x}{b:016x}{c:016x}{d:016x}"))
-            })
+            .map(|_| digest(&mut rng))
             .collect::<Result<_, _>>()?;
         let pem = dir.join("agent.pem");
         let mut agents = Vec::with_capacity(scenario.agents);
@@ -82,19 +80,25 @@ impl Fleet {
         Ok(Self { pool, agents })
     }
 
-    /// Starts each agent's client with `config`, evenly over `join`.
-    pub(crate) async fn connect(self, config: &Config, join: Duration) -> Connected {
+    /// Starts each agent's client with `config`, evenly over `join`. Each hands what members push to the channel
+    /// `pushes` gives for the agent's index and holdings.
+    pub(crate) async fn connect(
+        self,
+        config: &Config,
+        join: Duration,
+        mut pushes: impl FnMut(usize, &Arc<Holdings>) -> mpsc::Sender<Pushed>,
+    ) -> Connected {
         let start = Instant::now();
         let count = u32::try_from(self.agents.len()).unwrap_or(u32::MAX);
         let mut clients = Vec::with_capacity(self.agents.len());
-        for (index, agent) in (0..).zip(&self.agents) {
-            tokio::time::sleep_until(start + join / count.max(1) * index).await;
+        for (index, agent) in self.agents.iter().enumerate() {
+            let nth = u32::try_from(index).unwrap_or(u32::MAX);
+            tokio::time::sleep_until(start + join / count.max(1) * nth).await;
             clients.push(Client::spawn(
                 config.clone(),
                 Arc::clone(&agent.credentials),
                 Arc::clone(&agent.holdings),
-                // A load agent takes no pushes: a closed channel drops them.
-                tokio::sync::mpsc::channel(1).0,
+                pushes(index, &agent.holdings),
             ));
         }
         Connected {
@@ -104,8 +108,21 @@ impl Fleet {
     }
 }
 
+/// No channel: a closed one drops what members push, as D33's agents take no pushes.
+pub(crate) fn drop_pushes(_: usize, _: &Arc<Holdings>) -> mpsc::Sender<Pushed> {
+    mpsc::channel(1).0
+}
+
+/// A random sha256 digest drawn from `rng`.
+pub(crate) fn digest(rng: &mut fastrand::Rng) -> anyhow::Result<Digest> {
+    let [a, b, c, d] = std::array::from_fn::<u64, 4, _>(|_| rng.u64(..));
+    Ok(Digest::parse(&format!(
+        "sha256:{a:016x}{b:016x}{c:016x}{d:016x}"
+    ))?)
+}
+
 /// The node name of the agent at `index`.
-fn name(index: usize) -> String {
+pub(crate) fn name(index: usize) -> String {
     format!("load-agent-{index:05}")
 }
 

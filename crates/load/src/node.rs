@@ -22,6 +22,10 @@ use crate::exposition::{self, Buckets, PROTOBUF};
 
 /// The reflector's node, which its certificate names and its one member is.
 pub(crate) const NODE: &str = "load-reflector";
+/// The two reflectors of a prewarm run, members of each other (D193).
+pub(crate) const PAIR: [&str; 2] = ["load-reflector-a", "load-reflector-b"];
+/// The directory of the `hosts.toml` trees, the `config_path` of a node's containerd config.
+const HOSTS: &str = "certs.d";
 /// The containerd version the nodes' fakes answer.
 const CONTAINERD: &str = "v2.4.2";
 /// The variable that names a node's process for a wrapper, such as `just profile`'s, which names its output after it.
@@ -54,19 +58,66 @@ pub(crate) struct Node {
 }
 
 impl Node {
-    /// Writes the files of a reflector whose certificate `cluster` issues.
+    /// Writes the files of a reflector whose certificate `cluster` issues, its own one member.
     pub(crate) fn new(cluster: &Cluster) -> anyhow::Result<Self> {
-        let (port, listen) = hold_port()?;
-        Self::write(
-            cluster,
-            NODE,
-            Answers::containerd(CONTAINERD),
-            (port, listen),
-            "role = \"reflector\"\n",
-            &format!(
-                "[reflector]\nlisten = \"{listen}\"\nmembers = [{{ node = \"{NODE}\", address = \"{listen}\" }}]\n"
-            ),
-        )
+        Self::reflectors(cluster, &[NODE])?
+            .pop()
+            .context("no reflector written")
+    }
+
+    /// Writes the files of the reflectors `names`, each a member of the others, whose certificates `cluster` issues.
+    pub(crate) fn reflectors(
+        cluster: &Cluster,
+        names: &[&'static str],
+    ) -> anyhow::Result<Vec<Self>> {
+        let held = names
+            .iter()
+            .map(|_| hold_port())
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let members = names
+            .iter()
+            .zip(&held)
+            .map(|(node, (_, address))| format!("{{ node = \"{node}\", address = \"{address}\" }}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        names
+            .iter()
+            .zip(held)
+            .map(|(name, (port, listen))| {
+                Self::write(
+                    cluster,
+                    name,
+                    Answers::containerd(CONTAINERD),
+                    (port, listen),
+                    "role = \"reflector\"\n",
+                    // Only SIGHUP reloads: a poll would start the wave on each member up to its interval apart,
+                    // and the rounds would run together.
+                    &format!(
+                        "[config]\npoll_interval = 86400\n\n\
+                         [reflector]\nlisten = \"{listen}\"\nmembers = [{members}]\n"
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// Has the reflector resolve images of the plain HTTP registry at `registry` and prewarm `image`, from its next
+    /// reload on ([`Agent::hang_up`]).
+    pub(crate) fn prewarm(&self, registry: SocketAddr, image: &str) -> anyhow::Result<()> {
+        let hosts = self.path().join(HOSTS).join(registry.to_string());
+        std::fs::create_dir_all(&hosts)?;
+        std::fs::write(
+            hosts.join("hosts.toml"),
+            format!("server = \"http://{registry}\"\n"),
+        )?;
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.path().join("config.toml"))?;
+        std::io::Write::write_all(
+            &mut config,
+            format!("[prewarm]\nimages = [\"{image}\"]\n").as_bytes(),
+        )?;
+        Ok(())
     }
 
     /// Writes the files of the agent `name`, whose certificate `cluster` issues, which announces the `content` its fake
@@ -122,7 +173,10 @@ impl Node {
         let d = path.display();
         std::fs::write(
             path.join("containerd.toml"),
-            format!("version = 3\nroot = \"{d}/root\"\n"),
+            format!(
+                "version = 3\nroot = \"{d}/root\"\n\
+                 [plugins.\"io.containerd.cri.v1.images\".registry]\nconfig_path = \"{d}/{HOSTS}\"\n"
+            ),
         )?;
         std::fs::write(
             path.join("config.toml"),
@@ -314,13 +368,23 @@ impl Agent {
             .with_context(|| format!("no {field} in the reflector's /proc status"))
     }
 
-    /// Sends SIGTERM and waits for the agent to exit with success.
-    pub(crate) async fn stop(mut self) -> anyhow::Result<()> {
+    /// Sends SIGHUP: the agent reads its config again.
+    pub(crate) async fn hang_up(&self) -> anyhow::Result<()> {
+        self.signal("-HUP").await
+    }
+
+    async fn signal(&self, signal: &str) -> anyhow::Result<()> {
         let kill = Command::new("kill")
-            .args(["-TERM", &self.pid.to_string()])
+            .args([signal, &self.pid.to_string()])
             .status()
             .await?;
-        ensure!(kill.success(), "kill -TERM {}: {kill}", self.pid);
+        ensure!(kill.success(), "kill {signal} {}: {kill}", self.pid);
+        Ok(())
+    }
+
+    /// Sends SIGTERM and waits for the agent to exit with success.
+    pub(crate) async fn stop(mut self) -> anyhow::Result<()> {
+        self.signal("-TERM").await?;
         let status = tokio::time::timeout(EXIT, self.child.wait())
             .await
             .context("the agent did not exit after SIGTERM")??;
