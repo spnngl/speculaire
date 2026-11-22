@@ -379,13 +379,13 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Revisit when:** an admin needs `[::]` to mean IPv6 only; an IPv6 address such as `[fe80::1]` still listens on IPv6 alone.
 
 
-## D173: Audit fields take D37's words in snake_case, and the `gate` event gives the reason `enforce` would (amends D37)
+## D173: Audit fields take D37's words in snake_case, and the `gate` event gives the reason `enforce` would (amends D37; amended by D179)
 
 - **Decision:**
   - **Names:** each field of an audit event is D37's words for it in snake_case: `gate` has `namespace`, `pod`, `container`, `image_name`, `image_identity`, `identity_path`, `matched_policies`, `mode`, `result`, `reason`, `stale` and `exemption`; `verdict` has `image_identity`, `matched_policies`, `trust_root_hash`, `result`, `reason` and `signer_identities`. Each event also has `event`, its name. The table of `docs/operations.md` § Audit events is the one list, and the unit tests of `crates/agent/src/gate/decision/tests.rs` and `crates/verify/src/engine.rs` read it.
   - **Every field, every time:** a field with nothing to name is empty, such as `image_identity` when an exempt namespace allowed the container before its identity was read, or `exemption` when none applied.
   - **Values:** `reason` is the rejection reason `enforce` gives, under either mode, and empty when it allows; `result` takes the labels of `speculaire_gate_total`; `exemption` is `namespace` or `image`. A creation the NRI plugin answers at once because 256 are in flight is a `gate` event with `result` `overloaded`.
-  - **Image name:** chosen in `speculaire-runtime` (D90). On containerd, the pod-spec string of `io.kubernetes.cri.image-name`, which it sets on every path (v2.4.2 `internal/cri/server/container_create.go:263-266`). CRI-O passes no pod-spec name: its `io.kubernetes.cri-o.Image` is the image ID kubelet resolved (D65; measured on CRI-O 1.37), so the event names the repositories policies match, those of `Identified::names`.
+  - **Image name:** chosen in `speculaire-runtime` (D90). On containerd, the pod-spec string of `io.kubernetes.cri.image-name`, which it sets on every path (v2.4.2 `internal/cri/server/container_create.go:263-266`). CRI-O passes no pod-spec name: its `io.kubernetes.cri-o.Image` is the image ID kubelet resolved (D65; measured on CRI-O 1.37), so the event names the repositories policies match, those of `Identified::names`. D179 makes it, on every path, the names the policies were matched on.
   - **Cost:** the gate builds the fields only when an audit event would be written (`tracing::enabled!`), so the default, audit off, costs one check per creation (D107).
   - **journald:** a field is stored in capitals behind `F_`, the prefix `tracing-journald` gives by default (0.3.2 `src/lib.rs:109`).
 - **Because:**

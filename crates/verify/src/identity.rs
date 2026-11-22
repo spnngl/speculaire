@@ -7,7 +7,8 @@ use crate::engine::{Key, Lookup, Verdict, Verdicts, match_hash};
 use crate::{MatchHash, Policies, RootHash};
 
 impl Verdicts {
-    /// The verdict of `identified` under `policies`; none when no name of it matches a policy.
+    /// The verdict of `identified` under `policies`; none when no name of it matches a policy. A name no policy matches
+    /// never lightens another's verdict (D179).
     ///
     /// Each listed manifest of the image passes when its verdict under each policy group of the names passes (D151).
     /// The image is allowed when one of its manifests is; otherwise it has the most hopeful of their verdicts, and
@@ -31,7 +32,7 @@ impl Verdicts {
                     stale: false,
                 });
             }
-            Identified::Listed { .. } | Identified::Image(_) => {}
+            Identified::Listed { .. } | Identified::Unconfirmed { .. } | Identified::Image(_) => {}
         }
         let mut hashes: Vec<MatchHash> = Vec::new();
         for name in identified.names() {

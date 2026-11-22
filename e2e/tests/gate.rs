@@ -1130,6 +1130,9 @@ fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refuse
     ready(&worker, "default", "speculaire-e2e-unmatched");
     lap("no exemption, then unmatched allowed");
 
+    another_name(&enforced, &host, &unsigned);
+    lap("another name of the image");
+
     restarted(&enforced, &runnable);
     lap("agent restarted during a rollout");
 
@@ -1160,8 +1163,8 @@ fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refuse
 /// it leaves NRI, last (D39, D177): `runnable` runs, and `unsigned` is rejected with its reason, not for a missing
 /// plugin.
 fn stopping(worker: &Worker, runnable: &str, (unsigned, signed): (&str, &str)) -> Duration {
-    // Pulled before the stop, so that no pull delays the containers past it. Alone: the signed image has the same image
-    // ID, and while both are on the node the runtime may name either as the container's image (D169).
+    // Pulled before the stop, so that no pull delays the containers past it. Alone: CRI-O passes no name the pod asked
+    // for, so while `signed` is on the node the verdict can be its manifest's, another reason (D179).
     assert!(remove(worker, signed) && remove(worker, unsigned));
     worker.sh(&format!("crictl pull {unsigned} >/dev/null"));
     let upstream = worker.cluster.upstream(Kind::Plain);
@@ -1228,6 +1231,28 @@ fn stopping(worker: &Worker, runnable: &str, (unsigned, signed): (&str, &str)) -
 
 /// What the agent logs when `shutdown.drain_timeout` cuts transfers (D39 step 4).
 const CUT: &str = "transfers still in flight at shutdown.drain_timeout are cut";
+
+/// `signed` and `unsigned` are one image ID. With both on the node, under `gate.unmatched = "allow"`, the name the pod
+/// asked for chooses the policies and the exemptions, never another name of its image: a pod of `unsigned` is rejected,
+/// and stays so under an exemption of `signed` (D179). On CRI-O, which passes no such name, the verdict is either
+/// manifest's: `signed`'s is `rejected: identity mismatch`.
+fn another_name(enforced: &Enforced<'_>, host: &str, unsigned: &str) {
+    let worker = enforced.worker;
+    worker.sh(&format!("crictl pull {unsigned} >/dev/null"));
+    let refused = match worker.cluster.runtime() {
+        Runtime::Containerd => "rejected: no signature",
+        Runtime::Crio => "rejected: ",
+    };
+    start(worker, "default", "speculaire-e2e-both", unsigned);
+    rejected(worker, "default", "speculaire-e2e-both", refused);
+    let exempt = format!("{host}/{}", SIGNED.split(':').next().unwrap());
+    enforced.set(
+        &format!(r#"/^\[gate.exempt\]/,/^\[/ s|^#images = \[\]$|images = ["{exempt}"]|"#),
+        &format!(r#"images = \["{exempt}"\]"#),
+    );
+    start(worker, "default", "speculaire-e2e-exempted", unsigned);
+    rejected(worker, "default", "speculaire-e2e-exempted", refused);
+}
 
 /// On containerd 2.3, a container whose image name another image took after the kubelet resolved it, as a retag between
 /// the pull and the creation does, is rejected (D15, D170). The container is created as the kubelet creates it: from

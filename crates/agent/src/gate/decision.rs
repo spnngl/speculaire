@@ -57,10 +57,12 @@ impl Settings {
         }
     }
 
-    /// Whether `gate.exempt.images` names one of the names policies match (D18, D172).
+    /// Whether `gate.exempt.images` names each of the names policies match, and there is one (D18, D172, D179).
     fn exempts(&self, identified: &Identified<'_>) -> bool {
+        let mut names = identified.names().peekable();
         !self.images.is_empty()
-            && identified.names().any(|name| {
+            && names.peek().is_some()
+            && names.all(|name| {
                 Reference::parse_normalized_named(name)
                     .is_ok_and(|name| self.images.iter().any(|glob| glob.matches(&name)))
             })

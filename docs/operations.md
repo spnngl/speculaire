@@ -150,7 +150,7 @@ kubelet retries a rejected container creation with a backoff, and each retry is 
 | `gate` | `namespace` | The pod's namespace |
 | `gate` | `pod` | The pod's name |
 | `gate` | `container` | The container's name |
-| `gate` | `image_name` | On containerd, the image as the pod names it; on CRI-O, which passes no such name, the repositories policies match, comma-separated (D65) |
+| `gate` | `image_name` | The names the policies were matched on, comma-separated: the image as the pod names it on containerd once the runtime lists the image under it; otherwise, and on CRI-O, which passes no such name, every repository of the image (D65, D179) |
 | `gate` | `image_identity` | The image identity read: containerd's listed digest, CRI-O's image ID (D15); empty when none was read |
 | `gate` | `identity_path` | `nri`, `annotation` or `image_id`, as `speculaire_identity_path` names it (D170) |
 | `gate` | `matched_policies` | The names of the policies the image's names match, comma-separated |

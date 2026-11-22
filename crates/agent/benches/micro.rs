@@ -13,8 +13,10 @@ use speculaire_nri::api::{self, Container, CreateContainerRequest, PodSandbox};
 use speculaire_oci::platform::Host;
 use speculaire_oci::reference::Digest;
 use speculaire_runtime::containerd::Containerd;
+use speculaire_runtime::cri::ListedImage;
 use speculaire_runtime::identity::NodeIdentity;
 use speculaire_runtime::identity::annotation::{Annotation, IMAGE_NAME};
+use speculaire_runtime::images::{Image, List, Update};
 use speculaire_runtime::paths::Paths;
 use speculaire_verify::{Absent, Key, Lookup, MatchHash, Policies, Verdict, Verdicts};
 use tokio::sync::{mpsc, watch};
@@ -44,8 +46,8 @@ spec:
         subject: someone
 ";
 
-/// A node on a fake containerd 2.3 whose store holds `NAME`, an index over one manifest of 16 layers, the container's
-/// snapshot on them, and an `Allow` kept for the index under `POLICY`.
+/// A node on a fake containerd 2.3 whose store and list hold `NAME`, an index over one manifest of 16 layers, the
+/// container's snapshot on them, and an `Allow` kept for the index under `POLICY`.
 struct Node {
     _dir: tempfile::TempDir,
     _fake: Fake,
@@ -104,6 +106,17 @@ impl Node {
             verifier,
             watch::channel(Arc::clone(&settings)).1,
         ));
+        // The runtime's list, which confirms the name the pod asked for on the `nri` path (D179).
+        let listed = ListedImage {
+            id: config.to_string(),
+            repo_tags: vec![NAME.to_owned()],
+            repo_digests: Vec::new(),
+        };
+        let mut list = List::default();
+        list.apply(Update::Listing(
+            Image::from_listed(&listed).into_iter().collect(),
+        ));
+        decider.keep(&list);
         let request = CreateContainerRequest {
             pod: Some(PodSandbox {
                 namespace: "default".to_owned(),

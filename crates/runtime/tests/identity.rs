@@ -64,20 +64,26 @@ fn digest(text: &str) -> Digest {
 }
 
 /// containerd names the digest of the image's index, by tag or by platform manifest digest alike: the target of the
-/// image it resolved, which is a repository digest it lists for the image.
+/// image it resolved, which is a repository digest it lists for the image. The name is the pod's, which the list
+/// confirms names the image (D179).
 #[test]
-fn nri_on_containerd_2_4_2_reads_the_index_the_image_was_listed_with() {
+fn nri_on_containerd_2_4_2_reads_the_index_the_image_was_listed_with_and_the_pod_s_name() {
     let list = list("containerd-2.4.2/images.json");
     let image = list
         .images()
         .find(|image| image.id == digest(CONFIG))
         .expect("busybox");
-    for path in ["containerd-2.4.2/tag.pb", "containerd-2.4.2/digest.pb"] {
+    let nri = Nri::default();
+    nri.keep(&list);
+    for (path, name) in [
+        ("containerd-2.4.2/tag.pb", "busybox:1.37"),
+        ("containerd-2.4.2/digest.pb", &format!("busybox@{ARM64}")),
+    ] {
         let container = container(path);
-        let identified = identify(&Nri, &container);
+        let identified = identify(&nri, &container);
         let want = Identified::Listed {
             digest: digest(INDEX),
-            name: "docker.io/library/busybox:1.37",
+            name,
         };
         assert_eq!(identified, want, "{path}");
         let repo_digests: Vec<_> = image.repo_digests.iter().map(|repo| &repo.digest).collect();
@@ -113,5 +119,6 @@ fn image_id_on_cri_o_1_37_2_reads_every_manifest_and_name_of_the_image() {
 #[test]
 fn nri_on_cri_o_1_37_2_reads_no_identity() {
     let container = container("crio-1.37.2/tag.pb");
-    assert!(matches!(identify(&Nri, &container), Identified::Unknown(_)));
+    let nri = Nri::default();
+    assert!(matches!(identify(&nri, &container), Identified::Unknown(_)));
 }
