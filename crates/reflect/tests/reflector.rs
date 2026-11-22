@@ -11,11 +11,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle, PrometheusRecorder};
+use speculaire_oci::reference::Reference;
 use speculaire_pki::node::Credentials;
 use speculaire_pki::testing::Cluster;
 use speculaire_reflect::frame::{self, FrameError, Reader};
 use speculaire_reflect::proto::{self, agent_message, reflector_message};
-use speculaire_reflect::{Limits, Member, Reflector, Settings, connect};
+use speculaire_reflect::push::{LIST_CAP, PrewarmList};
+use speculaire_reflect::{Limits, Member, PushError, Pushes, Reflector, Settings, connect};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -333,6 +335,72 @@ async fn a_reflector_accepts_the_versions_of_its_range() {
     speaks_one.wait_lookup(&digest(1), &[]).await;
 }
 
+/// The image `registry.example/image-{n}`.
+fn image(n: usize) -> Reference {
+    Reference::parse_docker_ref(&format!("registry.example/image-{n}")).unwrap()
+}
+
+/// Queues a `Prewarm` of `image` for `node` once its stream takes pushes.
+async fn prewarm(pushes: &Pushes, node: &str, image: &Reference) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while let Err(err) = pushes.prewarm(node, image) {
+        assert_eq!(err, PushError::NoStream);
+        assert!(Instant::now() < deadline, "no stream of {node}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_lookup_sent_while_the_list_cap_of_images_waits_is_answered_and_each_image_arrives_once()
+{
+    let test = Test::start(settings()).await;
+    let pushes = test.reflector.pushes();
+    let mut agent = test.agent("a", "a", 2).await;
+    prewarm(&pushes, "a", &image(0)).await;
+    for n in 1..LIST_CAP {
+        pushes.prewarm("a", &image(n)).unwrap();
+    }
+    let list = Arc::new(PrewarmList::new(vec![image(0)]).unwrap());
+    pushes.list("a", &list).unwrap();
+    agent
+        .send(agent_message::Message::Lookup(proto::LookupRequest {
+            digest: digest(1),
+            id: 7,
+        }))
+        .await;
+    let (mut answers, mut images, mut lists) = (Vec::new(), Vec::new(), Vec::new());
+    while answers.is_empty() || images.len() < LIST_CAP || lists.is_empty() {
+        match agent.reply().await.unwrap().unwrap() {
+            reflector_message::Message::Lookup(answer) => answers.push(answer.id),
+            reflector_message::Message::Prewarm(prewarm) => images.push(prewarm.image),
+            reflector_message::Message::PrewarmList(list) => lists.push(list.images),
+            reply => panic!("{reply:?}"),
+        }
+    }
+    assert_eq!(answers, [7]);
+    let queued: Vec<String> = (0..LIST_CAP).map(|n| image(n).to_string()).collect();
+    assert_eq!(images, queued);
+    assert_eq!(lists, [vec![image(0).to_string()]]);
+}
+
+#[tokio::test]
+async fn an_agent_of_protocol_version_one_receives_no_push() {
+    let test = Test::start(settings()).await;
+    let pushes = test.reflector.pushes();
+    let mut speaks_one = test.agent("a", "a", 1).await;
+    speaks_one.snapshot(vec![digest(1)], 0).await;
+    // Its `Hello` is taken: another agent finds what it announced.
+    test.agent("b", "b", 2)
+        .await
+        .wait_lookup(&digest(1), &["a"])
+        .await;
+    assert_eq!(pushes.prewarm("a", &image(0)), Err(PushError::NoStream));
+    let list = Arc::new(PrewarmList::default());
+    assert_eq!(pushes.list("a", &list), Err(PushError::NoStream));
+    // The next frame it reads is the answer to its lookup.
+    assert_eq!(speaks_one.lookup(&digest(1)).await, Vec::<String>::new());
+}
+
 #[tokio::test]
 async fn a_lookup_returns_up_to_eight_holders_and_never_the_one_asking() {
     let test = Test::start(settings()).await;
@@ -587,6 +655,20 @@ async fn a_connection_silent_for_forty_seconds_is_closed() {
     let closed = agent.tls.read(&mut byte).await;
     assert!(matches!(closed, Ok(0) | Err(_)), "{closed:?}");
     assert!(start.elapsed() >= frame::SILENCE, "{:?}", start.elapsed());
+}
+
+#[tokio::test]
+async fn an_agent_may_wait_before_its_first_frame() {
+    let test = Test::start(settings()).await;
+    let mut agent = test.connection("a").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    agent
+        .send(agent_message::Message::Ping(proto::Ping {}))
+        .await;
+    assert_eq!(
+        agent.reply().await.unwrap(),
+        Some(reflector_message::Message::Pong(proto::Pong {}))
+    );
 }
 
 #[tokio::test]

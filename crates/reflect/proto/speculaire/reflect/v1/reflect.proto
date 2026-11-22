@@ -2,7 +2,8 @@
 //
 // A connection is mutual TLS with ALPN `speculaire-reflect/1`. Each side sends frames: a 4-byte big-endian length,
 // then that many bytes of one message, `AgentMessage` from the agent and `ReflectorMessage` from the reflector. The
-// reflector reads its frames in order and answers each before it reads the next.
+// reflector reads its frames in order and answers each before it reads the next. Between answers it sends
+// `Prewarm` and `PrewarmList` unasked, to an agent whose `Hello` says protocol version 2 or later (D183, D184).
 //
 // Changes are additive only: a reflector accepts its own protocol version and the previous one.
 syntax = "proto3";
@@ -33,6 +34,7 @@ message ReflectorMessage {
     Pong pong = 5;
     // The last message of a connection the reflector ends.
     Refused refused = 6;
+    PrewarmList prewarm_list = 7;
   }
 }
 
@@ -63,9 +65,15 @@ message Delta {
 // Send a new `Snapshot`: a `Delta` arrived out of sequence.
 message Resync {}
 
-// Pull `image` ahead of use (D51); never sent before M7.
+// Pull `image` ahead of use (D51).
 message Prewarm {
   string image = 1;
+}
+
+// The reflector's `prewarm.images`, at most 64: the images the agent keeps pinned while a member's latest list names
+// them.
+message PrewarmList {
+  repeated string images = 1;
 }
 
 message LookupRequest {

@@ -93,6 +93,8 @@ impl Fleet {
                 config.clone(),
                 Arc::clone(&agent.credentials),
                 Arc::clone(&agent.holdings),
+                // A load agent takes no pushes: a closed channel drops them.
+                tokio::sync::mpsc::channel(1).0,
             ));
         }
         Connected {

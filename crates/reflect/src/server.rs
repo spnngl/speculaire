@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use speculaire_pki::node::{Credentials, node_subject};
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -21,11 +21,15 @@ use crate::frame::{self, FrameError, Reader};
 use crate::index::Index;
 use crate::message::{Lookup, Request};
 use crate::metrics::{self, Reason, ServerSeries};
+use crate::outbox::{Outbox, Pending, Pushes, Streams};
 use crate::proto::{self, reflector_message};
 use crate::session::{Rejection, Reply, Session};
 
-/// The protocol version this reflector speaks (D97).
-pub const PROTOCOL_VERSION: u32 = 1;
+/// The protocol version this reflector speaks (D97, D184).
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// The first protocol version whose agents take pushes (D184).
+pub(crate) const PUSH_VERSION: u32 = 2;
 
 /// How many holders a `Lookup` returns at most (D97).
 pub const LOOKUP_PEERS: usize = 8;
@@ -96,6 +100,7 @@ impl Default for Limits {
 pub struct Reflector {
     address: SocketAddr,
     index: Arc<Index>,
+    pushes: Pushes,
     stop: CancellationToken,
     accept: JoinHandle<()>,
     /// Ends once every connection has dropped its [`Api`], whose sender it holds.
@@ -118,9 +123,11 @@ impl Reflector {
         tls.alpn_protocols = vec![frame::ALPN.to_vec()];
         let stop = CancellationToken::new();
         let index = Arc::default();
+        let pushes = Pushes::default();
         let (held, ended) = mpsc::channel(1);
         let api = Api {
             index: Arc::clone(&index),
+            streams: Arc::clone(pushes.streams()),
             members: proto::MembersResponse {
                 members: settings
                     .members
@@ -145,6 +152,7 @@ impl Reflector {
         Ok(Self {
             address,
             index,
+            pushes,
             stop,
             accept,
             ended,
@@ -155,6 +163,12 @@ impl Reflector {
     #[must_use]
     pub const fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    /// Queues what the reflector sends its agents unasked (D183).
+    #[must_use]
+    pub fn pushes(&self) -> Pushes {
+        self.pushes.clone()
     }
 
     /// Refuses every connection as stopping and waits for each to end (D39, D103): agents then announce to the
@@ -174,6 +188,8 @@ impl Reflector {
 #[derive(Debug)]
 struct Api {
     index: Arc<Index>,
+    /// The outbox of each stream that takes pushes.
+    streams: Arc<Streams>,
     settings: Arc<Settings>,
     /// What `Members` answers, built once from the settings.
     members: proto::MembersResponse,
@@ -252,41 +268,48 @@ async fn open(
     }
 }
 
-/// Answers the agent's frames until the connection ends.
+/// Answers the agent's frames until the connection ends, and sends what its outbox holds after each (D183).
 async fn exchange(tls: &mut TlsStream<TcpStream>, node: Arc<str>, accepted: Instant, api: &Api) {
     let mut reader = Reader::new(api.settings.limits.message);
     let mut session = Session::new(
         Arc::clone(&api.index),
         Arc::clone(&api.settings),
+        Arc::clone(&api.streams),
         Arc::clone(&node),
     );
+    // Pushes do not show the agent alive: only its frames move the deadline.
+    let mut silent = tokio::time::Instant::now() + frame::SILENCE;
     let refusal = loop {
-        let read = tokio::select! {
+        let woken = tokio::select! {
             () = api.stop.cancelled() => break stopping(),
-            read = tokio::time::timeout(frame::SILENCE, reader.next(tls)) => read,
+            woken = tokio::time::timeout_at(silent, next(&mut reader, tls, session.outbox())) => woken,
         };
-        let message = match read {
-            Ok(Ok(Some(message))) => message,
-            Ok(Ok(None)) => return debug!(%node, "the agent closed its reflector connection"),
-            Ok(Err(err @ FrameError::Size { .. })) => break reject(&node, Reason::Size, &err),
-            Ok(Err(err @ FrameError::Decode(_))) => break reject(&node, Reason::Malformed, &err),
-            Ok(Err(FrameError::Io(err))) => {
-                return debug!(%node, error = %err, "reflector connection failed");
+        let reply = match woken {
+            Ok(Woken::Queued) => None,
+            Ok(Woken::Read(read)) => {
+                silent = tokio::time::Instant::now() + frame::SILENCE;
+                let message = match read {
+                    Ok(Some(message)) => message,
+                    Ok(None) => return debug!(%node, "the agent closed its reflector connection"),
+                    Err(err @ FrameError::Size { .. }) => break reject(&node, Reason::Size, &err),
+                    Err(err @ FrameError::Decode(_)) => {
+                        break reject(&node, Reason::Malformed, &err);
+                    }
+                    Err(FrameError::Io(err)) => {
+                        return debug!(%node, error = %err, "reflector connection failed");
+                    }
+                };
+                match answer(api, &mut session, message, accepted) {
+                    Ok(reply) => reply,
+                    Err(refusal) => break refusal,
+                }
             }
             Err(_) => return debug!(%node, "reflector connection silent; closing it"),
-        };
-        let reply = match answer(api, &mut session, message, accepted) {
-            Ok(Some(reply)) => reply,
-            Ok(None) => continue,
-            Err(refusal) => break refusal,
-        };
-        let reply = proto::ReflectorMessage {
-            message: Some(reply),
         };
         // Stopping inside a frame leaves the agent no frame to read the refusal from: the connection just closes.
         let written = tokio::select! {
             () = api.stop.cancelled() => return,
-            written = tokio::time::timeout(frame::SILENCE, frame::write(tls, &reply, frame::LIMIT)) => written,
+            written = tokio::time::timeout(frame::SILENCE, send(tls, reply, session.outbox())) => written,
         };
         match written {
             Ok(Ok(())) => {}
@@ -306,6 +329,67 @@ async fn exchange(tls: &mut TlsStream<TcpStream>, node: Arc<str>, accepted: Inst
     if let Ok(Err(err)) = tokio::time::timeout(FAREWELL, farewell).await {
         debug!(%node, error = %err, "cannot tell the agent why the reflector ends its connection");
     }
+}
+
+/// What woke a connection's loop.
+#[derive(Debug)]
+enum Woken {
+    /// The agent's next frame, or why there is none.
+    Read(Result<Option<proto::AgentMessage>, FrameError>),
+    /// A push was queued.
+    Queued,
+}
+
+/// The agent's next frame, or the first push queued in `outbox` before it; a frame that is readable goes first.
+async fn next<R: AsyncRead + Unpin>(
+    reader: &mut Reader<proto::AgentMessage>,
+    io: &mut R,
+    outbox: Option<&Outbox>,
+) -> Woken {
+    let queued = async {
+        match outbox {
+            Some(outbox) => outbox.queued().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        biased;
+        read = reader.next(io) => Woken::Read(read),
+        () = queued => Woken::Queued,
+    }
+}
+
+/// Writes `reply`, then what `outbox` holds: the list, then the images in the order queued (D183). What was queued
+/// after the request arrived goes after its reply, and nothing queued waits behind more than one request.
+async fn send<W: AsyncWrite + Unpin>(
+    io: &mut W,
+    reply: Option<reflector_message::Message>,
+    outbox: Option<&Outbox>,
+) -> Result<(), FrameError> {
+    if let Some(reply) = reply {
+        write(io, reply).await?;
+    }
+    let Some(outbox) = outbox else {
+        return Ok(());
+    };
+    let Pending { list, images } = outbox.take();
+    if let Some(list) = list {
+        write(io, reflector_message::Message::PrewarmList((&*list).into())).await?;
+    }
+    for image in &images {
+        write(io, reflector_message::Message::Prewarm(image.into())).await?;
+    }
+    Ok(())
+}
+
+async fn write<W: AsyncWrite + Unpin>(
+    io: &mut W,
+    message: reflector_message::Message,
+) -> Result<(), FrameError> {
+    let message = proto::ReflectorMessage {
+        message: Some(message),
+    };
+    frame::write(io, &message, frame::LIMIT).await
 }
 
 async fn handshake(
@@ -411,4 +495,87 @@ fn reject(node: &str, reason: Reason, why: &dyn std::fmt::Display) -> proto::Ref
         Reason::Malformed => proto::Reason::Malformed,
     };
     refused(code, &format!("connection of node {node:?} refused: {why}"))
+}
+
+/// The loop of a connection and its outbox under Shuttle's schedules (D183): `just shuttle`.
+#[cfg(all(test, shuttle))]
+mod schedules {
+    use speculaire_oci::reference::Reference;
+
+    use super::*;
+    use crate::proto::agent_message;
+
+    const PINGS: usize = 3;
+    const IMAGES: usize = 4;
+
+    #[test]
+    fn schedules_answer_every_request_and_lose_no_push() {
+        shuttle::check_random(
+            || {
+                shuttle::future::block_on(async {
+                    // A closure, not a function: cargo-mutants would mutate a function it never builds with `shuttle`.
+                    let image = |n: usize| {
+                        Reference::parse_docker_ref(&format!("registry.example/image-{n}"))
+                            .expect("a valid reference")
+                    };
+                    let (mut ours, mut theirs) = tokio::io::duplex(1 << 16);
+                    let pushes = Pushes::default();
+                    let node: Arc<str> = Arc::from("a");
+                    let outbox = pushes.streams().open(&node);
+                    // The loop of `exchange`, which answers each `Ping`, until the agent closes.
+                    let exchange = shuttle::future::spawn(async move {
+                        let mut reader = Reader::new(frame::LIMIT);
+                        loop {
+                            let reply = match next(&mut reader, &mut ours, Some(&outbox)).await {
+                                Woken::Read(Ok(Some(_))) => {
+                                    Some(reflector_message::Message::Pong(proto::Pong {}))
+                                }
+                                Woken::Read(Ok(None)) => break,
+                                Woken::Read(Err(err)) => panic!("{err}"),
+                                Woken::Queued => None,
+                            };
+                            send(&mut ours, reply, Some(&outbox))
+                                .await
+                                .expect("the agent reads");
+                        }
+                    });
+                    let queue = shuttle::future::spawn(async move {
+                        for n in 0..IMAGES {
+                            pushes.prewarm("a", &image(n)).expect("room for each image");
+                        }
+                    });
+                    let ping = proto::AgentMessage {
+                        message: Some(agent_message::Message::Ping(proto::Ping {})),
+                    };
+                    for _ in 0..PINGS {
+                        frame::write(&mut theirs, &ping, frame::LIMIT)
+                            .await
+                            .expect("the loop reads");
+                    }
+                    let mut reader = Reader::<proto::ReflectorMessage>::new(frame::LIMIT);
+                    let (mut pongs, mut images) = (0, Vec::new());
+                    while pongs < PINGS || images.len() < IMAGES {
+                        let message = reader
+                            .next(&mut theirs)
+                            .await
+                            .expect("a frame")
+                            .expect("an open stream");
+                        match message.message {
+                            Some(reflector_message::Message::Pong(_)) => pongs += 1,
+                            Some(reflector_message::Message::Prewarm(prewarm)) => {
+                                images.push(prewarm.image);
+                            }
+                            other => panic!("{other:?}"),
+                        }
+                    }
+                    let queued: Vec<String> = (0..IMAGES).map(|n| image(n).to_string()).collect();
+                    assert_eq!(images, queued);
+                    theirs.shutdown().await.expect("a close");
+                    exchange.await.expect("the loop ends");
+                    queue.await.expect("the queueing ends");
+                });
+            },
+            2000,
+        );
+    }
 }

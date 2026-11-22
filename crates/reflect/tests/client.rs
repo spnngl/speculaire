@@ -10,15 +10,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle, PrometheusRecorder};
-use speculaire_oci::reference::Digest;
+use speculaire_oci::reference::{Digest, Reference};
 use speculaire_pki::node::Credentials;
 use speculaire_pki::testing::Cluster;
-use speculaire_reflect::client::{Client, Config, Holdings, LookupError, PEER_PORT, Source};
+use speculaire_reflect::client::{
+    Client, Config, Holdings, LookupError, PEER_PORT, Pushed, Source,
+};
 use speculaire_reflect::frame::{self, Reader};
 use speculaire_reflect::proto::{self, agent_message, reflector_message};
-use speculaire_reflect::{Member, Reflector, Settings, connect};
+use speculaire_reflect::push::Push;
+use speculaire_reflect::{Member, PushError, Reflector, Settings, connect};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 /// A cluster of two reflectors, the second behind the load balancer.
@@ -75,8 +79,19 @@ impl Test {
         }
     }
 
-    /// The client of `node`, holding `holdings`, with `peer.address` set to `peer`.
+    /// The client of `node`, holding `holdings`, with `peer.address` set to `peer`; it drops what members push.
     fn agent(&self, node: &str, holdings: &Arc<Holdings>, peer: Option<SocketAddr>) -> Client {
+        self.pushed(node, holdings, peer, mpsc::channel(1).0)
+    }
+
+    /// The client of `node`, as [`Self::agent`], handing what members push to `pushes`.
+    fn pushed(
+        &self,
+        node: &str,
+        holdings: &Arc<Holdings>,
+        peer: Option<SocketAddr>,
+        pushes: mpsc::Sender<Pushed>,
+    ) -> Client {
         let balancer = self.members[1].address;
         let config = Config {
             host: balancer.ip().to_string(),
@@ -87,6 +102,7 @@ impl Test {
             config,
             credentials(&self.cluster, &self.dir, node),
             Arc::clone(holdings),
+            pushes,
         )
     }
 
@@ -249,6 +265,7 @@ async fn a_client_stopped_before_its_first_stream_fixes_no_peer_address() {
         config,
         credentials(&test.cluster, &test.dir, "node-a"),
         Arc::new(Holdings::default()),
+        mpsc::channel(1).0,
     );
     let fixed = a.fixed_peer_address();
     a.stop().await;
@@ -293,6 +310,7 @@ async fn a_client_stops_at_once_while_the_load_balancer_hangs() {
         config,
         credentials(&test.cluster, &test.dir, "node-a"),
         Arc::new(Holdings::default()),
+        mpsc::channel(1).0,
     );
     tokio::time::sleep(Duration::from_millis(200)).await;
     let start = Instant::now();
@@ -371,5 +389,33 @@ async fn a_member_the_load_balancer_no_longer_lists_is_no_longer_streamed_to() {
         assert!(Instant::now() < deadline, "{lookups:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    a.stop().await;
+}
+
+#[tokio::test]
+async fn only_a_member_pushes_and_its_pushes_reach_the_channel() {
+    // The load balancer lists cp-2 alone: the agent streams to cp-2, not to cp-1 (D184).
+    let test = Test::start(&["cp-2"]).await;
+    let (pushes, mut received) = mpsc::channel(4);
+    let a = test.pushed("node-a", &Arc::new(Holdings::default()), None, pushes);
+    let image = Reference::parse_docker_ref("registry.example/app:1").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while let Err(err) = test.reflectors[1].pushes().prewarm("node-a", &image) {
+        assert_eq!(err, PushError::NoStream);
+        assert!(Instant::now() < deadline, "no stream to cp-2");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let got = tokio::time::timeout(Duration::from_secs(5), received.recv()).await;
+    assert_eq!(
+        got.unwrap(),
+        Some(Pushed {
+            member: "cp-2".to_owned(),
+            push: Push::Prewarm(image.clone()),
+        })
+    );
+    assert_eq!(
+        test.reflectors[0].pushes().prewarm("node-a", &image),
+        Err(PushError::NoStream)
+    );
     a.stop().await;
 }

@@ -10,7 +10,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - A reflector outage degrades to *fall through*, never to a failed pull.
 - **Revisit when:** we need clusters without a stable control plane, or multi-cluster sharing (`docs/proposals/federation.md`).
 
-## D2: Reflector topology and protocol (amended by D33, D51, D97, D98, D105)
+## D2: Reflector topology and protocol (amended by D33, D51, D97, D98, D105, D184)
 
 - **Decision:**
   - **Placement:** reflectors are the agents on the control-plane nodes, with `role = "reflector"`. Every agent knows one URL, `reflector.url`: a load balancer in front of the control-plane nodes. It must be L4 TCP passthrough, because mTLS ends at the reflector.
@@ -54,7 +54,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - While an agent reconnects, members can disagree for a moment; the cost is one extra seed pulling from upstream.
 - **Revisit when:** benchmarks show extra upstream pulls during prewarm.
 
-## D97: The reflector's wire, index and limits (amends D2, D27, D76; amended by D104, D105)
+## D97: The reflector's wire, index and limits (amends D2, D27, D76; amended by D104, D105, D184)
 
 - **Decision:**
   - **Wire:** protobuf package `speculaire.reflect.v1`, in `crates/reflect/proto/`. `protocol_version` is an integer, 1 for now. Digests travel as their text, and the reflector parses each one as an OCI digest (sha256, sha384 or sha512).
@@ -136,7 +136,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - `just valgrind`, locally on aarch64: memcheck finds no error and no definite leak in either run.
 - **Revisit when:** a target is missed. In DHAT's profile, each agent's connection costs the reflector about 50 KiB of h2, tonic and rustls buffers, which comes before the index (D2). 24 KiB of it are h2's write buffer and its 8 KiB read buffer, which no setting changes (h2 0.4.20 `src/codec/framed_write.rs:67`).
 
-## D105: Agents and reflectors speak length-prefixed protobuf over TLS, not gRPC (amends D2, D13, D97, D98, D104; amended by D117)
+## D105: Agents and reflectors speak length-prefixed protobuf over TLS, not gRPC (amends D2, D13, D97, D98, D104; amended by D117, D183)
 
 - **Decision:**
   - **Wire:** a TLS connection with the ALPN protocol `speculaire-reflect/1` (`frame::ALPN`). Each frame is a 4-byte big-endian length, then that many bytes of one protobuf message: an `AgentMessage` from the agent, a `ReflectorMessage` from the reflector (`crates/reflect/proto/`). There is no gRPC service; `protocol_version` stays 1.
@@ -195,3 +195,28 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Neither a reference nor a node name holds a 0x00, so the separator keeps `ab`, `c` apart from `a`, `bc`.
 - **Measured:** `just bench-micro`, `speculaire-reflect`'s `seed`, 2 seeds among 10k nodes, on an Apple M5: median 459 µs (46 ns a node), one allocation of 48 B, the result.
 - **Revisit when:** the choice shows in a reflector's profile at a wave's start.
+
+## D183: A reflector queues what it pushes in one outbox per stream, which drops nothing (amends D105)
+
+- **Decision:**
+  - **Outbox:** each `Announce` stream that takes pushes (D184) has one, from its `Hello` on: the latest `PrewarmList` and the images waiting for a `Prewarm`, in the order queued. A newer list replaces the waiting one, and an image queued again while it waits is kept once. With 64 images waiting (`push::LIST_CAP`), a 65th is refused to its caller with `PushError::Full`. Nothing in an outbox is ever dropped, so there is no drop metric.
+  - **Handle:** `Reflector::pushes` returns `Pushes`, whose `prewarm` and `list` queue for one node's stream, or fail with `PushError::NoStream`. A node's later stream takes its pushes over, as it takes its entry over (D97).
+  - **Loop:** the connection's one task waits for the agent's next frame or a queued push, the frame first when both are ready. After each wake, it writes the frame's reply, if any, then the list, then the images. A reply goes out before anything queued after its request arrived, and a request waits behind at most one outbox. Pushes do not move the 40 s silence deadline, which only the agent's frames do (D105).
+  - **Check:** Shuttle explores the loop and the outbox (`server::schedules`, `just shuttle`); a lost wake deadlocks it.
+- **Because:**
+  - One task and no channel per connection keep D105's memory and its answers in order. Its revisit, unasked messages that need a queue, arrives with M7's pushes.
+  - What a reflector pushes is bounded: one list of at most 64 images (`prewarm.images`), and a `Prewarm` of a listed image. 64 images and one list bound an outbox, and the agent only needs a member's latest list.
+  - Dropping a `Prewarm` would leave the node cold with no sign of it; a caller told `Full` knows what was not queued.
+- **Revisit when:** a reflector pushes anything else, or an outbox's writes show in D33's lookup p99.
+
+## D184: Only a member pushes, to an agent of protocol version 2 (amends D2, D97)
+
+- **Decision:**
+  - **Version:** protocol version 2 takes `Prewarm` and `PrewarmList`. A reflector sends them only on a stream whose `Hello` says 2 or later, and still accepts version 1 (D2).
+  - **Trust:** the agent takes pushes only on its `Announce` streams, each dialled to a member of the `Members` list expecting the member's node (D98). A push on the `Members` connection is ignored.
+  - **Client:** `Client::spawn` takes a channel; each push, parsed into `push::Push` (an image `PullImage` would take, as containerd's CRI plugin parses it, or a list of at most 64), goes to it with the member's node, as `Pushed`. A push that does not parse is logged and dropped, and the stream stays. A full channel holds the stream, lookups' answers included, so the agent reads it at once. Until the agent acts on pushes, it passes a closed channel, which drops each one.
+- **Because:**
+  - A push makes the node pull. Only a member, a control-plane node whose certificate the agent checked (`docs/security.md`), may ask for that.
+  - A version 1 agent drops a `Prewarm` and does not know `PrewarmList`. The version tells the reflector whom a push reaches, and queueing nothing for the others costs nothing.
+  - Reflectors upgrade first (D40), so a reflector of version 2 meets agents of 1 and 2, and an agent of 2 never meets a reflector of 1.
+- **Revisit when:** something other than a member must push, or a third protocol version drops version 1.
