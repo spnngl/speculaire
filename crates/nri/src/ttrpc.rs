@@ -194,6 +194,17 @@ async fn write_message<W: AsyncWrite + Unpin>(
     kind: u8,
     message: &impl prost::Message,
 ) -> io::Result<()> {
+    encode_message(buf, stream, kind, message)?;
+    writer.write_all(buf).await
+}
+
+/// Puts `message` with its header in `buf`, in place of what it held.
+fn encode_message(
+    buf: &mut Vec<u8>,
+    stream: u32,
+    kind: u8,
+    message: &impl prost::Message,
+) -> io::Result<()> {
     let length = u32::try_from(message.encoded_len())
         .ok()
         .filter(|&length| length <= MAX_MESSAGE)
@@ -207,7 +218,46 @@ async fn write_message<W: AsyncWrite + Unpin>(
     buf.clear();
     buf.extend_from_slice(header.as_bytes());
     message.encode(buf).expect("a Vec grows to fit the message");
-    writer.write_all(buf).await
+    Ok(())
+}
+
+/// The message of a call of the plugin service's `method` on `stream`, whose request is the protobuf `payload`.
+#[cfg(feature = "testing")]
+pub(crate) fn request_message(
+    stream: u32,
+    method: &str,
+    payload: &[u8],
+    timeout: Duration,
+) -> io::Result<Vec<u8>> {
+    let request = proto::Request {
+        service: PLUGIN_SERVICE.to_owned(),
+        method: method.to_owned(),
+        payload: payload.to_vec(),
+        timeout_nano: i64::try_from(timeout.as_nanos()).unwrap_or(i64::MAX),
+    };
+    let mut buf = Vec::new();
+    encode_message(&mut buf, stream, REQUEST, &request)?;
+    Ok(buf)
+}
+
+/// The status of the response `message` holds; none until it holds a whole message.
+///
+/// # Errors
+///
+/// When the message is not a response.
+#[cfg(feature = "testing")]
+pub(crate) fn response_status(message: &[u8]) -> Option<io::Result<Status>> {
+    let (header, body) = Header::read_from_prefix(message).ok()?;
+    let body = body.get(..usize::try_from(header.length.get()).ok()?)?;
+    let response = match header.kind {
+        RESPONSE => proto::Response::decode(body)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
+        kind => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a message of kind {kind}, not a response"),
+        )),
+    };
+    Some(response.map(|response| response.status.unwrap_or_default()))
 }
 
 /// Answers the request on `stream`: `Ok` carries the response's protobuf, `Err` the status that replaces it.
