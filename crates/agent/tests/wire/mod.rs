@@ -126,12 +126,7 @@ pub(crate) fn containerd(dir: &std::path::Path, pulled: &Pulled) -> (Fake, NodeI
     let socket = dir.join("containerd.sock");
     let mut answers = Answers::containerd("2.3.7");
     answers.image_store = vec![(NAME.to_owned(), pulled.target.to_string())];
-    answers.snapshots = vec![Snapshot {
-        snapshotter: "overlayfs".to_owned(),
-        key: CONTAINER_ID.to_owned(),
-        parent: pulled.chain.to_string(),
-        labels: Vec::new(),
-    }];
+    answers.snapshots = vec![snapshot(pulled)];
     let fake = Fake::start(&socket, answers).expect("a fake containerd");
     let host = Host {
         os: "linux".to_owned(),
@@ -143,6 +138,16 @@ pub(crate) fn containerd(dir: &std::path::Path, pulled: &Pulled) -> (Fake, NodeI
         fake,
         NodeIdentity::containerd(Annotation::new(containerd, host)),
     )
+}
+
+/// The container's snapshot, on the image's chain ID.
+fn snapshot(pulled: &Pulled) -> Snapshot {
+    Snapshot {
+        snapshotter: "overlayfs".to_owned(),
+        key: CONTAINER_ID.to_owned(),
+        parent: pulled.chain.to_string(),
+        labels: Vec::new(),
+    }
 }
 
 /// The runtime's image list: `NAME`, pulled by its index on containerd and by its manifest on CRI-O.
@@ -256,7 +261,7 @@ pub(crate) struct Wire {
     /// The answer's, kept between samples.
     answer: Vec<u8>,
     _gate: Gate,
-    _fake: Option<Fake>,
+    fake: Option<Fake>,
     _audit: Option<DefaultGuard>,
     _dir: tempfile::TempDir,
 }
@@ -311,7 +316,7 @@ impl Wire {
             call: testing::call(STREAM, "CreateContainer", &payload, Duration::from_secs(2)),
             answer: Vec::new(),
             _gate: gate,
-            _fake: fake,
+            fake,
             _audit: audit,
             _dir: dir,
         };
@@ -319,6 +324,21 @@ impl Wire {
         while wire.create() != Answer::Allow {
             std::thread::sleep(Duration::from_millis(5));
         }
+        // And on `annotation`, the snapshot's prepare event read, which spares the `Stat`: the gate follows the events
+        // once it is connected, so the event goes again until a request asks no `Stat`.
+        let fake = wire.fake.take();
+        if let Some(fake) = &fake {
+            loop {
+                fake.prepared(&snapshot(&pulled));
+                let asked = fake.stats();
+                assert_eq!(wire.create(), Answer::Allow);
+                if fake.stats() == asked {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        wire.fake = fake;
         wire
     }
 

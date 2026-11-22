@@ -17,13 +17,14 @@ use speculaire_nri::create::{Container, Pod};
 use speculaire_oci::index::Index;
 use speculaire_oci::manifest::{self, Children};
 use speculaire_oci::platform::Host;
-use speculaire_oci::reference::{Digest, Reference};
+use speculaire_oci::reference::{Digest, DockerRef};
 use speculaire_oci::{chain, referrers};
 use speculaire_registry_config::containerd::config::{self as containerd_config, Snapshotters};
 use tracing::{debug, warn};
 
 use super::{Identified, MISSING};
 use crate::containerd::Containerd;
+use crate::containerd::snapshots::Prepared;
 use crate::containerd::store::Store;
 use crate::content::{self, Content as _};
 
@@ -63,6 +64,8 @@ pub struct Annotation {
     snapshotters: ArcSwap<Snapshotters>,
     /// The chain ID of each target digest resolved so far.
     chains: Mutex<HashMap<Digest, Digest>>,
+    /// The parents containerd's snapshot events named.
+    prepared: Prepared,
 }
 
 impl Annotation {
@@ -75,6 +78,7 @@ impl Annotation {
             host,
             snapshotters: ArcSwap::from_pointee(Snapshotters::default()),
             chains: Mutex::new(HashMap::new()),
+            prepared: Prepared::default(),
         }
     }
 
@@ -93,34 +97,32 @@ impl Annotation {
         self.snapshotters.store(Arc::new(snapshotters));
     }
 
-    /// Keeps the image store until the agent stops.
+    /// Keeps the image store, and the snapshots prepared, until the agent stops.
     pub async fn follow(&self) {
-        self.containerd.keep(&self.store).await;
+        tokio::join!(
+            self.containerd.keep(&self.store),
+            self.containerd.keep_prepared(&self.prepared)
+        );
     }
 
     /// The identity of `container`, created in `pod`: its image's target digest and the name it was asked by, when its
     /// snapshot rests on the image's chain ID.
     pub async fn identify<'a>(&self, pod: &Pod<'_>, container: &Container<'a>) -> Identified<'a> {
-        let Some(name) = container.annotations.get(IMAGE_NAME) else {
-            return Identified::Unknown(MISSING);
-        };
-        let Ok(reference) = Reference::parse_docker_ref(name) else {
-            return Identified::Unknown(MISSING);
-        };
-        let Some(target) = self.store.get(&reference.to_string()) else {
-            return Identified::Unknown(NOT_STORED);
+        let (name, target) = match self.target(container) {
+            Ok(found) => found,
+            Err(reason) => return Identified::Unknown(reason),
         };
         let Some(chain) = self.chain(&target).await else {
             return Identified::Unknown(NO_CHAIN);
         };
-        // An untrusted workload names no handler or this one (v2.3.7 `internal/cri/config/config.go:731-748`).
-        let handler = if pod.annotations.get(UNTRUSTED_WORKLOAD) == Some("true") {
-            UNTRUSTED_RUNTIME
-        } else {
-            pod.runtime_handler
-        };
         let snapshotters = self.snapshotters.load_full();
-        let snapshotter = snapshotters.of(handler);
+        let snapshotter = snapshotters.of(handler(pod));
+        if self.prepared.rests_on(snapshotter, container.id, &chain) {
+            return Identified::Listed {
+                digest: target,
+                name,
+            };
+        }
         match self
             .containerd
             .snapshot_base(snapshotter, container.id, &chain)
@@ -141,6 +143,36 @@ impl Annotation {
                 Identified::Unknown(NO_SNAPSHOT)
             }
         }
+    }
+
+    /// [`Self::identify`] when it needs no call to containerd: the chain ID kept, and the snapshot's prepare event
+    /// read. None otherwise.
+    pub fn identify_now<'a>(
+        &self,
+        pod: &Pod<'_>,
+        container: &Container<'a>,
+    ) -> Option<Identified<'a>> {
+        let (name, target) = match self.target(container) {
+            Ok(found) => found,
+            Err(reason) => return Some(Identified::Unknown(reason)),
+        };
+        let chain = self.chains().get(&target).cloned()?;
+        let snapshotters = self.snapshotters.load();
+        let rests = self
+            .prepared
+            .rests_on(snapshotters.of(handler(pod)), container.id, &chain);
+        rests.then_some(Identified::Listed {
+            digest: target,
+            name,
+        })
+    }
+
+    /// The name `container` was asked by, and the target digest the image store holds for it; else why there is none.
+    fn target<'a>(&self, container: &Container<'a>) -> Result<(&'a str, Digest), &'static str> {
+        let name = container.annotations.get(IMAGE_NAME).ok_or(MISSING)?;
+        let reference = DockerRef::parse(name).map_err(|_| MISSING)?;
+        let target = self.store.get(reference.as_str()).ok_or(NOT_STORED)?;
+        Ok((name, target))
     }
 
     /// The chain ID of the image `target` names on this node, kept once read.
@@ -213,6 +245,16 @@ enum ChainError {
     Nested,
     #[error(transparent)]
     Config(#[from] chain::Error),
+}
+
+/// The runtime handler `pod` runs on: an untrusted workload names no handler or this one (v2.3.7
+/// `internal/cri/config/config.go:731-748`).
+fn handler<'a>(pod: &Pod<'a>) -> &'a str {
+    if pod.annotations.get(UNTRUSTED_WORKLOAD) == Some("true") {
+        UNTRUSTED_RUNTIME
+    } else {
+        pod.runtime_handler
+    }
 }
 
 #[cfg(test)]

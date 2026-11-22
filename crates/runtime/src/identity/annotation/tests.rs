@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use containerd_client::events::SnapshotPrepare;
+use containerd_client::types::Envelope;
 use serde_json::json;
 use speculaire_fake_runtime::{Answers, Fake, Snapshot};
 use speculaire_nri::api::{Container, PodSandbox};
@@ -523,4 +525,55 @@ async fn the_store_follows_containerd_s_images() {
             name: NAME
         }
     );
+}
+
+#[tokio::test]
+async fn a_snapshot_whose_prepare_event_names_the_chain_id_is_identified_without_a_stat() {
+    let image = image();
+    let (fake, annotation, _dir) = node(
+        &image,
+        vec![snapshot(CONTAINER, &image.amd64.to_string(), false)],
+    );
+    let container = container(Some(NAME));
+    let (pod, view) = (pod(""), (&container).into());
+    let now = || annotation.identify_now(&(&pod).into(), &view);
+    assert_eq!(now(), None, "no chain ID kept");
+    assert_eq!(
+        identify(&annotation, &pod, &container).await,
+        listed(&image)
+    );
+    assert_eq!((now(), fake.stats()), (None, 1), "no prepare event read");
+
+    let prepare = |key: &str| {
+        let event = SnapshotPrepare {
+            key: key.to_owned(),
+            parent: image.amd64.to_string(),
+            snapshotter: DEFAULT_SNAPSHOTTER.to_owned(),
+        };
+        Envelope {
+            timestamp: None,
+            namespace: "k8s.io".to_owned(),
+            topic: "/snapshot/prepare".to_owned(),
+            event: Some(containerd_client::to_any(&event)),
+        }
+    };
+    tokio::select! {
+        () = annotation.containerd.keep_prepared(&annotation.prepared) => panic!("following ends only when the agent stops"),
+        () = async {
+            while fake.subscribers() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            fake.publish(prepare("another"));
+            fake.publish(prepare(CONTAINER));
+            while now().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        } => {}
+    }
+    assert_eq!(now(), Some(listed(&image)));
+    assert_eq!(
+        identify(&annotation, &pod, &container).await,
+        listed(&image)
+    );
+    assert_eq!(fake.stats(), 1, "no more `Stat`");
 }

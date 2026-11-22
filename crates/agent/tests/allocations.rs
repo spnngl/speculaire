@@ -1,15 +1,13 @@
 //! The gate's fast path allocates nothing (D189): a `CreateContainer` whose identity is in memory and whose verdict is
-//! kept, on the `nri` and `image_id` paths, from the call's bytes on NRI's socket to the answer's, the runtime's side
-//! included. Each test counts what its thread allocates: every task of the gate runs on it.
+//! kept, on each path, from the call's bytes on NRI's socket to the answer's, the runtime's side included. On the
+//! `annotation` path, containerd's `/snapshot/prepare` event has named the snapshot's parent. Each test counts what
+//! its thread allocates: every task of the gate runs on it.
 #![expect(
     unsafe_code,
     reason = "a global allocator is unsafe to implement, and counting is all this one adds to the system's"
 )]
 
-#[expect(
-    dead_code,
-    reason = "the annotation path, which asks containerd, is the benchmarks' alone"
-)]
+#[expect(dead_code, reason = "the decision benchmarks' helpers go unused here")]
 mod wire;
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -85,6 +83,11 @@ fn allocations(path: Path) -> u64 {
 #[test]
 fn a_request_on_the_nri_path_allocates_nothing_but_histogram_blocks() {
     assert_eq!(allocations(Path::Nri), HISTOGRAM_BLOCKS);
+}
+
+#[test]
+fn a_request_on_the_annotation_path_allocates_nothing_but_histogram_blocks() {
+    assert_eq!(allocations(Path::Annotation), HISTOGRAM_BLOCKS);
 }
 
 #[test]

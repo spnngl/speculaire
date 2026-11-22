@@ -349,17 +349,12 @@ impl<'a> Repository<'a> {
             return Ok(Self(Name::Text(&text[..name])));
         }
         let mut buffer = [0; HUB_MAX];
-        let mut free = buffer.as_mut_slice();
-        let written = [domain, "/", prefix, remote]
-            .into_iter()
-            .try_for_each(|part| free.write_all(part.as_bytes()));
-        let len = HUB_MAX - free.len();
-        if written.is_err() {
+        let Some(len) = write(&mut buffer, [domain, "/", prefix, remote]) else {
             // Longer than any valid reference on Docker Hub: the owned parse tells why.
             return Err(Reference::parse_normalized_named(text)
                 .err()
                 .unwrap_or(ReferenceError::TooLong));
-        }
+        };
         let normalized = str::from_utf8(&buffer[..len]).expect("written from strings");
         let Split { name, .. } = split(normalized)?;
         Ok(Self(Name::Hub {
@@ -386,6 +381,106 @@ impl fmt::Debug for Repository<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Repository").field(&self.as_str()).finish()
     }
+}
+
+/// A reference written out as [`Reference::parse_docker_ref`] normalizes it, the name containerd keeps an image by,
+/// without allocating when it fits a buffer inside the value (D107, D189).
+pub struct DockerRef(Written);
+
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the buffer keeps a reference off the heap (D107)"
+)]
+enum Written {
+    /// The text is the buffer's first `len` bytes.
+    Buffer { text: [u8; HUB_MAX], len: usize },
+    /// Too long for the buffer, on a registry with a long domain name.
+    Owned(String),
+}
+
+impl DockerRef {
+    /// Parses `text` as [`Reference::parse_docker_ref`] does, and keeps its text: `name@digest`, `name:tag`, or
+    /// `name:latest` when it has neither.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reference::parse_docker_ref`].
+    ///
+    /// # Panics
+    ///
+    /// Never: the buffer is written from strings.
+    pub fn parse(text: &str) -> Result<Self, ReferenceError> {
+        let (domain, prefix, remote) = normalize(text)?;
+        let mut buffer = [0; HUB_MAX];
+        let written = write(&mut buffer, [domain, "/", prefix, remote]).map(|len| {
+            let normalized = str::from_utf8(&buffer[..len]).expect("written from strings");
+            split(normalized).map(|split| (split, len))
+        });
+        let Some((
+            Split {
+                name, end, digest, ..
+            },
+            len,
+        )) = written.transpose()?
+        else {
+            return owned(text);
+        };
+        let len = match digest {
+            Some(digest) => {
+                let mut free = buffer.get_mut(name..).unwrap_or_default();
+                let room = free.len();
+                write!(free, "@{digest}")
+                    .ok()
+                    .map(|()| name + room - free.len())
+            }
+            None if end == name => {
+                write(&mut buffer[name..], [":", DEFAULT_TAG]).map(|tag| name + tag)
+            }
+            None => Some(len),
+        };
+        match len {
+            Some(len) => Ok(Self(Written::Buffer { text: buffer, len })),
+            None => owned(text),
+        }
+    }
+
+    /// The reference as [`Reference::parse_docker_ref`]'s text shows it.
+    ///
+    /// # Panics
+    ///
+    /// Never: the buffer is written from strings.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match &self.0 {
+            Written::Buffer { text, len } => {
+                str::from_utf8(&text[..*len]).expect("written from strings")
+            }
+            Written::Owned(text) => text,
+        }
+    }
+}
+
+impl fmt::Debug for DockerRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DockerRef").field(&self.as_str()).finish()
+    }
+}
+
+/// [`DockerRef`] past its buffer: the owned parse, written out.
+fn owned(text: &str) -> Result<DockerRef, ReferenceError> {
+    Reference::parse_docker_ref(text)
+        .map(|reference| DockerRef(Written::Owned(reference.to_string())))
+}
+
+/// Writes `parts` at the start of `buffer`, and gives the length written, or `None` when they do not fit.
+fn write<const N: usize>(buffer: &mut [u8], parts: [&str; N]) -> Option<usize> {
+    let room = buffer.len();
+    let mut free = buffer;
+    parts
+        .into_iter()
+        .try_for_each(|part| free.write_all(part.as_bytes()))
+        .ok()
+        .map(|()| room - free.len())
 }
 
 /// `ParseNormalizedNamed`'s first checks, and the parts of `text`'s normalized form: `domain/prefix+remote`.
@@ -617,9 +712,11 @@ mod tests {
     const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
-    fn a_repository_is_the_name_of_the_reference_parse_normalized_named_gives() {
+    fn a_repository_and_a_docker_ref_are_what_the_owned_parses_give() {
         let long = |length: usize| "a".repeat(length);
+        let far = format!("{}.test/", long(300));
         let domains = [
+            far.as_str(),
             "",
             "docker.io/",
             "index.docker.io/",
@@ -674,6 +771,11 @@ mod tests {
                             owned.map(|reference| reference.name().to_owned()),
                             "{text}"
                         );
+                        assert_eq!(
+                            DockerRef::parse(&text).map(|docker| docker.as_str().to_owned()),
+                            Reference::parse_docker_ref(&text).map(|docker| docker.to_string()),
+                            "{text}"
+                        );
                     }
                 }
             }
@@ -714,6 +816,30 @@ mod tests {
         assert_eq!(
             format!("{:?}", Repository::parse("nginx").unwrap()),
             r#"Repository("docker.io/library/nginx")"#
+        );
+    }
+
+    #[test]
+    fn a_docker_ref_is_written_in_its_buffer_unless_too_long() {
+        let far = format!("{}.test/app", "a".repeat(600));
+        for (text, written) in [
+            ("nginx", "docker.io/library/nginx:latest"),
+            ("reg.test/app:1", "reg.test/app:1"),
+            (
+                &format!("reg.test/app:1@{SHA}"),
+                &format!("reg.test/app@{SHA}"),
+            ),
+        ] {
+            let docker = DockerRef::parse(text).unwrap();
+            assert!(matches!(docker.0, Written::Buffer { .. }), "{text}");
+            assert_eq!(docker.as_str(), written);
+        }
+        let docker = DockerRef::parse(&far).unwrap();
+        assert!(matches!(docker.0, Written::Owned(_)));
+        assert_eq!(docker.as_str(), format!("{far}:latest"));
+        assert_eq!(
+            format!("{:?}", DockerRef::parse("nginx").unwrap()),
+            r#"DockerRef("docker.io/library/nginx:latest")"#
         );
     }
 
