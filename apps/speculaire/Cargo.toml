@@ -23,7 +23,9 @@ secrecy.workspace = true
 speculaire-artifacts = { workspace = true, features = ["testing"] }
 speculaire-fake-runtime.workspace = true
 speculaire-load.workspace = true
+speculaire-oci.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }
+speculaire-reflect.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

@@ -21,6 +21,8 @@ pub const GATE_SECONDS: &str = "speculaire_gate_seconds";
 pub const CONFIG_RELOAD_FAILURES: &str = "speculaire_config_reload_failures_total";
 /// `speculaire_cache_loads_total`: loads of `cache.bin` at startup, by `result` (D31, D176).
 pub const CACHE_LOADS: &str = "speculaire_cache_loads_total";
+/// `speculaire_prewarm_pulls_total`: images members pushed, by what became of them (D188).
+pub const PREWARM_PULLS: &str = "speculaire_prewarm_pulls_total";
 
 /// `speculaire_p2p_enabled`: 1 while a node identity and the cluster CA are loaded and the identity has not expired (D16).
 pub const P2P_ENABLED: &str = "speculaire_p2p_enabled";
@@ -63,6 +65,9 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
     counter!(CONFIG_RELOAD_FAILURES).absolute(0);
     for result in ["loaded", "discarded"] {
         counter!(CACHE_LOADS, "result" => result).absolute(0);
+    }
+    for result in ["ok", "failed", "dropped", "no_space"] {
+        counter!(PREWARM_PULLS, "result" => result).absolute(0);
     }
     gauge!(P2P_ENABLED).set(0);
     speculaire_mirror::metrics::describe();
@@ -117,6 +122,10 @@ fn describe() {
     describe_counter!(
         CACHE_LOADS,
         "Loads of the saved verdicts at startup: loaded, or discarded as unreadable"
+    );
+    describe_counter!(
+        PREWARM_PULLS,
+        "Images members pushed to prewarm: pulled, failed, dropped as listed or in flight, or skipped while the image filesystem is over prewarm.max_disk_percent"
     );
     describe_gauge!(
         P2P_ENABLED,

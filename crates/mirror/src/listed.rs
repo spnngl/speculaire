@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use speculaire_oci::reference::Digest;
+use speculaire_oci::reference::{Digest, Reference};
 use speculaire_oci::tagged::Tagged;
 use speculaire_runtime::images::{Image, Images, List};
 use tokio::sync::{mpsc, watch};
@@ -54,6 +54,29 @@ impl Listed {
             if self.0.changed().await.is_err() {
                 return;
             }
+        }
+    }
+
+    /// Whether the runtime lists `image`: by its repository digest, or by its tag (D51).
+    #[must_use]
+    pub fn holds(&self, image: &Reference) -> bool {
+        let listed = self.borrow();
+        let Some(list) = listed.as_ref() else {
+            return false;
+        };
+        let mut images = list.images();
+        match (image.digest(), image.tag()) {
+            (Some(digest), _) => images.any(|held| {
+                held.repo_digests
+                    .iter()
+                    .any(|repo| repo.repository == image.name() && repo.digest == *digest)
+            }),
+            (None, Some(tag)) => images.any(|held| {
+                held.tags
+                    .iter()
+                    .any(|tagged| tagged.name() == image.name() && tagged.tag() == tag)
+            }),
+            (None, None) => false,
         }
     }
 
@@ -194,5 +217,27 @@ mod tests {
         listed.tag_keys(|applied| keys = Some(applied)).await;
         let key = Tagged::parse("reg.test/app:1").unwrap().key().clone();
         assert_eq!(keys, Some(HashSet::from([key])));
+    }
+
+    /// A prewarm push names an image by tag or by digest; either is held once the runtime lists it so (D51).
+    #[test]
+    fn an_image_is_held_by_its_tag_or_its_repository_digest() {
+        let unread = Listed(watch::channel(None).1);
+        let tagged = Reference::parse_docker_ref("reg.test/app:1").unwrap();
+        assert!(!unread.holds(&tagged));
+        let listed = Listed::of(vec![image(1, Some("reg.test/app:1"), &["reg.test/app"])]);
+        assert!(listed.holds(&tagged));
+        let other_tag = Reference::parse_docker_ref("reg.test/app:2").unwrap();
+        assert!(!listed.holds(&other_tag));
+        let other_name = Reference::parse_docker_ref("reg.test/other:1").unwrap();
+        assert!(!listed.holds(&other_name));
+        let pinned = |name: &str, byte: u8| {
+            Reference::parse_docker_ref(&format!("{name}@{}", digest(byte))).unwrap()
+        };
+        assert!(listed.holds(&pinned("reg.test/app", 0xff)));
+        assert!(!listed.holds(&pinned("reg.test/app", 0xfe)));
+        assert!(!listed.holds(&pinned("reg.test/other", 0xff)));
+        let untagged = Reference::parse_normalized_named("reg.test/app").unwrap();
+        assert!(!listed.holds(&untagged));
     }
 }

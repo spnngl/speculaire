@@ -10,15 +10,19 @@ use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStr
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use secrecy::ExposeSecret as _;
 use speculaire_fake_runtime::{Answers, Fake};
+use speculaire_oci::reference::Reference;
 use speculaire_pki::mirror::{Mirror, Part};
+use speculaire_pki::node::Credentials;
 use speculaire_pki::testing::Cluster;
+use speculaire_reflect::push::PrewarmList;
+use speculaire_reflect::{Member, PushError, Pushes, Reflector, Settings};
 use speculaire_verify::TrustRoot;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -33,7 +37,7 @@ const PROTOBUF: &str =
 /// so that the agent runs where there is no runtime, as on the CI runner and on macOS (D86, D168).
 struct Node {
     dir: tempfile::TempDir,
-    _fake: Fake,
+    fake: Fake,
     _nri: Fake,
 }
 
@@ -55,7 +59,7 @@ impl Node {
         }
         Self {
             dir,
-            _fake: fake,
+            fake,
             _nri: nri,
         }
     }
@@ -1525,4 +1529,174 @@ fn an_agent_announces_what_containerd_holds_to_the_reflectors_of_its_url() {
         .filter(|l| l.contains("reflector stream up"))
         .count();
     assert_eq!(up, 1, "{lines:#?}");
+}
+
+/// Reflectors `cp-1` and `cp-2`, the members, and `cp-3`, which is not one, on a runtime of their own. The agent
+/// reaches them at `cp-2`'s address, as through a load balancer.
+struct Members {
+    reflectors: Vec<Reflector>,
+    url: SocketAddr,
+    cluster: Cluster,
+    files: tempfile::TempDir,
+    _runtime: tokio::runtime::Runtime,
+}
+
+impl Members {
+    fn start() -> Self {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let cluster = Cluster::new("kubernetes");
+        let files = tempfile::tempdir().unwrap();
+        let nodes = ["cp-1", "cp-2", "cp-3"];
+        let (reflectors, url) = runtime.block_on(async {
+            let mut listeners = Vec::new();
+            for _ in nodes {
+                listeners.push(tokio::net::TcpListener::bind(ANY_PORT).await.unwrap());
+            }
+            let members: Vec<Member> = nodes[..2]
+                .iter()
+                .zip(&listeners)
+                .map(|(node, listener)| Member {
+                    node: (*node).to_owned(),
+                    address: listener.local_addr().unwrap(),
+                })
+                .collect();
+            let url = members[1].address;
+            let reflectors = listeners
+                .into_iter()
+                .zip(nodes)
+                .map(|(listener, node)| {
+                    let credentials = credentials(&cluster, files.path(), node);
+                    Reflector::spawn(listener, &credentials, Settings::new(members.clone()))
+                        .unwrap()
+                })
+                .collect();
+            (reflectors, url)
+        });
+        Self {
+            reflectors,
+            url,
+            cluster,
+            files,
+            _runtime: runtime,
+        }
+    }
+
+    /// The `[identity]` and `[reflector]` tables of the agent of `node-a`.
+    fn table(&self) -> String {
+        let certificate = self.files.path().join("node-a.pem");
+        put(&certificate, &self.cluster.kubelet("node-a"));
+        format!(
+            "[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[reflector]\nurl = \"https://{}\"\n",
+            certificate.display(),
+            self.files.path().join("ca.crt").display(),
+            self.url
+        )
+    }
+
+    /// What `cp-N` pushes to `node-a` once their stream is up, the index of `cp-N` being N - 1.
+    fn push(&self, index: usize, push: impl Fn(&Pushes) -> Result<(), PushError>) {
+        let pushes = self.reflectors[index].pushes();
+        wait_until(|| match push(&pushes) {
+            Ok(()) => true,
+            Err(PushError::NoStream) => false,
+            Err(err) => panic!("{err:?}"),
+        });
+    }
+
+    fn prewarm(&self, index: usize, image: &str) {
+        let image = Reference::parse_docker_ref(image).unwrap();
+        self.push(index, |pushes| pushes.prewarm("node-a", &image));
+    }
+
+    fn list(&self, index: usize, images: &[&str]) {
+        let images = images
+            .iter()
+            .map(|image| Reference::parse_docker_ref(image).unwrap())
+            .collect();
+        let list = Arc::new(PrewarmList::new(images).unwrap());
+        self.push(index, |pushes| pushes.list("node-a", &list));
+    }
+}
+
+/// The credentials of `node` in `cluster`, from files in `dir` as kubelet writes them.
+fn credentials(cluster: &Cluster, dir: &Path, node: &str) -> Arc<Credentials> {
+    let credentials = Arc::new(Credentials::default());
+    let certificate = dir.join(format!("{node}.pem"));
+    let ca = dir.join("ca.crt");
+    put(&certificate, &cluster.kubelet(node));
+    put(&ca, cluster.ca());
+    credentials.load_identity(&certificate).unwrap();
+    credentials.load_authority(&ca).unwrap();
+    credentials
+}
+
+/// `speculaire_prewarm_pulls_total` for `result`.
+fn prewarms(agent: &Agent, result: &str) -> u64 {
+    let series = format!("speculaire_prewarm_pulls_total{{result=\"{result}\"}} ");
+    let text = agent.get("/metrics", "").text();
+    text.lines()
+        .find_map(|line| line.strip_prefix(&series))
+        .unwrap_or_else(|| panic!("no {series}in {text}"))
+        .parse()
+        .unwrap()
+}
+
+/// D51: a member's `Prewarm` is one `PullImage` through containerd's CRI; the same image pushed again, by another
+/// member, is dropped; a reflector that is no member has no stream to push on. CRI-O takes the same call:
+/// `crates/runtime` tests both.
+#[test]
+fn a_members_prewarm_is_one_pull_and_a_repeat_is_dropped() {
+    let members = Members::start();
+    // The fake names `/` as the image filesystem, as full as the host's disk.
+    let table = format!("{}[prewarm]\nmax_disk_percent = 100\n", members.table());
+    let agent = Agent::spawn_on(Node::healthy(), &table, &[]);
+    members.prewarm(0, "app:1");
+    members.prewarm(1, "app:1");
+    wait_until(|| prewarms(&agent, "ok") == 1 && prewarms(&agent, "dropped") == 1);
+    members.prewarm(1, "app:1");
+    wait_until(|| prewarms(&agent, "dropped") == 2);
+    let image = Reference::parse_docker_ref("app:2").unwrap();
+    assert_eq!(
+        members.reflectors[2].pushes().prewarm("node-a", &image),
+        Err(PushError::NoStream)
+    );
+    assert_eq!(agent.node.fake.pulls(), ["docker.io/library/app:1"]);
+    let (status, lines) = agent.stop();
+    assert!(status.success(), "{status}: {lines:#?}");
+}
+
+/// Question 15: over `prewarm.max_disk_percent`, a prewarm counts `no_space` and warns once; under it, set live, the
+/// retry a member's list brings pulls.
+#[test]
+fn over_max_disk_percent_a_prewarm_waits_with_one_warning_and_the_next_list_retries_it() {
+    let members = Members::start();
+    let table = members.table();
+    // The fake names `/` as the image filesystem: some of it is used.
+    let mut agent = Agent::spawn_on(
+        Node::healthy(),
+        &format!("{table}[prewarm]\nmax_disk_percent = 0\n[log]\nfilter = \"debug\"\n"),
+        &[],
+    );
+    members.list(0, &["app:1"]);
+    members.prewarm(0, "app:1");
+    members.prewarm(0, "app:2");
+    wait_until(|| prewarms(&agent, "no_space") == 2);
+    agent.rewrite(&format!(
+        "{table}[prewarm]\nmax_disk_percent = 100\n[log]\nfilter = \"debug\"\n"
+    ));
+    agent.signal("HUP");
+    agent.line(&[RELOADED]);
+    // The limit applies a moment after the line: each list retries at once, until one finds it.
+    wait_until(|| {
+        members.list(0, &["app:1"]);
+        prewarms(&agent, "ok") == 1
+    });
+    assert_eq!(agent.node.fake.pulls(), ["docker.io/library/app:1"]);
+    let (status, lines) = agent.stop();
+    assert!(status.success(), "{status}: {lines:#?}");
+    let warned = lines
+        .iter()
+        .filter(|l| l.contains("prewarm pulls are skipped"))
+        .count();
+    assert_eq!(warned, 1, "{lines:#?}");
 }

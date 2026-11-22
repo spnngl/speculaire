@@ -211,6 +211,7 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | `speculaire_p2p_enabled` | 0 for more than 10 min: the node has no usable kubelet certificate or cluster CA, or its certificate expired, and pulls only from upstream; the info log names an absent file, the error log a bad one (D16, D95) |
 | `speculaire_identity_expiry_timestamp_seconds` | Less than a tenth of the certificate's lifetime away: kubelet renews it once 70 to 90% of its lifetime has passed, so it stopped renewing; once it passes, P2P stops on the node (D95) |
 | `speculaire_reflector_connected` | 0 for any `member` for more than 5 min |
+| `speculaire_prewarm_pulls_total{result="no_space"}` | It increases: the image filesystem is fuller than `prewarm.max_disk_percent`, so the node prewarms nothing and pods pull at start; the warning log `prewarm pulls are skipped` gives the usage. Free disk or raise the limit (D188) |
 | `speculaire_reflector_announce_rejected_total` | It increases: a reflector refuses an agent's stream, whose announcements are then missing from lookups (§ Reflector refusals) |
 | `speculaire_reflector_prewarm_rounds_total{release="timeout"}` | It increases: an agent sent a prewarmed image did not announce it within `prewarm.seed_timeout` (§ Prewarm) |
 | `speculaire_reflector_prewarm_resolve_failures_total` | It increases: a reflector cannot resolve a `prewarm.images` entry, and its wave does not start (§ Prewarm) |

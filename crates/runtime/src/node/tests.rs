@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use speculaire_oci::reference::Digest;
+use speculaire_oci::reference::{Digest, Reference};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -10,6 +10,7 @@ use super::Fallback;
 use crate::content::Content as _;
 use crate::detect::Runtime;
 use crate::fixture::{Tree, has};
+use crate::pull::UsageError;
 use crate::{images, inventory};
 
 /// Waits for `follower` to end, which it does at once on a loss once the agent stops.
@@ -47,6 +48,43 @@ async fn a_follower_that_loses_the_runtime_once_the_agent_stops_ends() {
         // The readers stay until the followers end: what ends them is the stop, not a reader gone.
         drop((listed, held));
     }
+}
+
+/// A pull is the same CRI call on either runtime, and the usage is read where `ImageFsInfo` says images land (D188).
+#[tokio::test]
+async fn either_runtime_pulls_over_the_cri_and_names_its_image_filesystem() {
+    let image = Reference::parse_docker_ref("nginx:1.27").unwrap();
+    for runtime in [Runtime::Containerd, Runtime::CriO] {
+        let mut tree = Tree::new(runtime);
+        let pull = tree.node.pull();
+        pull.pull(&image).await.expect("the pull succeeds");
+        assert_eq!(tree.pulls(), ["docker.io/library/nginx:1.27"], "{runtime}");
+        let usage = pull.usage().await.expect("`/` has a usage");
+        assert!(usage <= 100, "{runtime}: {usage}");
+        tree.update(|answers| answers.pull_fails = true);
+        let err = pull.pull(&image).await.expect_err("the pull fails");
+        assert!(err.to_string().contains("PullImage"), "{err}");
+        // The mount point is asked once: a runtime gone keeps its usage readable.
+        tree.stop();
+        pull.usage().await.expect("the mount point is known");
+    }
+    let tree = Tree::new(Runtime::Containerd);
+    tree.update(|answers| answers.image_filesystem = String::new());
+    let err = tree
+        .node
+        .pull()
+        .usage()
+        .await
+        .expect_err("no image filesystem");
+    assert!(matches!(err, UsageError::Unnamed { .. }), "{err}");
+    tree.update(|answers| answers.image_filesystem = "/nonexistent/speculaire".to_owned());
+    let err = tree
+        .node
+        .pull()
+        .usage()
+        .await
+        .expect_err("no such mount point");
+    assert!(err.to_string().contains("/nonexistent/speculaire"), "{err}");
 }
 
 #[test]

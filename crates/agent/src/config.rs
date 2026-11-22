@@ -13,7 +13,7 @@ use speculaire_reflect::prewarm::Plan;
 use speculaire_verify::Glob;
 pub use value::{
     Absolute, ByteSize, Interval, InvalidValue, LogFilter, Loopback, MaxUploads, NodeName,
-    PeerAddress, PrewarmImages, ReflectorUrl, RegistryName, Span, TrustedRoot, TufUrl,
+    PeerAddress, Percent, PrewarmImages, ReflectorUrl, RegistryName, Span, TrustedRoot, TufUrl,
 };
 
 /// Where the agent reads its settings when `--config` names no other file (D30).
@@ -149,6 +149,7 @@ impl Config {
                     seeds: _,
                     seed_timeout: _,
                     refresh: _,
+                    max_disk_percent: _,
                 },
             log: Log {
                 filter: _,
@@ -622,7 +623,7 @@ pub struct Member {
     pub address: SocketAddr,
 }
 
-/// `[prewarm]`, read only with `role = "reflector"`.
+/// `[prewarm]`: every key but `max_disk_percent` is read only with `role = "reflector"`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Prewarm {
@@ -634,6 +635,8 @@ pub struct Prewarm {
     pub seed_timeout: Interval,
     /// How often a tag is resolved again, a new wave starting when its platform manifests changed (D186).
     pub refresh: Interval,
+    /// The image filesystem's usage above which this agent pulls no pushed image (D188).
+    pub max_disk_percent: Percent,
 }
 
 impl Prewarm {
@@ -656,6 +659,7 @@ impl Default for Prewarm {
             seeds: NonZeroU32::new(2).expect("2 is not zero"),
             seed_timeout: Interval::from_secs(300),
             refresh: Interval::from_secs(3600),
+            max_disk_percent: Percent::new(80).expect("80 is at most 100"),
         }
     }
 }

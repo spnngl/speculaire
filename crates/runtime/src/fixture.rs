@@ -191,6 +191,11 @@ impl Tree {
         self.fake.as_ref().unwrap().update(change);
     }
 
+    /// The image of each `PullImage` the runtime got.
+    pub(crate) fn pulls(&self) -> Vec<String> {
+        self.fake.as_ref().unwrap().pulls()
+    }
+
     /// Stops the runtime: its socket is left behind, and refuses connections.
     pub(crate) fn stop(&mut self) {
         self.fake = None;

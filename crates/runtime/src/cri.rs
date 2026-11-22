@@ -1,7 +1,7 @@
-//! What the runtime says about itself over the CRI: `RuntimeService.Version`, which containerd and CRI-O both answer
-//! (D86).
+//! The CRI calls the agent makes, which containerd and CRI-O both answer alike (D86): what the runtime says about
+//! itself, what it holds and runs, and pulling an image as the kubelet does.
 //!
-//! The calls are blocking: each runs on a runtime of its own, so none may be made from inside an async task.
+//! [`version`] is blocking: it runs on a runtime of its own, so it may not be called from inside an async task.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -18,10 +18,20 @@ use crate::version::Release;
 /// How long a runtime may take to connect and to answer.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a pull may take. containerd cancels a pull whose progress stalls for 5 minutes, CRI-O never does
+/// (`pull_progress_timeout`), so this bounds a stalled pull on CRI-O (D188).
+const PULL_TIMEOUT: Duration = Duration::from_mins(30);
+
+/// How long `ImageFsInfo` may take: CRI-O walks the whole image store to answer it
+/// (`server/image_fs_info.go:15` at v1.37.2), so it is given the kubelet's default `--runtime-request-timeout`.
+const FS_INFO_TIMEOUT: Duration = Duration::from_mins(2);
+
 /// The method, in the CRI's `runtime.v1` package (`k8s.io/cri-api` `api.proto`).
 const VERSION_METHOD: &str = "/runtime.v1.RuntimeService/Version";
 const LIST_IMAGES_METHOD: &str = "/runtime.v1.ImageService/ListImages";
 const LIST_CONTAINERS_METHOD: &str = "/runtime.v1.RuntimeService/ListContainers";
+const PULL_IMAGE_METHOD: &str = "/runtime.v1.ImageService/PullImage";
+const IMAGE_FS_INFO_METHOD: &str = "/runtime.v1.ImageService/ImageFsInfo";
 
 /// `CONTAINER_RUNNING` of the CRI's `ContainerState`.
 const CONTAINER_RUNNING: i32 = 1;
@@ -72,6 +82,52 @@ pub struct ListedImage {
     /// `repository@digest` names.
     #[prost(string, repeated, tag = "3")]
     pub repo_digests: Vec<String>,
+}
+
+/// `ImageSpec`, by reference alone.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ImageSpec {
+    #[prost(string, tag = "1")]
+    image: String,
+}
+
+/// `PullImageRequest`, without `auth`: the runtime takes credentials from its registry config (D17).
+#[derive(Clone, PartialEq, prost::Message)]
+struct PullImageRequest {
+    #[prost(message, optional, tag = "1")]
+    image: Option<ImageSpec>,
+}
+
+/// `PullImageResponse`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct PullImageResponse {
+    #[prost(string, tag = "1")]
+    image_ref: String,
+}
+
+/// `ImageFsInfoRequest`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ImageFsInfoRequest {}
+
+/// `ImageFsInfoResponse`, without `container_filesystems`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ImageFsInfoResponse {
+    #[prost(message, repeated, tag = "1")]
+    image_filesystems: Vec<FilesystemUsage>,
+}
+
+/// `FilesystemUsage`, by its identifier alone.
+#[derive(Clone, PartialEq, prost::Message)]
+struct FilesystemUsage {
+    #[prost(message, optional, tag = "2")]
+    fs_id: Option<FilesystemIdentifier>,
+}
+
+/// `FilesystemIdentifier`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct FilesystemIdentifier {
+    #[prost(string, tag = "1")]
+    mountpoint: String,
 }
 
 /// `ListContainersRequest`.
@@ -184,19 +240,29 @@ pub(crate) fn block_on<T>(
         .block_on(timed(path, method, future))
 }
 
-/// `future`, bounded by [`TIMEOUT`].
-async fn timed<T>(
+/// `future`, bounded by [`TIMEOUT`]; not `async` itself, so as not to nest one more future in its callers'.
+fn timed<'a, T: 'a>(
+    path: &'a Path,
+    method: &'static str,
+    future: impl Future<Output = Result<T, Error>> + 'a,
+) -> impl Future<Output = Result<T, Error>> + 'a {
+    within(TIMEOUT, path, method, future)
+}
+
+/// `future`, bounded by `limit`.
+async fn within<T>(
+    limit: Duration,
     path: &Path,
     method: &'static str,
     future: impl Future<Output = Result<T, Error>>,
 ) -> Result<T, Error> {
-    tokio::time::timeout(TIMEOUT, future)
+    tokio::time::timeout(limit, future)
         .await
         .unwrap_or_else(|_| {
             Err(Error::Call {
                 path: path.to_owned(),
                 method,
-                message: format!("no answer within {} s", TIMEOUT.as_secs()),
+                message: format!("no answer within {} s", limit.as_secs()),
             })
         })
 }
@@ -298,4 +364,51 @@ pub async fn running_images(socket: &Path) -> Result<Vec<String>, Error> {
             }
         })
         .collect())
+}
+
+/// `ImageService.PullImage` of `image` on the socket of a runtime, with no credentials: the image lands where the
+/// kubelet looks, pulled through the runtime's registry config like any pull (D188).
+///
+/// # Errors
+///
+/// When the socket cannot be connected to, or the pull fails or takes longer than 30 minutes.
+pub async fn pull_image(socket: &Path, image: &str) -> Result<(), Error> {
+    let request = PullImageRequest {
+        image: Some(ImageSpec {
+            image: image.to_owned(),
+        }),
+    };
+    let _: PullImageResponse = within(
+        PULL_TIMEOUT,
+        socket,
+        PULL_IMAGE_METHOD,
+        unary(socket, PULL_IMAGE_METHOD, request),
+    )
+    .await?;
+    Ok(())
+}
+
+/// `ImageService.ImageFsInfo` on the socket of a runtime: the mount point of the filesystem images land on, the
+/// first one named, as the kubelet reads it (`internal/cri/server/images/imagefs_info.go:55` in containerd v2.4.2);
+/// `None` when it names none.
+///
+/// # Errors
+///
+/// When the socket cannot be connected to, or the runtime does not answer in 2 minutes.
+pub async fn image_filesystem(socket: &Path) -> Result<Option<PathBuf>, Error> {
+    let response: ImageFsInfoResponse = within(
+        FS_INFO_TIMEOUT,
+        socket,
+        IMAGE_FS_INFO_METHOD,
+        unary(socket, IMAGE_FS_INFO_METHOD, ImageFsInfoRequest {}),
+    )
+    .await?;
+    Ok(response
+        .image_filesystems
+        .into_iter()
+        .next()
+        .and_then(|usage| usage.fs_id)
+        .map(|id| id.mountpoint)
+        .filter(|mountpoint| !mountpoint.is_empty())
+        .map(PathBuf::from))
 }

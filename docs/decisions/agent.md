@@ -59,7 +59,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A separate filter keeps a `log.filter` change from silently dropping the audit trail.
 - **Revisit when:** someone needs OpenTelemetry traces or log export; add `tracing-opentelemetry` as a layer behind a cargo feature.
 
-## D39: Shutdown withdraws first, drains, saves, and leaves NRI last (amended by D69, D103, D177)
+## D39: Shutdown withdraws first, drains, saves, and leaves NRI last (amended by D69, D103, D177, D188)
 
 - **Decision:** on SIGTERM, the agent:
   1. sends `STOPPING=1` to systemd, and `/readyz` returns 503;
@@ -92,7 +92,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - node-exporter listens on every address the same way.
 - **Revisit when:** an admin needs the endpoints on one interface only; `metrics.address` already allows it.
 
-## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56, D60, D91, D187)
+## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56, D60, D91, D187, D188)
 
 - **Decision:**
   - Each key in `packaging/config.toml` shows a literal default. A default computed at startup is written `"auto"`: `peer.max_uploads` (4 × CPUs, D24) and `peer.address` (D36).
@@ -103,7 +103,8 @@ The agent process on a node: its settings, and how it installs into and leaves c
     - `nri.socket = "/var/run/nri/nri.sock"` (D9);
     - `verify.policy = "/etc/speculaire/policy.yaml"` (D26);
     - `verify.trusted_root = ""`: empty follows the Sigstore public-good root through TUF; a path pins a `trusted_root.json` (D26);
-    - `reflector.listen = "[::]:7483"`, and `prewarm.images = []` (image references, D26), both read only with `role = "reflector"`.
+    - `reflector.listen = "[::]:7483"`, and `prewarm.images = []` (image references, D26), both read only with `role = "reflector"`;
+    - `prewarm.max_disk_percent = 80`, read by every agent (D188).
   - **Restart keys:** the fields of `Config` typed `Restart<T>` (`crates/agent/src/config.rs`), which `packaging/config.toml` marks with "Restart". Every other key reloads live.
 - **Because:**
   - D30 makes `packaging/config.toml` the only list of settings, so a key that exists only in prose cannot be checked.
@@ -220,7 +221,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Reading the same keys everywhere keeps `check-config` honest: it checks the node the agent would run on.
 - **Revisit when:** a second thing needs a directory, such as the blob cache (D67) or the verdict cache (D31).
 
-## D90: A `Node` hands out four traits, and everything that differs between containerd and CRI-O sits behind them (amends D64, D84, D86; amended by D99, D121)
+## D90: A `Node` hands out four traits, and everything that differs between containerd and CRI-O sits behind them (amends D64, D84, D86; amended by D99, D121, D188)
 
 - **Decision:**
   - **Traits** (`speculaire-runtime`): `Wiring` (`configure`, `unconfigure`, `check`: containerd's `hosts.toml` files; CRI-O's drop-in, `certs.d` and `systemctl reload crio`), `Settings` (`required_plugins`, which `unconfigure` reads (D84), and `preflight` (D86)), `Registries` (the sources of an image name, D89) and `Content` (a blob by digest). `Containerd` and `CriO` implement them and hold their socket and paths. `detect` still returns the `Runtime` enum; a `Node` is built from it once at startup, or by a command after `--runtime`, and hands out each trait. Nothing outside `speculaire-runtime` and the parsing of `--runtime` matches on `Runtime`.

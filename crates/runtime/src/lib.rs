@@ -4,8 +4,8 @@
 //! [`Node`] is the one place that knows which runtime it is. [`Wiring`](wiring::Wiring) points it at the mirror,
 //! [`Settings`](settings::Settings) says what it is set to, [`Registries`](registries::Registries) says where images
 //! are, [`Content`](content::Content) says what the node holds, [`Inventory`](inventory::Inventory) follows it, and
-//! [`Images`](images::Images) follows the runtime's image list, and [`Identity`](identity::Identity) reads a container's
-//! image identity.
+//! [`Images`](images::Images) follows the runtime's image list, [`Pull`](pull::Pull) pulls into it, and
+//! [`Identity`](identity::Identity) reads a container's image identity.
 
 pub mod certificates;
 pub mod containerd;
@@ -21,6 +21,7 @@ pub mod images;
 pub mod inventory;
 mod node;
 pub mod paths;
+pub mod pull;
 pub mod registries;
 pub mod settings;
 pub mod version;
