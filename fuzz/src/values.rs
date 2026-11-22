@@ -227,6 +227,8 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
             "[]",
             r#"["registry.k8s.io/pause:3.10"]"#,
             r#"["registry.k8s.io/pause@sha256:00"]"#,
+            r#"["nginx", "docker.io/library/nginx:latest"]"#,
+            r#"["Registry.example/App"]"#,
             r#"[""]"#,
             "[1]",
         ],
@@ -244,6 +246,8 @@ pub(crate) const KEYS: &[(&str, &[&str])] = &[
             r#""2""#,
         ],
     ),
+    ("prewarm.seed_timeout", SPANS),
+    ("prewarm.refresh", SPANS),
     (
         "log.filter",
         &[

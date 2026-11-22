@@ -47,6 +47,10 @@ Every metric speculaire exports or will export. `Runtime` names the runtime whos
 | `speculaire_reflector_lookup_seconds` | histogram | — | both | Server-side `Lookup` latency (D33 target: p99 at most 500 µs) |
 | `speculaire_reflector_resync_seconds` | histogram | — | both | Time from accepting an agent's connection to holding its first snapshot, once per connection; after a restart, its largest sample is the refill (D103, D104) |
 | `speculaire_reflector_announce_rejected_total` | counter | `reason` = `identity`\|`version`\|`address`\|`size`\|`digests`\|`malformed` | both | Refused `Announce` streams (D2, D16, D97); `docs/operations.md` § Reflector refusals |
+| `speculaire_reflector_prewarm_sent_total` | counter | `stage` = `seed`\|`release` | both | `Prewarm`s queued: to a wave's seeds, or to a later round or an agent whose stream opened after its wave (D185, D186) |
+| `speculaire_reflector_prewarm_rounds_total` | counter | `release` = `announced`\|`timeout` | both | Rounds of a wave ended: every agent of the round announced the image, or `prewarm.seed_timeout` passed (D185); `docs/operations.md` § Prewarm |
+| `speculaire_reflector_prewarm_waves_total` | counter | `cause` = `list`\|`refresh`\|`start` | both | Waves started: a new `prewarm.images` entry, a tag whose platform manifests changed, or the list the reflector started with (D186) |
+| `speculaire_reflector_prewarm_resolve_failures_total` | counter | — | both | Failed resolutions of a `prewarm.images` entry, each tried again later (D186); `docs/operations.md` § Prewarm |
 
 ## Verification
 

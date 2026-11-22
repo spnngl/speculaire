@@ -18,6 +18,7 @@ pub mod client;
 pub mod frame;
 pub mod message;
 pub mod metrics;
+pub mod prewarm;
 pub mod push;
 pub use key::Key;
 pub use outbox::{PushError, Pushes};
@@ -33,6 +34,7 @@ mod seed;
 mod server;
 mod session;
 mod sync;
+mod wave;
 
 /// The reflector API's messages, generated from `proto/`.
 #[expect(

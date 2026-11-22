@@ -6,6 +6,7 @@ use std::sync::{Arc, PoisonError};
 use speculaire_oci::reference::Reference;
 use tokio::sync::Notify;
 
+use crate::metrics::{self, Stage};
 use crate::push::{LIST_CAP, PrewarmList};
 use crate::sync::{Mutex, MutexGuard};
 
@@ -31,7 +32,7 @@ impl Pushes {
     ///
     /// When the node has no stream that takes pushes, or its stream waits to send [`LIST_CAP`] other images.
     pub fn prewarm(&self, node: &str, image: &Reference) -> Result<(), PushError> {
-        self.0.outbox(node)?.prewarm(image)
+        self.0.prewarm(node, image)
     }
 
     /// Queues `list` for `node`'s stream, in place of any list that waits.
@@ -40,7 +41,8 @@ impl Pushes {
     ///
     /// When the node has no stream that takes pushes.
     pub fn list(&self, node: &str, list: &Arc<PrewarmList>) -> Result<(), PushError> {
-        self.0.outbox(node)?.list(Arc::clone(list));
+        let outbox = self.0.lock().outboxes.get(node).cloned();
+        outbox.ok_or(PushError::NoStream)?.list(Arc::clone(list));
         Ok(())
     }
 
@@ -49,35 +51,89 @@ impl Pushes {
     }
 }
 
-/// The outbox of each node's stream that takes pushes: its latest.
+/// The outbox of each node's stream that takes pushes, its latest, and what each new stream is sent at its `Hello`.
 #[derive(Debug, Default)]
-pub(crate) struct Streams(Mutex<HashMap<Arc<str>, Arc<Outbox>>>);
+pub(crate) struct Streams(Mutex<Open>);
+
+#[derive(Debug, Default)]
+struct Open {
+    outboxes: HashMap<Arc<str>, Arc<Outbox>>,
+    /// The member's `prewarm.images` (D186).
+    list: Option<Arc<PrewarmList>>,
+    /// The images whose wave ended (D186).
+    released: Vec<Reference>,
+}
 
 impl Streams {
-    /// A new outbox for `node`'s stream, which replaces that of its earlier stream.
+    /// A new outbox for `node`'s stream, which replaces that of its earlier stream. It holds the list and the released
+    /// images, sent after the `Hello`'s answer (D186).
     pub(crate) fn open(&self, node: &Arc<str>) -> Arc<Outbox> {
-        let outbox = Arc::default();
-        self.lock().insert(Arc::clone(node), Arc::clone(&outbox));
+        let mut open = self.lock();
+        let outbox = Arc::new(Outbox {
+            pending: Mutex::new(Pending {
+                list: open.list.clone(),
+                images: open.released.clone(),
+            }),
+            queued: Notify::new(),
+        });
+        open.outboxes.insert(Arc::clone(node), Arc::clone(&outbox));
+        let released = open.released.len() as u64;
+        drop(open);
+        metrics::sent(Stage::Release, released);
         outbox
     }
 
     /// Forgets `outbox`, unless a later stream of `node` replaced it.
     pub(crate) fn close(&self, node: &str, outbox: &Arc<Outbox>) {
-        let mut streams = self.lock();
-        if streams
+        let mut open = self.lock();
+        if open
+            .outboxes
             .get(node)
-            .is_some_and(|open| Arc::ptr_eq(open, outbox))
+            .is_some_and(|stream| Arc::ptr_eq(stream, outbox))
         {
-            streams.remove(node);
+            open.outboxes.remove(node);
         }
     }
 
-    fn outbox(&self, node: &str) -> Result<Arc<Outbox>, PushError> {
-        self.lock().get(node).cloned().ok_or(PushError::NoStream)
+    /// The nodes with a stream that takes pushes.
+    pub(crate) fn nodes(&self) -> Vec<Arc<str>> {
+        self.lock().outboxes.keys().cloned().collect()
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<Arc<str>, Arc<Outbox>>> {
-        // Each change is one map operation: a panic leaves no change halfway.
+    /// Queues a `Prewarm` of `image` for `node`'s stream, as [`Pushes::prewarm`].
+    pub(crate) fn prewarm(&self, node: &str, image: &Reference) -> Result<(), PushError> {
+        let outbox = self.lock().outboxes.get(node).cloned();
+        outbox.ok_or(PushError::NoStream)?.prewarm(image)
+    }
+
+    /// Queues `list` for every stream, and for each that opens later.
+    pub(crate) fn set_list(&self, list: &Arc<PrewarmList>) {
+        let mut open = self.lock();
+        open.list = Some(Arc::clone(list));
+        let outboxes: Vec<_> = open.outboxes.values().cloned().collect();
+        drop(open);
+        for outbox in outboxes {
+            outbox.list(Arc::clone(list));
+        }
+    }
+
+    /// Marks `image` released: each stream that opens from now on is sent it. Returns the nodes streaming now, which
+    /// the caller sends it to.
+    pub(crate) fn release(&self, image: &Reference) -> Vec<Arc<str>> {
+        let mut open = self.lock();
+        if !open.released.contains(image) {
+            open.released.push(image.clone());
+        }
+        open.outboxes.keys().cloned().collect()
+    }
+
+    /// Takes `image` back from the released: a new wave of it starts, or it left the list.
+    pub(crate) fn withdraw(&self, image: &Reference) {
+        self.lock().released.retain(|released| released != image);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Open> {
+        // Each change is one map or list operation: a panic leaves no change halfway.
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

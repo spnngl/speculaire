@@ -1347,6 +1347,59 @@ fn a_reflector_opens_once_its_identity_is_loaded_and_readyz_waits_for_it() {
 }
 
 #[test]
+fn a_new_prewarm_image_starts_its_wave_within_two_seconds_and_a_bad_list_is_refused() {
+    let files = tempfile::tempdir().unwrap();
+    let cluster = Cluster::new("kubernetes");
+    let certificate = files.path().join("kubelet-client-current.pem");
+    let ca = files.path().join("ca.crt");
+    put(&ca, cluster.ca());
+    put(&certificate, &cluster.kubelet("cp-1"));
+    let config = |images: &str| {
+        format!(
+            "role = \"reflector\"\n[identity]\ncertificate = \"{}\"\nca = \"{}\"\n[config]\npoll_interval = 1\n[reflector]\nlisten = \"127.0.0.1:0\"\n[prewarm]\nimages = [{images}]\n",
+            certificate.display(),
+            ca.display()
+        )
+    };
+    let mut agent = Agent::start(&config(""));
+    agent.line(&["reflector open"]);
+    let waves = |agent: &Agent| {
+        let text = agent.get("/metrics", "").text();
+        text.lines()
+            .find_map(|l| {
+                l.strip_prefix("speculaire_reflector_prewarm_waves_total{cause=\"list\"} ")
+                    .map(str::to_owned)
+            })
+            .unwrap()
+    };
+    assert_eq!(waves(&agent), "0");
+
+    let written = Instant::now();
+    agent.rewrite(&config(r#""registry.example/app:1""#));
+    wait_until(|| waves(&agent) == "1");
+    assert!(
+        written.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        written.elapsed()
+    );
+
+    let long = vec![r#""registry.example/app:1""#; 65].join(", ");
+    for (bad, failures) in [(long.as_str(), 1), (r#""Registry.example/App""#, 2)] {
+        agent.rewrite(&config(bad));
+        agent.line(&[r#""level":"ERROR""#, "prewarm.images"]);
+        assert_eq!(
+            reload_failures(&agent),
+            format!("speculaire_config_reload_failures_total {failures}")
+        );
+    }
+    // The list kept is the one before: of the two entries, one is new.
+    agent.rewrite(&config(
+        r#""registry.example/app:1", "registry.example/db:1""#,
+    ));
+    wait_until(|| waves(&agent) == "2");
+}
+
+#[test]
 fn p2p_waits_for_the_kubelet_certificate_and_a_bad_one_is_one_error_naming_it() {
     let files = tempfile::tempdir().unwrap();
     let cluster = Cluster::new("kubernetes");

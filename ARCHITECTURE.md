@@ -35,6 +35,8 @@ These words have one meaning everywhere: in code, docs, metrics and commits.
 | *gate* | The NRI `CreateContainer` handler. It only reads local state and never touches the network. |
 | *node identity* | The node name in the kubelet client certificate, `CN=system:node:<name>` (D16). |
 | *withhold, never forge* | The trust rule for peers. A peer can fail to provide content, but cannot get bad bytes accepted, because everything is checked against its digest or its signature. |
+| *seed* | One of the `prewarm.seeds` agents a member picks for an image of `prewarm.images`, the first to get its `Prewarm` (D51, D181). |
+| *wave* | One prewarm of one image across the agents streaming to a member: its seeds, then rounds of other agents, each released once the round before announced the image (D185, D186). |
 
 ## Components
 
@@ -99,7 +101,7 @@ The verifier works asynchronously, so the gate never waits on the network.
 
 ### Prewarm
 1. The reflector config holds the list and pushes it to agents as `Prewarm` on the `Announce` stream (D26).
-2. Every member picks the same few seed nodes, which pull from upstream; the rest pull peer-to-peer once the seeds have announced the blobs (D51).
+2. Every member resolves each image through the *registry config* to its platform manifests and layers, and starts a *wave*. It picks the same few *seeds*, which pull from upstream. Once each seed has announced every layer of one platform manifest, or after `prewarm.seed_timeout`, it releases a round of up to 4 agents per agent already sent to; each round is released once the one before announced, or timed out, and agents that connect after the last round get the `Prewarm` at once (D51, D185, D186).
 3. Agents pull with CRI `PullImage`, which goes through the mirror. They can pin images with the `io.cri-containerd.pinned=pinned` label (containerd v2.3.0 `internal/cri/labels/labels.go:42-45`) so kubelet GC skips them. CRI-O has no such label, and the agent does not pin there (D65).
 4. Artifacts and verdicts are prewarmed along with the images.
 

@@ -92,7 +92,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - node-exporter listens on every address the same way.
 - **Revisit when:** an admin needs the endpoints on one interface only; `metrics.address` already allows it.
 
-## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56, D60, D91)
+## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56, D60, D91, D187)
 
 - **Decision:**
   - Each key in `packaging/config.toml` shows a literal default. A default computed at startup is written `"auto"`: `peer.max_uploads` (4 × CPUs, D24) and `peer.address` (D36).
@@ -141,7 +141,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Without the certificates the mirror cannot listen (D14). Without the entry, containerd never calls the mirror, so verification starts only at the gate (D22), and every first start waits.
 - **Revisit when:** a packaging runs `configure` for the admin, as the DaemonSet's init container would.
 
-## D60: Config values parse into types, and the remaining keys get names (amends D16, D47; amended by D87, D135, D137, D138)
+## D60: Config values parse into types, and the remaining keys get names (amends D16, D47; amended by D87, D135, D137, D138, D187)
 
 - **Decision:**
   - Keys the decisions left unnamed, with their defaults:
@@ -149,7 +149,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
     - `identity.certificate = "/var/lib/kubelet/pki/kubelet-client-current.pem"` and `identity.ca = "/etc/kubernetes/pki/ca.crt"`, D16's paths;
     - `reflector.url = ""`, meaning no reflector and no peers, or an `https://host[:port]` URL with no path;
     - `reflector.members = []`, a list of `{ node = "<node name>", address = "<ip:port>" }`.
-  - **Value syntax:** durations are numbers of seconds to the millisecond, such as `10` or `0.3` (D138); sizes are strings with a binary unit (`"64MiB"`; `B`, `KiB`, `MiB`, `GiB`, `TiB`); paths are absolute; `config.poll_interval` is longer than zero; `peer.max_uploads` and `prewarm.seeds` are at least 1; `log.filter` must parse as an `EnvFilter`. Each value parses once into a type whose `Display` is its canonical spelling, the one `packaging/config.toml` shows: `"1024KiB"` prints as `"1MiB"`. `gate.exempt.images` and `prewarm.images` stay strings until the gate compiles its globs and the reflector resolves its references.
+  - **Value syntax:** durations are numbers of seconds to the millisecond, such as `10` or `0.3` (D138); sizes are strings with a binary unit (`"64MiB"`; `B`, `KiB`, `MiB`, `GiB`, `TiB`); paths are absolute; `config.poll_interval` is longer than zero; `peer.max_uploads` and `prewarm.seeds` are at least 1; `log.filter` must parse as an `EnvFilter`. Each value parses once into a type whose `Display` is its canonical spelling, the one `packaging/config.toml` shows: `"1024KiB"` prints as `"1MiB"`. `gate.exempt.images` stays strings until the gate compiles its globs; `prewarm.images` parses into references (D187).
   - The reload class lives in the type: each restart key (D47) is a `Restart<T>`.
   - `check-config` reports the file, line, column and dotted key, such as `line 22, column 1: gate.unmached: unknown field`.
   - Two tests hold `packaging/config.toml` to the code: the uncommented file parses to `Config::default()` (D47), and its TOML equals `Config::default()` serialized, so a key missing from the file fails. A third fails when ARCHITECTURE.md, `docs/*.md` or `docs/decisions/*.md` names a dotted key in backticks that the file lacks; `docs/TODECIDE.md` is skipped, because its keys are not decided.
@@ -409,3 +409,14 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A connection opened while the agent stops is not waited for, so a busy runtime cannot hold the stop past `shutdown.drain_timeout`.
   - Measured on kind (arm64), a 32 MiB mirror transfer held at 1 MiB/s and `shutdown.drain_timeout = 15`: `systemctl stop` took 15.18 s on containerd 2.4 and 15.17 s on CRI-O 1.37, within `TimeoutStopSec=20s`. Pods created meanwhile got their verdicts from memory, and the mirror answered `404` where main refused the connection. The gate suite took 88 s and 96 s.
 - **Revisit when:** a runtime stops falling through on a `404` from its mirror.
+
+
+## D187: `prewarm.images` holds at most 64 references, and the wave's timers are live keys (amends D47, D60)
+
+- **Decision:**
+  - `prewarm.images` parses into at most 64 (`push::LIST_CAP`) image references, each parsed as containerd's CRI plugin parses a `PullImage` image (D184). A longer list or a bad reference fails the load or reload, which keeps the previous list (D30), and the error names the key and the entry. The reflector keeps each entry as written for the seeds' rank (D181).
+  - Keys, both live and read only with `role = "reflector"`: `prewarm.seed_timeout = 300` (D185) and `prewarm.refresh = 3600` (D186), durations in seconds (D138).
+  - A reload hands the plan to the running reflector.
+- **Because:**
+  - One `PrewarmList` and an outbox's 64 waiting images bound what a member pushes (D183). A reference that does not parse would only fail at each agent's pull.
+- **Revisit when:** an operator needs more than 64 images prewarmed.

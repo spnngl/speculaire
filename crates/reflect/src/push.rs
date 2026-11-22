@@ -2,6 +2,7 @@
 
 use speculaire_oci::reference::{Reference, ReferenceError};
 
+use crate::prewarm::Images;
 use crate::proto;
 
 /// How many images a `PrewarmList` names at most (D183).
@@ -37,6 +38,18 @@ impl PrewarmList {
     #[must_use]
     pub fn images(&self) -> &[Reference] {
         &self.0
+    }
+}
+
+impl From<&Images> for PrewarmList {
+    fn from(images: &Images) -> Self {
+        Self(
+            images
+                .as_slice()
+                .iter()
+                .map(|image| image.reference().clone())
+                .collect(),
+        )
     }
 }
 

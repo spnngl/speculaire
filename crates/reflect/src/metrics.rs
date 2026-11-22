@@ -18,6 +18,15 @@ pub const LOOKUP: &str = "speculaire_reflector_lookup_seconds";
 pub const RESYNC: &str = "speculaire_reflector_resync_seconds";
 /// `speculaire_reflector_announce_rejected_total`: `Announce` streams refused, by `reason`.
 pub const REJECTED: &str = "speculaire_reflector_announce_rejected_total";
+/// `speculaire_reflector_prewarm_sent_total`: `Prewarm`s queued for agents, by `stage`: `seed` or `release` (D186).
+pub const PREWARM_SENT: &str = "speculaire_reflector_prewarm_sent_total";
+/// `speculaire_reflector_prewarm_rounds_total`: rounds of a wave ended, by `release`: `announced` or `timeout`
+/// (D185).
+pub const PREWARM_ROUNDS: &str = "speculaire_reflector_prewarm_rounds_total";
+/// `speculaire_reflector_prewarm_waves_total`: waves started, by `cause`: `list`, `refresh` or `start` (D186).
+pub const PREWARM_WAVES: &str = "speculaire_reflector_prewarm_waves_total";
+/// `speculaire_reflector_prewarm_resolve_failures_total`: resolutions of a `prewarm.images` entry that failed (D186).
+pub const PREWARM_RESOLVE_FAILURES: &str = "speculaire_reflector_prewarm_resolve_failures_total";
 
 /// `speculaire_reflector_connected`: 1 while the `Announce` stream to the `member` is up.
 pub const CONNECTED: &str = "speculaire_reflector_connected";
@@ -70,6 +79,83 @@ impl Reason {
     }
 }
 
+/// Which `Prewarm` of a wave: one to a seed, or one released to the other agents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stage {
+    Seed,
+    Release,
+}
+
+/// How a round of a wave ended: each agent of it announced the image, or `prewarm.seed_timeout` passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Release {
+    Announced,
+    Timeout,
+}
+
+/// Why a wave started: its entry joined `prewarm.images`, a refresh found new platform manifests, or the reflector
+/// started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cause {
+    List,
+    Refresh,
+    Start,
+}
+
+impl Stage {
+    const ALL: [Self; 2] = [Self::Seed, Self::Release];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Seed => "seed",
+            Self::Release => "release",
+        }
+    }
+}
+
+impl Release {
+    const ALL: [Self; 2] = [Self::Announced, Self::Timeout];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Announced => "announced",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+impl Cause {
+    const ALL: [Self; 3] = [Self::List, Self::Refresh, Self::Start];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Refresh => "refresh",
+            Self::Start => "start",
+        }
+    }
+}
+
+/// Counts `count` `Prewarm`s queued at `stage`.
+pub(crate) fn sent(stage: Stage, count: u64) {
+    counter!(PREWARM_SENT, "stage" => stage.label()).increment(count);
+}
+
+/// Counts a round ended.
+pub(crate) fn round(release: Release) {
+    counter!(PREWARM_ROUNDS, "release" => release.label()).increment(1);
+}
+
+/// Counts a wave started.
+pub(crate) fn wave(cause: Cause) {
+    counter!(PREWARM_WAVES, "cause" => cause.label()).increment(1);
+}
+
+/// Counts a resolution failed.
+pub(crate) fn resolve_failed() {
+    counter!(PREWARM_RESOLVE_FAILURES).increment(1);
+}
+
 /// Describes the metrics and gives each series its zero, so that each exists from startup.
 pub fn describe() {
     describe_gauge!(AGENTS, "Agents with an open Announce stream");
@@ -90,6 +176,23 @@ pub fn describe() {
     for reason in Reason::ALL {
         counter!(REJECTED, "reason" => reason.label()).absolute(0);
     }
+    describe_counter!(PREWARM_SENT, "Prewarm messages queued for agents");
+    describe_counter!(PREWARM_ROUNDS, "Rounds of a prewarm wave ended");
+    describe_counter!(PREWARM_WAVES, "Prewarm waves started");
+    describe_counter!(
+        PREWARM_RESOLVE_FAILURES,
+        "Resolutions of a prewarm image that failed"
+    );
+    for stage in Stage::ALL {
+        counter!(PREWARM_SENT, "stage" => stage.label()).absolute(0);
+    }
+    for release in Release::ALL {
+        counter!(PREWARM_ROUNDS, "release" => release.label()).absolute(0);
+    }
+    for cause in Cause::ALL {
+        counter!(PREWARM_WAVES, "cause" => cause.label()).absolute(0);
+    }
+    counter!(PREWARM_RESOLVE_FAILURES).absolute(0);
 }
 
 /// Describes the client's metrics. Its series are by member, so they appear with the first `Members` answer.

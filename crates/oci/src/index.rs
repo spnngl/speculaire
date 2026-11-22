@@ -204,6 +204,14 @@ impl Index {
         self.entries.iter().map(|entry| &entry.digest)
     }
 
+    /// The image manifests a runtime may pick, one per platform the index serves, in index order.
+    pub fn images(&self) -> impl Iterator<Item = &Digest> {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.role, Role::Image(_)))
+            .map(|entry| &entry.digest)
+    }
+
     /// The attestation manifests of the entry `of`, in index order.
     #[must_use]
     pub fn attestations(&self, of: &Digest) -> Vec<&Digest> {
@@ -324,6 +332,7 @@ mod tests {
             entry(2, MANIFEST, "linux/386"),
         ]);
         assert_eq!(nested.platform_manifest(&host("amd64", "")), None);
+        assert!(nested.images().eq([&digest(2)]));
     }
 
     #[test]
@@ -343,6 +352,7 @@ mod tests {
         assert_eq!(built.attestations(&digest(1)), [&digest(8)]);
         assert_eq!(built.attestations(&digest(2)), Vec::<&Digest>::new());
         assert!(built.manifests().eq([9, 1, 3, 8, 7].map(digest).iter()));
+        assert!(built.images().eq([1, 3].map(digest).iter()));
         // Even with the host's platform, an attestation manifest is never the platform's.
         let only = index(&[
             attestation(9, 3).replace("unknown\",\"os\":\"unknown", "amd64\",\"os\":\"linux")

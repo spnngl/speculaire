@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use speculaire_reflect::prewarm::{Image, Images};
 
 /// A value that a key does not accept; the message says what the key expects.
 #[derive(Debug, thiserror::Error)]
@@ -562,6 +563,43 @@ impl fmt::Display for ReflectorUrl {
     }
 }
 
+/// `prewarm.images`: at most [`LIST_CAP`](speculaire_reflect::push::LIST_CAP) references CRI would pull, each kept as written (D60, D187).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
+pub struct PrewarmImages(Images);
+
+impl PrewarmImages {
+    /// The entries.
+    #[must_use]
+    pub const fn get(&self) -> &Images {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<String>> for PrewarmImages {
+    type Error = InvalidValue;
+    fn try_from(texts: Vec<String>) -> Result<Self, InvalidValue> {
+        let images = texts
+            .iter()
+            .map(|text| Image::parse(text).map_err(|err| InvalidValue(err.to_string())))
+            .collect::<Result<_, _>>()?;
+        Images::new(images)
+            .map(Self)
+            .map_err(|err| InvalidValue(err.to_string()))
+    }
+}
+
+impl From<PrewarmImages> for Vec<String> {
+    fn from(images: PrewarmImages) -> Self {
+        images
+            .0
+            .as_slice()
+            .iter()
+            .map(|image| image.as_str().to_owned())
+            .collect()
+    }
+}
+
 /// A Kubernetes node name: a lowercase RFC 1123 subdomain.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -706,6 +744,14 @@ mod tests {
                 "{literal}"
             );
         }
+    }
+
+    #[test]
+    fn prewarm_images_print_as_written() {
+        let literal =
+            r#"["nginx", "registry.example/app@sha256:"#.to_owned() + &"ab".repeat(32) + "\"]";
+        let images: PrewarmImages = read(&literal).unwrap();
+        assert_eq!(toml::Value::try_from(images).unwrap().to_string(), literal);
     }
 
     #[test]
