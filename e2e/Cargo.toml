@@ -24,6 +24,8 @@ workspace = true
 [dev-dependencies]
 # The platform of the nodes, whose manifest a pull picks from an image index, and the gate suite's chain IDs.
 speculaire-oci.workspace = true
+# The prewarm suite names an image's seeds as the reflectors pick them (D181).
+speculaire-reflect.workspace = true
 # The gate suite runs the runtime's containerd clients against a worker's containerd, relayed to this host.
 speculaire-runtime.workspace = true
 tempfile.workspace = true

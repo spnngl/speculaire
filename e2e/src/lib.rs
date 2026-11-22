@@ -6,7 +6,7 @@
 //!
 //! The peer harness (D94): `just e2e-up` also starts the cluster's [`upstream`] registry and its reflectors'
 //! [`balancer`], pulling Docker Hub's images through its mirrors ([`hub`]); [`node`] stops, slows and corrupts a node
-//! for the peer suites, and [`reflector`] calls a reflector.
+//! for the peer suites, [`reflector`] calls a reflector, and [`prewarm`] writes the reflectors' `prewarm.images`.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -17,6 +17,7 @@ pub mod balancer;
 pub mod catalog;
 pub mod hub;
 pub mod node;
+pub mod prewarm;
 pub mod reflector;
 pub mod registry;
 pub mod upstream;
