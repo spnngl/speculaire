@@ -505,7 +505,7 @@ impl Default for Artifacts {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BlobCache {
-    /// The size above which the least recently served blobs are evicted (D67).
+    /// The bound of the blobs kept and in flight, above which the least recently served are evicted (D67, D205).
     pub max_size: ByteSize,
     /// Where the cache keeps its blobs (D67, D88).
     pub directory: Restart<Absolute>,

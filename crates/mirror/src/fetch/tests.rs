@@ -168,7 +168,11 @@ impl Nodes {
 
     /// A fetcher of [`CLIENT`] that asks `holders` in that order, and hedges as a fresh one does.
     fn hedging_fetcher(&self, holders: Vec<Holder>, settings: Settings) -> Fetcher {
-        let fetcher = Fetcher::new(self.dir.path().join("staging"), settings);
+        let fetcher = Fetcher::new(
+            self.dir.path().join("staging"),
+            Space::new(u64::MAX),
+            settings,
+        );
         fetcher.link(Arc::new(Fixed(holders)), self.credentials(CLIENT));
         fetcher
     }
@@ -359,10 +363,168 @@ async fn on_containerd_a_whole_get_of_a_digest_the_node_lacks_is_served_from_a_p
     ));
 }
 
+/// A whole `GET` of `reference`'s blob, as containerd sends it.
+fn get_blob<'a>(reference: &'a crate::request::Reference<'a>) -> crate::pulls::Pull<'a> {
+    crate::pulls::Pull {
+        kind: Kind::Blob,
+        name: "library/busybox",
+        namespace: None,
+        reference: Some(reference),
+        head: false,
+        range: None,
+        accept: None,
+    }
+}
+
+/// The body's first frame is an error: containerd keeps no byte of it.
+async fn assert_fails_before_any_byte(response: hyper::Response<crate::pulls::Body>) {
+    let mut body = response.into_body();
+    assert!(body.frame().await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn on_containerd_a_blobs_head_goes_out_before_its_body_is_whole_and_checked() {
+    use crate::pulls::{Answer, Local, Pulls as _};
+    let mut nodes = Nodes::new();
+    let blob = pattern(SIZE, 0);
+    let digest = sha(&blob);
+    let (a, _) = nodes.peer("node-a", &[(&digest, &blob)], 4).await;
+    // The only peer stalls a quarter in: the blob cannot be checked, but its head is out already.
+    let stalled = behind(&a, Fault::Stall(SIZE / 4)).await;
+    let settings = Settings {
+        stall_timeout: Duration::from_millis(300),
+        ..SETTINGS
+    };
+    let local = Local::new(Held(HashMap::new()), nodes.fetcher(vec![stalled], settings));
+    let reference = crate::request::Reference::Digest(digest.clone());
+    let Answer::Served(_, response) = local.pull(get_blob(&reference)).await else {
+        panic!("a blob a peer answers for has its head served");
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[CONTENT_LENGTH],
+        HeaderValue::from(SIZE as u64)
+    );
+    assert_fails_before_any_byte(response).await;
+    // containerd's next try of it goes upstream.
+    assert!(matches!(
+        local.pull(get_blob(&reference)).await,
+        Answer::Missing
+    ));
+}
+
+#[tokio::test]
+async fn on_containerd_a_wrong_blob_is_never_sent_and_its_peer_is_denied() {
+    use crate::pulls::{Answer, Local, Pulls as _};
+    let (handle, _guard) = recorder();
+    let mut nodes = Nodes::new();
+    let digest = sha(&pattern(SIZE, 0));
+    let (a, _) = nodes
+        .peer("node-a", &[(&digest, &pattern(SIZE, 1))], 4)
+        .await;
+    let local = Local::new(Held(HashMap::new()), nodes.fetcher(vec![a], SETTINGS));
+    let reference = crate::request::Reference::Digest(digest.clone());
+    let Answer::Served(_, response) = local.pull(get_blob(&reference)).await else {
+        panic!("a blob a peer answers for has its head served");
+    };
+    assert_fails_before_any_byte(response).await;
+    assert_counted(
+        &handle,
+        &[r#"speculaire_peer_fetches_total{result="digest_mismatch"} 1"#],
+    );
+    // Denied, the peer is not asked again: the pull falls through.
+    assert!(matches!(
+        local.pull(get_blob(&reference)).await,
+        Answer::Missing
+    ));
+}
+
+#[tokio::test]
+async fn a_later_round_may_bring_another_size_which_a_head_already_sent_refuses() {
+    use crate::pulls::{Answer, Local, Pulls as _};
+    let mut nodes = Nodes::new();
+    let blob = pattern(SIZE, 0);
+    let digest = sha(&blob);
+    // A lies on the size and the bytes; asked first, it wins the first round, and the second goes to B.
+    let (a, _) = nodes
+        .peer("node-a", &[(&digest, &pattern(SIZE / 2, 1))], 4)
+        .await;
+    let (b, _) = nodes.peer("node-b", &[(&digest, &blob)], 4).await;
+    let fetcher = nodes.fetcher(vec![a.clone(), b.clone()], SETTINGS);
+    // The space holds the larger size exactly: the claim grows to it, and no further.
+    let size = u64::try_from(SIZE).unwrap();
+    fetcher.0.space.set_max(size);
+    let staged = fetcher
+        .stage(Kind::Blob, &digest, u64::MAX)
+        .await
+        .unwrap()
+        .finish()
+        .await
+        .unwrap();
+    assert_eq!(staged.claim.bytes(), size);
+    assert_eq!(fetcher.0.space.claimed(), size);
+    assert_eq!(read(staged.blob).await, blob);
+
+    let local = Local::new(Held(HashMap::new()), nodes.fetcher(vec![a, b], SETTINGS));
+    let reference = crate::request::Reference::Digest(digest.clone());
+    let Answer::Served(_, response) = local.pull(get_blob(&reference)).await else {
+        panic!("a blob a peer answers for has its head served");
+    };
+    assert_eq!(response.headers()[CONTENT_LENGTH], (SIZE / 2).to_string());
+    assert_fails_before_any_byte(response).await;
+}
+
+#[tokio::test]
+async fn a_later_round_of_the_same_size_needs_no_more_of_a_lowered_bound() {
+    let mut nodes = Nodes::new();
+    let blob = pattern(SIZE, 0);
+    let digest = sha(&blob);
+    let (a, _) = nodes
+        .peer("node-a", &[(&digest, &pattern(SIZE, 1))], 4)
+        .await;
+    let (b, _) = nodes.peer("node-b", &[(&digest, &blob)], 4).await;
+    let fetcher = nodes.fetcher(vec![a, b], SETTINGS);
+    let staging = fetcher.stage(Kind::Blob, &digest, u64::MAX).await.unwrap();
+    // A reload lowers the bound below what A claimed: B, in the second round, claims nothing more, so it goes on.
+    fetcher.0.space.set_max(0);
+    let staged = staging.finish().await.unwrap();
+    assert_eq!(read(staged.blob).await, blob);
+}
+
+#[tokio::test]
+async fn a_blob_staged_claims_its_size_of_the_space_until_it_is_dropped() {
+    let mut nodes = Nodes::new();
+    let blob = pattern(100, 7);
+    let digest = sha(&blob);
+    let (a, _) = nodes.peer("node-a", &[(&digest, &blob)], 4).await;
+    let space = Space::new(150);
+    let fetcher = Fetcher::new(nodes.dir.path().join("staging"), space.clone(), SETTINGS);
+    fetcher.link(Arc::new(Fixed(vec![a])), nodes.credentials(CLIENT));
+    let staged = fetcher
+        .stage(Kind::Blob, &digest, u64::MAX)
+        .await
+        .unwrap()
+        .finish()
+        .await
+        .unwrap();
+    assert_eq!(space.claimed(), 100);
+    // The space cannot hold a second copy: it is not fetched.
+    assert!(fetcher.stage(Kind::Blob, &digest, u64::MAX).await.is_none());
+    assert_eq!(read(staged.blob).await, blob);
+    drop(staged.claim);
+    assert_eq!(space.claimed(), 0);
+    assert!(fetcher.whole(Kind::Blob, &digest).await.is_some());
+    assert_eq!(space.claimed(), 0);
+}
+
 #[tokio::test]
 async fn nothing_is_fetched_before_the_fetcher_is_linked_or_from_no_holder() {
     let nodes = Nodes::new();
-    let unlinked = Fetcher::new(nodes.dir.path().join("staging"), SETTINGS);
+    let unlinked = Fetcher::new(
+        nodes.dir.path().join("staging"),
+        Space::new(u64::MAX),
+        SETTINGS,
+    );
     assert!(unlinked.whole(Kind::Blob, &sha(b"x")).await.is_none());
     let alone = nodes.fetcher(Vec::new(), SETTINGS);
     assert!(alone.download(Kind::Blob, &sha(b"x")).await.is_none());
@@ -504,6 +666,7 @@ async fn a_denied_peer_is_allowed_again_once_deny_ttl_has_passed() {
     let deny_ttl = Duration::from_secs(600);
     let fetcher = Fetcher::new(
         PathBuf::new(),
+        Space::new(u64::MAX),
         Settings {
             deny_ttl,
             ..SETTINGS
@@ -525,6 +688,7 @@ fn a_deny_ttl_past_the_clocks_range_denies() {
     // A duration reads up to `i64::MAX` seconds (D138); `Instant` and `SystemTime` hold fewer.
     let fetcher = Fetcher::new(
         PathBuf::new(),
+        Space::new(u64::MAX),
         Settings {
             deny_ttl: Duration::MAX,
             ..SETTINGS
@@ -695,7 +859,7 @@ async fn a_live_stall_timeout_applies_to_the_next_fetch() {
 
 #[test]
 fn hedges_wait_for_the_80th_85th_and_90th_percentiles_of_answer_times_at_least_50_ms() {
-    let fetcher = Fetcher::new(PathBuf::new(), SETTINGS);
+    let fetcher = Fetcher::new(PathBuf::new(), Space::new(u64::MAX), SETTINGS);
     assert_eq!(fetcher.0.hedge_delays(), [HEDGE_FLOOR; 3]);
     for millis in (1..=100).rev() {
         fetcher.0.answered(Duration::from_millis(millis));

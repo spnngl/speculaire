@@ -15,6 +15,7 @@ use speculaire_mirror::fetch::{self, Fetcher, Holder};
 use speculaire_mirror::listed::Listed;
 use speculaire_mirror::peer::Uploads;
 use speculaire_mirror::relay::Relay;
+use speculaire_mirror::space::Space;
 use speculaire_mirror::tls::Tls;
 use speculaire_mirror::{Fetched, Local};
 use speculaire_oci::platform::Host;
@@ -384,6 +385,8 @@ struct Mirror {
     uploads: Arc<Uploads>,
     /// What fetches from peers, linked to the reflectors once the agent shares.
     fetcher: Fetcher,
+    /// `blob_cache.max_size`, which the blobs kept and in flight share (D205).
+    space: Space,
     /// The images the runtime lists, whose tags the agent announces and the peer API resolves (D123).
     listed: Listed,
 }
@@ -392,9 +395,7 @@ impl Mirror {
     /// Gives the mirror the live keys of `config`: a lowered `blob_cache.max_size` evicts at the next blob kept (D91),
     /// `peer.max_uploads` caps the next upload (D24), and `peer.stall_timeout` and `peer.deny_ttl` reach the next fetch.
     fn apply(&self, config: &Config) {
-        if let Some(relay) = &self.relay {
-            relay.cache().set_max_size(config.blob_cache.max_size.get());
-        }
+        self.space.set_max(config.blob_cache.max_size.get());
         self.uploads.set_limit(config.peer.max_uploads.get());
         self.fetcher.set(fetch_settings(config));
     }
@@ -489,8 +490,9 @@ async fn start_mirror(
     let tls = Arc::new(tls);
     let uploads = Arc::new(Uploads::new(config.peer.max_uploads.get()));
     let blobs = config.blob_cache.directory.get().get();
+    let space = Space::new(config.blob_cache.max_size.get());
     // On containerd, a blob from peers waits there until it is whole and checked (D102).
-    let fetcher = Fetcher::new(blobs.join("staging"), fetch_settings(config));
+    let fetcher = Fetcher::new(blobs.join("staging"), space.clone(), fetch_settings(config));
     speculaire_mirror::metrics::describe_fetch();
     let (tell, asked) = tokio::sync::mpsc::unbounded_channel();
     let (task, relay, listed) = match node.fallback() {
@@ -506,7 +508,7 @@ async fn start_mirror(
             Listed::follow(node.images()),
         ),
         Fallback::Relay => {
-            let cache = Cache::open(blobs, config.blob_cache.max_size.get())
+            let cache = Cache::open(blobs, space.clone())
                 .with_context(|| format!("opening the blob cache {}", blobs.display()))?;
             let relay = Arc::new(Relay::new(
                 cache,
@@ -538,6 +540,7 @@ async fn start_mirror(
             relay,
             uploads,
             fetcher,
+            space,
             listed,
         },
         asked,
@@ -988,8 +991,10 @@ mod tests {
     fn the_live_keys_of_a_config_reach_the_relays_cache_and_the_fetcher() {
         let dir = tempfile::tempdir().unwrap();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let space = Space::new(1 << 30);
             let fetcher = Fetcher::new(
                 dir.path().join("staging"),
+                space.clone(),
                 fetch::Settings {
                     stall_timeout: Duration::from_secs(1),
                     deny_ttl: Duration::from_secs(1),
@@ -997,7 +1002,7 @@ mod tests {
                 },
             );
             let relay = Arc::new(Relay::new(
-                Cache::open(dir.path(), 1 << 30).unwrap(),
+                Cache::open(dir.path(), space.clone()).unwrap(),
                 fetcher.clone(),
                 Arc::new(ContainerdRegistries::new(dir.path().join("config.toml"))),
                 Arc::new(speculaire_runtime::crio::CriO::new(
@@ -1013,12 +1018,16 @@ mod tests {
                 relay: Some(Arc::clone(&relay)),
                 uploads: Arc::new(Uploads::new(NonZeroUsize::MIN)),
                 fetcher,
+                space,
                 listed: relay.listed().clone(),
             };
             let config = Config::default();
             assert_ne!(config.blob_cache.max_size.get(), 1 << 30);
             mirror.apply(&config);
-            assert_eq!(relay.cache().max_size(), config.blob_cache.max_size.get());
+            assert_eq!(
+                relay.cache().space().max(),
+                config.blob_cache.max_size.get()
+            );
             assert_eq!(mirror.uploads.limit(), config.peer.max_uploads.get().get());
             assert_eq!(mirror.fetcher.settings(), fetch_settings(&config));
         });

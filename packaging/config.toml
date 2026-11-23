@@ -100,7 +100,8 @@
 #deny_ttl = 600
 
 [blob_cache]
-# On CRI-O, the size above which the least recently served blobs are evicted (D67).
+# The bound of what the mirror writes in directory: the blobs it stages from peers, refused beyond it, and on CRI-O
+# the blobs it writes and keeps, the least recently served evicted first (D67, D205).
 #max_size = "20GiB"
 # Where the blob cache keeps the blobs and the manifests the mirror served (D67, D88); on containerd, its staging/
 # holds what comes from peers until its digest is checked (D102). Restart.

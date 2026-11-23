@@ -141,6 +141,13 @@ A reflector resolves each `prewarm.images` entry through the node''s *registry c
 
 A pull by tag asks the peers whose runtime lists that tag before upstream, so it works while upstream is down (D123). A peer can name any image for a tag, and a tag moved upstream keeps resolving to the image peers hold (`docs/security.md`). To resolve every tag upstream, as before, set `mirror.resolve_tags = false` and reload: the next tag request answers 404 and the runtime asks upstream. No restart and no `configure` is needed; containerd's `hosts.toml` keeps `resolve`. `speculaire_tag_lookups_total{result}` counts the tags peers resolved (`peer`) and missed (`miss`). On containerd, a node configured by an earlier release sends the mirror no tag until `speculaire configure` runs again and adds `resolve` to its `hosts.toml` entry (D82).
 
+## Blobs from peers on containerd
+
+The mirror answers a blob from peers as soon as one answers, and sends its bytes once the whole blob is in `blob_cache.directory`'s `staging/` and matches its digest (D102, D205). containerd waits up to its `image_pull_progress_timeout`, 5 min by default, for them; a blob peers take longer to send fails the pull, and kubelet's retry goes upstream.
+
+- `no peer sent the blob right after its head was sent: the pull goes upstream` (warning) names a blob whose peers failed or sent wrong bytes: containerd kept nothing of it and pulls it from upstream, and the mirror sends that blob upstream for 60 s.
+- `blobs in flight claim blob_cache.max_size: this one is pulled from upstream` (info) means the blobs being fetched fill `blob_cache.max_size`, which bounds `staging/` too: raise it if peers should serve larger or more blobs at once.
+
 ## Logs and audit
 
 - `journalctl -u speculaire` shows the agent's logs, at `warn` and above by default. Change `log.filter` (`EnvFilter` syntax) and reload to see more (D37).
@@ -200,7 +207,7 @@ Histograms are native and served only over protobuf, so Prometheus must have nat
 | Metric | Alert when |
 |---|---|
 | `speculaire_gate_total{mode="enforce",result=~"rejected\|unverifiable\|pending\|unmatched"}` | The rate rises above its usual level |
-| `speculaire_peer_fetches_total{result="digest_mismatch"}` | It increases: a peer sent bytes that do not match their digest, and is skipped until `peer.deny_ttl` passes; the warning log `a peer sent content that is not its digest`, and the `peer` audit event if on, name its node. On containerd the pull went on from another peer; on CRI-O it failed once and kubelet retried (D52, D102) |
+| `speculaire_peer_fetches_total{result="digest_mismatch"}` | It increases: a peer sent bytes that do not match their digest, and is skipped until `peer.deny_ttl` passes; the warning log `a peer sent content that is not its digest`, and the `peer` audit event if on, name its node. On containerd nothing of it was sent: the pull went on from another peer or upstream; on CRI-O it failed once and kubelet retried (D52, D102, D205) |
 | `speculaire_lookup_seconds_count{result="error"}` | It rises: lookups fail at every reflector asked, and pulls fall through to upstream (D102) |
 | `speculaire_lookup_seconds_count{result="no_reflector"}` | It rises: the agent streams to no reflector, asks nobody, and pulls fall through to upstream (D103) |
 | `speculaire_lookup_seconds_count{result="miss"}` | Its share of lookups rises while every `speculaire_reflector_connected` is 1: the reflectors answer, but lack what the nodes hold; look for refused streams (`speculaire_reflector_announce_rejected_total`) and for nodes whose `speculaire_p2p_enabled` is 0 (D103) |

@@ -34,7 +34,7 @@ async fn read(cache: &Cache, digest: &Digest) -> Option<Vec<u8>> {
 #[tokio::test]
 async fn a_blob_kept_is_served_by_its_digest_and_counted() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(dir.path(), 1 << 20).unwrap();
+    let cache = Cache::open(dir.path(), Space::new(1 << 20)).unwrap();
     assert_eq!(cache.size(), 0);
     assert!(read(&cache, &digest(1)).await.is_none());
     keep(&cache, &digest(1), b"hello").await;
@@ -60,7 +60,7 @@ async fn a_blob_kept_is_served_by_its_digest_and_counted() {
 #[tokio::test]
 async fn a_writer_that_is_not_committed_leaves_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(dir.path(), 1 << 20).unwrap();
+    let cache = Cache::open(dir.path(), Space::new(1 << 20)).unwrap();
     let mut writer = cache.writer().await.unwrap();
     writer.write(b"partial").await.unwrap();
     assert_eq!(
@@ -79,7 +79,7 @@ async fn a_writer_that_is_not_committed_leaves_nothing() {
 async fn opening_again_deletes_leftovers_and_counts_what_was_kept() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let cache = Cache::open(dir.path(), 1 << 20).unwrap();
+        let cache = Cache::open(dir.path(), Space::new(1 << 20)).unwrap();
         keep(&cache, &digest(1), b"one").await;
         keep(&cache, &digest(2), b"three").await;
     }
@@ -88,7 +88,7 @@ async fn opening_again_deletes_leftovers_and_counts_what_was_kept() {
     std::fs::write(dir.path().join("blobs/sha256/not-a-digest"), b"x").unwrap();
     std::fs::create_dir_all(dir.path().join("blobs/other")).unwrap();
     std::fs::write(dir.path().join("blobs/stray"), b"x").unwrap();
-    let cache = Cache::open(dir.path(), 1 << 20).unwrap();
+    let cache = Cache::open(dir.path(), Space::new(1 << 20)).unwrap();
     assert_eq!(
         std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
         0
@@ -105,7 +105,7 @@ async fn opening_again_deletes_leftovers_and_counts_what_was_kept() {
 async fn above_the_bound_the_least_recently_served_blob_goes_first() {
     let (handle, _guard) = crate::fetch::tests::recorder();
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(dir.path(), 25).unwrap();
+    let cache = Cache::open(dir.path(), Space::new(25)).unwrap();
     for n in 1..=3 {
         keep(&cache, &digest(n), &[n; 10]).await;
     }
@@ -133,7 +133,7 @@ async fn above_the_bound_the_least_recently_served_blob_goes_first() {
 #[tokio::test]
 async fn protected_blobs_go_last_and_only_when_nothing_else_is_left() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(dir.path(), 15).unwrap();
+    let cache = Cache::open(dir.path(), Space::new(15)).unwrap();
     for n in 1..=3 {
         keep(&cache, &digest(n), &[n; 10]).await;
     }
@@ -142,19 +142,44 @@ async fn protected_blobs_go_last_and_only_when_nothing_else_is_left() {
     assert_eq!(cache.evict(&protected), [digest(3), digest(1)]);
     assert_eq!(cache.digests(), [digest(2)]);
     // A bound of zero evicts what is protected too.
-    cache.set_max_size(0);
-    assert_eq!(cache.max_size(), 0);
+    cache.space().set_max(0);
+    assert_eq!(cache.space().max(), 0);
     assert_eq!(cache.evict(&protected), [digest(2)]);
     assert_eq!(cache.size(), 0);
 }
 
 #[tokio::test]
+async fn blobs_in_flight_claim_the_bound_with_what_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::open(dir.path(), Space::new(10)).unwrap();
+    let mut writer = cache.writer().await.unwrap();
+    writer.write(&[1; 6]).await.unwrap();
+    assert_eq!(cache.space().claimed(), 6);
+    // A write past the bound is counted, not refused: the cache is over it until what it keeps goes.
+    writer.write(&[1; 5]).await.unwrap();
+    assert_eq!(cache.space().claimed(), 11);
+    assert!(cache.over());
+    drop(writer);
+    assert_eq!(cache.space().claimed(), 0);
+    keep(&cache, &digest(1), &[1; 6]).await;
+    assert_eq!(cache.space().claimed(), 0);
+    // A blob staged elsewhere in the space fills it, then pushes the cache over: what is kept goes.
+    let mut staged = cache.space().claim(4).unwrap();
+    assert!(!cache.over());
+    assert!(staged.grow(1));
+    assert!(cache.over());
+    assert_eq!(cache.evict(&HashSet::new()), [digest(1)]);
+    assert!(!cache.over());
+    drop(staged);
+}
+
+#[tokio::test]
 async fn a_blob_evicted_once_opened_still_streams() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(dir.path(), 1 << 20).unwrap();
+    let cache = Cache::open(dir.path(), Space::new(1 << 20)).unwrap();
     keep(&cache, &digest(1), b"one").await;
     let blob = cache.open(&digest(1)).await.unwrap().unwrap();
-    cache.set_max_size(0);
+    cache.space().set_max(0);
     assert_eq!(cache.evict(&HashSet::new()), [digest(1)]);
     let chunks: Vec<Bytes> = blob
         .stream(0, 3)
@@ -169,7 +194,7 @@ async fn a_blob_evicted_once_opened_still_streams() {
 #[tokio::test]
 async fn a_blob_deleted_behind_the_cache_is_forgotten_at_the_next_read() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::open(dir.path(), 1 << 20).unwrap();
+    let cache = Cache::open(dir.path(), Space::new(1 << 20)).unwrap();
     keep(&cache, &digest(1), b"one").await;
     keep(&cache, &digest(2), b"two").await;
     std::fs::remove_file(dir.path().join("blobs/sha256").join(digest(1).encoded())).unwrap();
@@ -190,7 +215,7 @@ async fn a_blob_deleted_behind_the_cache_is_forgotten_at_the_next_read() {
 async fn the_order_of_service_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let cache = Cache::open(dir.path(), 1 << 20).unwrap();
+        let cache = Cache::open(dir.path(), Space::new(1 << 20)).unwrap();
         for n in 1..=3 {
             keep(&cache, &digest(n), &[n; 10]).await;
         }
@@ -205,7 +230,7 @@ async fn the_order_of_service_survives_a_restart() {
         }
         assert!(read(&cache, &digest(1)).await.is_some());
     }
-    let cache = Cache::open(dir.path(), 25).unwrap();
+    let cache = Cache::open(dir.path(), Space::new(25)).unwrap();
     assert_eq!(cache.evict(&HashSet::new()), [digest(2)]);
 }
 
@@ -217,7 +242,7 @@ async fn a_follower_gets_the_blobs_kept_then_each_kept_and_evicted_and_a_listing
     use tokio::sync::mpsc;
 
     let dir = tempfile::tempdir().unwrap();
-    let cache = Arc::new(Cache::open(dir.path(), 10).unwrap());
+    let cache = Arc::new(Cache::open(dir.path(), Space::new(10)).unwrap());
     keep(&cache, &digest(1), b"12345").await;
     let (sender, mut updates) = mpsc::channel(1);
     let following = tokio::spawn(Arc::clone(&cache).follow(sender));
@@ -245,7 +270,7 @@ async fn a_follower_gets_the_blobs_kept_then_each_kept_and_evicted_and_a_listing
         Some(Update::Change(Change::Removed(digest(2))))
     );
     // More changes than the backlog, while the follower is blocked on its full channel: it lists again.
-    cache.set_max_size(u64::MAX);
+    cache.space().set_max(u64::MAX);
     for n in 0..u16::try_from(2 * super::BACKLOG).unwrap() {
         let many = Digest::parse(&format!("sha256:{}", format!("{n:04x}").repeat(16))).unwrap();
         keep(&cache, &many, b"x").await;

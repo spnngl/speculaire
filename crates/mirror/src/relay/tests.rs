@@ -292,13 +292,18 @@ impl Node {
         // Unlinked, the fetcher asks no peer.
         let fetcher = Fetcher::new(
             self.dir.path().join("staging"),
+            crate::space::Space::new(u64::MAX),
             crate::fetch::tests::SETTINGS,
         );
         self.relay_from(max_size, images, fetcher)
     }
 
     fn relay_from(&self, max_size: u64, images: Listed, fetcher: Fetcher) -> Relay {
-        let cache = Cache::open(self.dir.path().join("blobs"), max_size).unwrap();
+        let cache = Cache::open(
+            self.dir.path().join("blobs"),
+            crate::space::Space::new(max_size),
+        )
+        .unwrap();
         Relay::new(
             cache,
             fetcher,
@@ -1350,7 +1355,7 @@ async fn above_the_bound_the_blobs_of_unlisted_images_go_before_those_of_listed_
     let total = relay.cache().size();
     // A bound under the total by a little: the other image's biggest blob is the least recently served among the
     // unlisted ones that no listed image protects only if it is the oldest, so make the listed image the more recent.
-    relay.cache().set_max_size(total - 1);
+    relay.cache().space().set_max(total - 1);
     read(
         relay
             .pull(pull(Kind::Blob, &by(&sha(&kept.layers[0])), false, None))
@@ -1370,7 +1375,7 @@ async fn above_the_bound_the_blobs_of_unlisted_images_go_before_those_of_listed_
     }
     assert!(!relay.cache().over());
     // A bound that leaves only room for the listed image's smallest blob evicts what it protects as a last resort.
-    relay.cache().set_max_size(10);
+    relay.cache().space().set_max(10);
     relay.listed().read().await;
     relay.evict().await;
     assert!(relay.cache().size() <= 10);
@@ -1404,7 +1409,7 @@ async fn the_blobs_of_listed_images_go_least_recently_served_first() {
         .unwrap();
     }
     // One byte short of the two layers: the manifest, the config and the layer served first go.
-    relay.cache().set_max_size(5999);
+    relay.cache().space().set_max(5999);
     relay.listed().read().await;
     relay.evict().await;
     assert!(!relay.cache().contains(&sha(&image.layers[0])));
@@ -1427,7 +1432,7 @@ async fn a_cache_over_its_bound_is_evicted_by_the_task_that_waits_for_it() {
         let relay = Arc::clone(&relay);
         async move { relay.evict_when_over().await }
     });
-    relay.cache().set_max_size(4000);
+    relay.cache().space().set_max(4000);
     for blob in std::iter::once(&image.config).chain(&image.layers) {
         read(
             relay

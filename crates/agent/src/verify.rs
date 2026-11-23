@@ -50,6 +50,7 @@ pub fn verify(config: &Config, node: &Node, image: &str) -> anyhow::Result<Repor
         // Never linked to a peer: it fetches nothing.
         Fetcher::new(
             directory.path().join("staging"),
+            speculaire_mirror::space::Space::new(0),
             crate::serve::fetch_settings(config),
         ),
         registries,

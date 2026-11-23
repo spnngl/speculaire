@@ -131,7 +131,11 @@ async fn only_the_first_holders_are_asked_and_a_denied_one_is_not() {
 #[tokio::test]
 async fn an_unlinked_fetcher_or_a_holder_without_an_index_lists_nothing() {
     let mut nodes = Nodes::new();
-    let unlinked = Fetcher::new(std::path::PathBuf::new(), SETTINGS);
+    let unlinked = Fetcher::new(
+        std::path::PathBuf::new(),
+        crate::space::Space::new(u64::MAX),
+        SETTINGS,
+    );
     assert_eq!(unlinked.referrers(&target()).await, []);
     // A holder that is gone: its port is closed.
     let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

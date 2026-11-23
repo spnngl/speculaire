@@ -19,6 +19,7 @@ pub mod referrers;
 pub mod relay;
 pub mod request;
 mod serve;
+pub mod space;
 pub mod tls;
 
 pub use pulls::{Answer, Body, Local, Pull, Pulls, Refusal};

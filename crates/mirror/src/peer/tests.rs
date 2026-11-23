@@ -627,7 +627,7 @@ async fn a_client_without_a_kubelet_certificate_from_the_cluster_ca_is_refused()
 #[tokio::test]
 async fn a_blob_removed_after_it_was_announced_answers_404() {
     let dir = tempfile::tempdir().unwrap();
-    let cache = Arc::new(Cache::open(dir.path(), u64::MAX).unwrap());
+    let cache = Arc::new(Cache::open(dir.path(), crate::space::Space::new(u64::MAX)).unwrap());
     let held = digest_of(1);
     let mut writer = cache.writer().await.unwrap();
     writer.write(&pattern(100)).await.unwrap();

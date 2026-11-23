@@ -145,7 +145,11 @@ impl Nodes {
     /// [`Self::test`] under `limits`.
     async fn limited(&self, limits: Limits, local: Held, lookup: Script) -> Test {
         let dir = tempfile::tempdir().unwrap();
-        let peers = Fetcher::new(dir.path().join("staging"), SETTINGS);
+        let peers = Fetcher::new(
+            dir.path().join("staging"),
+            speculaire_mirror::space::Space::new(u64::MAX),
+            SETTINGS,
+        );
         peers.link(Arc::new(lookup), self.credentials(NODE));
         Test::near(
             limits,
