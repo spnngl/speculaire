@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157, D194)
 
 - **Decision:**
   - **Workflow:**
@@ -113,7 +113,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Measured in CI** (M0 spike workflow, run 42925541544): the same harness, with spikes 01 and 04, passes on `ubuntu-26.04` and `ubuntu-26.04-arm` against containerd 2.3.7 and 2.4.2, with Docker 29.4.2, 4 CPUs and 15 GiB per runner, in 5 to 7 minutes per leg including the Rust build. Each leg pulls about 8 Docker Hub images anonymously without hitting a rate limit.
 - **Revisit when:** —
 
-## D28: Dogfood: releases carry what the gate checks (amended by D157)
+## D28: Dogfood: releases carry what the gate checks (amended by D157, D194)
 
 - **Decision:**
   - Each release image gets SLSA build provenance (`attest-build-provenance`) and an SPDX SBOM (`syft`, which reads the `cargo auditable` data) attached with `actions/attest-sbom`.
@@ -701,7 +701,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** the fixtures near 2 MB; the recording's certificates or TUF metadata expire for a test that cannot pin its time; a multi-platform recording lets arm64 pull the BuildKit cases.
 
 
-## D157: `release` builds one scratch image index, attests it and runs `speculaire verify` on it (amends D27, D28)
+## D157: `release` builds one scratch image index, attests it and runs `speculaire verify` on it (amends D27, D28; amended by D194)
 
 - **Decision:**
   - **Triggers:** a version tag `v*`, and `workflow_dispatch` from main. A dispatch pushes the tag `dispatch-<run id>`, with no GitHub release and no version tag; a version tag pushes `<version>`. Later milestones add the rest of D27's release list to the tag's run.
@@ -842,3 +842,19 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The kubelet collects every 5 minutes (`pkg/kubelet/kubelet.go:231`), and its run at startup frees nothing: with `imageMinimumGCAge` at 0 s it defaults to 2 minutes, and images count from the kubelet's start (`image_gc_manager.go:500`); at 1 ns the run fails with `invalid capacity 0 on image filesystem`, stats not ready. A case on it waits 5 minutes; D159's 18 minutes per leg cannot hold that.
 - **Measured:** by hand on containerd 2.4, kind v1.37.0 arm64, thresholds 1 and 0 with a kubelet restart: the run 5 min after the restart removed the unused, unpinned images, among them the control image, and kept the pinned ones; the run at the restart freed 0 bytes.
 - **Revisit when:** the kubelet runs image collection on demand, or CI's per-leg limit rises above 25 minutes.
+
+
+## D194: speculaire's own image is a development image, unsigned; users run the one spnngl/images builds (amends D27, D28, D157)
+
+- **Decision:**
+  - `image.yml`, formerly `release.yml`, runs on a `workflow_dispatch` from any branch. It builds the index of D157 and pushes it as `ghcr.io/spnngl/speculaire:dev-<commit sha>`, for development and tests only.
+  - It signs nothing and attests nothing, and has no `verify` job. Its jobs hold `contents: read`, and the push job `packages: write`. A version tag triggers nothing.
+  - `packaging/policy/release.yaml` is removed.
+  - The image users run is `ghcr.io/spnngl/images/speculaire`. spnngl/images builds it, and signs and attests it. The docs point there.
+  - D28's dogfood check leaves this repository. Whether spnngl/images runs `speculaire verify` on its image is open (`docs/TODECIDE.md`).
+- **Because:** one place builds what users run. Two signed images of one binary would need two policies, and users would have to pick one.
+- **Cost:**
+  - Nothing here checks speculaire's gate against an attested image of its own. The Sigstore checks rest on the fixtures (D139) alone.
+  - A version tag here publishes nothing. The binaries exist only as `image.yml`'s artifacts, kept 7 days.
+  - The images `release.yml` pushed to `ghcr.io/spnngl/speculaire` stay there, signed.
+- **Revisit when:** spnngl/images stops building speculaire, or a release here needs its own artifacts, such as D27's packages and tarballs.
