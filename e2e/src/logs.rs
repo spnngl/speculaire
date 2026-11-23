@@ -1,4 +1,4 @@
-//! The agent's log entries, read alike from the journal and from its JSON lines (D195).
+//! The agent's log entries, read alike from the journal and from its JSON lines (D200).
 //!
 //! Under systemd the agent logs to the journal, whose fields name its own `F_<FIELD>`; elsewhere it writes JSON lines,
 //! whose fields are `fields.<field>`. Its stdout and stderr, such as its span timings and its exit error, are lines in
