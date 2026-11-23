@@ -58,6 +58,38 @@ pub trait Wiring: Send + Sync {
     ///
     /// When a config cannot be read.
     fn check(&self, target: &Target) -> Result<Vec<Problem>, Error>;
+
+    /// How the runtime comes to read what [`configure`](Wiring::configure) writes (D201).
+    ///
+    /// # Errors
+    ///
+    /// When the runtime's config cannot be read.
+    fn reload(&self) -> Result<Reload, Error>;
+}
+
+/// How a runtime comes to read its registry config again (D201).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reload {
+    /// containerd reads the `hosts.toml` files at each pull.
+    EachPull,
+    /// CRI-O watches `registries.conf.d`: `auto_reload_registries = true`.
+    Watch,
+    /// `configure` runs `systemctl reload crio`.
+    Systemctl,
+}
+
+impl std::fmt::Display for Reload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::EachPull => "containerd reads the `hosts.toml` files at each pull",
+            Self::Watch => {
+                "CRI-O reads `registries.conf.d` when a file in it changes (`auto_reload_registries = true`)"
+            }
+            Self::Systemctl => {
+                "CRI-O reads `registries.conf.d` on `systemctl reload crio` (`auto_reload_registries = false`)"
+            }
+        })
+    }
 }
 
 /// What a run did.
@@ -139,7 +171,9 @@ pub enum Error {
     #[error("cannot read CRI-O's config: {0}")]
     Inspect(#[from] crio::Error),
     /// CRI-O did not reload.
-    #[error("cannot reload CRI-O: {0}")]
+    #[error(
+        "cannot reload CRI-O: {0}. Without systemd, set `auto_reload_registries = true` under `[crio.image]` and restart CRI-O: it then reads `registries.conf.d` when a file in it changes"
+    )]
     Reload(io::Error),
 }
 

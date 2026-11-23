@@ -146,7 +146,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - It has the same form as `metrics.address` and `reflector.listen`.
 - **Revisit when:** —
 
-## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80, D83, D102, D123, D152)
+## D66: On CRI-O, a `registries.conf.d` drop-in sends every pull to the mirror, which resolves tags upstream (amends D6, D14, D17, D22, D32; amended by D80, D83, D102, D123, D152, D201)
 
 - **Decision:**
   - `speculaire configure` writes `/etc/containers/registries.conf.d/99-speculaire.conf`. For each registry it mirrors, the file holds one `[[registry]]` that copies the admin's effective entry for that prefix (`location`, `insecure`, `blocked`, its mirrors) and puts first `[[registry.mirror]] location = "<mirror.address>/<registry host>"` with `pull-from-mirror = "all"`.
@@ -448,3 +448,20 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - containerd stats a host path of any kind (v2.4.2 `core/remotes/docker/config/hosts.go:293-304`), then fails reading `hosts.toml` under the file (`:315-318`): every pull of that host fails, and the kubelet reports it. No pull depends on the sources the agent gives that host.
   - Refusing the tree, as an invalid `hosts.toml` does (D91), would keep the previous registry config for every host because of one stray file, such as a `README` named after a host.
 - **Revisit when:** containerd skips such a file or reads a host from it, or the agent must refuse what containerd refuses.
+
+
+## D201: On CRI-O with `auto_reload_registries = true`, `configure` and `unconfigure` leave the reload to CRI-O (amends D66, D84)
+
+- **Decision:**
+  - `configure` and `unconfigure` read `[crio.image] auto_reload_registries` from `GET /config` on `crio.sock` before they write. When it is true, they write or remove the drop-in and run no `systemctl`: CRI-O reads `registries.conf.d` again when a file in it changes. When it is false, they run `systemctl reload crio`, as D66 says.
+  - A `systemctl reload crio` that cannot run or fails stops the command, naming `auto_reload_registries` under `[crio.image]`. Outside systemd, as in a pod, `configure` exits 1 unless the key is true.
+  - `check-config` prints one line on stdout, `reload: ...`, saying how the runtime reads its registry config again: containerd at each pull, CRI-O when a file changes or on `systemctl reload crio`.
+  - The agent of the Helm chart needs `auto_reload_registries = true` on each CRI-O node, set in a file of `/etc/crio/crio.conf.d/` before CRI-O starts (`docs/operations.md`, Install).
+- **Because:**
+  - A pod reaches no systemd. With the key true, CRI-O 1.35, 1.36 and 1.37 watch `registries.conf.d` (v1.37.2 `server/server.go:656-661`, v1.36.7 `:579`, v1.35.10 `:578`), and reload 200 ms after the last write, creation, removal or mode change of a `.conf` file in it (v1.37.2 `server/server.go:51,1255-1265`).
+  - `GET /config` answers CRI-O's whole config (v1.37.2 `server/inspect.go:153-154`), so the key is always there; D64 already reads that endpoint.
+  - Reading the key first keeps `configure`'s rule: a config it cannot read changes nothing.
+- **Cost:**
+  - CRI-O watches `registries.conf.d` only if the directory exists when CRI-O starts (v1.37.2 `server/server.go:1215-1219`). Otherwise it reads the drop-in at its next restart.
+  - `unconfigure` deletes the certificates before CRI-O's 200 ms debounce ends. A pull in that window fails its handshake with the mirror, and CRI-O takes its next source, as with a stopped mirror (D66).
+- **Revisit when:** CRI-O turns `auto_reload_registries` on by default, or drops the watcher.

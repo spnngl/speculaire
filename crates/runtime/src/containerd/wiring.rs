@@ -8,7 +8,7 @@ use speculaire_registry_config::containerd::config as containerd_config;
 use speculaire_registry_config::containerd::config::Hosts;
 
 use super::{Containerd, config_missing, hosts, pins};
-use crate::wiring::{Error, Problem, Report, Target, Wiring, io_at};
+use crate::wiring::{Error, Problem, Reload, Report, Target, Wiring, io_at};
 use crate::{certificates, files};
 
 impl Containerd {
@@ -158,6 +158,10 @@ impl Wiring for Containerd {
             }
         }
         Ok(problems)
+    }
+
+    fn reload(&self) -> Result<Reload, Error> {
+        Ok(Reload::EachPull)
     }
 }
 

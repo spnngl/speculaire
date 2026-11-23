@@ -1,0 +1,6 @@
+HTTP/1.0 200 OK
+Content-Type: application/toml
+
+[crio.image]
+global_auth_file = "/var/lib/kubelet/config.json"
+auto_reload_registries = true
