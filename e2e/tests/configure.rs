@@ -291,6 +291,127 @@ fn check_config_refuses_the_default_gate_wait_against_crios_500ms_request_timeou
     );
 }
 
+/// How many times CRI-O applied a new registry config since the node booted.
+fn registry_reloads(cluster: &Cluster, node: &str) -> usize {
+    sh(
+        cluster,
+        node,
+        "journalctl -u crio --no-pager | grep -c 'Applied new registry configuration' || true",
+    )
+    .trim()
+    .parse()
+    .unwrap()
+}
+
+/// The manifests the node's mirror served CRI-O.
+fn served_manifests(cluster: &Cluster, node: &str) -> f64 {
+    cluster
+        .metrics(node)
+        .unwrap()
+        .get(r#"speculaire_mirror_requests_total{kind="manifest",result="served"}"#)
+        .unwrap_or(0.0)
+}
+
+/// `speculaire <command>` with no `systemctl` on its `PATH`, as in a pod.
+fn without_systemctl(cluster: &Cluster, node: &str, command: &str) -> e2e::Output {
+    cluster
+        .exec_output(
+            node,
+            &["env", "PATH=/nonexistent", "/usr/bin/speculaire", command],
+        )
+        .unwrap()
+}
+
+/// D194: with `auto_reload_registries = true`, CRI-O reads the drop-in that `configure` writes without `systemctl`.
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn crio_watching_registries_conf_d_needs_no_systemctl() {
+    let _serial = serial();
+    let cluster = Cluster::from_env();
+    if cluster.runtime() != Runtime::Crio {
+        return;
+    }
+    let node = workers(&cluster).remove(0);
+    let dropin = "/etc/containers/registries.conf.d/99-speculaire.conf";
+    // CRI-O reads its own config at start only.
+    let restart = |script: &str, auto_reload: bool| {
+        sh(&cluster, &node, &format!("{script} && systemctl restart crio"));
+        let want = format!("auto_reload_registries = {auto_reload}");
+        wait_until("CRI-O", || {
+            cluster
+                .exec_output(
+                    &node,
+                    &[
+                        "sh",
+                        "-c",
+                        &format!("crictl version && crio status config | grep -q '{want}'"),
+                    ],
+                )
+                .is_ok_and(|o| o.success)
+        });
+    };
+    let reloaded_after = |before: usize| {
+        wait_until("CRI-O to apply the registry config", || {
+            registry_reloads(&cluster, &node) > before
+        });
+    };
+    restart(
+        "printf '[crio.image]\\nauto_reload_registries = true\\n' > /etc/crio/crio.conf.d/90-auto-reload.conf",
+        true,
+    );
+    let check = without_systemctl(&cluster, &node, "check-config");
+    // Without the drop-in, CRI-O pulls past the mirror.
+    let before = registry_reloads(&cluster, &node);
+    sh(&cluster, &node, &format!("rm {dropin}"));
+    reloaded_after(before);
+    let before = registry_reloads(&cluster, &node);
+    let configure = without_systemctl(&cluster, &node, "configure");
+    if configure.success {
+        reloaded_after(before);
+    }
+    sh(
+        &cluster,
+        &node,
+        &format!("crictl rmi {IMAGE} >/dev/null 2>&1; true"),
+    );
+    let served = served_manifests(&cluster, &node);
+    let pull = cluster
+        .exec_output(&node, &["crictl", "pull", IMAGE])
+        .unwrap();
+    let through_mirror = served_manifests(&cluster, &node) - served;
+    sh(&cluster, &node, &format!("crictl rmi {IMAGE}; true"));
+    restart("rm /etc/crio/crio.conf.d/90-auto-reload.conf", false);
+    let refused = without_systemctl(&cluster, &node, "configure");
+    cluster.exec(&node, &["speculaire", "configure"]).unwrap();
+
+    assert!(
+        check.success
+            && check
+                .stdout
+                .contains("reload: CRI-O reads `registries.conf.d` when a file in it changes"),
+        "{check:?}"
+    );
+    assert!(configure.success, "{configure:?}");
+    assert!(pull.success, "{pull:?}");
+    assert!(
+        through_mirror >= 1.0,
+        "the pull after configure sent the mirror no manifest request"
+    );
+    assert!(
+        !refused.success
+            && refused
+                .stderr
+                .contains("set `auto_reload_registries = true` under `[crio.image]`"),
+        "{refused:?}"
+    );
+    assert!(
+        cluster
+            .exec_output(&node, &["speculaire", "check-config"])
+            .unwrap()
+            .success
+    );
+}
+
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn unconfigure_removes_only_its_own_and_pulls_still_work() {

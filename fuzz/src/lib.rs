@@ -277,16 +277,17 @@ pub fn platform(data: &[u8]) {
 
 /// What CRI-O's inspect API answers to `GET /config`, as the agent reads it (D64).
 ///
-/// Reading the body, then the NRI settings and the credential file from it, never panics.
+/// Reading the body, then the NRI settings, the credential file and `auto_reload_registries` from it, never panics.
 ///
 /// # Panics
 ///
 /// When reading panics.
 pub fn crio_inspect(data: &[u8]) {
-    use speculaire_runtime::crio::{Nri, body, global_auth_file};
+    use speculaire_runtime::crio::{Nri, auto_reload_registries, body, global_auth_file};
     if let Ok(body) = body(data) {
         let _ = Nri::parse(body);
         let _ = global_auth_file(body);
+        let _ = auto_reload_registries(body);
     }
 }
 

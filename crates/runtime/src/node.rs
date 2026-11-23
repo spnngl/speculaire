@@ -56,7 +56,7 @@ impl Node {
     /// The node whose runtime is `runtime`, with its socket among `sockets` and its files below `paths`.
     ///
     /// `containerd_config` is containerd's `config.toml` when it is not the default one (D87); `systemctl` is what
-    /// reloads CRI-O.
+    /// reloads CRI-O when it does not watch `registries.conf.d` (D201).
     #[must_use]
     pub fn new(
         runtime: Runtime,

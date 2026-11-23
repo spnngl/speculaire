@@ -275,25 +275,47 @@ impl Nri {
 ///
 /// When the text is not TOML or the key is not a string.
 pub fn global_auth_file(config: &str) -> Result<Option<PathBuf>, Error> {
-    #[derive(Default, Deserialize)]
-    struct Root {
-        #[serde(default)]
-        crio: Crio,
-    }
-    #[derive(Default, Deserialize)]
-    struct Crio {
-        #[serde(default)]
-        image: Image,
-    }
-    #[derive(Default, Deserialize)]
-    struct Image {
-        #[serde(default)]
-        global_auth_file: String,
-    }
-    let Root {
-        crio: Crio { image },
-    } = toml::from_str(config)?;
+    let image = Image::parse(config)?;
     Ok((!image.global_auth_file.is_empty()).then(|| PathBuf::from(image.global_auth_file)))
+}
+
+/// Whether CRI-O reads `registries.conf.d` again when a file in it changes, `[crio.image] auto_reload_registries` in
+/// the text of its config (v1.37.2 `pkg/config/config.go:769-772`, watcher `server/server.go:656-661`); unset is
+/// CRI-O's default, `false` (D201).
+///
+/// # Errors
+///
+/// When the text is not TOML or the key is not a boolean.
+pub fn auto_reload_registries(config: &str) -> Result<bool, Error> {
+    Ok(Image::parse(config)?.auto_reload_registries)
+}
+
+/// The keys of `[crio.image]` the agent reads.
+#[derive(Default, Deserialize)]
+struct Image {
+    #[serde(default)]
+    global_auth_file: String,
+    #[serde(default)]
+    auto_reload_registries: bool,
+}
+
+impl Image {
+    fn parse(config: &str) -> Result<Self, Error> {
+        #[derive(Deserialize)]
+        struct Root {
+            #[serde(default)]
+            crio: Crio,
+        }
+        #[derive(Default, Deserialize)]
+        struct Crio {
+            #[serde(default)]
+            image: Image,
+        }
+        let Root {
+            crio: Crio { image },
+        } = toml::from_str(config)?;
+        Ok(image)
+    }
 }
 
 /// The directory of CRI-O's `images.json`, `<root>/<storage_driver>-images` (D65), in the text of its config: CRI-O
@@ -360,6 +382,25 @@ mod tests {
             assert_eq!(super::global_auth_file(text).unwrap(), None, "{text:?}");
         }
         assert!(super::global_auth_file("[crio.image]\nglobal_auth_file = 1\n").is_err());
+    }
+
+    #[test]
+    fn auto_reload_registries_is_under_crio_image_and_unset_means_false() {
+        let set = "[crio.image]\nauto_reload_registries = true\n";
+        assert!(super::auto_reload_registries(set).unwrap());
+        for text in [
+            "",
+            "[crio]\n",
+            "[crio.image]\nauto_reload_registries = false\n",
+        ] {
+            assert!(!super::auto_reload_registries(text).unwrap(), "{text:?}");
+        }
+        for text in [
+            "[crio.image]\nauto_reload_registries = \"true\"\n",
+            "[crio\n",
+        ] {
+            assert!(super::auto_reload_registries(text).is_err(), "{text:?}");
+        }
     }
 
     use super::*;

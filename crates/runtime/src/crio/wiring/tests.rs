@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use super::own_cert_dirs;
 use crate::crio::CriO;
 use crate::detect::Runtime;
-use crate::fixture::{Tree, put};
+use crate::fixture::{Tree, now, put};
 use crate::paths::Paths;
-use crate::wiring::Error;
+use crate::wiring::{Error, Reload, Wiring};
 
 const REGISTRIES_CONF: &str = "unqualified-search-registries = [\"docker.io\"]\n\n[[registry]]\nprefix = \"docker.io\"\nlocation = \"registry-1.docker.io\"\n[[registry.mirror]]\nlocation = \"mirror.corp:5000/dockerhub\"\n";
 
@@ -236,17 +236,81 @@ fn systemctl_reloads_crio_and_its_failure_is_reported() {
         "/nonexistent/crio.sock",
         "/nonexistent/systemctl",
     );
-    assert!(crio.reload().is_err());
+    let err = crio.systemctl_reload().unwrap_err();
+    assert!(err.to_string().contains("systemctl reload crio"), "{err}");
     let crio = CriO::new(
         Paths::under(node.dir.path()),
         node.node.socket(),
         node.systemctl(),
     );
-    crio.reload().unwrap();
+    crio.systemctl_reload().unwrap();
     assert_eq!(node.reloads(), 1);
     node.reload_fails(true);
-    let err = crio.reload().unwrap_err();
+    let err = crio.systemctl_reload().unwrap_err();
     assert!(err.to_string().contains("systemctl reload crio"), "{err}");
+}
+
+/// CRI-O's config with `auto_reload_registries` set as `on`.
+fn auto_reload(node: &Tree, on: bool) {
+    node.update(|answers| {
+        answers.crio_config = Some(format!(
+            "[crio.image]\nauto_reload_registries = {on}\n\n[crio.nri]\nenable_nri = true\n"
+        ));
+    });
+}
+
+#[test]
+fn crio_watching_registries_conf_d_gets_the_drop_in_and_no_systemctl() {
+    let node = crio_node();
+    auto_reload(&node, true);
+    // Were it run, `systemctl` would fail.
+    node.reload_fails(true);
+    assert_eq!(node.node.wiring().reload().unwrap(), Reload::Watch);
+    node.configure().unwrap();
+    assert!(node.crio_dropin().is_file());
+    assert_eq!(node.check(), Vec::<String>::new());
+    node.unconfigure().unwrap();
+    assert!(!node.crio_dropin().exists());
+    assert!(!node.crio_certs().join("127.0.0.1:7480").exists());
+    assert_eq!(node.reloads(), 0);
+
+    auto_reload(&node, false);
+    assert_eq!(node.node.wiring().reload().unwrap(), Reload::Systemctl);
+}
+
+#[test]
+fn crio_without_systemctl_or_auto_reload_fails_naming_the_key() {
+    let node = crio_node();
+    auto_reload(&node, false);
+    let crio = CriO::new(
+        Paths::under(node.dir.path()),
+        node.node.socket(),
+        "/nonexistent/systemctl",
+    );
+    for err in [
+        crio.configure(&node.target, now()).unwrap_err(),
+        crio.unconfigure(&node.target).unwrap_err(),
+    ] {
+        assert!(matches!(err, Error::Reload(_)), "{err}");
+        let message = err.to_string();
+        for part in [
+            "systemctl reload crio",
+            "set `auto_reload_registries = true` under `[crio.image]`",
+        ] {
+            assert!(message.contains(part), "{message}");
+        }
+    }
+}
+
+#[test]
+fn crio_whose_config_cannot_be_read_is_left_unchanged() {
+    let node = crio_node();
+    node.update(|answers| answers.crio_config = None);
+    let before = node.tree();
+    let err = node.configure().unwrap_err();
+    assert!(matches!(err, Error::Inspect(_)), "{err}");
+    assert_eq!(node.tree(), before);
+    assert_eq!(node.reloads(), 0);
 }
 
 #[test]

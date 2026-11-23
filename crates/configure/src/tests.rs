@@ -10,7 +10,7 @@ use speculaire_fake_runtime::{Answers, Fake};
 use speculaire_runtime::detect::{Runtime, Sockets};
 use speculaire_runtime::paths::Paths;
 use speculaire_runtime::settings::{Required, Settings};
-use speculaire_runtime::wiring::{Error, Problem, Report, Target, Wiring};
+use speculaire_runtime::wiring::{Error, Problem, Reload, Report, Target, Wiring};
 
 use super::*;
 
@@ -68,6 +68,10 @@ impl Wiring for FakeWiring {
     fn check(&self, _: &Target) -> Result<Vec<Problem>, Error> {
         self.calls.lock().unwrap().push("check");
         Ok(self.problems.clone())
+    }
+
+    fn reload(&self) -> Result<Reload, Error> {
+        Ok(Reload::EachPull)
     }
 }
 

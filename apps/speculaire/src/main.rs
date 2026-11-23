@@ -229,7 +229,8 @@ fn verdict(err: &mut impl Write, problems: &[Problem]) -> anyhow::Result<()> {
 }
 
 /// Exits non-zero, naming each file or socket, when the config, the policy or a pinned trust root is invalid, the agent
-/// would refuse to start on this node (D86), or the runtime's config is not as `configure` leaves it.
+/// would refuse to start on this node (D86), or the runtime's config is not as `configure` leaves it. Prints how the
+/// runtime reads its registry config again (D201).
 fn check_config(path: &std::path::Path, runtime: &RuntimeArg) -> anyhow::Result<()> {
     let config = config::load(path)?;
     Policies::load(config.verify.policy.get())?;
@@ -245,6 +246,10 @@ fn check_config(path: &std::path::Path, runtime: &RuntimeArg) -> anyhow::Result<
         SystemTime::now(),
     )
     .context("cannot check the runtime's config")?;
+    // A config that cannot be read is among the problems already: preflight reads it too.
+    if let Ok(reload) = on.wiring().reload() {
+        writeln!(std::io::stdout().lock(), "reload: {reload}")?;
+    }
     verdict(&mut std::io::stderr().lock(), &problems)
 }
 

@@ -12,7 +12,7 @@ use speculaire_registry_config::crio::registries::{self, Registry};
 use super::{CriO, dropin};
 use crate::certificates;
 use crate::files::{self, Change};
-use crate::wiring::{Error, Problem, Report, Target, Wiring, io_at};
+use crate::wiring::{Error, Problem, Reload, Report, Target, Wiring, io_at};
 
 const CERTS: [(&str, u32); 3] = [
     ("ca.crt", 0o644),
@@ -30,11 +30,22 @@ impl CriO {
         Ok((entries, left, text))
     }
 
-    /// Makes CRI-O read its registry config again (`systemctl reload crio`).
-    fn reload(&self) -> io::Result<()> {
+    /// Makes CRI-O read its registry config again, unless it watches `registries.conf.d` (D201).
+    fn reread(&self, reload: Reload) -> Result<(), Error> {
+        match reload {
+            Reload::EachPull | Reload::Watch => Ok(()),
+            Reload::Systemctl => self.systemctl_reload().map_err(Error::Reload),
+        }
+    }
+
+    /// `systemctl reload crio`.
+    fn systemctl_reload(&self) -> io::Result<()> {
+        let context =
+            |e: io::Error| io::Error::new(e.kind(), format!("systemctl reload crio: {e}"));
         let status = Command::new(&self.systemctl)
             .args(["reload", "crio"])
-            .status()?;
+            .status()
+            .map_err(context)?;
         if status.success() {
             Ok(())
         } else {
@@ -72,6 +83,7 @@ fn remove_cert_dir(dir: &Path, changes: &mut Vec<Change>) -> Result<(), Error> {
 impl Wiring for CriO {
     fn configure(&self, target: &Target, now: SystemTime) -> Result<Report, Error> {
         let (_, left, text) = self.render(target)?;
+        let reload = self.reload()?;
         let mirror_dir = target.directory.clone();
         let old_ca = certificates::read(&mirror_dir)?.map(|m| m.ca().to_owned());
         let mut report = Report {
@@ -113,18 +125,19 @@ impl Wiring for CriO {
             .notes
             .extend(self.check(target)?.iter().map(Problem::to_string));
         // Always: a reload that failed after the files were written must run again, and finds nothing to change.
-        self.reload().map_err(Error::Reload)?;
+        self.reread(reload)?;
         Ok(report)
     }
 
     fn unconfigure(&self, target: &Target) -> Result<Report, Error> {
+        let reload = self.reload()?;
         let mut report = Report::default();
         let dropin_path = self.dropin();
         report
             .changes
             .extend(files::remove(&dropin_path).map_err(io_at(&dropin_path))?);
         // Always, for the reason `configure` does: the certificates go only once CRI-O has stopped using them.
-        self.reload().map_err(Error::Reload)?;
+        self.reread(reload)?;
         let mirror_dir = target.directory.clone();
         let certs = self.certs();
         let mut dirs = vec![certs.join(target.address.to_string())];
@@ -179,6 +192,15 @@ impl Wiring for CriO {
             }
         }
         Ok(problems)
+    }
+
+    fn reload(&self) -> Result<Reload, Error> {
+        let config = super::config(self.socket())?;
+        Ok(if super::auto_reload_registries(&config)? {
+            Reload::Watch
+        } else {
+            Reload::Systemctl
+        })
     }
 }
 
