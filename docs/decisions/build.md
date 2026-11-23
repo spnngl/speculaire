@@ -73,7 +73,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - We port parts of containerd and NRI (D9, D17, D29), and Apache-2.0 §4 requires keeping their notices.
 - **Revisit when:** —
 
-## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157, D194)
+## D27: CI and release copy dedens' conventions (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157, D194, D197)
 
 - **Decision:**
   - **Workflow:**
@@ -113,7 +113,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - **Measured in CI** (M0 spike workflow, run 42925541544): the same harness, with spikes 01 and 04, passes on `ubuntu-26.04` and `ubuntu-26.04-arm` against containerd 2.3.7 and 2.4.2, with Docker 29.4.2, 4 CPUs and 15 GiB per runner, in 5 to 7 minutes per leg including the Rust build. Each leg pulls about 8 Docker Hub images anonymously without hitting a rate limit.
 - **Revisit when:** —
 
-## D28: Dogfood: releases carry what the gate checks (amended by D157, D194)
+## D28: Dogfood: releases carry what the gate checks (amended by D157, D194, D199)
 
 - **Decision:**
   - Each release image gets SLSA build provenance (`attest-build-provenance`) and an SPDX SBOM (`syft`, which reads the `cargo auditable` data) attached with `actions/attest-sbom`.
@@ -169,7 +169,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** the real-cluster tier needs a cluster that can be dedicated to it for a few hours each minor release, and the privileged node pods need cluster-admin.
 - **Revisit when:** `spegel-org/benchmark` stops being maintained; then fork it into `bench/`.
 
-## D40: SemVer, fixes for the latest minor only (amended by D63)
+## D40: SemVer, fixes for the latest minor only (amended by D63, D197)
 
 - **Decision:**
   - **Versions:** SemVer. Releases stay `0.x` until the gate ships `enforce`; in `0.x`, a breaking change bumps the minor. A breaking change is one that removes or renames a setting, a CLI command or flag, or a metric, or drops a protocol version or a containerd minor.
@@ -844,17 +844,35 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** the kubelet runs image collection on demand, or CI's per-leg limit rises above 25 minutes.
 
 
-## D194: speculaire's own image is a development image, unsigned; users run the one spnngl/images builds (amends D27, D28, D157)
+## D194: speculaire's own image is a development image, unsigned; users run the one spnngl/images builds (amends D27, D28, D157; amended by D199)
 
 - **Decision:**
   - `image.yml`, formerly `release.yml`, runs on a `workflow_dispatch` from any branch. It builds the index of D157 and pushes it as `ghcr.io/spnngl/speculaire:dev-<commit sha>`, for development and tests only.
   - It signs nothing and attests nothing, and has no `verify` job. Its jobs hold `contents: read`, and the push job `packages: write`. A version tag triggers nothing.
   - `packaging/policy/release.yaml` is removed.
   - The image users run is `ghcr.io/spnngl/images/speculaire`. spnngl/images builds it, and signs and attests it. The docs point there.
-  - D28's dogfood check leaves this repository. Whether spnngl/images runs `speculaire verify` on its image is open (`docs/TODECIDE.md`).
+  - D28's dogfood check leaves this repository; spnngl/images runs it (D199).
 - **Because:** one place builds what users run. Two signed images of one binary would need two policies, and users would have to pick one.
 - **Cost:**
   - Nothing here checks speculaire's gate against an attested image of its own. The Sigstore checks rest on the fixtures (D139) alone.
   - A version tag here publishes nothing. The binaries exist only as `image.yml`'s artifacts, kept 7 days.
   - The images `release.yml` pushed to `ghcr.io/spnngl/speculaire` stay there, signed.
 - **Revisit when:** spnngl/images stops building speculaire, or a release here needs its own artifacts, such as D27's packages and tarballs.
+
+## D197: Before each minor release, a kind suite runs the previous release's agents against the reflectors under test (amends D27, D40)
+
+- **Decision:**
+  - Once the first minor that speaks the reflector protocol is released, the e2e cluster runs that release's agents against the reflectors of the commit under test, on the IPv4 pass, before each minor release.
+  - Until then, `a_reflector_accepts_the_versions_of_its_range` (`crates/reflect/tests/reflector.rs:322`) is the only check.
+- **Because:** D40's upgrade order rests on a reflector accepting its own protocol version and the previous one. That test checks it in one process, with both versions built from one commit, and no release speaks the reflector protocol yet.
+- **Cost:** one more kind run before each minor release, and a harness that installs two binaries on one cluster.
+- **Revisit when:** the reflector protocol gets a version the previous minor cannot speak, which D40 would call breaking.
+
+## D199: spnngl/images runs `speculaire verify` on the speculaire image it pushes (amends D28, D194)
+
+- **Decision:**
+  - After it signs and attests, spnngl/images's workflow runs `speculaire verify` from that image on the pushed digest, under a policy naming that workflow and requiring its provenance and SBOM, anonymously and over the public-good TUF root, as D157's `verify` job did.
+  - The work is in spnngl/images, after spnngl/images#375 merges. Nothing changes here.
+- **Because:** D157's job made the project pass its own gate (D28). D194 left the image to spnngl/images and dropped the job, so nothing runs the gate on an attested speculaire image.
+- **Cost:** the policy lives in spnngl/images and names its workflow; a rename there fails the check until the policy follows.
+- **Revisit when:** spnngl/images stops building speculaire (D194).

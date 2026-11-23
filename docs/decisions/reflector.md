@@ -10,7 +10,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - A reflector outage degrades to *fall through*, never to a failed pull.
 - **Revisit when:** we need clusters without a stable control plane, or multi-cluster sharing (`docs/proposals/federation.md`).
 
-## D2: Reflector topology and protocol (amended by D33, D51, D97, D98, D105, D184)
+## D2: Reflector topology and protocol (amended by D33, D51, D97, D98, D105, D184, D196)
 
 - **Decision:**
   - **Placement:** reflectors are the agents on the control-plane nodes, with `role = "reflector"`. Every agent knows one URL, `reflector.url`: a load balancer in front of the control-plane nodes. It must be L4 TCP passthrough, because mTLS ends at the reflector.
@@ -43,7 +43,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - The user set the 500 µs and 256 MiB figures and accepted the others.
 - **Revisit when:** a target fails. Then revisit D2.
 
-## D51: Every member picks the same prewarm seeds (amends D2; amended by D181, D185, D186, D188, D192, D193)
+## D51: Every member picks the same prewarm seeds (amends D2; amended by D181, D185, D186, D188, D192, D193, D196)
 
 - **Decision:**
   - For each image of `prewarm.images`, every member picks the same seeds: the `prewarm.seeds` agents (default 2, live) with the highest rendezvous hash of (image reference, node identity), among the agents streaming to it.
@@ -54,7 +54,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - While an agent reconnects, members can disagree for a moment; the cost is one extra seed pulling from upstream.
 - **Revisit when:** benchmarks show extra upstream pulls during prewarm.
 
-## D97: The reflector's wire, index and limits (amends D2, D27, D76; amended by D104, D105, D184)
+## D97: The reflector's wire, index and limits (amends D2, D27, D76; amended by D104, D105, D184, D196)
 
 - **Decision:**
   - **Wire:** protobuf package `speculaire.reflect.v1`, in `crates/reflect/proto/`. `protocol_version` is an integer, 1 for now. Digests travel as their text, and the reflector parses each one as an OCI digest (sha256, sha384 or sha512).
@@ -222,7 +222,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 - **Revisit when:** something other than a member must push, or a third protocol version drops version 1.
 
 
-## D185: A wave is released in rounds, each once the one before announced the image or `prewarm.seed_timeout` passed (amends D51)
+## D185: A wave is released in rounds, each once the one before announced the image or `prewarm.seed_timeout` passed (amends D51; amended by D195)
 
 - **Decision:**
   - **Resolution:** a member resolves each `prewarm.images` entry through the *registry config* (D17), its own mirror left out, to the image's platform manifests and their layer digests. An index gives its image manifests, at most 32; a nested index is an error. The member checks each manifest's digest, and nothing else: the agents verify what they pull (D26).
@@ -249,7 +249,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Docker Hub counts manifest `GET`s against its pull limit, and not `HEAD`s; a tag that moved upstream would otherwise stay cold until the list changed.
 - **Revisit when:** a list grows past what one resolution a second per entry can follow, or an agent's restart mid-wave shows in upstream pulls.
 
-## D188: An agent pulls what members push through its runtime's CRI, one image at a time, below a disk limit (amends D34, D39, D47, D51, D90, D184; amended by D191)
+## D188: An agent pulls what members push through its runtime's CRI, one image at a time, below a disk limit (amends D34, D39, D47, D51, D90, D184; amended by D191, D195)
 
 - **Decision:**
   - **Pull:** the agent pulls a pushed image with CRI `PullImage` on the runtime's socket, the same call on containerd and CRI-O, behind the `Pull` trait a `Node` hands out (D90). The request carries no credentials: a registry that needs them is prewarmed only where the registry config holds them (D17). A pull is cut after 30 minutes.
@@ -297,3 +297,32 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - A round's `Prewarm`s come together, and the next round only after each agent of it announced, 4 s later at least. A pause of 2 s between two `Prewarm`s of one member tells the rounds apart without the reflectors' metrics.
 - **Measured** on `ubuntu-26.04`, 4 CPUs and 16 GiB, Kubernetes 1.37 and containerd 2.4.2: `e2e-up` with 20 nodes, the node image and the suites' build included, took 278 s at 4.3 GiB used and 78 % CPU; the prewarm suite took 144 s at 5.2 GiB and 29 %. The wave at 10k agents took 27 to 28 s in rounds of 2, 8, 40, 200, 1000, 5000 and 3750 on each reflector, on amd64 and arm64 alike; the larger reflector peaked at 462 to 477 MiB, with a lookup p99 of 20 to 86 µs.
 - **Revisit when:** the scale run nears its 60 minutes, or a wave at 10k agents misses a D33 target.
+
+## D195: After a prewarm pull, the agent fetches each layer it holds without a blob, so it announces the whole image (amends D185, D188)
+
+- **Decision:**
+  - **Fetch:** once a prewarm pull goes through (D188), the agent fetches through its own mirror, peers first (D102), each layer of the pulled platform manifest it does not hold as a blob: into the content store on containerd, into the *blob cache* on CRI-O. It then announces every layer, so its round ends without waiting for `prewarm.seed_timeout` (D185).
+  - **Metric:** `speculaire_prewarm_refetched_total` counts the layers fetched so (D34).
+  - **Precondition:** before building, check whether CRI-O leaves the same gap when a layer is already in its storage from another image.
+- **Because:**
+  - A pull fetches no blob for a layer the node already holds unpacked, so the agent has nothing to announce for it. containerd reaches that state on a removal while the image's containers still run: its garbage collector deletes the blobs and keeps the snapshots (v2.4.2 `internal/cri/server/images/image_remove.go:44-77`), and the next pull skips them (`core/unpack/unpacker.go:508-520`).
+  - A seed in that state holds its wave back the full 300 s; the gate suite hit it in CI (#269). Seeds are picked by hash (D181), so the reflector cannot avoid such a node.
+- **Cost:** such a node downloads layers it already runs, and on containerd keeps each twice, as a blob and as a snapshot.
+- **Revisit when:** a runtime's pull fetches the blob of a layer it holds unpacked.
+
+## D196: Peers prefer holders in their own zone (amends D2, D51, D97, D102)
+
+- **Decision:**
+  - **Zone:** each agent learns its zone from the live key `zone` of `[peer]`. `"auto"` (default) reads the `topology.kubernetes.io/zone` label of its own `Node` from the apiserver with the kubelet credentials (D16), again until the label exists; any other string is the zone; `""` means none. The agent sends its zone in `Hello`.
+  - **Lookup:** a lookup fills its 8 holders (D97) from the asker's zone first, then from the others. The key `zones` of `[peer]`, `"prefer"` (default) or `"only"`, returns the asker's zone alone with `"only"`, for clusters whose upstream costs less than traffic between zones.
+  - **Fetch:** the fetcher (D102) tries same-zone holders first.
+  - **Prewarm:** `prewarm.seeds` counts seeds per zone (D51).
+  - **Metrics:** peer metrics get a bounded `zone` label, `same` or `other` (D34).
+  - **Keys:** both keys join `packaging/config.toml` with the code (D30); until then the docs name them by table, as D60's key test reads only the file's keys.
+  - **Precondition:** before building, check that the Node authorizer lets a kubelet certificate read its own `Node`.
+- **Because:**
+  - Many clusters span zones, and traffic between zones costs more and takes longer: AWS bills about $0.01/GB each way, and a round trip takes about 0.1–0.3 ms within a zone against 0.5–2 ms between zones.
+  - Nothing in the swarm knows a node's zone: a lookup answers 8 holders from a random position (D97), and Linux itself has no notion of a zone.
+  - A hard split into one swarm per zone sends a zone that lacks a blob to upstream rather than to a peer in the next zone.
+- **Cost:** the agent reads from the apiserver, which it never did: a new connection and a trust boundary that `docs/security.md` gains with the code.
+- **Revisit when:** the Node authorizer refuses the read, or a zone's holders answer `503` (D24) during a wave.

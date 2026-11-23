@@ -9,14 +9,14 @@ Each decision has three parts: the choice (**Decision**), its reasons (**Because
 Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 
 - D1 [reflector](reflector.md): reflectors replace the DHT; no libp2p
-- D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51, D97, D98, D105, D184)
+- D2 [reflector](reflector.md): reflectors are the control-plane agents; an L4 load balancer is used only for `Members` discovery, and agents stream to every member directly (amended by D33, D51, D97, D98, D105, D184, D196)
 - D3 [distribution](distribution.md): every agent announces its own peer address and port (amended by D36)
 - D4 [build](build.md): no io_uring in v1, and the unit denies its syscalls
 - D5 [distribution](distribution.md): blobs are served from containerd's content directory, with a gRPC fallback (amended by D67, D85, D110)
 - D6 [distribution](distribution.md): the mirror never gets the `resolve` capability (amended by D66, D123)
 - D7 [distribution](distribution.md): full-blob responses are hashed in flight; relayed `Range` requests are not (amended by D52, D67, D73, D102)
 - D8 [verification](verification.md): crypto comes from sigstore-rust (`sigstore-verify`, `sigstore-trust-root`) (amended by D43, D136, D139, D143, D145, D147)
-- D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64, D163, D166, D180)
+- D9 [gate](gate.md): enforcement is an external NRI plugin, on our own `nri` crate (amended by D64, D163, D166, D180, D198)
 - D10 [gate](gate.md): no containerd bindir image-verifier in v1
 - D11 [verification](verification.md): the policy is shaped like `ClusterImagePolicy` and matched on the pod-spec image name; every matching policy must pass (amended by D65, D81, D136, D142, D149)
 - D12 [verification](verification.md): SBOMs are checked for signature, format and package presence in v1; content rules come later; no vulnerability scanning on the node (amended by D150)
@@ -34,8 +34,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100, D102)
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
-- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157, D194)
-- D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate (amended by D157, D194)
+- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157, D194, D197)
+- D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate (amended by D157, D194, D199)
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79, D162)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21; amended by D165, D176)
@@ -47,8 +47,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D37 [agent](agent.md): logs through `tracing` to journald or JSON, default `warn`; an audit log of gate decisions and verdict changes, off by default; secrets never logged (amends D30; amended by D52, D116, D173)
 - D38 [verification](verification.md): upstream `429` pauses discovery to that host until `Retry-After`; fallback and `.sig` tags are probed with `HEAD` (amends D20; amended by D43, D128)
 - D39 [agent](agent.md): shutdown withdraws from reflectors, drains for 10 s, saves the cache, and leaves NRI last (amended by D69, D103, D177, D188)
-- D40 [build](build.md): SemVer, `0.x` until `enforce` ships; fixes for the latest minor only; containerd minors from 2.3 while upstream supports them (amended by D63)
-- D41 [gate](gate.md): `gate.wait` stays under half of containerd's `plugin_request_timeout`; a closed NRI connection re-registers at once (amended by D64, D168)
+- D40 [build](build.md): SemVer, `0.x` until `enforce` ships; fixes for the latest minor only; containerd minors from 2.3 while upstream supports them (amended by D63, D197)
+- D41 [gate](gate.md): `gate.wait` stays under half of containerd's `plugin_request_timeout`; a closed NRI connection re-registers at once (amended by D64, D168, D198)
 - D42 [agent](agent.md): `/metrics`, `/readyz` and `/livez` listen on `metrics.address`, port 7482, plain HTTP (amended by D45)
 - D43 [verification](verification.md): attestations count only as Sigstore bundles found as OCI referrers; `.att` tags and private GitHub attestations are not supported; `.sig` stays (amends D8, D38; amended by D49, D145, D149)
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation
@@ -58,7 +58,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29; amended by D72)
 - D49 [verification](verification.md): a BuildKit SBOM inside a signed index is D43's one exception (amends D43)
 - D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34; amended by D121)
-- D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2; amended by D181, D185, D186, D188, D192, D193)
+- D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2; amended by D181, D185, D186, D188, D192, D193, D196)
 - D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37; amended by D102)
 - D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69, D88)
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64, D86, D180)
@@ -104,12 +104,12 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159, D190)
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
-- D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76; amended by D104, D105, D184)
+- D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76; amended by D104, D105, D184, D196)
 - D98 [reflector](reflector.md): the agent trusts `Members` only from a listed node, opens each stream with a whole snapshot and drops changes while no stream is up, treats a stream's end after 5 s as a drop, and hedges `Lookup` after 20 ms (amends D2, D33; amended by D102, D103, D105, D132)
 - D99 [agent](agent.md): a fifth trait, `Inventory`, lists and follows what a node serves: containerd's `k8s.io` content, listed again every 60 s for what the garbage collector deletes, or the blob cache where the node relays (amends D90; amended by D121, D123, D124)
 - D100 [distribution](distribution.md): the peer API routes `GET` and `HEAD` by digest through the mirror's parser, caps only blob bodies, answers `503` while the agent stops, and opens on the peer address the client fixes (amends D24, D36; amended by D103, D123, D124, D177)
 - D101 [agent](agent.md): `configure` keeps the mirror's table only where containerd reads it first, and refuses a `hosts.toml` whose first host table is `[host.""]`, which containerd skips there and would read after the mirror's (amends D82)
-- D102 [distribution](distribution.md): the fetcher races and hedges a lookup's holders (4 at once, Spegel's 80th/85th/90th percentile delays, 50 ms floor), resumes with `Range`, checks a blob whole before serving it on containerd and streams it on CRI-O; `speculaire_lookup_seconds` gains `result`; every socket sets `TCP_NODELAY` (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103, D123, D126)
+- D102 [distribution](distribution.md): the fetcher races and hedges a lookup's holders (4 at once, Spegel's 80th/85th/90th percentile delays, 50 ms floor), resumes with `Range`, checks a blob whole before serving it on containerd and streams it on CRI-O; `speculaire_lookup_seconds` gains `result`; every socket sets `TCP_NODELAY` (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103, D123, D126, D196)
 - D103 [reflector](reflector.md): a lookup with no stream up counts as `no_reflector`, a restarted reflector refills from the agents' opening snapshots, the client stops without waiting on the load balancer, and the drain waits for each connection to close, not only for its body (amends D39, D98, D100, D102; amended by D177)
 - D104 [reflector](reflector.md): `speculaire-loadgen` runs D33's scenario from the library `crates/load` against a reflector process, measuring `/proc` and `/metrics`, in `load.yml` nightly and on dispatch with `args`; `Snapshot` chunks of 25 digests, unbatched messages, 8 KiB stream windows, snapshots staged as bitmaps and inline index keys bound the reflector's cost per agent; a stopping reflector empties its index at once; divan micro-benchmarks outside CI; `deep` runs the reflector under Valgrind (amends D27, D33, D97; amended by D105, D116, D193)
 - D105 [reflector](reflector.md): agents and reflectors speak 4-byte length-prefixed protobuf over TLS with ALPN `speculaire-reflect/1`, not gRPC: numbered lookups answered in order between announcements, `Ping` every 30 s and a close after 40 s of silence, `Refused` with a reason, frame lengths checked against 4 MiB before allocating (amends D2, D13, D97, D98, D104; amended by D117, D183)
@@ -189,20 +189,25 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 
 - D179 [gate](gate.md): the name the pod asked for, containerd's `io.kubernetes.cri.image-name` once the runtime's list gives the image its repository, chooses the policies and the image exemptions; otherwise every name of the image does, the strictest verdict wins and an exemption needs every name; the `gate` event's `image_name` is the names matched (amends D169, D172, D173)
 
-- D180 [gate](gate.md): after the agent leaves NRI, the first container created in a running pod passes the required-plugin check until the runtimes ship NRI v0.12.5; documented and asserted by a gate test, no stand-in plugin (amends D9, D54)
+- D180 [gate](gate.md): after the agent leaves NRI, the first container created in a running pod passes the required-plugin check until the runtimes ship NRI v0.12.5; documented and asserted by a gate test, no stand-in plugin (amends D9, D54; amended by D198)
 - D181 [reflector](reflector.md): a seed's rank is the first 8 bytes of SHA-256 over the image reference as written, 0x00 and the node identity, ties to the smaller name; changing it is breaking (amends D51)
 - D182 [build](build.md): each e2e leg fails unless protobuf scrapes, taken before each agent stop and after the suites, hold every catalog row of its runtime; rows name their runtime; the forward check reads protobuf too (amends D34, D109)
 - D183 [reflector](reflector.md): a reflector queues pushes in one outbox per stream, the latest `PrewarmList` and at most 64 images waiting for a `Prewarm`, written after each reply by the connection's one task; nothing is dropped, a 65th image is refused to the caller (amends D105)
 - D184 [reflector](reflector.md): protocol version 2 takes pushes; the agent takes them only on its streams to members, parses them at the boundary and hands them to a channel; a version 1 agent gets none (amends D2, D97; amended by D188)
-- D185 [reflector](reflector.md): a member resolves each prewarm image to its platform manifests'' layers and releases its wave in rounds of up to 4 agents per agent sent it, each once the round before announced every layer of one platform or `prewarm.seed_timeout` passed (amends D51)
+- D185 [reflector](reflector.md): a member resolves each prewarm image to its platform manifests'' layers and releases its wave in rounds of up to 4 agents per agent sent it, each once the round before announced every layer of one platform or `prewarm.seed_timeout` passed (amends D51; amended by D195)
 - D186 [reflector](reflector.md): a wave starts on a new list entry, on a tag whose platform manifests changed at a `prewarm.refresh`, and 60 s after a member starts; a stream opened after the wave gets its `Prewarm` after `Hello`; four prewarm counters (amends D34, D51)
 - D187 [agent](agent.md): `prewarm.images` parses into at most 64 references, a bad list keeping the previous one; `prewarm.seed_timeout` and `prewarm.refresh` are live keys (amends D47, D60)
-- D188 [reflector](reflector.md): an agent pulls each member's `Prewarm` with CRI `PullImage` behind a `Pull` trait, one at a time in push order, dropping images listed or in flight; retries 30 s to 10 min while a member's list names the image; skips while the image filesystem is over `prewarm.max_disk_percent` (80, live); sends no credentials; counts `speculaire_prewarm_pulls_total` (amends D34, D39, D47, D51, D90, D184; amended by D191)
+- D188 [reflector](reflector.md): an agent pulls each member's `Prewarm` with CRI `PullImage` behind a `Pull` trait, one at a time in push order, dropping images listed or in flight; retries 30 s to 10 min while a member's list names the image; skips while the image filesystem is over `prewarm.max_disk_percent` (80, live); sends no credentials; counts `speculaire_prewarm_pulls_total` (amends D34, D39, D47, D51, D90, D184; amended by D191, D195)
 - D189 [gate](gate.md): the gate reads `CreateContainerRequest` in one pass over the payload, borrowing the 10 fields it uses and skipping the rest by wire type, safe Rust; prost decodes every other message; a request decided without waiting (identity in memory, verdict kept) is answered before any task and allocates nothing but a histogram block per 64, which `tests/allocations.rs` asserts; on containerd 2.3, snapshot prepare events spare the `Stat` (amends D107, D166, D170, D172)
 - D190 [build](build.md): pull requests run the e2e suites in the IPv4 pass only, with the catalog check; `main` runs both passes on all 14 legs (amends D94, D113, D159)
 - D191 [reflector](reflector.md): on containerd, an agent pins each image it prewarms while a member's list names it, with `io.cri-containerd.pinned=pinned` and its mark `speculaire.prewarm=pinned`, unpins the marked images no list names, and leaves unmarked pins; `unconfigure` unpins every marked image; nothing on CRI-O (amends D32, D65, D188)
 - D192 [build](build.md): the pin e2e cases remove unused images with `crictl rmi --prune`; the kubelet's image collection, 5 min apart, is checked by hand (amends D51)
 - D193 [reflector](reflector.md): `scale.yml` runs the prewarm suite nightly on kind with 20 nodes (`SPECULAIRE_E2E_WORKERS`), and `speculaire-loadgen --prewarm` a wave over two reflectors at D33's 10k agents in `load.yml` (amends D51, D63, D104)
-- D194 [build](build.md): speculaire's own image is for development and tests: `image.yml`, on a dispatch from any branch, pushes the D157 index as `ghcr.io/spnngl/speculaire:dev-<commit>`, unsigned and unattested, with no `verify` job; users run `ghcr.io/spnngl/images/speculaire`, which spnngl/images builds, signs and attests (amends D27, D28, D157)
+- D194 [build](build.md): speculaire's own image is for development and tests: `image.yml`, on a dispatch from any branch, pushes the D157 index as `ghcr.io/spnngl/speculaire:dev-<commit>`, unsigned and unattested, with no `verify` job; users run `ghcr.io/spnngl/images/speculaire`, which spnngl/images builds, signs and attests (amends D27, D28, D157; amended by D199)
+- D195 [reflector](reflector.md): after a prewarm pull, the agent fetches through its mirror, peers first, each layer it holds without a blob, so it announces the whole image; counts `speculaire_prewarm_refetched_total` (amends D185, D188)
+- D196 [reflector](reflector.md): agents learn their zone from the `[peer]` key `zone` (`"auto"` reads their `Node`'s `topology.kubernetes.io/zone`) and send it in `Hello`; a lookup fills its holders from the asker's zone first, or only (`zones = "only"`); the fetcher tries same-zone holders first; seeds are counted per zone (amends D2, D51, D97, D102)
+- D197 [build](build.md): before each minor release, once a release speaks the reflector protocol, a kind suite runs the previous release's agents against the reflectors under test, on the IPv4 pass (amends D27, D40)
+- D198 [gate](gate.md): once a pinned runtime ships NRI v0.12.4 or later, the agent answers `fail_request = true`, so a call that fails or times out on it rejects the creation (amends D9, D41, D180)
+- D199 [build](build.md): spnngl/images runs `speculaire verify` on the speculaire image it pushes, under a policy naming its workflow (amends D28, D194)
 
-Next free number: D195.
+Next free number: D200.
