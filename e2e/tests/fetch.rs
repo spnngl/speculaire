@@ -15,6 +15,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::balancer::PORT;
+use e2e::logs::{Level, tail};
 use e2e::reflector::Holder;
 use e2e::upstream::{Digest, Image, Kind};
 use e2e::{Cluster, IpFamily, Output, Runtime};
@@ -376,22 +377,25 @@ fn a_peer_that_serves_a_corrupted_blob_is_denied_with_a_warning_and_an_audit_eve
             r#"speculaire_peer_fetches_total{result="digest_mismatch"}"#
         ) > mismatches
     );
-    let warning = nodes.sh(
-        &nodes.b,
-        "journalctl -u speculaire -p warning --no-pager -o verbose",
-    );
+    let logs = nodes.cluster.agent_logs(&nodes.b, None).unwrap();
     assert!(
-        warning.contains("a peer sent content that is not its digest")
-            && warning.contains(&nodes.a),
-        "{warning}"
+        logs.iter().any(|entry| {
+            entry.level >= Some(Level::Warn)
+                && entry
+                    .message
+                    .contains("a peer sent content that is not its digest")
+                && entry.to_string().contains(&nodes.a)
+        }),
+        "{}",
+        tail(&logs, 30)
     );
-    let audit = nodes.sh(
-        &nodes.b,
-        "journalctl -t speculaire-audit --no-pager -o verbose",
-    );
+    let audit = nodes.cluster.audit(&nodes.b).unwrap();
     assert!(
-        audit.contains("EVENT=peer") && audit.contains(&nodes.a),
-        "{audit}"
+        audit.iter().any(|event| {
+            event.field("event") == Some("peer") && event.to_string().contains(&nodes.a)
+        }),
+        "{}",
+        tail(&audit, 30)
     );
 
     // A is skipped: C serves the next image although it answers late.

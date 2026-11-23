@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use e2e::Cluster;
 use e2e::balancer::PORT;
+use e2e::logs::tail;
 use e2e::node::Rules;
 use e2e::reflector::KUBELET;
 use e2e::registry::PASSWORD;
@@ -304,13 +305,10 @@ impl Drop for Worker {
         } else {
             String::new()
         };
-        // The journal stays: `configure.rs` reads CRI-O's entries in it, and a graceful stop writes no warning.
-        let script = format!(
-            "{restore}{}; {}; systemctl reset-failed speculaire; systemctl restart speculaire",
-            self.rmi(),
-            self.rmi_collected()
-        );
+        // The logs stay: `configure.rs` reads CRI-O's entries in the journal, and a graceful stop writes no warning.
+        let script = format!("{restore}{}; {}", self.rmi(), self.rmi_collected());
         let _ = self.cluster.exec_output(&self.name, &["sh", "-c", &script]);
+        let _ = self.cluster.restart_agent(&self.name);
         if !std::thread::panicking() {
             self.cluster.wait_ready(&self.name).unwrap();
         }
@@ -337,20 +335,12 @@ fn holds(cluster: &Cluster, node: &str, expected: &Expected, start: Instant) -> 
     {
         assert!(
             start.elapsed() < WITHIN,
-            "{node}'s store lacks some of {:?}: {}",
+            "{node}'s store lacks some of {:?}: {}\n{}",
             expected.artifacts,
             cluster
-                .exec(
-                    node,
-                    &[
-                        "sh",
-                        "-c",
-                        &format!(
-                            "ls -R {STORE}; journalctl -u speculaire --no-pager -o cat | tail -n 30"
-                        ),
-                    ],
-                )
-                .unwrap()
+                .exec(node, &["sh", "-c", &format!("ls -R {STORE}")])
+                .unwrap(),
+            tail(&cluster.agent_logs(node, None).unwrap(), 30)
         );
         sleep(Duration::from_millis(200));
     }
@@ -537,22 +527,23 @@ fn at_trace_the_journal_holds_no_secret_of_the_private_upstream() {
     let private = worker.cluster.upstream(Kind::Private);
     worker.log_filter("trace");
     worker.forget(&expected);
-    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
+    let since = worker.cluster.clock(&worker.name).unwrap();
 
     worker.pull(&private, &expected);
 
-    let journal = worker.sh(&format!(
-        "journalctl -u speculaire --no-pager -o cat --since '{}'",
-        since.trim()
-    ));
+    let logs = worker
+        .cluster
+        .agent_logs(&worker.name, Some(since))
+        .unwrap();
     assert!(
-        journal.contains("upstream request"),
-        "the journal holds no trace event"
+        logs.iter().any(|entry| entry.message == "upstream request"),
+        "the logs hold no trace event"
     );
+    let logs = tail(&logs, logs.len());
     for secret in [PASSWORD, "Basic ", "eyJ"] {
         assert!(
-            !journal.contains(secret),
-            "the journal holds a secret ({} bytes of it matched)",
+            !logs.contains(secret),
+            "the logs hold a secret ({} bytes of it matched)",
             secret.len()
         );
     }

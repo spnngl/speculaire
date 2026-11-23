@@ -72,8 +72,9 @@ impl Node {
     /// Edits the agent's config with the `sed` script `edit`, checks that `line` is in it, and reloads the agent.
     fn reload(&self, edit: &str, line: &str) {
         self.sh(&format!(
-            "sed -i -e '{edit}' {CONFIG} && grep -q '^{line}$' {CONFIG} && systemctl reload speculaire"
+            "sed -i -e '{edit}' {CONFIG} && grep -q '^{line}$' {CONFIG}"
         ));
+        self.cluster.reload_agent(&self.name).unwrap();
     }
 
     /// Creates `pod` of the pause image in `namespace` on the node, labelled [`LABEL`].
@@ -213,6 +214,7 @@ impl Drop for Restore<'_> {
              cp {KEPT}/speculaire.toml {CONFIG}; systemctl daemon-reload; systemctl restart {unit}",
             unit = node.cluster.runtime().unit()
         );
+        let _ = node.cluster.scrape(&node.name);
         let _ = node.cluster.exec_output(&node.name, &["sh", "-c", &script]);
         node.cluster.wait_runtime(&node.name).unwrap();
         node.sh(&format!(
@@ -275,6 +277,7 @@ fn the_operations_guide_from_install_to_break_glass_gives_each_stated_result() {
 /// § Install, from a node where the package is not installed nor `configure` run.
 fn install(node: &Node) {
     // The agent's state is kept for the later suites; its config stays, as the package's would.
+    node.cluster.scrape(&node.name).unwrap();
     node.sh(&format!(
         "systemctl disable --now speculaire && speculaire unconfigure >/dev/null && \
          mv /usr/bin/speculaire /usr/lib/systemd/system/speculaire.service {KEPT}/package/ && \
@@ -453,7 +456,7 @@ fn break_glass(node: &Node) {
     let scheduler = node.scheduler(true, "");
     node.sh(&format!("crictl stop {scheduler} >/dev/null"));
     node.scheduler(true, &scheduler);
-    node.sh("systemctl restart speculaire");
+    node.cluster.restart_agent(&node.name).unwrap();
     node.cluster.wait_ready(&node.name).unwrap();
 
     // Step 3: with `speculaire` no longer required, the runtime's restart keeps the running containers, and new ones

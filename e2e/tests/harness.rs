@@ -10,6 +10,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use e2e::balancer::PORT;
+use e2e::logs::tail;
 use e2e::node::Metrics;
 use e2e::reflector::KUBELET;
 use e2e::upstream::Kind;
@@ -74,10 +75,15 @@ fn diagnostics(cluster: &Cluster, client: &str) -> String {
     let nodes = cluster.nodes().unwrap();
     let mut out: Vec<String> = Vec::new();
     for reflector in cluster.reflectors() {
+        out.push(
+            cluster
+                .agent_logs(&reflector, None)
+                .map_or_else(|e| e.to_string(), |logs| tail(&logs, 20)),
+        );
         out.push(sh(
             cluster,
             &reflector,
-            &format!("journalctl -u speculaire --no-pager | tail -20; ss -ltn | grep {PORT}; true"),
+            &format!("ss -ltn | grep {PORT}; true"),
         ));
         let node = nodes.iter().find(|n| n.name == reflector).unwrap();
         out.push(call(node.address.parse().unwrap()));
@@ -251,17 +257,11 @@ fn an_agent_stops_starts_and_comes_back_after_a_kill() {
     assert!(!ready());
     cluster.start_agent(&client).unwrap();
     assert!(ready());
-    let pid = || {
-        sh(
-            &cluster,
-            &client,
-            "systemctl show -p MainPID --value speculaire",
-        )
-    };
+    let pid = || cluster.agent_pid(&client).unwrap();
     let killed = pid();
     cluster.kill_agent(&client).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
-    while [killed.as_str(), "0\n"].contains(&pid().as_str()) {
+    while [killed, None].contains(&pid()) {
         assert!(
             Instant::now() < deadline,
             "systemd did not restart the agent"

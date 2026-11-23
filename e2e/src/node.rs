@@ -1,5 +1,8 @@
-//! What the suites do to a node (D94): stop, start or kill its agent, slow its network, cut it off from a host, corrupt
-//! a blob it serves, and read its metrics and audit events.
+//! What the suites do to a node (D94): stop, start, restart, reload or kill its agent, slow its network, cut it off from
+//! a host, corrupt a blob it serves, and read its metrics, logs and audit events.
+//!
+//! The suites act on the agent only through these helpers, which alone run `systemctl` and `journalctl` on it, except
+//! the suites of the unit itself (D195).
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -9,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use prost::Message as _;
 
+use crate::logs::Entry;
 use crate::registry::{docker, fail};
 use crate::upstream::Digest;
 use crate::{Cluster, Failure, Runtime};
@@ -135,13 +139,62 @@ impl Cluster {
         Rules::insert(self, node, rules)
     }
 
-    /// Stops the node's agent, as an admin does.
+    /// Stops the node's agent, as an admin does, and returns the node's clock when the stop began.
     ///
     /// # Errors
     ///
     /// When `systemctl` fails.
-    pub fn stop_agent(&self, node: &str) -> Result<(), Failure> {
-        self.sh(node, "systemctl stop speculaire").map(drop)
+    pub fn stop_agent(&self, node: &str) -> Result<SystemTime, Failure> {
+        self.scrape(node)?;
+        let began = self.sh(node, "date +%s%N; systemctl stop speculaire")?;
+        nanos(node, &began)
+    }
+
+    /// Stops the node's agent and runs `script` in the same `docker exec`, so that no other request of the kubelet's
+    /// reaches the runtime between the two; returns what `script` printed.
+    ///
+    /// # Errors
+    ///
+    /// When the stop or `script` fails.
+    pub fn stop_agent_then(&self, node: &str, script: &str) -> Result<String, Failure> {
+        self.scrape(node)?;
+        self.sh(node, &format!("systemctl stop speculaire\n{script}"))
+    }
+
+    /// Begins stopping the node's agent and returns once it stops, while it drains (D39).
+    ///
+    /// # Errors
+    ///
+    /// When the agent is not stopping within 2 s.
+    pub fn stop_agent_no_wait(&self, node: &str) -> Result<(), Failure> {
+        self.scrape(node)?;
+        self.sh(
+            node,
+            "systemctl stop --no-block speculaire
+             for _ in $(seq 100); do [ \"$(systemctl is-active speculaire)\" = deactivating ] && exit 0; sleep 0.02; done
+             echo 'the agent is not stopping after 2 s' >&2; exit 1",
+        )
+        .map(drop)
+    }
+
+    /// Waits until the node's agent has stopped, and checks that it exited by itself within the stop timeout.
+    ///
+    /// # Errors
+    ///
+    /// When `systemctl` fails, or the agent was killed or failed.
+    pub fn wait_stopped(&self, node: &str) -> Result<(), Failure> {
+        let result = self.sh(
+            node,
+            "while [ \"$(systemctl is-active speculaire)\" = deactivating ]; do sleep 0.1; done
+             systemctl show -p Result --value speculaire",
+        )?;
+        match result.trim() {
+            "success" => Ok(()),
+            other => Err(fail(
+                node,
+                &format!("the agent stopped with result {other}"),
+            )),
+        }
     }
 
     /// Starts the node's agent and waits until it is ready.
@@ -163,22 +216,106 @@ impl Cluster {
     ///
     /// When `systemctl` fails.
     pub fn kill_agent(&self, node: &str) -> Result<(), Failure> {
+        self.scrape(node)?;
         self.sh(node, "systemctl kill --signal=SIGKILL speculaire")
             .map(drop)
     }
 
-    /// Empties the node's journal and restarts its agent, which writes its start entries again: `unit.rs` asserts the
-    /// journal holds no warning, and a kill leaves some.
+    /// Restarts the node's agent, keeping its logs, and returns once it runs: [`Cluster::wait_ready`] waits for it to
+    /// register.
+    ///
+    /// # Errors
+    ///
+    /// When the agent fails to start.
+    pub fn restart_agent(&self, node: &str) -> Result<(), Failure> {
+        self.scrape(node)?;
+        self.sh(
+            node,
+            "systemctl reset-failed speculaire; systemctl restart speculaire",
+        )
+        .map(drop)
+    }
+
+    /// Sends the node's agent `SIGHUP`, on which it reads its files again (D30, D91, D95, D154).
+    ///
+    /// # Errors
+    ///
+    /// When the agent does not run.
+    pub fn reload_agent(&self, node: &str) -> Result<(), Failure> {
+        self.sh(node, "systemctl reload speculaire").map(drop)
+    }
+
+    /// The PID of the node's agent, as the node sees it; `None` when no agent runs.
+    ///
+    /// # Errors
+    ///
+    /// When `systemctl` fails.
+    pub fn agent_pid(&self, node: &str) -> Result<Option<u32>, Failure> {
+        let pid = self.sh(node, "systemctl show -p MainPID --value speculaire")?;
+        let pid: u32 = pid.trim().parse().map_err(|e| fail(node, &e))?;
+        Ok((pid != 0).then_some(pid))
+    }
+
+    /// The node's clock now.
+    ///
+    /// # Errors
+    ///
+    /// When `date` fails.
+    pub fn clock(&self, node: &str) -> Result<SystemTime, Failure> {
+        nanos(node, &self.sh(node, "date +%s%N")?)
+    }
+
+    /// The entries of the node's agent logs since `since`, a time of the node's clock taken to the second, or since
+    /// they were emptied; oldest first, audit events aside.
+    ///
+    /// # Errors
+    ///
+    /// When `journalctl` fails, or an entry does not parse.
+    pub fn agent_logs(&self, node: &str, since: Option<SystemTime>) -> Result<Vec<Entry>, Failure> {
+        let since = since.map_or_else(String::new, |since| {
+            let secs = since
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            format!(" --since @{secs}")
+        });
+        self.journal(
+            node,
+            &format!("journalctl -q -t speculaire --no-pager -o json{since}"),
+        )
+    }
+
+    /// The audit events of the node's agent, oldest first (D37, D173).
+    ///
+    /// # Errors
+    ///
+    /// When `journalctl` fails, or an event does not parse.
+    pub fn audit(&self, node: &str) -> Result<Vec<Entry>, Failure> {
+        self.journal(node, "journalctl -q -t speculaire-audit --no-pager -o json")
+    }
+
+    fn journal(&self, node: &str, command: &str) -> Result<Vec<Entry>, Failure> {
+        self.sh(node, command)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                Entry::from_journal(line).map_err(|e| fail(&format!("the journal of {node}"), &e))
+            })
+            .collect()
+    }
+
+    /// Empties the node's agent logs and restarts the agent, which writes its start entries again: `unit.rs` asserts the
+    /// logs hold no warning, and a kill leaves some.
     ///
     /// # Errors
     ///
     /// When the agent is not ready within 120 s.
     pub fn reset_agent(&self, node: &str) -> Result<(), Failure> {
-        self.restart_with_empty_journal(node)?;
+        self.restart_with_empty_logs(node)?;
         self.wait_ready(node)
     }
 
-    /// Stops the node's agent, empties its journal and starts the agent, without waiting for it.
+    /// Stops the node's agent, empties its logs and starts the agent, without waiting for it.
     ///
     /// The agent stops first: one still running may write a warning between the vacuum and its stop, such as a
     /// discovery failing on an upstream the test has just removed. The vacuum keeps an archived file whose last entry
@@ -187,7 +324,8 @@ impl Cluster {
     /// # Errors
     ///
     /// When `systemctl` fails to start the agent.
-    pub fn restart_with_empty_journal(&self, node: &str) -> Result<(), Failure> {
+    pub fn restart_with_empty_logs(&self, node: &str) -> Result<(), Failure> {
+        self.scrape(node)?;
         self.sh(
             node,
             "systemctl stop speculaire; journalctl --rotate && journalctl --vacuum-time=1us; systemctl reset-failed speculaire; systemctl start speculaire",
@@ -387,27 +525,6 @@ impl Cluster {
         .map(drop)
     }
 
-    /// The audit events in the node's journal, oldest first, as `journalctl -t speculaire-audit -o json` gives them:
-    /// each the record of its journal fields, such as `F_EVENT` (D37, D173).
-    ///
-    /// # Errors
-    ///
-    /// When `journalctl` fails, or a line is no JSON object.
-    pub fn audit(
-        &self,
-        node: &str,
-    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, Failure> {
-        let journal = self.sh(node, "journalctl -q -t speculaire-audit --no-pager -o json")?;
-        journal
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| match serde_json::from_str(line) {
-                Ok(serde_json::Value::Object(record)) => Ok(record),
-                _ => Err(fail(&format!("the audit journal of {node}"), &line)),
-            })
-            .collect()
-    }
-
     /// The node's metrics, as its agent serves them now.
     ///
     /// # Errors
@@ -443,7 +560,8 @@ impl Cluster {
     }
 
     /// Adds the node's metrics in the protobuf exposition to the leg's scrapes, one file each, for the catalog check
-    /// (D182); nothing when the agent does not answer or `just e2e-test` named no directory.
+    /// (D182); nothing when the agent does not answer or `just e2e-test` named no directory. Each helper that stops the
+    /// agent calls it first (D195).
     ///
     /// # Errors
     ///
@@ -467,19 +585,6 @@ impl Cluster {
         std::fs::create_dir_all(dir)
             .and_then(|()| std::fs::write(&path, exposition))
             .map_err(|e| fail(&path.display().to_string(), &e))
-    }
-
-    /// Scrapes the node first when `command` may stop its agent, whose metrics go with it (D182): a `systemctl` that
-    /// names the agent's unit and stops, restarts, kills or disables something. A command that only seems to stop it
-    /// costs one scrape.
-    pub(crate) fn scrape_before(&self, node: &str, command: &[&str]) -> Result<(), Failure> {
-        let line = command.join(" ");
-        let stops = line.contains("systemctl")
-            && line.contains("speculaire")
-            && ["stop", "restart", "kill", "--now"]
-                .iter()
-                .any(|verb| line.contains(verb));
-        if stops { self.scrape(node) } else { Ok(()) }
     }
 
     /// The series of the native histogram `name` whose labels include `label`, summed, as the node's agent serves them
@@ -653,6 +758,16 @@ impl Native {
     }
 }
 
+/// The time `date +%s%N` printed first on `node`.
+fn nanos(node: &str, date: &str) -> Result<SystemTime, Failure> {
+    let nanos = date
+        .lines()
+        .next()
+        .and_then(|line| line.trim().parse().ok())
+        .ok_or_else(|| fail(node, &format!("no time in {date:?}")))?;
+    Ok(SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos))
+}
+
 /// Every address of `container`, a node or a registry, on kind's network, in both families: on a dual-stack cluster, a
 /// node may resolve a name to either.
 ///
@@ -817,6 +932,8 @@ impl Metrics {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use prost::Message as _;
 
     use super::{Family, Histogram, LabelPair, Native, Series, Span};
@@ -942,5 +1059,61 @@ mod tests {
         assert_eq!(labelled.count, 1);
         assert_eq!(Native::decode(&exposition, "none", None).unwrap().count, 0);
         assert!(Native::decode(&exposition[1..], "gate", None).is_err());
+    }
+
+    /// Every `.rs` file under `dir`.
+    fn sources(dir: &Path, into: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("the e2e crate's directories read") {
+            let path = entry.expect("the e2e crate's directories read").path();
+            if path.is_dir() {
+                sources(&path, into);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                into.push(path);
+            }
+        }
+    }
+
+    /// Outside these helpers and the suites of the unit itself, `systemctl` and `journalctl` act on the runtime only, on
+    /// lines that name it (D195): an agent run as a `DaemonSet` has no unit.
+    #[test]
+    fn the_suites_act_on_the_agent_only_through_the_node_helpers() {
+        const SYSTEMD_ONLY: [&str; 6] = [
+            "src/node.rs",
+            "tests/operations.rs",
+            "tests/preflight.rs",
+            "tests/unit.rs",
+            "tests/unit_reload.rs",
+            "tests/unit_restart.rs",
+        ];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        sources(&root.join("src"), &mut files);
+        sources(&root.join("tests"), &mut files);
+        let mut found = Vec::new();
+        for path in files {
+            let name = path
+                .strip_prefix(root)
+                .expect("under the crate")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if SYSTEMD_ONLY.contains(&name.as_str()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("the source reads");
+            for (number, line) in text.lines().enumerate() {
+                let systemd = line.contains("systemctl") || line.contains("journalctl");
+                let runtime = ["crio", "{unit}", ".unit()"]
+                    .iter()
+                    .any(|named| line.contains(named));
+                if systemd && !runtime {
+                    found.push(format!("{name}:{}: {}", number + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "use the node helpers:\n{}",
+            found.join("\n")
+        );
     }
 }

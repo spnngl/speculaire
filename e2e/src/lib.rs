@@ -16,6 +16,7 @@ use std::str::FromStr;
 pub mod balancer;
 pub mod catalog;
 pub mod hub;
+pub mod logs;
 pub mod node;
 pub mod prewarm;
 pub mod reflector;
@@ -177,7 +178,6 @@ impl Cluster {
     ///
     /// When `docker` cannot start or the command exits non-zero.
     pub fn exec(&self, node: &str, command: &[&str]) -> Result<String, Failure> {
-        self.scrape_before(node, command)?;
         run(Command::new("docker").arg("exec").arg(node).args(command))
     }
 
@@ -187,7 +187,6 @@ impl Cluster {
     ///
     /// When `docker` cannot start.
     pub fn exec_output(&self, node: &str, command: &[&str]) -> Result<Output, Failure> {
-        self.scrape_before(node, command)?;
         let mut docker = Command::new("docker");
         docker.arg("exec").arg(node).args(command);
         let out = docker.output().map_err(|e| Failure {

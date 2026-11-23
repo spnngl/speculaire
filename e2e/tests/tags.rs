@@ -185,9 +185,10 @@ impl<'a> Off<'a> {
             node,
             &format!(
                 "cp {CONFIG} {CONFIG}.e2e && sed -i 's/^#resolve_tags = true$/resolve_tags = false/' {CONFIG} \
-                 && grep -q '^resolve_tags = false$' {CONFIG} && systemctl reload speculaire"
+                 && grep -q '^resolve_tags = false$' {CONFIG}"
             ),
         );
+        nodes.cluster.reload_agent(node).unwrap();
         Self {
             nodes,
             node: node.to_owned(),
@@ -199,12 +200,9 @@ impl Drop for Off<'_> {
     fn drop(&mut self) {
         let _ = self.nodes.cluster.exec(
             &self.node,
-            &[
-                "sh",
-                "-c",
-                &format!("mv {CONFIG}.e2e {CONFIG} && systemctl reload speculaire"),
-            ],
+            &["sh", "-c", &format!("mv {CONFIG}.e2e {CONFIG}")],
         );
+        let _ = self.nodes.cluster.reload_agent(&self.node);
     }
 }
 

@@ -16,6 +16,7 @@ use std::process::Stdio;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use e2e::logs::{Entry, Level, tail};
 use e2e::node::{POLICY, STATE};
 use e2e::upstream::{FIXTURES, Kind, RUNNABLE, SIGNED, UNSIGNED, runnable_policy};
 use e2e::{Cluster, IpFamily, Runtime};
@@ -321,7 +322,7 @@ fn readyz_is_503_until_the_gate_registers_and_build_info_names_the_runtime() {
         dir = parent(HELD)
     ));
     let held = Held(&worker);
-    worker.sh("systemctl restart speculaire");
+    worker.cluster.restart_agent(&worker.node).unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(worker.sh(&format!("{STATE}; state")).trim(), "503 0");
     let version = env!("CARGO_PKG_VERSION");
@@ -380,13 +381,12 @@ fn the_gate_reads_the_image_identity_by_annotation_on_containerd_2_3_from_nri_on
         worker.series("speculaire_identity_path"),
         [format!(r#"path="{path}"}} 1"#)]
     );
-    // The `annotation` path alone warns of its identity gap, at each registration since the journal was emptied.
-    let warnings = worker.sh("journalctl -u speculaire -p warning -o cat --no-pager");
-    assert_eq!(
-        warnings.contains("identity gap, D15"),
-        path == "annotation",
-        "{warnings}"
-    );
+    // The `annotation` path alone warns of its identity gap, at each registration since the logs were emptied.
+    let logs = worker.cluster.agent_logs(&worker.node, None).unwrap();
+    let warned = logs.iter().any(|entry| {
+        entry.level >= Some(Level::Warn) && entry.message.contains("identity gap, D15")
+    });
+    assert_eq!(warned, path == "annotation", "{}", tail(&logs, 30));
 }
 
 /// A policy named `name` over the unsigned image at `host`: any keyless signer passes it, and it has none.
@@ -524,9 +524,8 @@ fn in_audit_a_pod_of_a_rejected_image_runs_and_counts_as_rejected() {
     drop(guard);
 }
 
-/// The journal field of each field of `event` in `docs/operations.md` § Audit events: its name in capitals behind
-/// `F_`, as `tracing-journald` writes it (D173).
-fn audit_fields(event: &str) -> Vec<String> {
+/// The name of each field of `event` in `docs/operations.md` § Audit events (D173).
+fn audit_fields(event: &str) -> Vec<&'static str> {
     let doc = include_str!("../../docs/operations.md");
     let (_, section) = doc
         .split_once("## Audit events\n")
@@ -535,35 +534,28 @@ fn audit_fields(event: &str) -> Vec<String> {
     let row = format!("| `{event}` | `");
     section
         .lines()
-        .filter_map(|line| line.strip_prefix(row.as_str())?.split_once('`'))
-        .map(|(field, _)| format!("F_{}", field.to_uppercase()))
+        .filter_map(|line| Some(line.strip_prefix(row.as_str())?.split_once('`')?.0))
         .collect()
 }
 
-/// The audit events `event` in the worker's journal whose field `key` is `value`, each checked to hold every field
+/// The audit events `event` of the worker's agent whose field `key` is `value`, each checked to hold every field
 /// `docs/operations.md` names.
-fn audited(
-    worker: &Worker,
-    event: &str,
-    (key, value): (&str, &str),
-) -> Vec<serde_json::Map<String, serde_json::Value>> {
+fn audited(worker: &Worker, event: &str, (key, value): (&str, &str)) -> Vec<Entry> {
     let events: Vec<_> = worker
         .cluster
         .audit(&worker.node)
         .unwrap()
         .into_iter()
-        .filter(|record| {
-            record.get("F_EVENT").is_some_and(|e| e == event)
-                && record.get(key).is_some_and(|v| v == value)
-        })
+        .filter(|entry| entry.field("event") == Some(event) && entry.field(key) == Some(value))
         .collect();
     let fields = audit_fields(event);
-    for record in &events {
-        let missing: Vec<&String> = fields
+    for entry in &events {
+        let missing: Vec<&str> = fields
             .iter()
-            .filter(|field| !record.contains_key(*field))
+            .copied()
+            .filter(|field| entry.field(field).is_none())
             .collect();
-        assert!(missing.is_empty(), "{missing:?} not in {record:?}");
+        assert!(missing.is_empty(), "{missing:?} not in {entry:?}");
     }
     events
 }
@@ -610,7 +602,7 @@ fn edit_policy(worker: &Worker, host: &str, image: &str) -> String {
         .cluster
         .policy(&worker.node, &unsigned_policy(host, &name))
         .unwrap();
-    worker.sh("systemctl reload speculaire");
+    worker.cluster.reload_agent(&worker.node).unwrap();
     wait_rejected(worker, image);
     name
 }
@@ -637,26 +629,26 @@ fn with_the_audit_on_a_creation_and_a_changed_verdict_are_one_event_each_and_wit
 
     // No policy matches the image: `audit` mode allows it, and no verification runs.
     run(&worker, guard.pod, &guard.image);
-    let created = audited(&worker, "gate", ("F_POD", guard.pod));
+    let created = audited(&worker, "gate", ("pod", guard.pod));
     let [gate] = created.as_slice() else {
         panic!("not one gate event: {created:?}")
     };
-    assert_eq!(gate["F_CONTAINER"], guard.pod, "{gate:?}");
+    assert_eq!(gate.field("container"), Some(guard.pod), "{gate:?}");
     // CRI-O passes no pod-spec name: the event names the image's repositories (D65, D173).
     let image_name = match worker.cluster.runtime() {
         Runtime::Containerd => guard.image.as_str(),
         Runtime::Crio => guard.image.rsplit_once(':').unwrap().0,
     };
-    assert_eq!(gate["F_IMAGE_NAME"], image_name, "{gate:?}");
-    assert_eq!(gate["F_MODE"], "audit", "{gate:?}");
-    assert_eq!(gate["F_RESULT"], "unmatched", "{gate:?}");
+    assert_eq!(gate.field("image_name"), Some(image_name), "{gate:?}");
+    assert_eq!(gate.field("mode"), Some("audit"), "{gate:?}");
+    assert_eq!(gate.field("result"), Some("unmatched"), "{gate:?}");
 
     let name = edit_policy(&worker, &host, &guard.image);
-    let changed = audited(&worker, "verdict", ("F_MATCHED_POLICIES", &name));
+    let changed = audited(&worker, "verdict", ("matched_policies", &name));
     let [verdict] = changed.as_slice() else {
         panic!("not one verdict event: {changed:?}")
     };
-    assert_eq!(verdict["F_RESULT"], "rejected", "{verdict:?}");
+    assert_eq!(verdict.field("result"), Some("rejected"), "{verdict:?}");
 
     drop(audit);
     guard.delete_pod();
@@ -714,10 +706,11 @@ impl<'a> Enforced<'a> {
         self.restart_agent();
     }
 
-    /// Restarts the agent, keeping its journal, and waits until it is registered again.
+    /// Restarts the agent, keeping its logs, and waits until it is registered again.
     fn restart_agent(&self) {
-        self.worker.sh("systemctl restart speculaire");
-        self.worker.cluster.wait_ready(&self.worker.node).unwrap();
+        let (cluster, node) = (&self.worker.cluster, &self.worker.node);
+        cluster.restart_agent(node).unwrap();
+        cluster.wait_ready(node).unwrap();
     }
 
     /// Restarts the runtime, and waits until it answers and the agent is registered again.
@@ -746,10 +739,11 @@ impl Drop for Enforced<'_> {
         let unrequire = match worker.cluster.runtime() {
             Runtime::Containerd => format!("mv {CONTAINERD}.e2e {CONTAINERD}"),
             Runtime::Crio => format!("rm -f {CRIO_REQUIRED}"),
-        } + "; systemctl reset-failed speculaire; systemctl start speculaire";
+        };
         let _ = worker
             .cluster
             .exec_output(&worker.node, &["sh", "-c", &unrequire]);
+        let _ = worker.cluster.start_agent(&worker.node);
         self.restart_runtime();
         let _ = worker.cluster.exec_output(
             &worker.node,
@@ -886,22 +880,11 @@ fn latency(worker: &Worker) -> &'static str {
     path
 }
 
-/// The journal records of the agent whose message starts with `message`, oldest first.
-fn logged(worker: &Worker, message: &str) -> Vec<serde_json::Map<String, serde_json::Value>> {
-    worker
-        .sh("journalctl -q -t speculaire --no-pager -o json")
-        .lines()
-        .filter_map(|line| match serde_json::from_str(line) {
-            Ok(serde_json::Value::Object(record)) => Some(record),
-            _ => None,
-        })
-        .filter(|record| {
-            record
-                .get("MESSAGE")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|m| m.starts_with(message))
-        })
-        .collect()
+/// The entries of the agent's logs whose message starts with `message`, oldest first.
+fn logged(worker: &Worker, message: &str) -> Vec<Entry> {
+    let mut logs = worker.cluster.agent_logs(&worker.node, None).unwrap();
+    logs.retain(|entry| entry.message.starts_with(message));
+    logs
 }
 
 /// The agent restarts while a Deployment of `runnable` rolls out: it loads the verdicts it saved at stop, so no new
@@ -1025,10 +1008,7 @@ fn cold(worker: &Worker, runnable: &str) {
     );
     let cause = logged(worker, "saved verdicts discarded");
     assert!(
-        cause
-            .last()
-            .and_then(|record| record.get("F_CAUSE"))
-            .is_some_and(|cause| cause == "the checksum does not match"),
+        cause.last().and_then(|entry| entry.field("cause")) == Some("the checksum does not match"),
         "{cause:?}"
     );
     start(worker, "default", "speculaire-e2e-cold", runnable);
@@ -1293,11 +1273,7 @@ fn stopping(worker: &Worker, runnable: &str, (unsigned, signed): (&str, &str)) -
     ));
     let cut = logged(worker, CUT).len();
     let begun = Instant::now();
-    worker.sh(
-        "systemctl stop --no-block speculaire
-         for _ in $(seq 100); do [ \"$(systemctl is-active speculaire)\" = deactivating ] && exit 0; sleep 0.02; done
-         exit 1",
-    );
+    worker.cluster.stop_agent_no_wait(&worker.node).unwrap();
     let answer = worker.sh(&format!(
         "{curl} -o /dev/null -w '%{{http_code}}' {MIRROR}/v2/; true"
     ));
@@ -1318,12 +1294,9 @@ fn stopping(worker: &Worker, runnable: &str, (unsigned, signed): (&str, &str)) -
     let failures = ready(worker, "default", "speculaire-e2e-stopping");
     assert!(failures.is_empty(), "{failures:?}");
     // Within `TimeoutStopSec`: systemd did not kill the agent.
-    let result = worker.sh(
-        "while [ \"$(systemctl is-active speculaire)\" = deactivating ]; do sleep 0.1; done
-         systemctl show -p Result --value speculaire",
-    );
+    let stopped = worker.cluster.wait_stopped(&worker.node);
     let stop = begun.elapsed();
-    assert_eq!(result.trim(), "success");
+    stopped.unwrap();
     assert_eq!(
         logged(worker, CUT).len(),
         cut + 1,
@@ -1427,20 +1400,24 @@ fn after_a_stop_the_first_container_in_a_running_pod_passes(worker: &Worker) {
 /// returns what creating the first printed: its ID, or the error.
 fn stopped_creations(worker: &Worker) -> String {
     const GAP: &str = "speculaire-e2e-gap";
-    // One script, so that no other request reaches NRI between the stop and the creations. In kube-proxy's pod, which
-    // runs; of the pause image, which the node holds, in a PID namespace of its own, as kube-proxy's pod has none.
-    let created = worker.sh(&format!(
+    // The creations run in the stop's `docker exec`, so that no other request reaches NRI between them; listing pods and
+    // images does not reach it. In kube-proxy's pod, which runs; of the pause image, which the node holds, in a PID
+    // namespace of its own, as kube-proxy's pod has none.
+    let creations = format!(
         r#"pod=$(crictl pods --namespace kube-system --name kube-proxy --state ready -q | head -1)
            image=$(crictl images -o json | grep -o '"registry.k8s.io/pause:[^"]*"' | head -1)
            printf '{{"metadata":{{"name":"{GAP}","namespace":"default","uid":"{GAP}"}}}}' >/tmp/{GAP}-pod.json
-           systemctl stop speculaire
            for i in 1 2; do
                printf '{{"metadata":{{"name":"{GAP}-%s"}},"image":{{"image":%s}},"linux":{{"security_context":{{"namespace_options":{{"pid":1}}}}}}}}' \
                    "$i" "$image" >/tmp/{GAP}.json
                crictl create "$pod" /tmp/{GAP}.json /tmp/{GAP}-pod.json 2>&1 | tail -1
            done
            crictl ps -a -q --name '^{GAP}-' | xargs -r crictl rm >/dev/null; rm -f /tmp/{GAP}*.json"#
-    ));
+    );
+    let created = worker
+        .cluster
+        .stop_agent_then(&worker.node, &creations)
+        .unwrap();
     worker.cluster.start_agent(&worker.node).unwrap();
     let [first, second] = created.lines().collect::<Vec<_>>()[..] else {
         panic!("two creations: {created}")
@@ -1454,17 +1431,11 @@ fn stopped_creations(worker: &Worker) -> String {
     first.to_owned()
 }
 
-/// The agent's warnings in the worker's journal whose field `F_POD` is `pod`.
-fn warnings(worker: &Worker, pod: &str) -> Vec<serde_json::Map<String, serde_json::Value>> {
-    worker
-        .sh("journalctl -q -t speculaire -p warning --no-pager -o json")
-        .lines()
-        .filter_map(|line| match serde_json::from_str(line) {
-            Ok(serde_json::Value::Object(record)) => Some(record),
-            _ => None,
-        })
-        .filter(|record| record.get("F_POD").is_some_and(|p| p == pod))
-        .collect()
+/// The agent's warnings whose field `pod` is `pod`.
+fn warnings(worker: &Worker, pod: &str) -> Vec<Entry> {
+    let mut logs = worker.cluster.agent_logs(&worker.node, None).unwrap();
+    logs.retain(|entry| entry.level >= Some(Level::Warn) && entry.field("pod") == Some(pod));
+    logs
 }
 
 #[test]
@@ -1483,9 +1454,10 @@ fn a_pod_running_before_the_agent_starts_is_verified_under_synchronize_warned_of
         image: format!("{host}/{UNSIGNED}"),
     };
     worker.sh(&format!(
-        "rm -f {POLICY}; crictl pull {} >/dev/null; systemctl stop speculaire",
+        "rm -f {POLICY}; crictl pull {} >/dev/null",
         guard.image
     ));
+    worker.cluster.stop_agent(&worker.node).unwrap();
     run(&worker, guard.pod, &guard.image);
     // A policy of a fresh name: no verdict of the agent's cache holds (D31).
     worker
@@ -1513,10 +1485,10 @@ fn a_pod_running_before_the_agent_starts_is_verified_under_synchronize_warned_of
     let [warning] = warned.as_slice() else {
         panic!("not one warning: {warned:?}")
     };
-    assert_eq!(warning["F_CONTAINER"], guard.pod, "{warning:?}");
+    assert_eq!(warning.field("container"), Some(guard.pod), "{warning:?}");
     assert!(
-        warning["F_REASON"]
-            .as_str()
+        warning
+            .field("reason")
             .is_some_and(|reason| reason.starts_with("rejected: ")),
         "{warning:?}"
     );

@@ -13,6 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use e2e::logs::{Level, tail};
 use e2e::registry::{
     self, Access, Certificates, LARGE_IMAGE, PASSWORD, Proxy, Registry, TokenServer, USER,
 };
@@ -76,9 +77,9 @@ impl Worker {
                 "cp {CONFIG} {CONFIG}.e2e && sed -i 's|^url = .*|url = \"\"|; s|^#poll_interval = 10$|poll_interval = 1|' {CONFIG} && grep -q '^poll_interval = 1$' {CONFIG}"
             ));
             worker.agent_changed = true;
-            worker.sh(&format!(
-                "systemctl stop speculaire && rm -rf {CACHE}/blobs {CACHE}/tmp && systemctl reset-failed speculaire; systemctl start speculaire"
-            ));
+            worker.cluster.stop_agent(&worker.name).unwrap();
+            worker.sh(&format!("rm -rf {CACHE}/blobs {CACHE}/tmp"));
+            worker.cluster.start_agent(&worker.name).unwrap();
             worker.wait_ready();
         }
         worker.forget();
@@ -144,7 +145,7 @@ impl Worker {
         self.configured = true;
         self.sh("speculaire configure");
         // The agent reads the registry config again at once, rather than at its next poll (D91).
-        self.sh("systemctl reload speculaire");
+        self.cluster.reload_agent(&self.name).unwrap();
         self.wait_ready();
     }
 
@@ -167,11 +168,11 @@ impl Worker {
         for script in scripts {
             self.sh(&format!("sed -i '{script}' {CONFIG}"));
         }
-        self.sh("systemctl reset-failed speculaire; systemctl restart speculaire");
+        self.cluster.restart_agent(&self.name).unwrap();
         self.wait_ready();
     }
 
-    /// Edits the agent's config with `sed` scripts and has it read again, as `systemctl reload` does.
+    /// Edits the agent's config with `sed` scripts and has the agent read it again, as a reload does.
     fn live_config(&mut self, scripts: &[&str]) {
         if !self.agent_changed {
             self.sh(&format!("cp {CONFIG} {CONFIG}.e2e"));
@@ -180,7 +181,7 @@ impl Worker {
         for script in scripts {
             self.sh(&format!("sed -i '{script}' {CONFIG}"));
         }
-        self.sh("systemctl reload speculaire");
+        self.cluster.reload_agent(&self.name).unwrap();
     }
 
     fn series(&self, name: &str) -> f64 {
@@ -278,7 +279,7 @@ impl Drop for Worker {
         }
         // Some of these tests provoke warnings on purpose; `unit.rs` asserts the journal holds none, so the
         // journal is emptied and the agent restarted for the entries it writes at start, with its config put back.
-        let _ = self.cluster.restart_with_empty_journal(&self.name);
+        let _ = self.cluster.restart_with_empty_logs(&self.name);
         // A second panic while a failed test unwinds would abort the whole binary; the next `Worker::on` waits anyway.
         if !std::thread::panicking() {
             self.wait_ready();
@@ -529,7 +530,7 @@ fn on_crio_the_relay_logs_in_with_the_nodes_credentials_and_ca_and_logs_no_secre
     // The login, only in the node's own credential file.
     worker.file(CRIO_AUTH_FILE, &auth_file(&private.address, &basic));
     worker.agent_config(&["s/^filter = .*/filter = \"trace\"/"]);
-    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
+    let since = worker.cluster.clock(&worker.name).unwrap();
 
     let bytes = worker.upstream_bytes();
     let pulled = worker.pull(&image, None);
@@ -542,18 +543,20 @@ fn on_crio_the_relay_logs_in_with_the_nodes_credentials_and_ca_and_logs_no_secre
     );
     assert!(worker.cached().len() >= 3, "{:?}", worker.cached());
 
-    let journal = worker.sh(&format!(
-        "journalctl -u speculaire --no-pager -o cat --since '{}'",
-        since.trim()
-    ));
+    let logs = worker
+        .cluster
+        .agent_logs(&worker.name, Some(since))
+        .unwrap();
     assert!(
-        journal.lines().count() > 10 && journal.contains("upstream request"),
-        "the journal does not hold trace events:\n{journal}"
+        logs.len() > 10 && logs.iter().any(|entry| entry.message == "upstream request"),
+        "the logs hold no trace events:\n{}",
+        tail(&logs, 30)
     );
+    let logs = tail(&logs, logs.len());
     for secret in [PASSWORD, basic.as_str(), "eyJ"] {
         assert!(
-            !journal.contains(secret),
-            "the journal holds a secret ({} bytes of it matched)",
+            !logs.contains(secret),
+            "the logs hold a secret ({} bytes of it matched)",
             secret.len()
         );
     }
@@ -617,8 +620,9 @@ fn on_crio_lowering_the_bound_of_the_blob_cache_evicts_at_the_next_fill_without_
     while worker.series("speculaire_blob_cache_bytes") > 12.0 * 1024.0 * 1024.0 {
         assert!(
             Instant::now() < deadline,
-            "the cache did not shrink:\n{}",
-            worker.sh("grep -n max_size /etc/speculaire/config.toml; journalctl -u speculaire --no-pager -o cat | tail -n 15")
+            "the cache did not shrink:\n{}\n{}",
+            worker.sh("grep -n max_size /etc/speculaire/config.toml"),
+            tail(&worker.cluster.agent_logs(&worker.name, None).unwrap(), 15)
         );
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -694,7 +698,7 @@ fn on_crio_upstreams_429_to_a_relayed_manifest_reaches_crio_and_the_pull_succeed
     let proxy = Proxy::start("limit.e2e.test", &upstream.address(), None, None).unwrap();
     let image = format!("{}/app/web:1", proxy.address());
     worker.registry_conf("limit", &proxy.address(), false);
-    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
+    let since = worker.cluster.clock(&worker.name).unwrap();
     let refused = worker.manifests("refused");
     let window = Duration::from_secs(5);
     proxy.throttle("/manifests/", window, Some(1)).unwrap();
@@ -710,33 +714,26 @@ fn on_crio_upstreams_429_to_a_relayed_manifest_reaches_crio_and_the_pull_succeed
         .collect();
     assert_eq!(limited.len(), 1, "{limited:?}");
     assert!((worker.manifests("refused") - refused - 1.0).abs() < f64::EPSILON);
-    let warnings = worker.sh(&format!(
-        "journalctl -u speculaire -p warning --no-pager -o verbose --since '{}'",
-        since.trim()
-    ));
-    // `-o verbose` starts each entry with an unindented line, then a field per indented line.
-    let mut entries: Vec<Vec<&str>> = Vec::new();
-    for line in warnings.lines() {
-        match (line.strip_prefix("    "), entries.last_mut()) {
-            (Some(field), Some(entry)) => entry.push(field),
-            _ => entries.push(Vec::new()),
-        }
-    }
-    let entry = entries
+    let logs = worker
+        .cluster
+        .agent_logs(&worker.name, Some(since))
+        .unwrap();
+    let entry = logs
         .iter()
-        .find(|entry| entry.contains(&"MESSAGE=upstream limits the relay: CRI-O gets a 429"))
-        .unwrap_or_else(|| panic!("no warning of the limit:\n{warnings}"));
+        .find(|entry| {
+            entry.level >= Some(Level::Warn)
+                && entry.message == "upstream limits the relay: CRI-O gets a 429"
+        })
+        .unwrap_or_else(|| panic!("no warning of the limit:\n{}", tail(&logs, 30)));
     for (field, value) in [
-        ("F_STATUS=", "429"),
-        ("F_HOST=", "limit.e2e.test"),
-        ("F_NAME=", "app/web"),
-        ("F_REFERENCE=", "1"),
+        ("status", "429"),
+        ("host", "limit.e2e.test"),
+        ("name", "app/web"),
+        ("reference", "1"),
     ] {
         assert!(
-            entry
-                .iter()
-                .any(|f| f.strip_prefix(field).is_some_and(|v| v.contains(value))),
-            "{field}{value} lacks in {entry:?}"
+            entry.field(field).is_some_and(|v| v.contains(value)),
+            "{field}={value} lacks in {entry}"
         );
     }
 }
@@ -842,7 +839,7 @@ fn on_crio_killing_the_agent_mid_pull_fails_that_pull_and_the_next_one_succeeds(
         assert!(Instant::now() < deadline, "no blob was ever in flight");
         std::thread::sleep(Duration::from_millis(100));
     }
-    worker.sh("systemctl kill --signal=SIGKILL speculaire");
+    worker.cluster.kill_agent(&worker.name).unwrap();
     let status = pull.wait().unwrap();
     assert!(!status.success(), "the pull went on without the agent");
 
@@ -867,8 +864,13 @@ fn on_crio_the_relay_costs_at_most_18_ms_of_cpu_per_mb() {
     let image = format!("{}/app/large:1", upstream.address());
 
     let ticks = |worker: &Worker| -> f64 {
+        let pid = worker
+            .cluster
+            .agent_pid(&worker.name)
+            .unwrap()
+            .expect("the agent runs");
         worker
-            .sh("awk '{print $14 + $15}' /proc/$(systemctl show -p MainPID --value speculaire)/stat")
+            .sh(&format!("awk '{{print $14 + $15}}' /proc/{pid}/stat"))
             .trim()
             .parse()
             .unwrap()

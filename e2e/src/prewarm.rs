@@ -36,9 +36,10 @@ impl Cluster {
                 &format!(
                     "{{ test ! -f {SAVED} || mv {SAVED} {CONFIG}; }} && cp {CONFIG} {SAVED} \
                      && sed -i 's/^#\\{{0,1\\}}poll_interval = [0-9]*$/poll_interval = 1/' {CONFIG} \
-                     && grep -q '^poll_interval = 1$' {CONFIG} && systemctl reload speculaire"
+                     && grep -q '^poll_interval = 1$' {CONFIG}"
                 ),
             )?;
+            self.reload_agent(&reflector)?;
         }
         let nodes =
             u32::try_from(self.nodes()?.len()).map_err(|e| fail("kubectl get nodes", &e))?;
@@ -145,11 +146,10 @@ impl Drop for Prewarm<'_> {
                 &[
                     "sh",
                     "-c",
-                    &format!(
-                        "test ! -f {SAVED} || mv {SAVED} {CONFIG}; systemctl reload speculaire"
-                    ),
+                    &format!("test ! -f {SAVED} || mv {SAVED} {CONFIG}"),
                 ],
             );
+            let _ = self.cluster.reload_agent(&reflector);
         }
     }
 }
