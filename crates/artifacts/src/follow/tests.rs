@@ -148,6 +148,7 @@ fn start_found(
 ) {
     let unlinked = speculaire_mirror::fetch::Fetcher::new(
         std::path::PathBuf::new(),
+        speculaire_mirror::space::Space::new(u64::MAX),
         speculaire_mirror::fetch::Settings {
             stall_timeout: std::time::Duration::from_secs(1),
             deny_ttl: std::time::Duration::from_secs(1),

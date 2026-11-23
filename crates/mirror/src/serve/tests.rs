@@ -78,6 +78,7 @@ async fn start<C: Content>(content: C) -> Server {
     // Unlinked, the fetcher fetches nothing: these tests are of what the node holds.
     let fetcher = crate::fetch::Fetcher::new(
         std::env::temp_dir(),
+        crate::space::Space::new(u64::MAX),
         crate::fetch::Settings {
             stall_timeout: std::time::Duration::from_secs(5),
             deny_ttl: std::time::Duration::from_secs(600),

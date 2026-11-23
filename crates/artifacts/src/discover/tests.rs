@@ -206,7 +206,11 @@ impl Test {
 
     async fn with(limits: Limits, candidates: impl FnOnce(&Registry) -> Vec<Endpoint>) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let unlinked = Fetcher::new(dir.path().join("staging"), SETTINGS);
+        let unlinked = Fetcher::new(
+            dir.path().join("staging"),
+            speculaire_mirror::space::Space::new(u64::MAX),
+            SETTINGS,
+        );
         Self::near(limits, candidates, Arc::new(Nothing), unlinked, dir).await
     }
 
@@ -909,7 +913,11 @@ async fn the_config_digest_is_read_from_the_platform_manifest_the_node_holds() {
     );
     let held = [&index, &amd64, &lone, &unheld].map(|bytes| (digest_of(bytes), bytes.clone()));
     let dir = tempfile::tempdir().unwrap();
-    let peers = Fetcher::new(dir.path().join("staging"), SETTINGS);
+    let peers = Fetcher::new(
+        dir.path().join("staging"),
+        speculaire_mirror::space::Space::new(u64::MAX),
+        SETTINGS,
+    );
     let local = Arc::new(Holding(held.into_iter().collect()));
     let test = Test::near(Limits::new(1024), |_| Vec::new(), local, peers, dir).await;
 

@@ -2,9 +2,9 @@
 //!
 //! [`pull`] starts a reflector and two agents, each a process of its own on a fake containerd: the holder, which holds a
 //! random blob and announces it, and the puller, which holds nothing. It asks the puller's mirror for the blob as
-//! containerd does, a `GET` without `Range`, which the mirror fetches whole from the holder and checks before its first
-//! byte (D102). The puller keeps nothing it fetched, so every pull goes to the holder again. Each is timed to the
-//! answer's first byte and to its last, on a connection of its own.
+//! containerd does, a `GET` without `Range`, whose head the mirror sends once the holder answers, and whose body once it
+//! has fetched the whole blob and checked it (D102, D205). The puller keeps nothing it fetched, so every pull goes to the
+//! holder again. Each is timed to the answer's first byte, of its head, and to its last, on a connection of its own.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;

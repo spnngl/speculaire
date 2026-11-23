@@ -1,8 +1,9 @@
 //! The *blob cache* of a CRI-O node (D67, D88): every manifest and blob the mirror served, by digest, on disk.
 //!
 //! `<directory>/blobs/<algorithm>/<hex>` holds what is kept; `<directory>/tmp/` holds what is being written. A file
-//! enters `blobs/` by rename once its digest matches, so no file there is partial or wrong. The cache is bounded:
-//! above `max_size` it evicts the least recently served blobs first, and the blobs of the images CRI-O lists last.
+//! enters `blobs/` by rename once its digest matches, so no file there is partial or wrong. The cache is bounded by its
+//! [`Space`]'s `max_size`, which the blobs in flight claim too (D205): above it, it evicts the least recently served
+//! blobs first, and the blobs of the images CRI-O lists last.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -19,6 +20,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
 
 use crate::metrics::CacheSeries;
+use crate::space::{Claim, Space};
 
 struct Entry {
     size: u64,
@@ -43,7 +45,7 @@ impl State {
 /// The cache.
 pub struct Cache {
     directory: PathBuf,
-    max_size: AtomicU64,
+    space: Space,
     state: Mutex<State>,
     parts: AtomicU64,
     /// Each blob kept and each blob gone, sent while the state is locked, so in the order the state changed.
@@ -58,17 +60,19 @@ const BACKLOG: usize = 1024;
 pub struct Writer {
     file: tokio::fs::File,
     path: PathBuf,
-    written: u64,
+    /// The bytes written, claimed of the space until the file is kept or deleted.
+    claim: Claim,
     committed: bool,
 }
 
 impl Cache {
-    /// Opens the cache in `directory`: deletes what an earlier run left in `tmp/`, and counts what is kept.
+    /// Opens the cache in `directory`, bounded by `space`: deletes what an earlier run left in `tmp/`, and counts what
+    /// is kept.
     ///
     /// # Errors
     ///
     /// When the directories cannot be made or read.
-    pub fn open(directory: impl Into<PathBuf>, max_size: u64) -> io::Result<Self> {
+    pub fn open(directory: impl Into<PathBuf>, space: Space) -> io::Result<Self> {
         let directory = directory.into();
         let blobs = directory.join("blobs");
         std::fs::create_dir_all(&blobs)?;
@@ -113,7 +117,7 @@ impl Cache {
         }
         let cache = Self {
             directory,
-            max_size: AtomicU64::new(max_size),
+            space,
             state: Mutex::new(state),
             parts: AtomicU64::new(0),
             changes: broadcast::channel(BACKLOG).0,
@@ -146,21 +150,16 @@ impl Cache {
         self.state().total
     }
 
-    /// The bound above which the cache evicts.
+    /// The space that bounds it. A change of its bound applies at the next [`Cache::evict`].
     #[must_use]
-    pub fn max_size(&self) -> u64 {
-        self.max_size.load(Ordering::Relaxed)
+    pub const fn space(&self) -> &Space {
+        &self.space
     }
 
-    /// Changes the bound (`blob_cache.max_size` reloads live, D30). Call [`Cache::evict`] to apply it.
-    pub fn set_max_size(&self, max_size: u64) {
-        self.max_size.store(max_size, Ordering::Relaxed);
-    }
-
-    /// Whether the cache is above its bound.
+    /// Whether what is kept and what is in flight are above the bound.
     #[must_use]
     pub fn over(&self) -> bool {
-        self.size() > self.max_size()
+        self.size() + self.space.claimed() > self.space.max()
     }
 
     /// The blob with `digest`, read without counting as served: the order of eviction stays as it was.
@@ -197,22 +196,22 @@ impl Cache {
         Ok(Writer {
             file,
             path,
-            written: 0,
+            claim: self.space.count(),
             committed: false,
         })
     }
 
-    /// Evicts until the cache is within its bound: the least recently served blobs first, except those in
-    /// `protected`, which go only when nothing else is left.
+    /// Evicts until what is kept and what is in flight are within the bound: the least recently served blobs first,
+    /// except those in `protected`, which go only when nothing else is left.
     ///
     /// Returns the digests evicted.
     pub fn evict(&self, protected: &HashSet<Digest>) -> Vec<Digest> {
         let mut evicted = Vec::new();
-        let max = self.max_size();
+        let max = self.space.max();
         loop {
             let victim = {
                 let state = self.state();
-                if state.total <= max {
+                if state.total + self.space.claimed() <= max {
                     break;
                 }
                 state
@@ -257,9 +256,9 @@ impl Writer {
     ///
     /// When the file cannot be written.
     pub async fn write(&mut self, chunk: &[u8]) -> io::Result<()> {
-        self.file.write_all(chunk).await?;
-        self.written += chunk.len() as u64;
-        Ok(())
+        // Counted, never refused: a blob CRI-O pulls now is the most recently served, and pushes older ones out (D205).
+        self.claim.add(chunk.len() as u64);
+        self.file.write_all(chunk).await
     }
 
     /// Keeps the file as the blob `digest`, by rename: the caller has checked the digest.
@@ -275,21 +274,17 @@ impl Writer {
         }
         tokio::fs::rename(&self.path, &target).await?;
         self.committed = true;
+        let size = self.written();
         let mut state = cache.state();
         let last = state.tick();
         // A blob kept twice, by two pulls at once, is the same file: count it once.
-        if let Some(old) = state.entries.insert(
-            digest.clone(),
-            Entry {
-                size: self.written,
-                last,
-            },
-        ) {
+        if let Some(old) = state.entries.insert(digest.clone(), Entry { size, last }) {
             state.total -= old.size;
         } else {
             let _ = cache.changes.send(Change::Added(digest.clone()));
         }
-        state.total += self.written;
+        // Counted twice until the claim drops with the writer: an eviction meanwhile errs on the side of the disk.
+        state.total += size;
         drop(state);
         cache.report();
         Ok(())
@@ -298,7 +293,7 @@ impl Writer {
     /// How many bytes were written.
     #[must_use]
     pub const fn written(&self) -> u64 {
-        self.written
+        self.claim.bytes()
     }
 }
 

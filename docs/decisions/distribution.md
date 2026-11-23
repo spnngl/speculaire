@@ -177,7 +177,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Cost:** on CRI-O the agent sits in the path of every pull from a mirrored registry, and relays what it fetches from upstream. When it is down, CRI-O pulls from upstream.
 - **Revisit when:** CRI-O gains a per-blob fallback across sources.
 
-## D67: On CRI-O, the agent serves from its own blob cache, which the mirror fills (amends D5, D7; amended by D88, D102)
+## D67: On CRI-O, the agent serves from its own blob cache, which the mirror fills (amends D5, D7; amended by D88, D102, D205)
 
 - **Decision:**
   - On CRI-O, the *blob cache* `/var/lib/speculaire/blobs/` replaces D5's content directory. It holds, by digest, every manifest and blob the mirror served to CRI-O. The peer API and the mirror read from it.
@@ -300,7 +300,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M3 step 04):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass `e2e/tests/peer.rs` in 1.1 s and 0.8 s: the second worker's peer API serves a pulled 1 MiB layer whole (SHA-256 checked) and its first 100 bytes as a `206` to the first worker's kubelet certificate, and refuses no certificate and kube-apiserver's `apiserver-kubelet-client` one, of the cluster CA but not a node's. In `crates/mirror/src/peer/tests.rs`, with `peer.max_uploads = 1`, a second `GET` of a body while a 64 MiB one is in flight answers `503` at once, and once stopping a new request answers `503` while the 64 MiB body in flight completes. The agent's own drain is D110's test.
 - **Revisit when:** peers need a request the mirror's parser does not route, or a node must serve on several addresses.
 
-## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103, D123, D126, D196)
+## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103, D123, D126, D196, D205)
 
 - **Decision:**
   - **Where:** `speculaire_mirror::fetch::Fetcher`, linked once P2P starts to a `Lookup` (the agent's adapter over the reflector client) and the node identity. Before that, or when the lookup fails, names no holder or only denied ones, the pull falls through (D66).
@@ -449,7 +449,6 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - Refusing the tree, as an invalid `hosts.toml` does (D91), would keep the previous registry config for every host because of one stray file, such as a `README` named after a host.
 - **Revisit when:** containerd skips such a file or reads a host from it, or the agent must refuse what containerd refuses.
 
-
 ## D201: On CRI-O with `auto_reload_registries = true`, `configure` and `unconfigure` leave the reload to CRI-O (amends D66, D84)
 
 - **Decision:**
@@ -465,3 +464,25 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
   - CRI-O watches `registries.conf.d` only if the directory exists when CRI-O starts (v1.37.2 `server/server.go:1215-1219`). Otherwise it reads the drop-in at its next restart.
   - `unconfigure` deletes the certificates before CRI-O's 200 ms debounce ends. A pull in that window fails its handshake with the mirror, and CRI-O takes its next source, as with a stopped mirror (D66).
 - **Revisit when:** CRI-O turns `auto_reload_registries` on by default, or drops the watcher.
+
+## D205: On containerd, a peer blob's head goes out at once and its body once checked; blobs in flight count against `blob_cache.max_size` (amends D67, D102)
+
+- **Decision:**
+  - **Head first (containerd):** a `GET` without `Range` of a blob the node lacks is answered `200`, with the size the first peer gave as `Content-Length`, as soon as a peer answers and the space below holds that size. The body waits until the blob is whole in `staging/` and matches its digest, as in D102, then streams from the staging file. When no peer sends it right, D102's 3 rounds over, the body fails before its first byte: hyper resets the connection.
+  - **Broken:** a blob whose body failed, or whose client left before its first byte, falls through for 60 s, so containerd's next read of it goes upstream rather than to peers that just failed.
+  - **Unchanged:** a manifest still waits whole and checked, since its `Content-Type` comes from its content (D85); `HEAD` and `Range` of a digest the node lacks fall through; CRI-O streams as in D102.
+  - **Space:** `blob_cache.max_size` bounds every byte the mirror writes under `blob_cache.directory`: blobs kept (CRI-O's cache) and blobs in flight. A staging file claims the size its peer gave before its first byte and holds it until its last byte is sent; a claim the space cannot hold is refused, and the pull falls through. A cache write counts each chunk as it writes it, never refused, and the cache evicts until what it keeps plus what is in flight fits. A reload changes the bound for both runtimes (`speculaire_mirror::space::Space`).
+- **Because:**
+  - containerd gives up on a response's head after 30 s, `ResponseHeaderTimeout` (`core/remotes/docker/registry.go:267`, v2.3.7 and v2.4.2), then tries the next host, upstream (`core/remotes/docker/fetcher.go:347-359` at v2.4.2, `:342-354` at v2.3.7). Once the head is in, only CRI's `image_pull_progress_timeout` bounds the wait for body bytes, 5 min without progress across the pull's requests by default (`internal/cri/config/config.go:62` at v2.4.2, `:63` at v2.3.7; `internal/cri/server/images/image_pull.go:745-754`). D102's whole-blob check therefore sent upstream every blob that peers took more than 30 s to send and the node to check.
+  - Streaming unchecked bytes and resetting on a mismatch was rejected: containerd checks the digest only at commit (`plugins/content/local/writer.go:135`), keeps the ingest when it fails, and resumes it at its offset on the next attempt (`core/content/helpers.go:209-210`), so wrong bytes would poison every retry, upstream's included (D102). Sending nothing before the check keeps D52's guarantee whole: no byte of a bad peer reaches the content store, and the peer is denied.
+  - A body that fails with no byte read is an `io.ErrUnexpectedEOF` without progress, which containerd's reader answers by opening the blob again at offset 0, mirror first (`core/remotes/docker/httpreadseeker.go:86-103`, same lines at v2.3.7 and v2.4.2); the 60 s memo makes that open a `404`, so the pull goes on from upstream.
+  - One bound for the directory is what an admin sizes: staging and the cache share it, and a bound per kind would leave room the other needs.
+  - A cache write evicts rather than being refused: the blob CRI-O pulls now is the most recently served, which D67 keeps over older ones; refusing it kept the older blobs and relayed the new one unkept, which the e2e eviction cases of `e2e/tests/relay.rs` caught.
+- **Limit:**
+  - A blob that peers take more than 5 min to send, with no other layer of the pull progressing meanwhile, fails that pull instead of going upstream after 30 s; kubelet's retry goes upstream.
+  - The `Content-Length` is the first peer's word: a peer that lies on it is caught by the digest, as any wrong byte is.
+  - A blob larger than `blob_cache.max_size` never comes from peers on containerd.
+- **Measured (M8):**
+  - `e2e/tests/fetch.rs`, B pulling a 40 MiB blob only A holds, A throttled to 8 Mbit/s, containerd 2.4: before D205, containerd gave up on the head after 30.4 s and B got the blob from upstream (CI, arm64); with D205 the pull takes 43.6 s, all from A (kind, arm64, Docker). The bound moved from 30 s to fetch and check a blob, about 28 MiB at that rate, to 5 min without progress.
+  - `just profile peer`, 30 pulls of 64 MiB through a peer on loopback (arm64, Docker), p50 before → after: first byte 90-96 ms → 1.0 ms, the head now leading the body; last byte 173-192 ms → 69-71 ms.
+- **Revisit when:** containerd checks a blob's digest before it keeps any byte of a failed body; then stream unchecked bytes as on CRI-O.

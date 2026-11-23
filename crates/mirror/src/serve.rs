@@ -365,13 +365,7 @@ pub(crate) async fn blob_response(
         range(range_header, size)
     };
     let mut response = Response::new(empty());
-    let headers = response.headers_mut();
-    headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
-    );
-    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    insert_digest(headers, digest);
+    insert_blob(response.headers_mut(), digest);
     let span = match ranged {
         Ranged::Whole => Span::whole(size),
         Ranged::Part(span) => {
@@ -406,6 +400,29 @@ pub(crate) async fn blob_response(
         *response.body_mut() = StreamBody::new(frames).boxed_unsync();
     }
     Ok(response)
+}
+
+/// The whole of a blob of `size` bytes, whose `body` may wait for it while the head goes out at once (D205).
+pub(crate) fn held_response(
+    digest: &Digest,
+    size: u64,
+    body: impl futures_util::Stream<Item = io::Result<Bytes>> + Send + 'static,
+) -> Response<Body> {
+    let mut response = Response::new(StreamBody::new(body.map_ok(Frame::data)).boxed_unsync());
+    let headers = response.headers_mut();
+    insert_blob(headers, digest);
+    headers.insert(CONTENT_LENGTH, HeaderValue::from(size));
+    response
+}
+
+/// The headers every answer with a blob has.
+fn insert_blob(headers: &mut HeaderMap, digest: &Digest) {
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    insert_digest(headers, digest);
 }
 
 pub(crate) fn insert_digest(headers: &mut HeaderMap, digest: &Digest) {

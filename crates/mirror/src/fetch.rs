@@ -38,6 +38,7 @@ use tracing::{Instrument as _, Span, debug, debug_span, field, info, warn};
 
 use crate::metrics::{FetchSeries, Fetched};
 use crate::request::Kind;
+use crate::space::{Claim, Space};
 
 mod referrers;
 mod tag;
@@ -97,6 +98,8 @@ pub struct Fetcher(Arc<Shared>);
 struct Shared {
     /// Where a blob is written while it is checked, as an unnamed file.
     staging: PathBuf,
+    /// What the staging files claim their size of (D205).
+    space: Space,
     settings: Mutex<Settings>,
     /// The lookup and the node identity, once P2P starts; until then nothing is fetched.
     link: OnceLock<Link>,
@@ -113,11 +116,12 @@ struct Link {
 }
 
 impl Fetcher {
-    /// A fetcher that stages blobs in `staging` and fetches nothing until [`Fetcher::link`].
+    /// A fetcher that stages blobs in `staging`, within `space`, and fetches nothing until [`Fetcher::link`].
     #[must_use]
-    pub fn new(staging: PathBuf, settings: Settings) -> Self {
+    pub fn new(staging: PathBuf, space: Space, settings: Settings) -> Self {
         Self(Arc::new(Shared {
             staging,
+            space,
             settings: Mutex::new(settings),
             link: OnceLock::new(),
             denied: Mutex::default(),
@@ -148,28 +152,38 @@ impl Fetcher {
     }
 
     /// `digest` whole, from peers, staged in an unnamed file and checked against its digest before anything is served.
-    /// `None` when no peer has it, or none sent it right.
+    /// `None` when no peer has it, none sent it right, or the space cannot hold it. Its claim ends as it is returned:
+    /// for what is read at once, as a manifest.
     pub async fn whole(&self, kind: Kind, digest: &Digest) -> Option<Blob> {
         self.whole_up_to(kind, digest, u64::MAX).await
     }
 
     /// [`Self::whole`], but `None` without staging anything when a peer says it is larger than `max` bytes.
     pub async fn whole_up_to(&self, kind: Kind, digest: &Digest, max: u64) -> Option<Blob> {
-        for _ in 0..ROUNDS {
-            let mut download = self.download(kind, digest).await?;
-            if download.size > max {
-                debug!(%digest, size = download.size, max, "content from peers is larger than wanted: it is not fetched");
-                return None;
-            }
-            let mut hash = Hash::new(digest);
-            let staged = self.stage(&mut download, &mut hash).await?;
-            if hash.matches() {
-                download.finish(true);
-                return Some(staged);
-            }
-            download.finish(false);
+        let staged = self.stage(kind, digest, max).await?.finish().await?;
+        Some(staged.blob)
+    }
+
+    /// Starts staging `digest` from peers: a peer answered, and the space holds the size it said (D205). `None` when no
+    /// peer answers, a peer says it is larger than `max` bytes, or the space cannot hold it.
+    pub async fn stage(&self, kind: Kind, digest: &Digest, max: u64) -> Option<Staging> {
+        let download = self.download(kind, digest).await?;
+        let size = download.size;
+        if size > max {
+            debug!(%digest, size, max, "content from peers is larger than wanted: it is not fetched");
+            return None;
         }
-        None
+        let Some(claim) = self.0.space.claim(size) else {
+            info!(%digest, size, claimed = self.0.space.claimed(), max = self.0.space.max(), "blobs in flight claim blob_cache.max_size: this one is pulled from upstream");
+            return None;
+        };
+        Some(Staging {
+            fetcher: self.clone(),
+            digest: digest.clone(),
+            download,
+            max,
+            claim,
+        })
     }
 
     /// The body of a blob from peers, as it arrives, or `None` when no peer answers. The caller hashes it and ends it
@@ -208,8 +222,8 @@ impl Fetcher {
         })
     }
 
-    /// The whole of `download`, a blob or a manifest, in an unnamed file of the staging directory, hashed into `hash`.
-    async fn stage(&self, download: &mut Download, hash: &mut Hash) -> Option<Blob> {
+    /// The rest of `download` in an unnamed file of the staging directory, hashed into `hash`.
+    async fn write(&self, download: &mut Download, hash: &mut Hash) -> Option<Blob> {
         let staging = self.0.staging.clone();
         let file = tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&staging)?;
@@ -234,6 +248,70 @@ impl Fetcher {
         }
         Some(Blob::from_open(file.into_std().await, download.size))
     }
+}
+
+/// Content from peers on its way to the staging directory: a peer answered with its size, which the space holds; no byte
+/// of it is checked yet.
+pub struct Staging {
+    fetcher: Fetcher,
+    digest: Digest,
+    download: Download,
+    max: u64,
+    claim: Claim,
+}
+
+impl Staging {
+    /// The size the first peer to answer said.
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.download.size
+    }
+
+    /// The whole content, checked against its digest. A mismatch denies every peer that sent part of it and starts
+    /// over without them, three times at most; a peer of a later round may say another size, which the space must
+    /// hold and `max` bound. `None` when no peer is left, or none sent it right.
+    pub async fn finish(self) -> Option<Staged> {
+        let Self {
+            fetcher,
+            digest,
+            download,
+            max,
+            mut claim,
+        } = self;
+        let kind = download.kind;
+        let mut first = Some(download);
+        for _ in 0..ROUNDS {
+            let mut download = match first.take() {
+                Some(download) => download,
+                None => fetcher.download(kind, &digest).await?,
+            };
+            let size = download.size;
+            if size > max {
+                debug!(%digest, size, max, "content from peers is larger than wanted: it is not fetched");
+                return None;
+            }
+            if size > claim.bytes() && !claim.grow(size - claim.bytes()) {
+                info!(%digest, size, claimed = fetcher.0.space.claimed(), max = fetcher.0.space.max(), "blobs in flight claim blob_cache.max_size: this one is pulled from upstream");
+                return None;
+            }
+            let mut hash = Hash::new(&digest);
+            let blob = fetcher.write(&mut download, &mut hash).await?;
+            if hash.matches() {
+                download.finish(true);
+                return Some(Staged { blob, claim });
+            }
+            download.finish(false);
+        }
+        None
+    }
+}
+
+/// Content from peers, whole and checked, in a staging file.
+pub struct Staged {
+    /// The content.
+    pub blob: Blob,
+    /// Its size, claimed of the space while the file is read.
+    pub claim: Claim,
 }
 
 impl Shared {

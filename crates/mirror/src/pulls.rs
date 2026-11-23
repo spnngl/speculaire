@@ -1,9 +1,13 @@
 //! What answers a pull: this node's own content on containerd, the relay on CRI-O (D66).
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::{Stream, StreamExt as _, TryStreamExt as _};
 use http::header::RETRY_AFTER;
 use http::{HeaderValue, StatusCode};
 use http_body_util::combinators::UnsyncBoxBody;
@@ -11,8 +15,10 @@ use hyper::Response;
 use speculaire_oci::reference::Digest;
 use speculaire_oci::tagged::Tagged;
 use speculaire_runtime::content::{Blob, Content, Error};
+use tokio::time::Instant;
+use tracing::warn;
 
-use crate::fetch::Fetcher;
+use crate::fetch::{Fetcher, Staging};
 use crate::metrics::Source;
 use crate::request::{Kind, Reference};
 use crate::serve::status;
@@ -101,13 +107,94 @@ pub trait Pulls: Send + Sync + 'static {
 pub struct Local<C> {
     content: C,
     fetcher: Fetcher,
+    broken: Broken,
 }
 
 impl<C: Content> Local<C> {
     /// Answers from `content`, and fetches a digest it lacks with `fetcher`.
-    pub const fn new(content: C, fetcher: Fetcher) -> Self {
-        Self { content, fetcher }
+    pub fn new(content: C, fetcher: Fetcher) -> Self {
+        Self {
+            content,
+            fetcher,
+            broken: Broken::default(),
+        }
     }
+}
+
+/// How long a blob whose body failed falls through, so that containerd's next try of it goes upstream.
+const BROKEN_FOR: Duration = Duration::from_secs(60);
+
+/// The blobs whose body failed after their head went out, until when each falls through (D205).
+#[derive(Clone, Default)]
+struct Broken(Arc<Mutex<HashMap<Digest, Instant>>>);
+
+impl Broken {
+    fn holds(&self, digest: &Digest) -> bool {
+        let now = Instant::now();
+        let mut broken = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        broken.retain(|_, until| *until > now);
+        broken.contains_key(digest)
+    }
+
+    fn mark(&self, digest: Digest) {
+        let until = Instant::now() + BROKEN_FOR;
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(digest, until);
+    }
+}
+
+/// A blob whose head is out and whose body is not: dropped so, it marks its digest broken.
+struct Unsent {
+    digest: Digest,
+    broken: Broken,
+    sent: bool,
+}
+
+impl Unsent {
+    const fn sent(&mut self) {
+        self.sent = true;
+    }
+}
+
+impl Drop for Unsent {
+    fn drop(&mut self) {
+        if !self.sent {
+            self.broken.mark(self.digest.clone());
+        }
+    }
+}
+
+/// The body of a blob from peers whose head said `size` bytes: nothing until it is whole and checked, then its bytes.
+/// When no peer sends it right, or the blob is another size, the body fails before its first byte, so containerd keeps
+/// none of it. That, or containerd giving up first, marks `digest` broken.
+fn held(
+    staging: Staging,
+    digest: Digest,
+    size: u64,
+    broken: Broken,
+) -> impl Stream<Item = io::Result<Bytes>> + Send {
+    let mut unsent = Unsent {
+        digest,
+        broken,
+        sent: false,
+    };
+    futures_util::stream::once(async move {
+        let Some(staged) = staging.finish().await.filter(|staged| staged.blob.size() == size) else {
+            warn!(digest = %unsent.digest, "no peer sent the blob right after its head was sent: the pull goes upstream");
+            return Err(io::Error::other("no peer sent the blob right"));
+        };
+        unsent.sent();
+        let chunks = staged.blob.stream(0, size).await.map_err(io::Error::other)?;
+        let claim = staged.claim;
+        // The staging file stays claimed of the space until its last byte is sent.
+        Ok(chunks.map(move |chunk| {
+            let _ = &claim;
+            chunk.map_err(io::Error::other)
+        }))
+    })
+    .try_flatten()
 }
 
 impl<C: Content> Pulls for Local<C> {
@@ -130,6 +217,22 @@ impl<C: Content> Pulls for Local<C> {
         // fall through (D102).
         if !matches!(answer, Answer::Missing) || pull.head || pull.range.is_some() {
             return answer;
+        }
+        // containerd waits 30 s for the head of an answer, and five minutes for the next byte of its body: a blob's
+        // head goes out as soon as a peer answers, and its body once it is whole and checked (D205).
+        if pull.kind == Kind::Blob {
+            if self.broken.holds(digest) {
+                return Answer::Missing;
+            }
+            let Some(staging) = self.fetcher.stage(pull.kind, digest, u64::MAX).await else {
+                return Answer::Missing;
+            };
+            let size = staging.size();
+            let body = held(staging, digest.clone(), size, self.broken.clone());
+            return Answer::Served(
+                Source::Peer,
+                crate::serve::held_response(digest, size, body),
+            );
         }
         match self.fetcher.whole(pull.kind, digest).await {
             Some(blob) => from_blob(blob, Source::Peer, pull.kind, digest, false, None).await,
@@ -172,3 +275,6 @@ async fn from_blob(
         Err(crate::serve::Miss::Failed(err)) => Answer::Failed(err),
     }
 }
+
+#[cfg(test)]
+mod tests;
