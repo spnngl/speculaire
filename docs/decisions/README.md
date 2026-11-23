@@ -40,7 +40,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21; amended by D165, D176, D204)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84, D191)
-- D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104, D202)
+- D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104, D202, D206)
 - D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109, D116, D182, D186, D188)
 - D35 [build](build.md): benchmarks against Spegel with `spegel-org/benchmark`: nightly on kind, and on any kubeadm cluster, through its kubeconfig, before each minor release, which must not be more than 5% slower (amended by D106, D114)
 - D36 [distribution](distribution.md): the peer address is the local IP of the reflector connection, unless `peer.address` is set (amends D3; amended by D56, D100)
@@ -215,3 +215,4 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D203 [build](build.md): `speculaire` sets `PR_SET_THP_DISABLE` at start on Linux unless `MIMALLOC_ALLOW_THP` is set, 30 MiB less for the reflector at D33's load (amends D46)
 - D204 [agent](agent.md): the agent raises its soft `RLIMIT_NOFILE` to the hard limit at start, and creates or narrows the directory of `verify.cache` to 0700 before it loads `cache.bin`; outside systemd a probe on `/livez` stands in for the watchdog (amends D31, D53, D69)
 - D205 [distribution](distribution.md): on containerd a peer blob's head goes out once a peer answers, its body once whole and checked, and a body that fails sends the blob upstream for 60 s; `blob_cache.max_size` bounds the blobs in flight with those kept (amends D67, D102)
+- D206 [reflector](reflector.md): the reflector's memory goal at D33's load is 384 MiB, with D46's secure mimalloc kept (amends D33)
