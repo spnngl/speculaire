@@ -150,7 +150,7 @@ impl Index {
             inner.unhold(slot, number);
         }
         inner.pairs += fresh.len();
-        inner.agent(slot).digests = held;
+        inner.agent(slot).digests = fitted(&held);
         inner.publish(&self.series);
         Ok(())
     }
@@ -186,6 +186,8 @@ impl Index {
         for &key in added {
             inner.hold(slot, key);
         }
+        let agent = inner.agent(slot);
+        agent.digests = fitted(&agent.digests);
         inner.publish(&self.series);
         Ok(())
     }
@@ -399,6 +401,13 @@ impl Holders {
             self.nodes.insert(slot);
         }
     }
+}
+
+/// A copy of `bitmap` sized to what it holds: a bitmap grows a container by doubling it, and a node keeps its digests
+/// for as long as its stream lasts. At D33's 10k nodes of 2k digests, the slack was 23 MB (D202).
+fn fitted(bitmap: &RoaringBitmap) -> RoaringBitmap {
+    // Cloning a `Vec` allocates its length only.
+    bitmap.clone()
 }
 
 /// The key of digest `number`, which the table of digest numbers holds.
