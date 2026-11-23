@@ -1067,7 +1067,10 @@ fn prewarmed(worker: &Worker, runnable: &str) {
     cluster.start_agent(&worker.node).unwrap();
 
     let prewarm = cluster.prewarm().unwrap();
-    let written = prewarm.write(&[runnable], 300).unwrap();
+    // A round waits for its seeds to announce every layer (D185). A node that kept a layer's snapshot after an
+    // earlier removal pulls no blob of that layer and never announces it (containerd v2.4.2
+    // `core/unpack/unpacker.go:508-520`), so 1 s, not the default 300 s, keeps a seed from holding the others back.
+    let written = prewarm.write(&[runnable], 1).unwrap();
     // The pull's fetch through the mirror verifies it (D152); the images held at the start verify under `event`.
     let allowed = || {
         count(
