@@ -2,7 +2,7 @@
 //! a host, corrupt a blob it serves, and read its metrics, logs and audit events.
 //!
 //! The suites act on the agent only through these helpers, which alone run `systemctl` and `journalctl` on it, except
-//! the suites of the unit itself (D195).
+//! the suites of the unit itself (D200).
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -561,7 +561,7 @@ impl Cluster {
 
     /// Adds the node's metrics in the protobuf exposition to the leg's scrapes, one file each, for the catalog check
     /// (D182); nothing when the agent does not answer or `just e2e-test` named no directory. Each helper that stops the
-    /// agent calls it first (D195).
+    /// agent calls it first (D200).
     ///
     /// # Errors
     ///
@@ -1074,7 +1074,7 @@ mod tests {
     }
 
     /// Outside these helpers and the suites of the unit itself, `systemctl` and `journalctl` act on the runtime only, on
-    /// lines that name it (D195): an agent run as a `DaemonSet` has no unit.
+    /// lines that name it (D200): an agent run as a `DaemonSet` has no unit.
     #[test]
     fn the_suites_act_on_the_agent_only_through_the_node_helpers() {
         const SYSTEMD_ONLY: [&str; 6] = [

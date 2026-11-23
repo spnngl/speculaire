@@ -448,13 +448,13 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
 
 
-## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159, D190)
+## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159, D190, D200)
 
 - **Decision:**
   - **Reflectors:** the agents of the control plane and of the first worker run `role = "reflector"` (D2 puts reflectors on control-plane nodes; kind's second control plane would add an etcd member and kind's own balancer for nothing the peer suites test). Both are in every agent's `reflector.members`, by node name and kind-network address, port 7483; the second worker is the client no reflector runs on.
   - **Balancer:** `just e2e-up` starts `<cluster>-lb` on kind's network: Envoy at the release kind v0.33.0 runs in front of its API servers (`pkg/cluster/internal/loadbalancer/const.go:20`, a tag there, a digest in the justfile), with a static config that passes TCP through on 7483 to both reflectors' `reflector.listen`, round robin, with a TCP health check every second. Every agent's `reflector.url` is `https://<balancer address>:7483`. To stop a backend, `e2e::balancer::Balancer::stop` rejects the balancer's connections to port 7483 on that node with a TCP reset, until its guard drops; the health check fails and the balancer moves on. The agent stays up, so the same helper serves "a reflector is gone for discovery" and an outage of the agent itself (`Cluster::stop_agent`) stays a separate case.
   - **Upstream:** `just e2e-up` starts `<cluster>-upstream.e2e.test`, D88's registry image on port 80, and points every node's runtime at it over plain HTTP before `speculaire configure`. `e2e::upstream::Upstream::push` creates an image of one random layer, so no node holds its blobs; `requests` parses the access log into (method, path, status), and `blob_gets` counts the `GET`s of each blob of an image.
-  - **Node helpers** (`e2e::node`): stop, start, kill and reset (empty journal, restart) an agent; a `tc netem` qdisc on the node's `eth0` until its guard drops; corrupt the file a node serves a blob from (containerd's content store, the agent's blob cache on CRI-O); read a node's metrics.
+  - **Node helpers** (`e2e::node`): stop, start, restart, reload, kill and reset (empty logs, restart) an agent, and read its PID and logs (D200); a `tc netem` qdisc on the node's `eth0` until its guard drops; corrupt the file a node serves a blob from (containerd's content store, the agent's blob cache on CRI-O); read a node's metrics.
   - **Dual stack:** `SPECULAIRE_E2E_IP_FAMILY=dual` makes `just e2e-up` write `networking.ipFamily: dual` and name the cluster `<cluster>-dual`; the balancer, `reflector.url` and `reflector.members` then use IPv6 addresses. The Kubernetes argument stays last, and the variable selects the family for `e2e-test` and `e2e-down` too.
   - **Legs:** each of the 14 legs runs the suites twice, IPv4 then dual stack, netem included. `e2e-down` with arguments removes only its cluster's containers, by the label `speculaire-e2e.cluster=<cluster>`.
 - **Because:**
@@ -801,12 +801,12 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** `just bench` builds the e2e crate. The gate's p99 on kind carries no release bar, as D106's numbers.
 - **Revisit when:** the bench images are signed, or `spegel-org/benchmark` adds images outside `ghcr.io/spegel-org/benchmark`: the policy must still match and fail them.
 
-## D182: Each e2e leg must emit every catalog row of its runtime, read from protobuf scrapes taken before each agent stop and after the suites (amends D34, D109)
+## D182: Each e2e leg must emit every catalog row of its runtime, read from protobuf scrapes taken before each agent stop and after the suites (amends D34, D109; amended by D200)
 
 - **Decision:**
   - **Runtime column:** each row of `docs/metrics.md` names the runtime whose agents emit it: `both`, `containerd` or `CRI-O`. Only `speculaire_blob_cache_bytes` and `speculaire_blob_cache_evictions_total` are `CRI-O` (D67).
   - **Emitted:** a metric is emitted on a leg when its family name appears in at least one protobuf scrape of any agent of the leg, whatever its labels or value. A counter or gauge described at startup counts at zero; a native histogram counts once it has observed a sample.
-  - **Scrapes:** `just e2e-test` names the leg's directory, `target/e2e/scrapes/<cluster>` without `-dual`, in `SPECULAIRE_E2E_SCRAPES`. The harness saves a node's `/metrics` in the protobuf exposition before each `docker exec` whose command runs `systemctl` on the agent's unit to stop, restart, kill or disable it, and `just e2e-test` saves every node's after the last suite. The agent drops no family while it runs, so these hold every family of every agent process.
+  - **Scrapes:** `just e2e-test` names the leg's directory, `target/e2e/scrapes/<cluster>` without `-dual`, in `SPECULAIRE_E2E_SCRAPES`. The harness saves a node's `/metrics` in the protobuf exposition before each stop, restart, kill or disable of the agent, and `just e2e-test` saves every node's after the last suite. The `e2e::node` helper that stops the agent scrapes first, as do the systemd-only suites before their own `systemctl` (D200). The agent drops no family while it runs, so these hold every family of every agent process.
   - **Reverse check:** `catalog`, a binary of the e2e crate, fails naming each row without a `Planned` cell, for `both` or the leg's runtime, that no scrape holds. `just e2e` runs it after the IPv4 pass of every leg, on pull requests and on main. The IPv4 pass clears the directory; the dual-stack pass only adds scrapes to it.
   - **Forward check:** `e2e/tests/unit.rs` reads each node's protobuf exposition and fails on a family the catalog does not list for the cluster's runtime.
   - **Exclusions:** a row the suites cannot emit is excluded by name here, with its reason; none is.
@@ -816,8 +816,8 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - An agent's families live until it stops; a scrape before each stop is the last view of that process, and one after the suites covers the agents left running. Scraping on a schedule would miss a family a short-lived process held.
   - One check per leg, after the IPv4 pass, needs no second cluster; the dual-stack pass runs the same code paths over other addresses (D94).
 - **Measured:** locally on Docker Desktop arm64, the IPv4 pass of `just e2e`: CRI-O 1.37 took 12.3 min, with 132 scrapes holding all 39 rows required; containerd 2.4 12.4 min, with 106 scrapes holding all 37. A scrape takes 92 ms, about 12 s per pass. No row needed a new case. With `speculaire_reflector_resync_seconds`'s row removed, the protobuf forward check failed on the control plane, and main's, on the text exposition, passed.
-- **Cost:** a row the suites stop exercising fails every leg until a case emits it again or this decision excludes it. A family seen under any label passes, so a label value never set goes unnoticed. A stop that bypasses `systemctl`, or a crash, loses the families since the last scrape.
-- **Revisit when:** a suite stops an agent other than through `systemctl`, or a metric is emitted only on some runtime versions of a leg.
+- **Cost:** a row the suites stop exercising fails every leg until a case emits it again or this decision excludes it. A family seen under any label passes, so a label value never set goes unnoticed. A stop that bypasses the helpers, or a crash, loses the families since the last scrape.
+- **Revisit when:** a suite stops an agent other than through the helpers, or a metric is emitted only on some runtime versions of a leg.
 
 ## D190: Pull requests run the e2e suites in the IPv4 pass only; main runs both passes (amends D94, D113, D159)
 
@@ -876,3 +876,18 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Because:** D157's job made the project pass its own gate (D28). D194 left the image to spnngl/images and dropped the job, so nothing runs the gate on an attested speculaire image.
 - **Cost:** the policy lives in spnngl/images and names its workflow; a rename there fails the check until the policy follows.
 - **Revisit when:** spnngl/images stops building speculaire (D194).
+
+## D200: The e2e suites act on the agent only through `e2e::node` helpers; D182's scrapes key on the helpers that stop it (amends D94, D182)
+
+- **Decision:**
+  - **Helpers:** `e2e/src/node.rs` holds every `systemctl` and `journalctl` call on the agent. `Cluster` stops it (`stop_agent`, `stop_agent_then`, `stop_agent_no_wait`, `wait_stopped`), starts, restarts, reloads and kills it, resets it with empty logs, and reads its PID, its node's clock, its logs and its audit events. The suites and `e2e::prewarm` call these; restarting the runtime and editing configs stay in the suites.
+  - **Logs:** `agent_logs` and `audit` return `e2e::logs::Entry`: receipt time, level, message, and fields by lower-case name. The journal's JSON export (`F_<FIELD>`, `PRIORITY`) and the agent's JSON lines (`fields.<field>`, `level`) parse to the same entry. A line outside the log format, such as the exit error, is an entry without a level.
+  - **Scrapes:** each helper that stops, restarts, kills or empties the agent scrapes first (D182). The systemd-only suites call `Cluster::scrape` before their own stop.
+  - **Systemd-only:** `unit.rs`, `unit_reload.rs`, `unit_restart.rs`, `preflight.rs` and `operations.rs` test the unit and the guide's commands, and keep `systemctl`. A unit test in `node.rs` fails on any other line of the suites that runs `systemctl` or `journalctl` without naming the runtime.
+- **Because:**
+  - A DaemonSet's agent has no unit (M8). Behind one helper, a DaemonSet run swaps each body, signals from the node and the pod's logs, and the suites stay as they are.
+  - D182 matched the command string, which a stop by signal or by `kubectl` never contains. Keyed on the helper, the scrape follows the stop whatever runs it.
+  - The two log formats name fields differently; one entry type lets a suite read a field once.
+- **Measured:** the unit test failed on `main`, naming 64 lines in 14 files.
+- **Cost:** a suite that needs a new action on the agent adds a helper. A systemd-only suite that stops the agent scrapes by hand.
+- **Revisit when:** the systemd-only suites get pod twins, or a suite needs a journal field that the JSON lines lack.

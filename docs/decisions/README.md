@@ -101,7 +101,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D91 [agent](agent.md): the registry config is parsed into a snapshot that a reload swaps (SIGHUP, or a poll that finds a watched file changed); a bad file keeps the previous one and is logged once and counted; `blob_cache.max_size` is live (amends D47, D89; amended by D92, D93)
 - D92 [agent](agent.md): a credential, certificate or key file that cannot be used leaves its hosts anonymous or without it, logged and counted once per reload, and the rest of the snapshot is built; certificate files are read at reload, never per request (amends D89, D91; amended by D93)
 - D93 [agent](agent.md): a poll reads a file again when its `stat` (modification time, length, device, inode) differs from the one taken before the previous read, or it appeared or went (amends D30, D91, D92; amended by D96, D108)
-- D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159, D190)
+- D94 [build](build.md): the e2e cluster runs reflectors on the control plane and the first worker behind an Envoy TCP balancer, an upstream registry whose access log the suites read, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159, D190, D200)
 - D95 [identity](identity.md): the identity and the CA are held in memory, read again when their file's stamp changes or on SIGHUP; a bad file keeps the previous one; `speculaire_p2p_enabled` follows a valid identity (amends D16)
 - D96 [agent](agent.md): a stamp also holds the change time, so a write whose modification time was restored is a change (amends D93)
 - D97 [reflector](reflector.md): protocol version 1, unary `Lookup` of at most 8 random holders, `Snapshot` chunks of 10k digests; a stream is refused at a 5 s handshake, a 4 MiB message, 100k digests or a peer address that is not `ip:port`; `deep` runs the index under Shuttle (amends D2, D27, D76; amended by D104, D105, D184, D196)
@@ -191,7 +191,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 
 - D180 [gate](gate.md): after the agent leaves NRI, the first container created in a running pod passes the required-plugin check until the runtimes ship NRI v0.12.5; documented and asserted by a gate test, no stand-in plugin (amends D9, D54; amended by D198)
 - D181 [reflector](reflector.md): a seed's rank is the first 8 bytes of SHA-256 over the image reference as written, 0x00 and the node identity, ties to the smaller name; changing it is breaking (amends D51)
-- D182 [build](build.md): each e2e leg fails unless protobuf scrapes, taken before each agent stop and after the suites, hold every catalog row of its runtime; rows name their runtime; the forward check reads protobuf too (amends D34, D109)
+- D182 [build](build.md): each e2e leg fails unless protobuf scrapes, taken before each agent stop and after the suites, hold every catalog row of its runtime; rows name their runtime; the forward check reads protobuf too (amends D34, D109; amended by D200)
 - D183 [reflector](reflector.md): a reflector queues pushes in one outbox per stream, the latest `PrewarmList` and at most 64 images waiting for a `Prewarm`, written after each reply by the connection's one task; nothing is dropped, a 65th image is refused to the caller (amends D105)
 - D184 [reflector](reflector.md): protocol version 2 takes pushes; the agent takes them only on its streams to members, parses them at the boundary and hands them to a channel; a version 1 agent gets none (amends D2, D97; amended by D188)
 - D185 [reflector](reflector.md): a member resolves each prewarm image to its platform manifests'' layers and releases its wave in rounds of up to 4 agents per agent sent it, each once the round before announced every layer of one platform or `prewarm.seed_timeout` passed (amends D51; amended by D195)
@@ -209,5 +209,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D197 [build](build.md): before each minor release, once a release speaks the reflector protocol, a kind suite runs the previous release's agents against the reflectors under test, on the IPv4 pass (amends D27, D40)
 - D198 [gate](gate.md): once a pinned runtime ships NRI v0.12.4 or later, the agent answers `fail_request = true`, so a call that fails or times out on it rejects the creation (amends D9, D41, D180)
 - D199 [build](build.md): spnngl/images runs `speculaire verify` on the speculaire image it pushes, under a policy naming its workflow (amends D28, D194)
+- D200 [build](build.md): the e2e suites act on the agent only through `e2e::node` helpers, whose logs read the journal or JSON lines as one entry type; D182's scrapes key on the helpers that stop the agent; a unit test keeps `systemctl` and `journalctl` on the agent out of other suites (amends D94, D182)
 
-Next free number: D200.
+Next free number: D201.
