@@ -97,7 +97,7 @@ impl Targets {
     /// D33's targets.
     pub const D33: Self = Self {
         rss: 1 << 30,
-        rss_goal: 256 << 20,
+        rss_goal: 384 << 20,
         lookup_p99: Duration::from_micros(500),
         resync: Duration::from_mins(1),
     };

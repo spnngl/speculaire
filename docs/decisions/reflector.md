@@ -27,13 +27,13 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Reflector RSS exceeds 1 GiB.
   - Keeping `reflector.members` in sync by hand becomes painful. Then derive it from control-plane `Node` objects.
 
-## D33: Reconnects are jittered, and reflector scale is load-tested (amends D2; amended by D98, D104, D202)
+## D33: Reconnects are jittered, and reflector scale is load-tested (amends D2; amended by D98, D104, D202, D206)
 
 - **Decision:**
   - After a stream drops, the agent waits a random delay between 0 and 5 s, then retries with exponential backoff and full jitter, from 1 s up to 60 s.
   - `speculaire-loadgen` (crate `apps/loadgen` (D62), `publish = false`, never packaged) simulates agents. Each simulated agent has its own node certificate from a test CA, made with `rcgen`, and sends `Hello`, a `Snapshot`, `Delta`s and `Lookup`s.
   - **Targets** for one reflector with 10k simulated agents × 2k blobs (20M pairs), under 5k lookups/s and 1k deltas/s:
-    - RSS, read by the load generator from `/proc/<pid>/status` (speculaire exports no process metrics, D34), at most 1 GiB. The goal is at most 256 MiB: the run reports it, but missing it does not fail the run;
+    - RSS, read by the load generator from `/proc/<pid>/status` (speculaire exports no process metrics, D34), at most 1 GiB. The goal is at most 384 MiB (D206; 256 MiB before): the run reports it, but missing it does not fail the run;
     - server-side lookup p99 at most 500 µs;
     - every agent resynced within 60 s after the reflector restarts.
   - `just load` runs the test. The nightly `load` workflow (D27) runs it on amd64 and arm64, and a missed target fails the run.
@@ -335,3 +335,14 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 - **Measured:** the index's peak heap in `just bench-micro`'s `fill` falls 169.3 → 146.7 MB. `just load` (D46's allocator), x86_64 / aarch64: peak RSS 460 / 453 → 396 / 392 MiB, lookup p99 79 / 94 → 79 / 103 µs, resync 61.1 / 41.5 → 44.1 / 43.3 s (runs 45205713811, 45210322736 of throwaway branches).
 - **Cost:** one copy of an agent's bitmap, about 4 KB, a commit and a delta.
 - **Revisit when:** `roaring` lets a bitmap shrink in place.
+
+## D206: The reflector's memory goal is 384 MiB (amends D33)
+
+- **Decision:** D33's RSS goal for one reflector at its load is 384 MiB, with D46's secure mimalloc kept. The 1 GiB target is unchanged. The rustls rewrite that drops its per-connection read buffer is done only if the reflector must fit 256 MiB.
+- **Because:**
+  - `docs/research/reflector-memory.md`: with D202 and D203 the peak is 363–368 MiB, of which about 239 MB is heap. Secure mode costs about 90 MiB of it, rustls's 4 KiB read buffer per connection about 50 MiB, `Key` inline in the index about 16 MB.
+  - musl's mallocng reaches 275–279 MiB, but its resync took 91.7 s, beyond D33's 60 s, in one of two runs, and its lookup p99 rose to 158 µs on aarch64.
+  - Dropping rustls's buffer needs its unbuffered API or kernel TLS, a large rewrite for about 50 MiB.
+  - The user chose 384 MiB on 2026-11-23.
+- **Cost:** a reflector at D33's load needs a memory limit above 384 MiB, not 256 MiB.
+- **Revisit when:** the reflector must fit 256 MiB, or rustls's buffered API stops keeping a read buffer per connection.

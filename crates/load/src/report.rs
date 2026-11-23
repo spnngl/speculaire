@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn the_goal_is_reported_when_met() {
         let mut measured = meeting();
-        measured.peak_rss = Some(256 << 20);
+        measured.peak_rss = Some(384 << 20);
         assert!(report(measured).markdown().contains("| goal met |"));
         let empty = report(Measured::default()).markdown();
         assert!(
