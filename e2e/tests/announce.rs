@@ -62,7 +62,7 @@ impl Agent {
             reflectors,
             changed: false,
         };
-        agent.wait_connected(&agent.name);
+        agent.cluster.wait_connected(&agent.name).unwrap();
         agent
     }
 
@@ -87,30 +87,7 @@ impl Agent {
     fn restart(&self) {
         self.sh("systemctl reset-failed speculaire; systemctl restart speculaire");
         self.cluster.wait_ready(&self.name).unwrap();
-        self.wait_connected(&self.name);
-    }
-
-    /// Waits until `node`'s agent has its stream to every reflector up.
-    fn wait_connected(&self, node: &str) {
-        let series: Vec<String> = self
-            .cluster
-            .reflectors()
-            .iter()
-            .map(|member| format!("speculaire_reflector_connected{{member=\"{member}\"}}"))
-            .collect();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let metrics = self.cluster.metrics(node).unwrap();
-            if series.iter().all(|s| metrics.get(s) == Some(1.0)) {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "{node}: not streaming to every reflector: {:?}",
-                series.iter().map(|s| metrics.get(s)).collect::<Vec<_>>()
-            );
-            std::thread::sleep(Duration::from_millis(500));
-        }
+        self.cluster.wait_connected(&self.name).unwrap();
     }
 
     /// A new image of the upstream with a layer of `size` bytes: no node holds its blobs.
@@ -196,7 +173,7 @@ fn every_agent_streams_to_each_reflector_and_both_find_a_pull_within_2_s() {
     let _serial = serial();
     let agent = Agent::new();
     for node in agent.cluster.nodes().unwrap() {
-        agent.wait_connected(&node.name);
+        agent.cluster.wait_connected(&node.name).unwrap();
     }
     let image = agent.image(1 << 20);
     agent.pull(&image);

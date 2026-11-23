@@ -43,6 +43,8 @@ struct Nodes {
 }
 
 impl Nodes {
+    /// The nodes, once every agent streams to every reflector: a suite before may have left a reflector stopped long
+    /// enough that the agents' next dial to it is up to a minute away (D33).
     fn new() -> Self {
         let cluster = Cluster::from_env();
         let names: Vec<String> = cluster
@@ -59,6 +61,9 @@ impl Nodes {
                 .clone()
         };
         let (a, b, c) = (find("-worker2"), find("-worker"), find("-control-plane"));
+        for node in [&a, &b, &c] {
+            cluster.wait_connected(node).unwrap();
+        }
         Self { cluster, a, b, c }
     }
 
@@ -160,24 +165,6 @@ impl Nodes {
         start.elapsed()
     }
 
-    /// Waits until `node`'s agent streams to every reflector, so that its lookups and announcements reach them.
-    fn wait_connected(&self, node: &str) {
-        let series: Vec<String> = self
-            .cluster
-            .reflectors()
-            .iter()
-            .map(|member| format!("speculaire_reflector_connected{{member=\"{member}\"}}"))
-            .collect();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while !series.iter().all(|s| self.metric(node, s) >= 1.0) {
-            assert!(
-                Instant::now() < deadline,
-                "{node} does not stream to every reflector"
-            );
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
-
     /// The value of `series` on `node`'s agent, 0 when it has not written it.
     fn metric(&self, node: &str, series: &str) -> f64 {
         self.cluster
@@ -258,7 +245,7 @@ impl Drop for Restore<'_> {
             .all(|node| nodes.cluster.reset_agent(node).is_ok());
         if restarted && !std::thread::panicking() {
             for node in order {
-                nodes.wait_connected(node);
+                nodes.cluster.wait_connected(node).unwrap();
             }
         }
     }
@@ -364,7 +351,7 @@ fn an_agent_without_its_certificate_falls_through_until_the_certificate_comes() 
     let took = nodes.wait_listens(&nodes.a, Duration::from_secs(30));
     println!("A's peer API opened {took:?} after its certificate came");
     assert_eq!(nodes.metric(&nodes.a, P2P), 1.0);
-    nodes.wait_connected(&nodes.a);
+    nodes.cluster.wait_connected(&nodes.a).unwrap();
     nodes.rmi(&[&nodes.a], &image);
     let gets = nodes.gets(&image);
     nodes.pulled(&nodes.a, &image);
