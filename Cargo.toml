@@ -172,6 +172,9 @@ hashbrown = { version = "0.17.1", default-features = false }
 shuttle = "0.9.10"
 # D46: the global allocator of the musl binaries, `MI_SECURE=4` (guard pages, randomised and encoded free lists).
 mimalloc = { version = "0.1.52", features = ["secure"] }
+# D203: `PR_SET_THP_DISABLE`, the heap without transparent huge pages; rustix has no such call, and `unsafe_code`
+# stays `deny`.
+nix = { version = "0.32.0", default-features = false, features = ["process"] }
 # D107: fixed binary layouts, such as D105's frame length, read and written as typed bytes.
 zerocopy = "0.8.63"
 

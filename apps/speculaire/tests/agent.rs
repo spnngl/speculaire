@@ -449,6 +449,33 @@ fn a_healthy_start_is_ready_and_logs_nothing_below_warn() {
     assert!(loud.is_empty(), "{loud:#?}");
 }
 
+/// `THP_enabled` of `/proc/<process>/status` (Linux 5.0): off once the process set `PR_SET_THP_DISABLE`, or in a
+/// kernel without transparent huge pages.
+#[cfg(target_os = "linux")]
+fn huge_pages(process: &str) -> bool {
+    let status = std::fs::read_to_string(format!("/proc/{process}/status")).unwrap();
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix("THP_enabled:"))
+        .unwrap();
+    value.trim() == "1"
+}
+
+/// D203. Skipped where this test runs without transparent huge pages already, or where its environment chooses.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_agent_turns_huge_pages_off_unless_mimalloc_allow_thp_is_set() {
+    if std::env::var_os("MIMALLOC_ALLOW_THP").is_some() || !huge_pages("self") {
+        eprintln!("skipped: transparent huge pages are off here, or MIMALLOC_ALLOW_THP is set");
+        return;
+    }
+    let agent = Agent::start("");
+    assert!(!huge_pages(&agent.child.id().to_string()));
+    // In lower case: mimalloc reads the name in any case, and so does the agent.
+    let agent = Agent::start_with_env("", &[("mimalloc_allow_thp", "1")]);
+    assert!(huge_pages(&agent.child.id().to_string()));
+}
+
 const LOADED: &str = r#"speculaire_cache_loads_total{result="loaded"}"#;
 const DISCARDED: &str = r#"speculaire_cache_loads_total{result="discarded"}"#;
 

@@ -33,5 +33,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc.workspace = true
 
+# D203: transparent huge pages off, `src/main.rs`.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
+
 [lints]
 workspace = true

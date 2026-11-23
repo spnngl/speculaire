@@ -183,7 +183,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - One maintained line matches the project's size; backports would double CI.
 - **Revisit when:** a user needs a longer-lived line; then add an LTS branch with its own CI.
 
-## D46: musl binaries use mimalloc in secure mode, always (amends D13)
+## D46: musl binaries use mimalloc in secure mode, always (amends D13; amended by D203)
 
 - **Decision:** the musl build of `speculaire` uses mimalloc with `MI_SECURE=4` (the `mimalloc` crate's `secure` feature) as its `#[global_allocator]`, through a `[target.'cfg(target_env = "musl")'.dependencies]` entry. Tool builds (Miri, fuzz, mutants) and non-musl builds keep the system allocator. The build image sets `SOURCE_DATE_EPOCH=0`.
 - **Because:**
@@ -891,3 +891,13 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Measured:** the unit test failed on `main`, naming 64 lines in 14 files.
 - **Cost:** a suite that needs a new action on the agent adds a helper. A systemd-only suite that stops the agent scrapes by hand.
 - **Revisit when:** the systemd-only suites get pod twins, or a suite needs a journal field that the JSON lines lack.
+
+## D203: speculaire runs without transparent huge pages (amends D46)
+
+- **Decision:** first thing in `main`, on Linux, `speculaire` sets `PR_SET_THP_DISABLE` (`nix`), the process's flag, unless its environment names `MIMALLOC_ALLOW_THP`, in any case, as mimalloc reads it: then mimalloc's own handling stands (`0` sets the same flag before `main`, any other value keeps the pages). dedens D154 does the same. mimalloc's secure mode (D46) is unchanged.
+- **Because:**
+  - mimalloc v3 `madvise(MADV_HUGEPAGE)`s its arenas (`src/prim/unix/prim.c:412`), and the kernel backs them with 2 MiB pages over memory never touched. At D33's load, with D202, the reflector's peak RSS falls 396 / 392 → 366 / 363 MiB (x86_64 / aarch64; runs 45210322736, 45214012205 by environment; at most 368 / 364 MiB in 45222923734 with this code), lookup p99 79 / 103 → 103 / 103 µs (one bucket, noise), resync 44.1 / 43.3 → 52.2 / 42.9 s (`docs/research/reflector-memory.md`).
+  - Rejected: the crate's `no_thp` feature, which only drops mimalloc's `madvise`, so nothing under THP `always` (it measured the same on the runners, whose THP is `madvise`); `mi_option_set` (`unsafe`, and too late: mimalloc reads the option before `main`); `-DMI_DEFAULT_ALLOW_THP=0` in `CFLAGS`, lost to a build that sets its own; rustix, which has no such call.
+  - On every Linux build, not only musl's, so that `apps/speculaire/tests/agent.rs` sees it in `just check`; glibc's heap also takes huge pages under THP `always`.
+- **Cost:** `nix` and `cfg_aliases`, exempted (D71). More TLB misses on a large heap: none showed in the lookup p99.
+- **Revisit when:** `just bench` (D35) shows a pull slower for it, or mimalloc stops asking for huge pages by default.
