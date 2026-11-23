@@ -34,8 +34,8 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100, D102)
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
 - D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
-- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157)
-- D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate (amended by D157)
+- D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157, D194)
+- D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate (amended by D157, D194)
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79, D162)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21; amended by D165, D176)
@@ -164,7 +164,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D154 [verification](verification.md): the policy file and a pinned trust root reload on SIGHUP or a changed stamp, a refused one keeping the previous; a changed key serves its previous verdict stale for up to `verify.stale_max` while its root is verified again under `trigger="reverify"` (amends D21, D30, D143, D151; amended by D155)
 - D155 [verification](verification.md): after a change, the roots the runtime's running containers run, from CRI `ListContainers` and `ListImages`, are verified again first (amends D154; amended by D175)
 - D156 [verification](verification.md): `speculaire verify <name>@<digest>` prints one image's verdict, then each matched policy, authority, attestation and SBOM check with its reason, as text or `--json`, exit 0 allowed, 1 not, 2 unusable config; it discovers upstream into a store of its own, without the agent or peers, and the engine's verdict derives from the same per-check results (amends D62)
-- D157 [build](build.md): `release`, on a version tag or a dispatch from main, builds both musl binaries natively into one scratch image index on ghcr.io, tagged `<version>` or `dispatch-<run id>` with no GitHub release, attests SLSA provenance and a syft SPDX SBOM on its digest, and its `verify` job runs `speculaire verify` on it anonymously under `packaging/policy/release.yaml` with the public-good TUF root (amends D27, D28)
+- D157 [build](build.md): `release`, on a version tag or a dispatch from main, builds both musl binaries natively into one scratch image index on ghcr.io, tagged `<version>` or `dispatch-<run id>` with no GitHub release, attests SLSA provenance and a syft SPDX SBOM on its digest, and its `verify` job runs `speculaire verify` on it anonymously under `packaging/policy/release.yaml` with the public-good TUF root (amends D27, D28; amended by D194)
 - D158 [distribution](distribution.md): a file in a `hosts.toml` root is left out of the tree, though containerd fails every pull of its host (amends D78)
 - D159 [build](build.md): the e2e suites wait on 1 s polls, a 45 s rate-limit window and a 300 ms netem delay instead of longer fixed waits, CRI-O's relay suite runs in the IPv4 pass only, and `just e2e-up` builds the suites while the cluster comes up (amends D94, D130; amended by D190)
 - D160 [build](build.md): `main` runs CI on its newest commit only; one run goes on and a newer push replaces the waiting one (amends D113)
@@ -203,5 +203,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D191 [reflector](reflector.md): on containerd, an agent pins each image it prewarms while a member's list names it, with `io.cri-containerd.pinned=pinned` and its mark `speculaire.prewarm=pinned`, unpins the marked images no list names, and leaves unmarked pins; `unconfigure` unpins every marked image; nothing on CRI-O (amends D32, D65, D188)
 - D192 [build](build.md): the pin e2e cases remove unused images with `crictl rmi --prune`; the kubelet's image collection, 5 min apart, is checked by hand (amends D51)
 - D193 [reflector](reflector.md): `scale.yml` runs the prewarm suite nightly on kind with 20 nodes (`SPECULAIRE_E2E_WORKERS`), and `speculaire-loadgen --prewarm` a wave over two reflectors at D33's 10k agents in `load.yml` (amends D51, D63, D104)
+- D194 [build](build.md): speculaire's own image is for development and tests: `image.yml`, on a dispatch from any branch, pushes the D157 index as `ghcr.io/spnngl/speculaire:dev-<commit>`, unsigned and unattested, with no `verify` job; users run `ghcr.io/spnngl/images/speculaire`, which spnngl/images builds, signs and attests (amends D27, D28, D157)
 
-Next free number: D194.
+Next free number: D195.

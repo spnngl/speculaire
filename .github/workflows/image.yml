@@ -1,0 +1,84 @@
+name: image
+
+# speculaire's development image (D194): amd64 and arm64 in one index on ghcr.io, tagged `dev-<commit>`, for
+# development and tests only. It carries no signature, provenance or SBOM; the image users run is built and signed
+# in spnngl/images. Runs on a dispatch, from any branch.
+on:
+  workflow_dispatch:
+
+# Each job grants only what it needs.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # `just musl` on each architecture's runner, as in ci.yml (D58).
+  musl:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+            arch: amd64
+          - os: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - env:
+          TARGET: ${{ matrix.target }}
+        run: just musl "$TARGET"
+      # Named by the architecture packaging/Containerfile copies it for.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: speculaire-${{ matrix.arch }}
+          path: target/musl/${{ matrix.target }}/speculaire
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    needs: musl
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      BUILDKIT_IMAGE: "docker.io/moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: speculaire-*
+          path: ${{ runner.temp }}/context
+      - env:
+          TOKEN: ${{ github.token }}
+        run: docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$TOKEN"
+      - run: docker buildx create --name image --driver docker-container --driver-opt "image=$(just hub-pull "$BUILDKIT_IMAGE")"
+      # Without BuildKit's attestations, the index holds the two images only.
+      - run: |
+          docker buildx build --builder image --platform linux/amd64,linux/arm64 --provenance=false --sbom=false \
+            --file packaging/Containerfile \
+            --output "type=image,name=$IMAGE:dev-$GITHUB_SHA,push=true,oci-mediatypes=true" "$RUNNER_TEMP/context"
