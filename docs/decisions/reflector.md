@@ -27,7 +27,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Reflector RSS exceeds 1 GiB.
   - Keeping `reflector.members` in sync by hand becomes painful. Then derive it from control-plane `Node` objects.
 
-## D33: Reconnects are jittered, and reflector scale is load-tested (amends D2; amended by D98, D104)
+## D33: Reconnects are jittered, and reflector scale is load-tested (amends D2; amended by D98, D104, D202)
 
 - **Decision:**
   - After a stream drops, the agent waits a random delay between 0 and 5 s, then retries with exponential backoff and full jitter, from 1 s up to 60 s.
@@ -105,7 +105,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 - **Measured (M3 step 06):** `e2e/tests/outage.rs` passes on containerd 2.4 and CRI-O 1.37 in 33 s. After a reflector restarts, its lookups find every holder 0.6 to 5.3 s after it is ready: the agents' 0 to 5 s wait after a drop (D33). An agent started with both reflectors down opens its peer API 0.6 to 3.9 s after one is ready, and 9.4 to 9.5 s after its certificate appears (`config.poll_interval`, 10 s). Stopping an agent that serves a 16 MiB layer at 32 Mbit/s takes it out of lookups in 160 to 350 ms, and the unit stops in 3.1 to 3.8 s while the peer's pull completes from it. Before the drain change, that pull went upstream.
 - **Revisit when:** a reflector keeps its index across restarts.
 
-## D104: The load scenario is a library under `speculaire-loadgen`, and the reflector bounds what each agent costs it (amends D27, D33, D97; amended by D105, D116, D193)
+## D104: The load scenario is a library under `speculaire-loadgen`, and the reflector bounds what each agent costs it (amends D27, D33, D97; amended by D105, D116, D193, D202)
 
 - **Decision:**
   - **Place:** `apps/loadgen`, the package `speculaire-loadgen`, parses arguments and prints the report (D62). The library `crates/load`, `speculaire-load`, holds the scenario. It makes a test CA with `speculaire-pki`'s `testing` feature, starts the reflector as a child `speculaire agent` with `role = "reflector"` on a fake containerd, and runs one `crates/reflect` client per simulated agent, each with its own node certificate.
@@ -326,3 +326,12 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - A hard split into one swarm per zone sends a zone that lacks a blob to upstream rather than to a peer in the next zone.
 - **Cost:** the agent reads from the apiserver, which it never did: a new connection and a trust boundary that `docs/security.md` gains with the code.
 - **Revisit when:** the Node authorizer refuses the read, or a zone's holders answer `503` (D24) during a wave.
+
+
+## D202: The index fits each agent's digest bitmap to its digests (amends D33, D104)
+
+- **Decision:** once a snapshot commits or a delta applies, the index replaces the agent's bitmap of digest numbers by a copy of it (`fitted` in `crates/reflect/src/index.rs`), which allocates no more than its containers hold.
+- **Because:** `docs/research/reflector-memory.md` breaks the reflector's peak down by owner. A roaring array container grows by doubling, and an agent's 2k digests sit in 4 containers of about 650 numbers, each with room for 1024: 23 MB of slack at D33's 10k agents, kept for as long as each stream lasts.
+- **Measured:** the index's peak heap in `just bench-micro`'s `fill` falls 169.3 → 146.7 MB. `just load` (D46's allocator), x86_64 / aarch64: peak RSS 460 / 453 → 396 / 392 MiB, lookup p99 79 / 94 → 79 / 103 µs, resync 61.1 / 41.5 → 44.1 / 43.3 s (runs 45205713811, 45210322736 of throwaway branches).
+- **Cost:** one copy of an agent's bitmap, about 4 KB, a commit and a delta.
+- **Revisit when:** `roaring` lets a bitmap shrink in place.
