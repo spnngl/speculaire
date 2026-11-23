@@ -1,6 +1,6 @@
 # Reflector memory at 10,000 agents
 
-What one reflector's peak RSS is made of in D33's load (10k agents × 2k digests from a pool of 200k), measured on 2026-11-23, and what each allocator and change costs. It backs D202.
+What one reflector's peak RSS is made of in D33's load (10k agents × 2k digests from a pool of 200k), measured on 2026-11-23, and what each allocator and change costs. It backs D202 and D203.
 
 ## Method
 
@@ -26,7 +26,7 @@ Peak RSS, lookup p99 and resync, x86_64 / aarch64.
 | Allocator | Before D202 | With D202 |
 |---|---|---|
 | mimalloc, `MI_SECURE=4` (D46) | 460 / 453 MiB, 79 / 94 µs, 61.1 / 41.5 s | 396 / 392 MiB, 79 / 103 µs, 44.1 / 43.3 s |
-| same, THP off | 423 / 421 MiB | 366 / 363 MiB, 103 / 103 µs, 52.2 / 42.3 s |
+| same, THP off (D203) | 423 / 421 MiB | 366 / 363 MiB, 103 / 103 µs, 52.2 / 42.3 s |
 | mimalloc, not secure | 369 / 361 MiB | |
 | same, THP off | 345 / 343 MiB | |
 | musl's mallocng | 313 / 312 MiB, 67 / 112 µs, 42.4 / 43.6 s | 279 / 275 MiB, 103 / 158 µs, **91.7** / 57.4 s |

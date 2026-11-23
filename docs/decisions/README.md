@@ -53,7 +53,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D43 [verification](verification.md): attestations count only as Sigstore bundles found as OCI referrers; `.att` tags and private GitHub attestations are not supported; `.sig` stays (amends D8, D38; amended by D49, D145, D149)
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation
 - D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror, artifact store, a reflector's API and NRI registration (amends D42; amended by D161, D168)
-- D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13)
+- D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13; amended by D203)
 - D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60, D91, D187, D188)
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29; amended by D72)
 - D49 [verification](verification.md): a BuildKit SBOM inside a signed index is D43's one exception (amends D43)
@@ -212,5 +212,6 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D200 [build](build.md): the e2e suites act on the agent only through `e2e::node` helpers, whose logs read the journal or JSON lines as one entry type; D182's scrapes key on the helpers that stop the agent; a unit test keeps `systemctl` and `journalctl` on the agent out of other suites (amends D94, D182)
 - D201 [distribution](distribution.md): on CRI-O, `configure` and `unconfigure` read `auto_reload_registries` from `GET /config`; when true they run no `systemctl` and CRI-O's watcher reads the drop-in; a failed `systemctl reload crio` names the key; `check-config` prints how the runtime reloads (amends D66, D84)
 - D202 [reflector](reflector.md): the index fits each agent's digest bitmap to its digests after each commit and delta, 23 MB less at 10k agents (amends D33, D104)
+- D203 [build](build.md): `speculaire` sets `PR_SET_THP_DISABLE` at start on Linux unless `MIMALLOC_ALLOW_THP` is set, 30 MiB less for the reflector at D33's load (amends D46)
 
-Next free number: D203.
+Next free number: D204.
