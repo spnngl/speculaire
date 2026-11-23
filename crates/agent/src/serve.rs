@@ -46,7 +46,7 @@ use crate::node::Node;
 use crate::prewarm::Resolver;
 use crate::pulls::Prewarm;
 use crate::status::{self, Status};
-use crate::{listen, systemd, telemetry, trust};
+use crate::{listen, open_files, systemd, telemetry, trust};
 
 /// Runs the agent with the config at `path`.
 ///
@@ -58,6 +58,7 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     let watch = Watch::new(vec![path.to_owned()]);
     let config = config::load(path)?;
     let logs = log::install(&config.log, &config.audit)?;
+    open_files::raise();
     let policy = Followed::read("the policy file", config.verify.policy.get(), read_policy)?;
     let trust = trust::Source::read(&config.verify)?;
     let node = Node::new(&config);
