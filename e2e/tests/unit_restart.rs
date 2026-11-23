@@ -10,6 +10,7 @@ fn the_unit_stops_cleanly_and_keeps_its_run_directory() {
     let node = cluster.nodes().unwrap().remove(0).name;
     let sh = |script: &str| cluster.exec(&node, &["sh", "-c", script]).unwrap();
     sh("echo kept > /run/speculaire/e2e-marker");
+    cluster.scrape(&node).unwrap();
     let stop = sh(
         "start=$(date +%s%N); systemctl stop speculaire; echo $(( ($(date +%s%N) - start) / 1000000 ))",
     );

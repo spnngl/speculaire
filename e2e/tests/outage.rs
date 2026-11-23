@@ -333,7 +333,7 @@ fn an_agent_without_its_certificate_falls_through_until_the_certificate_comes() 
         ),
     );
     nodes.cluster.reset_agent(&nodes.a).unwrap();
-    let pid = nodes.sh(&nodes.a, "systemctl show -p MainPID --value speculaire");
+    let pid = nodes.cluster.agent_pid(&nodes.a).unwrap();
     assert_eq!(nodes.metric(&nodes.a, P2P), 0.0);
     let image = nodes.image(1 << 20);
     nodes.pulled(&nodes.b, &image);
@@ -357,7 +357,7 @@ fn an_agent_without_its_certificate_falls_through_until_the_certificate_comes() 
     nodes.pulled(&nodes.a, &image);
     assert_eq!(nodes.gets(&image), gets, "A got a blob from upstream");
     assert_eq!(
-        nodes.sh(&nodes.a, "systemctl show -p MainPID --value speculaire"),
+        nodes.cluster.agent_pid(&nodes.a).unwrap(),
         pid,
         "A's agent restarted"
     );
@@ -389,8 +389,8 @@ fn an_agent_stopped_while_it_serves_leaves_lookups_within_1_s_and_finishes_the_u
         // the stop and to return each lookup, which the bound is not about.
         let start = Instant::now();
         let stop = scope.spawn(move || {
-            let began = nodes.sh(&nodes.a, "date +%s%N; systemctl stop speculaire");
-            (began.trim().parse::<u64>().unwrap(), start.elapsed())
+            let began = nodes.cluster.stop_agent(&nodes.a).unwrap();
+            (began, start.elapsed())
         });
         // Each reflector's first answer without A; A does not come back.
         let mut left: Vec<Option<u64>> = vec![None; nodes.cluster.reflectors().len()];
@@ -408,25 +408,15 @@ fn an_agent_stopped_while_it_serves_leaves_lookups_within_1_s_and_finishes_the_u
         let pull = pull.join().unwrap();
         assert!(pull.success, "{pull:?}");
         let (began, stopped) = stop.join().unwrap();
-        let gone = left
-            .into_iter()
-            .flatten()
-            .max()
-            .unwrap()
-            .saturating_sub(began);
-        (Duration::from_nanos(gone), stopped)
+        let last = UNIX_EPOCH + Duration::from_nanos(left.into_iter().flatten().max().unwrap());
+        (last.duration_since(began).unwrap_or_default(), stopped)
     });
     drop(slow);
     println!("lookups left A {gone:?} after its stop began; the stop took {stopped:?}");
     assert!(gone < Duration::from_secs(1), "{gone:?}");
     // `TimeoutStopSec` (D39).
     assert!(stopped < Duration::from_secs(20), "{stopped:?}");
-    assert_eq!(
-        nodes
-            .sh(&nodes.a, "systemctl show -p Result --value speculaire")
-            .trim(),
-        "success"
-    );
+    nodes.cluster.wait_stopped(&nodes.a).unwrap();
     assert_eq!(nodes.gets(&image), gets, "B got a blob from upstream");
     nodes.rmi(&[&nodes.a, &nodes.b], &image);
 }

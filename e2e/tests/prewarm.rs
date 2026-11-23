@@ -14,6 +14,7 @@ use std::num::NonZeroU32;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use e2e::logs::Entry;
 use e2e::node::addresses;
 use e2e::prewarm::Prewarm;
 use e2e::upstream::{Digest, Image, Kind, Upstream};
@@ -124,33 +125,28 @@ fn held(cluster: &Cluster, nodes: &[&str], reference: &str, since: Instant) -> D
     since.elapsed()
 }
 
-/// How many records of the node's agent have every field of `matches`, across its restarts.
-fn journal(cluster: &Cluster, node: &str, matches: &[&str]) -> usize {
-    let mut command = vec![
-        "journalctl",
-        "-q",
-        "-u",
-        "speculaire",
-        "--no-pager",
-        "-o",
-        "cat",
-    ];
-    command.extend_from_slice(matches);
-    cluster.exec(node, &command).unwrap().lines().count()
+/// How many entries of the node's agent logs, across its restarts, `matches`.
+fn logged(cluster: &Cluster, node: &str, matches: impl Fn(&Entry) -> bool) -> usize {
+    cluster
+        .agent_logs(node, None)
+        .unwrap()
+        .iter()
+        .filter(|entry| matches(entry))
+        .count()
 }
 
 /// How many times the node's agent logged that it prewarmed `reference`, across its restarts.
 fn prewarmed(cluster: &Cluster, node: &str, reference: &str) -> usize {
-    journal(
-        cluster,
-        node,
-        &["MESSAGE=prewarmed", &format!("F_IMAGE={reference}")],
-    )
+    logged(cluster, node, |entry| {
+        entry.message == "prewarmed" && entry.field("image") == Some(reference)
+    })
 }
 
 /// How many times the node's agent opened a stream to a reflector, across its restarts.
 fn streams(cluster: &Cluster, node: &str) -> usize {
-    journal(cluster, node, &["MESSAGE=reflector stream up"])
+    logged(cluster, node, |entry| {
+        entry.message == "reflector stream up"
+    })
 }
 
 /// The blob `GET`s without `Range` upstream answered for `image` after its first `since` requests, by the node they
@@ -281,9 +277,7 @@ fn a_reflector_restarted_mid_wave_leaves_the_other_to_release_and_resends_nothin
     wait(WITHIN, &what, &mut || {
         counter(&cluster, &restarted, SENT_SEED) > seeded
     });
-    cluster
-        .exec(&restarted, &["systemctl", "restart", "speculaire"])
-        .unwrap();
+    cluster.restart_agent(&restarted).unwrap();
     let restart = Instant::now();
     cluster.wait_ready(&restarted).unwrap();
     let what = || format!("{restarted} streams to no reflector since its restart");

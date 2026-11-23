@@ -12,6 +12,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use e2e::logs::{Entry, Level, tail};
 use e2e::node::{POLICY, Rules, TRUSTED_ROOT};
 use e2e::upstream::{FIXTURES, Kind, RUNNABLE, UNSIGNED, Upstream, runnable_policy};
 use e2e::{Cluster, IpFamily, Runtime};
@@ -231,11 +232,9 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let script = format!(
-            "{}; rm -f {POLICY}; systemctl reset-failed speculaire; systemctl restart speculaire",
-            rmi(&self.cluster)
-        );
+        let script = format!("{}; rm -f {POLICY}", rmi(&self.cluster));
         let _ = self.cluster.exec_output(&self.name, &["sh", "-c", &script]);
+        let _ = self.cluster.restart_agent(&self.name);
         if !std::thread::panicking() {
             self.cluster.wait_ready(&self.name).unwrap();
         }
@@ -299,20 +298,18 @@ fn a_policy_file_outside_the_subset_stops_the_agent_which_starts_on_the_example(
     );
     assert_ne!(refused, EXAMPLE_POLICY);
     worker.cluster.policy(&worker.name, &refused).unwrap();
-    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
-    let restart = worker
+    let since = worker.cluster.clock(&worker.name).unwrap();
+    let restart = worker.cluster.restart_agent(&worker.name);
+    assert!(restart.is_err(), "the agent started on a refused policy");
+    let logs = worker
         .cluster
-        .exec_output(&worker.name, &["systemctl", "restart", "speculaire"])
+        .agent_logs(&worker.name, Some(since))
         .unwrap();
-    assert!(!restart.success, "the agent started on a refused policy");
-    let journal = worker.sh(&format!(
-        "journalctl -u speculaire --no-pager -o cat --since '{}'",
-        since.trim()
-    ));
+    let logs = tail(&logs, logs.len());
     let reason = format!(
         "the policy file {POLICY}: document 1, spec.authorities[0].keyless.url: unknown field `url`"
     );
-    assert!(journal.contains(&reason), "no {reason:?} in:\n{journal}");
+    assert!(logs.contains(&reason), "no {reason:?} in:\n{logs}");
 
     worker.cluster.policy(&worker.name, EXAMPLE_POLICY).unwrap();
     worker.cluster.start_agent(&worker.name).unwrap();
@@ -462,11 +459,19 @@ impl Drop for Holder<'_> {
     }
 }
 
-/// The worker's agent journal since `since`, a time as `date '+%Y-%m-%d %H:%M:%S'` gives it.
-fn journal(worker: &Worker, since: &str) -> String {
-    worker.sh(&format!(
-        "journalctl -u speculaire --no-pager -o cat --since '{since}'"
-    ))
+/// The worker's agent logs since `since`, on the node's clock.
+fn logs(worker: &Worker, since: SystemTime) -> Vec<Entry> {
+    worker
+        .cluster
+        .agent_logs(&worker.name, Some(since))
+        .unwrap()
+}
+
+/// The first entry of the worker's agent logs since `since` whose message holds `line`.
+fn first(worker: &Worker, since: SystemTime, line: &str) -> Option<Entry> {
+    logs(worker, since)
+        .into_iter()
+        .find(|entry| entry.message.contains(line))
 }
 
 /// Waits until `done` holds, at most [`WITHIN`], and returns when it did; `what` names it otherwise.
@@ -479,11 +484,11 @@ fn until(what: &dyn Fn() -> String, done: &mut dyn FnMut() -> bool) -> Instant {
     Instant::now()
 }
 
-/// Waits until the worker's journal since `since` holds `line`.
-fn logged(worker: &Worker, since: &str, line: &str) -> Instant {
+/// Waits until the worker's agent logs since `since` have a message holding `line`.
+fn logged(worker: &Worker, since: SystemTime, line: &str) -> Instant {
     until(
-        &|| format!("no {line:?} in:\n{}", journal(worker, since)),
-        &mut || journal(worker, since).contains(line),
+        &|| format!("no {line:?} in:\n{}", tail(&logs(worker, since), 30)),
+        &mut || first(worker, since, line).is_some(),
     )
 }
 
@@ -517,8 +522,7 @@ fn an_image_whose_artifacts_no_source_serves_is_unverifiable_until_a_peer_discov
         .unwrap();
     worker.forget(std::slice::from_ref(&case));
     let b = Holder::pull(&worker, &case, &reference);
-    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
-    let since = since.trim();
+    let since = cluster.clock(&worker.name).unwrap();
     let unverifiable = {
         // B starts without upstreams: it discovers nothing. A pulls from B once a reflector names B.
         let _b_alone = cluster.reject_upstreams(&b.name).unwrap();
@@ -597,20 +601,11 @@ impl Drop for Grace<'_> {
     }
 }
 
-/// The time of the first line of the worker's journal since `since` that holds `line`, logged already, in seconds
-/// since the epoch.
-fn logged_at(worker: &Worker, since: &str, line: &str) -> f64 {
-    let journal = worker.sh(&format!(
-        "journalctl -u speculaire --no-pager -o short-unix --since '{since}'"
-    ));
-    let found = journal.lines().find(|logged| logged.contains(line));
-    found
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap()
+/// The time of the first entry of the worker's agent logs since `since` whose message holds `line`, logged already, in
+/// seconds since the epoch.
+fn logged_at(worker: &Worker, since: SystemTime, line: &str) -> f64 {
+    let entry = first(worker, since, line).unwrap();
+    entry.at.duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
 }
 
 #[test]
@@ -633,8 +628,7 @@ fn a_pull_by_tag_is_verified_from_its_manifest_fetch_before_the_runtime_lists_th
         .unwrap();
     worker.forget(std::slice::from_ref(&case));
     cluster.wait_ready(&worker.name).unwrap();
-    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
-    let since = since.trim();
+    let since = cluster.clock(&worker.name).unwrap();
 
     // The pull returns once the runtime lists the image.
     let pulled: f64 = worker
@@ -733,18 +727,18 @@ fn a_manifest_fetched_and_never_pulled_keeps_its_artifacts_through_a_restart_unt
     );
 }
 
-/// Waits until the worker's journal since `since` holds an error `message` whose fields hold `reason`.
-fn logged_error(worker: &Worker, since: &str, message: &str, reason: &str) {
-    // `-o verbose` shows the fields.
-    let errors = || {
-        worker.sh(&format!(
-            "journalctl -u speculaire -p err --no-pager -o verbose --since '{since}'"
-        ))
-    };
-    until(&|| format!("no {reason:?} in:\n{}", errors()), &mut || {
-        let errors = errors();
-        errors.contains(&format!("MESSAGE={message}")) && errors.contains(reason)
-    });
+/// Waits until the worker's agent logs since `since` have an error `message` whose fields hold `reason`.
+fn logged_error(worker: &Worker, since: SystemTime, message: &str, reason: &str) {
+    until(
+        &|| format!("no {reason:?} in:\n{}", tail(&logs(worker, since), 30)),
+        &mut || {
+            logs(worker, since).iter().any(|entry| {
+                entry.level >= Some(Level::Error)
+                    && entry.message == message
+                    && entry.fields.values().any(|value| value.contains(reason))
+            })
+        },
+    );
 }
 
 /// Sets the worker's `config.poll_interval` to `secs` while it lives, the agent restarted or sent SIGHUP by the caller:
@@ -801,11 +795,12 @@ fn a_changed_policy_verifies_again_on_sighup_or_a_poll_and_a_refused_one_keeps_t
     let poll = PollInterval::set(&worker, 3600);
     worker.forget(std::slice::from_ref(&case));
     cluster.wait_ready(&worker.name).unwrap();
-    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
-    let since = since.trim();
+    let since = cluster.clock(&worker.name).unwrap();
     let verdicts = |verdict: &str| {
-        journal(&worker, since)
-            .matches(&format!("verdict of {root} under fixtures: {verdict}"))
+        let line = format!("verdict of {root} under fixtures: {verdict}");
+        logs(&worker, since)
+            .iter()
+            .filter(|entry| entry.message.contains(&line))
             .count()
     };
     let wait = |verdict: &str, count: usize| {
@@ -813,13 +808,13 @@ fn a_changed_policy_verifies_again_on_sighup_or_a_poll_and_a_refused_one_keeps_t
             &|| {
                 format!(
                     "not {count} {verdict} verdicts in:\n{}",
-                    journal(&worker, since)
+                    tail(&logs(&worker, since), 30)
                 )
             },
             &mut || verdicts(verdict) == count,
         )
     };
-    let hangup = || worker.sh("systemctl kill -s HUP speculaire");
+    let hangup = || cluster.reload_agent(&worker.name).unwrap();
     let reloaded = || {
         cluster
             .metrics(&worker.name)

@@ -133,20 +133,19 @@ impl<'a> PollEachSecond<'a> {
             cluster,
             node,
             &format!(
-                "sed -i 's/^#poll_interval = 10$/poll_interval = 1/' {CONFIG} && grep -q '^poll_interval = 1$' {CONFIG} \
-                 && systemctl kill --signal=SIGHUP speculaire"
+                "sed -i 's/^#poll_interval = 10$/poll_interval = 1/' {CONFIG} && grep -q '^poll_interval = 1$' {CONFIG}"
             ),
         );
+        cluster.reload_agent(node).unwrap();
         Self { cluster, node }
     }
 }
 
 impl Drop for PollEachSecond<'_> {
     fn drop(&mut self) {
-        let script = format!(
-            "sed -i 's/^poll_interval = 1$/#poll_interval = 10/' {CONFIG} && systemctl kill --signal=SIGHUP speculaire"
-        );
+        let script = format!("sed -i 's/^poll_interval = 1$/#poll_interval = 10/' {CONFIG}");
         let _ = self.cluster.exec_output(self.node, &["sh", "-c", &script]);
+        let _ = self.cluster.reload_agent(self.node);
     }
 }
 
@@ -176,13 +175,7 @@ fn a_reflector_presents_its_rotated_kubelet_certificate_without_a_restart() {
         .find(|n| n.name == reflector)
         .unwrap();
     let address = SocketAddr::new(node.address.parse().unwrap(), PORT);
-    let pid = || {
-        sh(
-            &cluster,
-            &reflector,
-            "systemctl show -p MainPID --value speculaire",
-        )
-    };
+    let pid = || cluster.agent_pid(&reflector).unwrap();
     let before = pid();
     // The SIGHUP also reads the certificate again; Rotated's commands take longer than the agent takes to handle it,
     // so only a poll finds the new one.

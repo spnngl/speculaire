@@ -8,8 +8,9 @@
 )]
 
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use e2e::logs::tail;
 use e2e::node::Rules;
 use e2e::registry::Proxy;
 use e2e::upstream::{Digest, Kind, Request, SIGNED, Upstream};
@@ -182,7 +183,8 @@ impl Worker {
             "rm -f {path}; rmdir /etc/containerd/certs.d/{HOST} 2>/dev/null; speculaire configure"
         ));
         // The agent reads the registry config again at once, rather than at its next poll (D91).
-        self.sh("speculaire configure && systemctl reload speculaire");
+        self.sh("speculaire configure");
+        self.cluster.reload_agent(&self.name).unwrap();
         self.cluster.wait_ready(&self.name).unwrap();
     }
 
@@ -247,19 +249,18 @@ impl Worker {
             .collect()
     }
 
-    /// Waits until the journal since `since` has `line`, 10 s at most.
-    fn logs(&self, since: &str, line: &str) {
+    /// Waits until the agent's logs since `since` have a message holding `line`, 10 s at most.
+    fn logs(&self, since: SystemTime, line: &str) {
         let start = Instant::now();
         loop {
-            let journal = self.sh(&format!(
-                "journalctl -u speculaire --no-pager -o cat --since '{since}'"
-            ));
-            if journal.lines().any(|l| l.contains(line)) {
+            let logs = self.cluster.agent_logs(&self.name, Some(since)).unwrap();
+            if logs.iter().any(|entry| entry.message.contains(line)) {
                 return;
             }
             assert!(
                 start.elapsed() < Duration::from_secs(10),
-                "no `{line}` in the journal:\n{journal}"
+                "no `{line}` in the logs:\n{}",
+                tail(&logs, 30)
             );
             sleep(Duration::from_millis(200));
         }
@@ -287,12 +288,12 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let script = format!(
-            "{}; systemctl reset-failed speculaire; systemctl restart speculaire",
-            self.undo.join("; ")
-        );
-        let _ = self.cluster.exec_output(&self.name, &["sh", "-c", &script]);
+        let _ = self
+            .cluster
+            .exec_output(&self.name, &["sh", "-c", &self.undo.join("; ")]);
+        let restarted = self.cluster.restart_agent(&self.name);
         if !std::thread::panicking() {
+            restarted.unwrap();
             self.cluster.wait_ready(&self.name).unwrap();
         }
     }
@@ -314,8 +315,7 @@ fn a_429_to_discovery_pauses_its_host_for_every_image_until_retry_after() {
     let mut worker = Worker::new(cluster);
     worker.name_host();
     worker.forget(&[&signed, &limited]);
-    let since = worker.sh("date '+%Y-%m-%d %H:%M:%S'");
-    let since = since.trim();
+    let since = worker.cluster.clock(&worker.name).unwrap();
     let _alone = worker.alone();
     proxy.throttle("/referrers/", WINDOW, Some(1)).unwrap();
 
@@ -370,12 +370,17 @@ fn a_429_to_discovery_pauses_its_host_for_every_image_until_retry_after() {
     while !(worker.holds(&signed) && worker.holds(&limited)) {
         assert!(
             refused_at.elapsed() < WITHIN,
-            "the store lacks artifacts {} s after the 429: {:?}\n{}",
+            "the store lacks artifacts {} s after the 429: {:?}\n{}{}",
             refused_at.elapsed().as_secs(),
             proxy.requests().unwrap().split_off(refused + 1),
-            worker.sh(&format!(
-                "ls -R {STORE}; journalctl -u speculaire --no-pager -o cat --since '{since}' | tail -n 30"
-            ))
+            worker.sh(&format!("ls -R {STORE}")),
+            tail(
+                &worker
+                    .cluster
+                    .agent_logs(&worker.name, Some(since))
+                    .unwrap(),
+                30
+            )
         );
         sleep(Duration::from_millis(200));
     }

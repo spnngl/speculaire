@@ -85,7 +85,7 @@ impl Agent {
     }
 
     fn restart(&self) {
-        self.sh("systemctl reset-failed speculaire; systemctl restart speculaire");
+        self.cluster.restart_agent(&self.name).unwrap();
         self.cluster.wait_ready(&self.name).unwrap();
         self.cluster.wait_connected(&self.name).unwrap();
     }
@@ -154,14 +154,10 @@ impl Agent {
 impl Drop for Agent {
     fn drop(&mut self) {
         if self.changed {
-            let _ = self.cluster.exec(
-                &self.name,
-                &[
-                    "sh",
-                    "-c",
-                    &format!("mv {CONFIG}.e2e {CONFIG}; systemctl reset-failed speculaire; systemctl restart speculaire"),
-                ],
-            );
+            let _ = self
+                .cluster
+                .exec(&self.name, &["mv", &format!("{CONFIG}.e2e"), CONFIG]);
+            let _ = self.cluster.restart_agent(&self.name);
             let _ = self.cluster.wait_ready(&self.name);
         }
     }
