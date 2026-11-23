@@ -303,17 +303,21 @@ fn registry_reloads(cluster: &Cluster, node: &str) -> usize {
     .unwrap()
 }
 
-/// The manifests the node's mirror served CRI-O.
-fn served_manifests(cluster: &Cluster, node: &str) -> f64 {
-    cluster
-        .metrics(node)
-        .unwrap()
-        .get(r#"speculaire_mirror_requests_total{kind="manifest",result="served"}"#)
-        .unwrap_or(0.0)
+/// The manifest requests that reached the node's mirror, whatever it answered.
+fn manifest_requests(cluster: &Cluster, node: &str) -> f64 {
+    let metrics = cluster.metrics(node).unwrap();
+    ["served", "fall_through", "refused", "error"]
+        .iter()
+        .filter_map(|result| {
+            metrics.get(&format!(
+                r#"speculaire_mirror_requests_total{{kind="manifest",result="{result}"}}"#
+            ))
+        })
+        .sum()
 }
 
-/// `speculaire <command>` with no `systemctl` on its `PATH`, as in a pod.
-fn without_systemctl(cluster: &Cluster, node: &str, command: &str) -> e2e::Output {
+/// `speculaire <command>` with an empty `PATH`: as in a pod, it finds no systemd tool.
+fn without_path(cluster: &Cluster, node: &str, command: &str) -> e2e::Output {
     cluster
         .exec_output(
             node,
@@ -322,7 +326,7 @@ fn without_systemctl(cluster: &Cluster, node: &str, command: &str) -> e2e::Outpu
         .unwrap()
 }
 
-/// D194: with `auto_reload_registries = true`, CRI-O reads the drop-in that `configure` writes without `systemctl`.
+/// D201: with `auto_reload_registries = true`, CRI-O reads the drop-in that `configure` writes, with no systemd tool.
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn crio_watching_registries_conf_d_needs_no_systemctl() {
@@ -335,7 +339,11 @@ fn crio_watching_registries_conf_d_needs_no_systemctl() {
     let dropin = "/etc/containers/registries.conf.d/99-speculaire.conf";
     // CRI-O reads its own config at start only.
     let restart = |script: &str, auto_reload: bool| {
-        sh(&cluster, &node, &format!("{script} && systemctl restart crio"));
+        sh(
+            &cluster,
+            &node,
+            &format!("{script} && systemctl restart crio"),
+        );
         let want = format!("auto_reload_registries = {auto_reload}");
         wait_until("CRI-O", || {
             cluster
@@ -359,13 +367,13 @@ fn crio_watching_registries_conf_d_needs_no_systemctl() {
         "printf '[crio.image]\\nauto_reload_registries = true\\n' > /etc/crio/crio.conf.d/90-auto-reload.conf",
         true,
     );
-    let check = without_systemctl(&cluster, &node, "check-config");
-    // Without the drop-in, CRI-O pulls past the mirror.
+    let check = without_path(&cluster, &node, "check-config");
+    // So that `configure` writes the drop-in, and only CRI-O's watcher can make CRI-O read it.
     let before = registry_reloads(&cluster, &node);
     sh(&cluster, &node, &format!("rm {dropin}"));
     reloaded_after(before);
     let before = registry_reloads(&cluster, &node);
-    let configure = without_systemctl(&cluster, &node, "configure");
+    let configure = without_path(&cluster, &node, "configure");
     if configure.success {
         reloaded_after(before);
     }
@@ -374,14 +382,14 @@ fn crio_watching_registries_conf_d_needs_no_systemctl() {
         &node,
         &format!("crictl rmi {IMAGE} >/dev/null 2>&1; true"),
     );
-    let served = served_manifests(&cluster, &node);
+    let requests = manifest_requests(&cluster, &node);
     let pull = cluster
         .exec_output(&node, &["crictl", "pull", IMAGE])
         .unwrap();
-    let through_mirror = served_manifests(&cluster, &node) - served;
+    let through_mirror = manifest_requests(&cluster, &node) - requests;
     sh(&cluster, &node, &format!("crictl rmi {IMAGE}; true"));
     restart("rm /etc/crio/crio.conf.d/90-auto-reload.conf", false);
-    let refused = without_systemctl(&cluster, &node, "configure");
+    let refused = without_path(&cluster, &node, "configure");
     cluster.exec(&node, &["speculaire", "configure"]).unwrap();
 
     assert!(
