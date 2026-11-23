@@ -276,6 +276,14 @@ fn crio_watching_registries_conf_d_gets_the_drop_in_and_no_systemctl() {
 
     auto_reload(&node, false);
     assert_eq!(node.node.wiring().reload().unwrap(), Reload::Systemctl);
+    // What `check-config` prints.
+    for (reload, key) in [
+        (Reload::Watch, "`auto_reload_registries = true`"),
+        (Reload::Systemctl, "`auto_reload_registries = false`"),
+        (Reload::EachPull, "`hosts.toml`"),
+    ] {
+        assert!(reload.to_string().contains(key), "{reload}");
+    }
 }
 
 #[test]
