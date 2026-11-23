@@ -191,6 +191,11 @@ impl Tree {
         self.fake.as_ref().unwrap().update(change);
     }
 
+    /// What the runtime answers now.
+    pub(crate) fn answers(&self) -> Answers {
+        self.fake.as_ref().unwrap().answers()
+    }
+
     /// The image of each `PullImage` the runtime got.
     pub(crate) fn pulls(&self) -> Vec<String> {
         self.fake.as_ref().unwrap().pulls()

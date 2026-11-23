@@ -1,6 +1,8 @@
 //! Prewarm end to end (D51, D181, D185, D186, D188): an image written into both reflectors' `prewarm.images` reaches
 //! every node, only its seeds get its blobs from upstream, and each agent pulls it once, through a reflector's restart
-//! and a seed that can reach nothing. On the IPv4 pass only, as the verify suite (D141): neither the seeds' pick nor
+//! and a seed that can reach nothing. On containerd, each agent pins the image until no list names it, which keeps it
+//! through image garbage collection; on CRI-O, where none is pinned, a pod that needs it once removed gets it from
+//! peers (D191). On the IPv4 pass only, as the verify suite (D141): neither the seeds' pick nor
 //! the waves depend on the family.
 #![expect(
     clippy::unwrap_used,
@@ -13,6 +15,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use e2e::node::addresses;
+use e2e::prewarm::Prewarm;
 use e2e::upstream::{Digest, Image, Kind, Upstream};
 use e2e::{Cluster, IpFamily, Runtime};
 
@@ -27,6 +30,8 @@ const WITHIN: Duration = Duration::from_secs(30);
 const SIZE: u64 = 1 << 20;
 /// `prewarm.seed_timeout`, but in the case of the seed that reaches nothing.
 const SEED_TIMEOUT: u64 = 300;
+/// How long after the write that unlists an image every node unpins it (D191).
+const UNPINNED: Duration = Duration::from_secs(10);
 
 const PULLED: &str = r#"speculaire_prewarm_pulls_total{result="ok"}"#;
 const FAILED: &str = r#"speculaire_prewarm_pulls_total{result="failed"}"#;
@@ -148,19 +153,21 @@ fn streams(cluster: &Cluster, node: &str) -> usize {
     journal(cluster, node, &["MESSAGE=reflector stream up"])
 }
 
-/// The blob `GET`s without `Range` upstream answered for `image`, by the node they came from.
+/// The blob `GET`s without `Range` upstream answered for `image` after its first `since` requests, by the node they
+/// came from.
 fn blob_gets(
     cluster: &Cluster,
     upstream: &Upstream,
     image: &Image,
     nodes: &[String],
+    since: usize,
 ) -> BTreeMap<String, Vec<Digest>> {
     let by_address: Vec<_> = nodes
         .iter()
         .map(|node| (node, addresses(node).unwrap()))
         .collect();
     let mut gets: BTreeMap<String, Vec<Digest>> = BTreeMap::new();
-    for request in upstream.requests().unwrap() {
+    for request in upstream.requests().unwrap().into_iter().skip(since) {
         // The log has no `Range`: the full answer is a 200, a range's a 206.
         let Some(digest) = request
             .blob()
@@ -214,7 +221,7 @@ fn an_image_written_into_prewarm_images_is_held_everywhere_within_30_s_with_its_
         wait(Duration::from_secs(5), &what, &mut || pulled() > before);
         assert_eq!(pulled(), before + 1, "{node}");
     }
-    let gets = blob_gets(&cluster, &upstream, &image, &nodes);
+    let gets = blob_gets(&cluster, &upstream, &image, &nodes, 0);
     let getters: BTreeSet<&String> = gets.keys().collect();
     assert!(
         !getters.is_empty() && getters.iter().all(|node| seeds.contains(*node)),
@@ -402,4 +409,175 @@ fn a_seed_that_reaches_neither_upstream_nor_peers_holds_its_round_until_seed_tim
         unblocked.elapsed()
     );
     assert_eq!(prewarmed(&cluster, &blocked, reference), 1);
+}
+
+/// The node that is no reflector: a case removes its images, and its agent pins as any other.
+fn worker(cluster: &Cluster, nodes: &[String]) -> String {
+    let reflectors = cluster.reflectors();
+    nodes
+        .iter()
+        .find(|node| !reflectors.contains(node))
+        .unwrap()
+        .clone()
+}
+
+/// Waits until whether the runtime of `node` pins `reference` is `pinned`, at most `within`.
+fn pins(cluster: &Cluster, node: &str, reference: &str, pinned: bool, within: Duration) {
+    let what = || {
+        let state = if pinned { "does not pin" } else { "still pins" };
+        format!("{node} {state} {reference}")
+    };
+    wait(within, &what, &mut || {
+        cluster.pinned(node).unwrap().contains(reference) == pinned
+    });
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn on_containerd_a_prewarmed_image_is_pinned_through_image_collection_and_unpinned_within_10_s_once_unlisted()
+ {
+    let Some((cluster, nodes, _serial)) = cluster() else {
+        return;
+    };
+    if cluster.runtime() != Runtime::Containerd {
+        return;
+    }
+    let begun = Instant::now();
+    let node = worker(&cluster, &nodes);
+    let upstream = cluster.upstream(Kind::Plain);
+    let prewarm = cluster.prewarm().unwrap();
+    let image = upstream
+        .push(&repository(&upstream, "pinned", &nodes, |_| true), SIZE)
+        .unwrap();
+    let reference = image.reference.as_str();
+    let control = upstream
+        .push(&repository(&upstream, "control", &nodes, |_| true), SIZE)
+        .unwrap();
+    cluster
+        .exec(&node, &["crictl", "pull", &control.reference])
+        .unwrap();
+    // containerd's config pins the sandbox image, and kind its own: the agent leaves those.
+    let others = cluster.pinned(&node).unwrap();
+    assert!(
+        others
+            .iter()
+            .any(|tag| tag.starts_with("registry.k8s.io/pause:")),
+        "{others:?}"
+    );
+
+    let written = prewarm.write(&[reference], SEED_TIMEOUT).unwrap();
+    let all: Vec<&str> = nodes.iter().map(String::as_str).collect();
+    held(&cluster, &all, reference, written);
+    for node in &nodes {
+        pins(&cluster, node, reference, true, Duration::from_secs(5));
+    }
+    cluster.prune(&node).unwrap();
+    assert!(cluster.lists(&node, reference).unwrap());
+    assert!(!cluster.lists(&node, &control.reference).unwrap());
+
+    let unlisted = prewarm.write(&[], SEED_TIMEOUT).unwrap();
+    for node in &nodes {
+        let within = UNPINNED.saturating_sub(unlisted.elapsed());
+        pins(&cluster, node, reference, false, within);
+    }
+    eprintln!(
+        "{reference}: unpinned everywhere {:?} after the write, the case took {:?}",
+        unlisted.elapsed(),
+        begun.elapsed()
+    );
+    assert_eq!(cluster.pinned(&node).unwrap(), others);
+}
+
+/// Deletes the pod, even when the test fails.
+/// What the CRI-O case leaves, taken off however it ends: its image shares the layers of `TEST_IMAGE`, which CRI-O
+/// would then not fetch for the suites that follow.
+struct Leftovers<'a> {
+    cluster: &'a Cluster,
+    prewarm: &'a Prewarm<'a>,
+    nodes: &'a [String],
+    pod: &'static str,
+    image: &'a str,
+}
+
+impl Drop for Leftovers<'_> {
+    fn drop(&mut self) {
+        let _ = self.prewarm.write(&[], SEED_TIMEOUT);
+        let _ = self
+            .cluster
+            .kubectl(&["delete", "pod", self.pod, "--now", "--timeout=60s"]);
+        for node in self.nodes {
+            let _ = self.cluster.exec(node, &["crictl", "rmi", self.image]);
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn on_crio_a_prewarmed_image_is_not_pinned_and_once_removed_its_pod_starts_with_no_blob_from_upstream()
+ {
+    let Some((cluster, nodes, _serial)) = cluster() else {
+        return;
+    };
+    if cluster.runtime() != Runtime::Crio {
+        return;
+    }
+    let begun = Instant::now();
+    let node = worker(&cluster, &nodes);
+    let upstream = cluster.upstream(Kind::Plain);
+    let prewarm = cluster.prewarm().unwrap();
+    let image = upstream
+        .push_runnable(&repository(&upstream, "unpinned", &nodes, |_| true), SIZE)
+        .unwrap();
+    let reference = image.reference.as_str();
+
+    let written = prewarm.write(&[reference], SEED_TIMEOUT).unwrap();
+    let all: Vec<&str> = nodes.iter().map(String::as_str).collect();
+    held(&cluster, &all, reference, written);
+    assert!(!cluster.pinned(&node).unwrap().contains(reference));
+    cluster.prune(&node).unwrap();
+    assert!(!cluster.lists(&node, reference).unwrap());
+
+    // The peers hold every blob, and the node's blob cache too (D67): only the manifests come from upstream.
+    let since = upstream.requests().unwrap().len();
+    let leftovers = Leftovers {
+        cluster: &cluster,
+        prewarm: &prewarm,
+        nodes: &nodes,
+        pod: "e2e-prewarm-unpinned",
+        image: reference,
+    };
+    let _ = cluster.kubectl(&[
+        "delete",
+        "pod",
+        leftovers.pod,
+        "--ignore-not-found",
+        "--wait",
+    ]);
+    let overrides = format!(r#"{{"spec":{{"nodeName":"{node}"}}}}"#);
+    cluster
+        .kubectl(&[
+            "run",
+            leftovers.pod,
+            "--image",
+            reference,
+            "--image-pull-policy=IfNotPresent",
+            "--restart=Never",
+            &format!("--overrides={overrides}"),
+            "--command",
+            "--",
+            "sleep",
+            "3600",
+        ])
+        .unwrap();
+    cluster
+        .kubectl(&[
+            "wait",
+            "--for=condition=Ready",
+            &format!("pod/{}", leftovers.pod),
+            "--timeout=120s",
+        ])
+        .unwrap();
+    let gets = blob_gets(&cluster, &upstream, &image, &nodes, since);
+    assert!(!gets.contains_key(&node), "{gets:?}");
+    eprintln!("{reference}: the case took {:?}", begun.elapsed());
 }

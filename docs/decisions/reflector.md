@@ -43,7 +43,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - The user set the 500 µs and 256 MiB figures and accepted the others.
 - **Revisit when:** a target fails. Then revisit D2.
 
-## D51: Every member picks the same prewarm seeds (amends D2; amended by D181, D185, D186, D188)
+## D51: Every member picks the same prewarm seeds (amends D2; amended by D181, D185, D186, D188, D192)
 
 - **Decision:**
   - For each image of `prewarm.images`, every member picks the same seeds: the `prewarm.seeds` agents (default 2, live) with the highest rendezvous hash of (image reference, node identity), among the agents streaming to it.
@@ -249,7 +249,7 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - Docker Hub counts manifest `GET`s against its pull limit, and not `HEAD`s; a tag that moved upstream would otherwise stay cold until the list changed.
 - **Revisit when:** a list grows past what one resolution a second per entry can follow, or an agent's restart mid-wave shows in upstream pulls.
 
-## D188: An agent pulls what members push through its runtime's CRI, one image at a time, below a disk limit (amends D34, D39, D47, D51, D90, D184)
+## D188: An agent pulls what members push through its runtime's CRI, one image at a time, below a disk limit (amends D34, D39, D47, D51, D90, D184; amended by D191)
 
 - **Decision:**
   - **Pull:** the agent pulls a pushed image with CRI `PullImage` on the runtime's socket, the same call on containerd and CRI-O, behind the `Pull` trait a `Node` hands out (D90). The request carries no credentials: a registry that needs them is prewarmed only where the registry config holds them (D17). A pull is cut after 30 minutes.
@@ -267,3 +267,19 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
   - CRI-O walks its image store to answer `ImageFsInfo` (cri-o v1.37.2 `server/image_fs_info.go:15`), and the mount point does not move; `statvfs` reads the usage at no cost. containerd's kubelet-facing first entry is its snapshotter's (containerd v2.4.2 `internal/cri/server/images/imagefs_info.go:55`).
   - CRI-O sets no pull progress timeout (cri-o v1.37.2 `pkg/config/config.go:1192`), so a stalled pull would hold the worker; 30 minutes covers a large image on a slow link.
 - **Revisit when:** prewarm pulls slow the pods' own pulls, or nodes need a registry credential that only the kubelet holds.
+
+## D191: On containerd, an agent pins what it prewarms, marks the pin, and unpins once no member lists the image (amends D32, D65, D188)
+
+- **Decision:**
+  - **Pin:** after a prewarm pull goes through, while some member's latest `PrewarmList` names the image, the agent sets `io.cri-containerd.pinned=pinned` and its own mark `speculaire.prewarm=pinned` on the image's name, with the images service's `Update`. The request carries the image as `Get` returned it, and its field mask names the two labels. A `Prewarm` of an image the node holds pins it too. A name pinned already is left as it is, without the mark.
+  - **Unpin:** at each new `PrewarmList`, the agent takes both labels off every name it marked that no member's latest list names. At start it reads the marked names from containerd, so a restart forgets no pin. A failed pin or unpin logs a warning; an unpin is tried again at the next list.
+  - **Leave:** a pin without the mark, such as the sandbox image's from the CRI config's `pinned_images`, kind's, or an operator's, is never taken off.
+  - **Unconfigure:** `speculaire unconfigure` takes off every pin the agent marked and prints `unpinned <image>` for each. A containerd that does not answer leaves the pins, with a note, and the rest goes on (D32).
+  - **CRI-O:** the agent pins nothing, and logs it at debug: CRI-O pins only through `pinned_images` in its config (D65).
+- **Because:**
+  - The kubelet never frees an image the CRI calls pinned (kubernetes v1.37.0 `pkg/kubelet/images/image_gc_manager.go:567-569`). containerd calls an image pinned when one of its names carries the label (v2.4.2 `internal/cri/labels/labels.go:46-49`, `internal/cri/store/image/image.go:178,259`), and reloads a name on its `/images/update` event (`internal/cri/server/events.go:386-388`); v2.3.7 is the same (`events.go:387`).
+  - A pull adds the label and never removes it (`internal/cri/server/images/image_pull.go:399-438`), so without the mark the agent cannot tell its pins from the sandbox image's.
+  - containerd reads the request's target before the field mask, and crashes on an image without one (v2.4.2 `plugins/services/images/helpers.go:50`): the first e2e run took containerd down. The mask leaves a target a pull moved meanwhile.
+  - Pinning only listed images keeps GC's say over everything else: a member's list holds at most 64 images (D187).
+- **Measured:** in e2e on containerd 2.4, kind arm64, a list that drops the image unpins it on all 3 nodes 0.54 s after the write; the case takes 2.2 to 2.5 s.
+- **Revisit when:** CRI-O gains a pin that does not edit its configuration, or the kubelet frees pinned images.

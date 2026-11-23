@@ -196,12 +196,15 @@ fn node(path: &std::path::Path) -> anyhow::Result<Node> {
     Ok(Node::new(&config::load(path)?))
 }
 
-/// What a run changed on `out`, one file per line, and what it left alone on `err`.
+/// What a run changed on `out`, one file or image per line, and what it left alone on `err`.
 fn print_report(
     out: &mut impl Write,
     err: &mut impl Write,
     report: &Report,
 ) -> std::io::Result<()> {
+    for image in &report.unpinned {
+        writeln!(out, "unpinned {image}")?;
+    }
     for change in &report.changes {
         writeln!(out, "{change}")?;
     }
@@ -310,16 +313,21 @@ mod tests {
     }
 
     #[test]
-    fn a_report_prints_changes_on_stdout_and_notes_on_stderr() {
+    fn a_report_prints_unpins_and_changes_on_stdout_and_notes_on_stderr() {
+        use speculaire_oci::reference::Reference;
         use speculaire_runtime::files::Change;
         use speculaire_runtime::wiring::Report;
         let report = Report {
             changes: vec![Change::Created("/a".into()), Change::Removed("/b".into())],
+            unpinned: vec![Reference::parse_docker_ref("app:1").unwrap()],
             notes: vec!["left /c alone".to_owned()],
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         super::print_report(&mut out, &mut err, &report).unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), "created /a\nremoved /b\n");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "unpinned docker.io/library/app:1\ncreated /a\nremoved /b\n"
+        );
         assert_eq!(String::from_utf8(err).unwrap(), "note: left /c alone\n");
     }
 

@@ -20,7 +20,7 @@ use crate::identity::annotation::Annotation;
 use crate::images::Images;
 use crate::inventory::Inventory;
 use crate::paths::Paths;
-use crate::pull::{CriPull, Pull};
+use crate::pull::{CriPull, Pinning, Pull};
 use crate::registries::{ContainerdRegistries, CrioRegistries, Registries};
 use crate::settings::Settings;
 use crate::wiring::Wiring;
@@ -161,10 +161,15 @@ impl Node {
         }
     }
 
-    /// Pulls images as the kubelet does, the same CRI call on either runtime (D188).
+    /// Pulls images as the kubelet does, the same CRI call on either runtime (D188), and pins them on containerd
+    /// (D191).
     #[must_use]
     pub fn pull(&self) -> Arc<dyn Pull> {
-        Arc::new(CriPull::new(self.socket()))
+        let pinning = match &self.kind {
+            Kind::Containerd(_) => Pinning::Label,
+            Kind::CriO(_) => Pinning::None,
+        };
+        Arc::new(CriPull::new(self.socket(), pinning))
     }
 
     /// The image identity the gate reads from NRI's `CreateContainer` (D169, D170).

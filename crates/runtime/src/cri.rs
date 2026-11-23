@@ -241,7 +241,7 @@ pub(crate) fn block_on<T>(
 }
 
 /// `future`, bounded by [`TIMEOUT`]; not `async` itself, so as not to nest one more future in its callers'.
-fn timed<'a, T: 'a>(
+pub(crate) fn timed<'a, T: 'a>(
     path: &'a Path,
     method: &'static str,
     future: impl Future<Output = Result<T, Error>> + 'a,

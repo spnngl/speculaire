@@ -1,9 +1,10 @@
 //! A fake containerd or CRI-O, for tests that run where there is no runtime (the CI runner, macOS): it answers the CRI's
 //! `Version`, `ListImages`, `ListContainers`, `PullImage` and `ImageFsInfo`, containerd's introspection `Plugins`, content `List` and `Info`, images
-//! `List` and `Get`, snapshots `Stat` and events `Subscribe`, and CRI-O's `GET /config` on a Unix socket, which is all
+//! `List`, `Get` and `Update`, snapshots `Stat` and events `Subscribe`, and CRI-O's `GET /config` on a Unix socket, which is all
 //! preflight, the registry config, the inventory, the image store, the mirror and the engine ask (D86, D99). On its NRI
 //! socket, it registers the plugin that connects (D168).
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
 use std::net::Shutdown;
@@ -20,7 +21,7 @@ use containerd_client::services::v1::snapshots::{self, StatSnapshotRequest, Stat
 use containerd_client::services::v1::{
     GetImageRequest, GetImageResponse, Info, ListContentRequest, ListContentResponse,
     ListImagesRequest as ListStoredRequest, ListImagesResponse as ListStoredResponse, Plugin,
-    PluginsRequest, PluginsResponse, SubscribeRequest,
+    PluginsRequest, PluginsResponse, SubscribeRequest, UpdateImageRequest, UpdateImageResponse,
 };
 use containerd_client::tonic::codegen::http;
 use containerd_client::tonic::server::Grpc;
@@ -197,6 +198,8 @@ pub struct Answers {
     /// The images of containerd's images `List` and `Get`, whatever the namespace: name and target digest. Each target
     /// is an OCI index.
     pub image_store: Vec<(String, String)>,
+    /// The labels of the images of `image_store`, by name. Images `Update` changes them.
+    pub image_labels: HashMap<String, HashMap<String, String>>,
     /// Whether containerd's images `Get` answers `Unavailable`, as a containerd going away does.
     pub image_get_unavailable: bool,
     /// The snapshots of containerd's snapshots `Stat`, whatever the namespace.
@@ -231,6 +234,7 @@ impl Answers {
             image_filesystem: "/".to_owned(),
             content: Vec::new(),
             image_store: Vec::new(),
+            image_labels: HashMap::new(),
             image_get_unavailable: false,
             snapshots: Vec::new(),
             crio_config: None,
@@ -252,6 +256,7 @@ impl Answers {
             image_filesystem: "/".to_owned(),
             content: Vec::new(),
             image_store: Vec::new(),
+            image_labels: HashMap::new(),
             image_get_unavailable: false,
             snapshots: Vec::new(),
             crio_config: Some(
@@ -361,6 +366,16 @@ impl Fake {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
         );
+    }
+
+    /// What the fake answers now, with what images `Update` changed.
+    #[must_use]
+    pub fn answers(&self) -> Answers {
+        self.shared
+            .answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Sends `envelope` to every live `Subscribe`, as containerd publishes an event.
@@ -555,6 +570,7 @@ async fn route(
         }
         "/containerd.services.images.v1.Images/List" => stored_images(answers, request).await,
         "/containerd.services.images.v1.Images/Get" => stored_image(answers, request).await,
+        "/containerd.services.images.v1.Images/Update" => update_image(shared, request).await,
         "/containerd.services.snapshots.v1.Snapshots/Stat" => {
             shared.stats.fetch_add(1, Ordering::Relaxed);
             stat(answers, request).await
@@ -670,10 +686,11 @@ async fn containers(
         .await
 }
 
-/// containerd's image of `Answers::image_store`.
-fn stored(name: &str, digest: &str) -> containerd_client::services::v1::Image {
+/// containerd's image of `Answers::image_store`, with its labels.
+fn stored(answers: &Answers, name: &str, digest: &str) -> containerd_client::services::v1::Image {
     containerd_client::services::v1::Image {
         name: name.to_owned(),
+        labels: answers.image_labels.get(name).cloned().unwrap_or_default(),
         target: Some(Descriptor {
             media_type: "application/vnd.oci.image.index.v1+json".to_owned(),
             digest: digest.to_owned(),
@@ -695,7 +712,7 @@ async fn stored_images(
                 images: answers
                     .image_store
                     .iter()
-                    .map(|(name, digest)| stored(name, digest))
+                    .map(|(name, digest)| stored(&answers, name, digest))
                     .collect(),
             }))
         }
@@ -726,7 +743,7 @@ async fn stored_image(
                 .find(|(stored, _)| *stored == name)
                 .map(|(name, digest)| {
                     Response::new(GetImageResponse {
-                        image: Some(stored(name, digest)),
+                        image: Some(stored(&answers, name, digest)),
                     })
                 })
                 .ok_or_else(|| Status::not_found(format!("image {name:?}: not found")))
@@ -735,6 +752,77 @@ async fn stored_image(
     Grpc::new(ProstCodec::<GetImageResponse, GetImageRequest>::default())
         .unary(service, request)
         .await
+}
+
+/// containerd's images `Update` of labels, by field mask: each `labels.<key>` path sets the label to the request's
+/// value, and deletes it when that is empty (v2.4.2 `core/metadata/images.go:211-218`,
+/// `core/metadata/boltutil/helpers.go:96-99`). `NotFound` for a name not in `Answers::image_store`, `InvalidArgument`
+/// for another path, and `Internal` for an image without target, on which containerd crashes
+/// (`plugins/services/images/helpers.go:50`).
+async fn update_image(
+    shared: &Arc<Shared>,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let shared = Arc::clone(shared);
+    let service = tower::service_fn(move |asked: Request<UpdateImageRequest>| {
+        let asked = asked.into_inner();
+        let image = asked.image.unwrap_or_default();
+        let mut answers = shared
+            .answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let answer = relabel(
+            &mut answers,
+            &image,
+            asked.update_mask.unwrap_or_default().paths,
+        )
+        .map(|stored| {
+            Response::new(UpdateImageResponse {
+                image: Some(stored),
+            })
+        });
+        async move { answer }
+    });
+    Grpc::new(ProstCodec::<UpdateImageResponse, UpdateImageRequest>::default())
+        .unary(service, request)
+        .await
+}
+
+/// Sets the labels of `image` at `paths` in `answers`, and answers the image as it then is.
+fn relabel(
+    answers: &mut Answers,
+    image: &containerd_client::services::v1::Image,
+    paths: Vec<String>,
+) -> Result<containerd_client::services::v1::Image, Status> {
+    if image.target.is_none() {
+        return Err(Status::internal(
+            "an image without target: containerd would crash",
+        ));
+    }
+    let Some((name, digest)) = answers
+        .image_store
+        .iter()
+        .find(|(stored, _)| *stored == image.name)
+        .cloned()
+    else {
+        return Err(Status::not_found(format!(
+            "image {:?}: not found",
+            image.name
+        )));
+    };
+    let labels = answers.image_labels.entry(name.clone()).or_default();
+    for path in paths {
+        let Some(key) = path.strip_prefix("labels.") else {
+            return Err(Status::invalid_argument(format!(
+                "the fake containerd updates labels only, not {path:?}"
+            )));
+        };
+        match image.labels.get(key).filter(|value| !value.is_empty()) {
+            Some(value) => labels.insert(key.to_owned(), value.clone()),
+            None => labels.remove(key),
+        };
+    }
+    Ok(stored(answers, &name, &digest))
 }
 
 /// containerd's snapshots `Stat`: the snapshot of `Answers::snapshots` with the snapshotter and key asked, or

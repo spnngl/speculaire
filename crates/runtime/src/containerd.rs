@@ -9,6 +9,7 @@ pub mod content;
 pub mod hosts;
 pub mod images;
 pub mod inventory;
+pub(crate) mod pins;
 mod settings;
 pub mod snapshots;
 pub mod store;

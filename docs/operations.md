@@ -133,6 +133,7 @@ A reflector resolves each `prewarm.images` entry through the node''s *registry c
 
 - **A round timed out** (`speculaire_reflector_prewarm_rounds_total{release="timeout"}`): some agent sent the image did not announce every layer of one platform manifest within `prewarm.seed_timeout`, and the next round went out anyway. Check that agent''s pull: a seed that cannot reach upstream, or a node whose platform the image lacks.
 - **A resolution failed** (`speculaire_reflector_prewarm_resolve_failures_total`): the reflector could not fetch the image''s manifests from upstream, and tries again, waiting up to 5 min; the warning log `cannot resolve a prewarm.images entry` names the reference and the error. Check the reference and the control-plane node''s registry config and credentials.
+- **A pin failed** (warning logs `a prewarmed image stays unpinned`, `an image no list names stays pinned`): on containerd, the agent could not set or take off the pin of an image it prewarmed, so the kubelet may free an unpinned one, and keeps a pinned one until the next list change tries again. The log names the image and containerd's error. `crictl images --pinned` shows the pins; those the agent made carry the label `speculaire.prewarm=pinned`, which `speculaire unconfigure` takes off (D191).
 
 ## Tags from peers
 

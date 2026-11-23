@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use speculaire_oci::reference::Reference;
 use speculaire_pki::mirror;
 use speculaire_registry_config::containerd::config as containerd_config;
 use speculaire_registry_config::crio::registries;
@@ -42,7 +43,8 @@ pub trait Wiring: Send + Sync {
     /// When a config cannot be read or edited, or a file cannot be written, or the runtime does not reload.
     fn configure(&self, target: &Target, now: SystemTime) -> Result<Report, Error>;
 
-    /// Takes the mirror back out of the runtime's config, then deletes the certificates (D32).
+    /// Takes the pins the agent marked off, the mirror back out of the runtime's config, then deletes the certificates
+    /// (D32, D191).
     ///
     /// # Errors
     ///
@@ -63,6 +65,8 @@ pub trait Wiring: Send + Sync {
 pub struct Report {
     /// The files it created, changed or removed.
     pub changes: Vec<Change>,
+    /// The images whose pin it took off (D191).
+    pub unpinned: Vec<Reference>,
     /// What it left alone, and why.
     pub notes: Vec<String>,
 }
