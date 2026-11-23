@@ -38,6 +38,11 @@ kubernetes_newest := "1.37"
 kind_version := "0.33.0"
 # renovate: datasource=github-releases depName=kubernetes/kubernetes
 kubectl_version := "1.37.2"
+# The helm that installs the chart in DaemonSet mode (D208) and Spegel for the bench (D106).
+# renovate: datasource=github-releases depName=helm/helm
+helm_version := "4.3.2"
+# The commit of spnngl/charts' main whose `charts/speculaire` an e2e cluster in DaemonSet mode installs (D208).
+chart_rev := "52396e519bf077238193b7091e951a488133c9e8"
 # The reflectors' load balancer of an e2e cluster (D94): the Envoy release kind v0.33.0 runs in front of its API servers.
 # renovate: datasource=docker depName=docker.io/envoyproxy/envoy
 envoy := "v1.36.2@sha256:4972515dd9a069b44beb43cebba7851596e72a8c61cd7a7c33d8f48efc5280ba"
@@ -49,21 +54,19 @@ golang := "1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2c
 conformance_rev := "97274622c11112caa21efb8c52acca3c6b8fa7f1"
 # The build tags of go.podman.io/image: OpenPGP in Go instead of gpgme (cgo), and no storage drivers.
 go_tags := "containers_image_openpgp,exclude_graphdriver_btrfs,exclude_graphdriver_devicemapper"
-# `just e2e-tools` downloads kind and kubectl here; the e2e recipes put them first in PATH.
+# `just e2e-tools` downloads kind, kubectl and helm here; the e2e recipes put them first in PATH.
 e2e_dir := justfile_directory() / "target/e2e"
-e2e_path := (e2e_dir / "kind-" + kind_version) + ":" + (e2e_dir / "kubectl-" + kubectl_version)
+e2e_path := (e2e_dir / "kind-" + kind_version) + ":" + (e2e_dir / "kubectl-" + kubectl_version) + ":" + (e2e_dir / "helm-" + helm_version)
 
-# The bench (D35, D106): the measuring tool, the mirror compared, the tool installing it, and the node-access pod.
+# The bench (D35, D106): the measuring tool, the mirror compared, and the node-access pod.
 # renovate: datasource=github-releases depName=spegel-org/benchmark
 benchmark_version := "0.0.7"
 # renovate: datasource=github-releases depName=spegel-org/spegel
 spegel_version := "0.8.1"
-# renovate: datasource=github-releases depName=helm/helm
-helm_version := "4.3.2"
 # renovate: datasource=docker depName=docker.io/library/debian
 bench_node := "trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2"
 bench_dir := justfile_directory() / "target/bench-tools"
-bench_path := (bench_dir / "benchmark-" + benchmark_version) + ":" + (bench_dir / "helm-" + helm_version)
+bench_path := bench_dir / "benchmark-" + benchmark_version
 
 # List recipes.
 default:
@@ -516,6 +519,8 @@ e2e runtime version kubernetes="": e2e-tools
 
 # Build the node image and start the cluster, for debugging: just e2e-up containerd 2.4 1.35. The cluster has one
 # control plane and SPECULAIRE_E2E_WORKERS workers, 2 by default; the prewarm suite alone runs on more (D193).
+# SPECULAIRE_E2E_INSTALL=daemonset installs the chart, from the directory SPECULAIRE_CHART names or else at
+# `chart_rev`, instead of the unit (D208).
 e2e-up runtime version kubernetes="": e2e-tools
     #!/usr/bin/env bash
     set -euo pipefail
@@ -542,6 +547,30 @@ e2e-up runtime version kubernetes="": e2e-tools
     cargo test -p e2e --locked --no-run >"$build_log" 2>&1 &
     build=$!
     trap 'kill "$build" 2>/dev/null || true' EXIT
+    if [[ "$install" == daemonset ]]; then
+        chart="${SPECULAIRE_CHART:-{{ e2e_dir }}/charts-{{ chart_rev }}/charts/speculaire}"
+        if [[ -z "${SPECULAIRE_CHART:-}" && ! -f "$chart/Chart.yaml" ]]; then
+            checkout='{{ e2e_dir }}/charts-{{ chart_rev }}'
+            rm -rf "$checkout"
+            git init --quiet "$checkout"
+            git -C "$checkout" fetch --quiet --depth 1 https://github.com/spnngl/charts.git '{{ chart_rev }}'
+            git -C "$checkout" checkout --quiet FETCH_HEAD
+        fi
+        # The image of packaging/Containerfile around this run's binary, which the upstreams' binary pushes to the plain
+        # upstream; every node pulls it from there, CRI-O's as containerd's.
+        context="{{ e2e_dir }}/$cluster-image"
+        platform="$(case '{{ arch() }}' in x86_64) echo amd64 ;; *) echo arm64 ;; esac)"
+        rm -rf "$context"
+        mkdir -p "$context/speculaire-$platform"
+        cp "$bin" "$context/speculaire-$platform/speculaire"
+        docker build --quiet --provenance=false -f packaging/Containerfile -t "localhost/speculaire-e2e:$cluster" \
+            "$context" >/dev/null
+        docker save -o "$context/image.tar" "localhost/speculaire-e2e:$cluster"
+        # docker writes it 0600; regctl reads it as another user.
+        chmod 0644 "$context/image.tar"
+        docker rmi "localhost/speculaire-e2e:$cluster" >/dev/null
+        export SPECULAIRE_E2E_IMAGE="$context/image.tar"
+    fi
     # Docker Hub's images through its mirrors (D120, D122). The Containerfile's alpine, which Renovate moves, is a named
     # context of the one pulled.
     pull() { {{ just_executable() }} hub-pull "$1"; }
@@ -567,6 +596,14 @@ e2e-up runtime version kubernetes="": e2e-tools
         fi
     } >"$config"
     kind create cluster --name "$cluster" --image "$image" --config "$config" --wait 180s
+    # The init container has no systemctl to reload CRI-O: CRI-O watches `registries.conf.d` instead (D201). The
+    # upstreams' binary restarts it.
+    if [[ "$install" == daemonset && '{{ runtime }}' == crio ]]; then
+        for node in $(kind get nodes --name "$cluster"); do
+            docker exec "$node" sh -c \
+                "printf '[crio.image]\nauto_reload_registries = true\n' >/etc/crio/crio.conf.d/10-e2e-auto-reload.conf"
+        done
+    fi
     wait "$build" || { cat "$build_log" >&2; exit 1; }
     # The upstreams, the test images on each, and each node's runtime config for them (D94, D112).
     SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' SPECULAIRE_E2E_RELEASE="$release" \
@@ -633,10 +670,10 @@ e2e-up runtime version kubernetes="": e2e-tools
     grep -q '^trusted_root = ' "$agent_config"
     grep -q '^url = ' "$agent_config"
     grep -q '^members = ' "$agent_config"
-    # The packages' paths: the binary, the unit and the config (D69).
+    # The packages' paths: the binary, the unit and the config (D69). The suites run the binary on the nodes in both
+    # installs; the chart's pods read the node's config (`config.source: host`).
     for node in $(kind get nodes --name "$cluster"); do
         docker cp "$bin" "$node:/usr/bin/speculaire"
-        docker cp packaging/speculaire.service "$node:/usr/lib/systemd/system/speculaire.service"
         docker exec "$node" mkdir -p /etc/speculaire
         docker cp "$agent_config" "$node:/etc/speculaire/config.toml"
         if [[ "$node" == "$cluster-control-plane" || "$node" == "$cluster-worker" ]]; then
@@ -644,12 +681,26 @@ e2e-up runtime version kubernetes="": e2e-tools
             docker exec "$node" grep -q '^role = "reflector"$' /etc/speculaire/config.toml
         fi
         # The admin's step of docs/operations.md § Install (D55): the mirror's certificates and the runtime's entries
-        # come before the agent, whose preflight looks for them.
-        docker exec "$node" speculaire configure
-        docker exec "$node" sh -c 'systemctl daemon-reload && systemctl enable --now speculaire'
+        # come before the agent, whose preflight looks for them. The chart's init container takes it.
+        if [[ "$install" == unit ]]; then
+            docker cp packaging/speculaire.service "$node:/usr/lib/systemd/system/speculaire.service"
+            docker exec "$node" speculaire configure
+            docker exec "$node" sh -c 'systemctl daemon-reload && systemctl enable --now speculaire'
+        fi
     done
     # kind's --wait covers the control plane only.
     kubectl --context "kind-$cluster" wait --for=condition=Ready nodes --all --timeout=180s
+    if [[ "$install" == daemonset ]]; then
+        # The reflectors' nodes, as e2e/chart/values.yaml names them.
+        kubectl --context "kind-$cluster" label node "$cluster-control-plane" "$cluster-worker" speculaire.e2e/reflector=
+        values=(--values e2e/chart/values.yaml --set runtime=containerd)
+        if [[ '{{ runtime }}' == crio ]]; then
+            values=(--values e2e/chart/values.yaml --values e2e/chart/crio.yaml --set runtime=cri-o)
+        fi
+        helm --kube-context "kind-$cluster" install speculaire "$chart" --namespace speculaire --create-namespace \
+            --wait --timeout 5m "${values[@]}" --set image.repository="$cluster-upstream.e2e.test/speculaire" \
+            --set image.tag=e2e >/dev/null
+    fi
 
 # Run the suites against the cluster of `just e2e-up`; arguments go to the test binary: just e2e-test crio 1.37 '' a_pod_runs.
 # SPECULAIRE_E2E_SUITE names the one suite to run, such as `prewarm`.
@@ -660,6 +711,7 @@ e2e-test runtime version kubernetes="" *args:
     export PATH="{{ e2e_path }}:$PATH"
     SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' SPECULAIRE_E2E_RELEASE="$release" \
         SPECULAIRE_E2E_KUBERNETES="$kubernetes" SPECULAIRE_E2E_IP_FAMILY="$family" SPECULAIRE_E2E_SCRAPES="$scrapes" \
+        SPECULAIRE_E2E_INSTALL="$install" \
         cargo test -p e2e --locked ${SPECULAIRE_E2E_SUITE:+--test "$SPECULAIRE_E2E_SUITE"} -- --ignored {{ args }}
     # The suites scrape each agent before they stop it; this scrapes the agents the last suite left running (D182).
     mkdir -p "$scrapes"
@@ -668,6 +720,10 @@ e2e-test runtime version kubernetes="" *args:
         scrape="$scrapes/$node-end-$(date +%s%N).pb"
         docker exec "$node" curl -sf -H "$accept" http://127.0.0.1:7482/metrics >"$scrape" || rm -f "$scrape"
     done
+    # Each restart of a chart's pod is a suite's kill of its agent (D208).
+    if [[ "$install" == daemonset ]]; then
+        kubectl --context "kind-$cluster" get pods --namespace speculaire --output wide
+    fi
 
 # Save each node's journal, the agent's with every field, and the load balancer's log into target/e2e/journals/<cluster>:
 # just e2e-journals crio 1.37
@@ -680,8 +736,22 @@ e2e-journals runtime version kubernetes="":
     mkdir -p "$dir"
     for node in $(kind get nodes --name "$cluster"); do
         docker exec "$node" journalctl --no-pager -o short-iso-precise >"$dir/$node.log"
-        docker exec "$node" journalctl --no-pager -u speculaire -o json >"$dir/$node.speculaire.json"
+        if [[ "$install" == unit ]]; then
+            docker exec "$node" journalctl --no-pager -u speculaire -o json >"$dir/$node.speculaire.json"
+        else
+            # The logs of the containers the suites ended, which the node helpers kept, then the running one's (D208).
+            docker exec "$node" sh -c 'cat /var/log/speculaire-e2e/agent.log 2>/dev/null; true' >"$dir/$node.speculaire.log"
+            pod="$(kubectl --context "kind-$cluster" get pods --namespace speculaire \
+                --field-selector "spec.nodeName=$node" --output name)"
+            if [[ -n "$pod" ]]; then
+                kubectl --context "kind-$cluster" logs --namespace speculaire --timestamps --all-containers \
+                    "$pod" >>"$dir/$node.speculaire.log" 2>&1 || true
+            fi
+        fi
     done
+    if [[ "$install" == daemonset ]]; then
+        kubectl --context "kind-$cluster" describe pods --namespace speculaire >"$dir/pods.txt" 2>&1 || true
+    fi
     docker logs "$cluster-lb" >"$dir/$cluster-lb.log" 2>&1
     echo "e2e: journals in $dir" >&2
 
@@ -708,8 +778,9 @@ e2e-down runtime="" version="" kubernetes="":
     docker ps -aq --filter "label=$label" | xargs -r docker rm -f -v >/dev/null
 
 # Print the shell variables of an e2e cluster: `release`, `kubernetes`, `node` (the kindest/node tag and digest),
-# `family`, `cluster`, and `scrapes`, the directory of the leg's metrics scrapes, which both passes share (D182). CRI-O runs on its own Kubernetes minor; containerd on the one named, by default the newest
-# (D63). SPECULAIRE_E2E_IP_FAMILY=dual makes a dual-stack cluster, whose name ends in `-dual` (D94).
+# `family`, `install`, `cluster`, and `scrapes`, the directory of the leg's metrics scrapes, which both passes share (D182). CRI-O runs on its own Kubernetes minor; containerd on the one named, by default the newest
+# (D63). SPECULAIRE_E2E_IP_FAMILY=dual makes a dual-stack cluster, whose name ends in `-dual` (D94);
+# SPECULAIRE_E2E_INSTALL=daemonset one whose agents are the chart's pods, whose name ends in `-ds` (D208).
 [private]
 e2e-cluster runtime version kubernetes="":
     #!/usr/bin/env bash
@@ -719,6 +790,12 @@ e2e-cluster runtime version kubernetes="":
         ipv4) suffix='' ;;
         dual) suffix=-dual ;;
         *) echo "e2e: SPECULAIRE_E2E_IP_FAMILY is $family: ipv4 or dual" >&2; exit 1 ;;
+    esac
+    install="${SPECULAIRE_E2E_INSTALL:-unit}"
+    case "$install" in
+        unit) installed='' ;;
+        daemonset) installed=-ds ;;
+        *) echo "e2e: SPECULAIRE_E2E_INSTALL is $install: unit or daemonset" >&2; exit 1 ;;
     esac
     case '{{ runtime }} {{ version }}' in
         'containerd 2.3') release='{{ containerd_2_3 }}' ;;
@@ -744,10 +821,10 @@ e2e-cluster runtime version kubernetes="":
         *) echo "e2e: no Kubernetes $kubernetes: 1.35, 1.36 or 1.37" >&2; exit 1 ;;
     esac
     leg="speculaire-{{ runtime }}{{ replace(version, ".", "") }}-k${kubernetes//./}"
-    printf 'release=%s\nkubernetes=%s\nnode=%s\nfamily=%s\ncluster=%s\nscrapes=%s\n' "$release" "$kubernetes" "$node" \
-        "$family" "$leg$suffix" '{{ e2e_dir }}/scrapes/'"$leg"
+    printf 'release=%s\nkubernetes=%s\nnode=%s\nfamily=%s\ninstall=%s\ncluster=%s\nscrapes=%s\n' "$release" \
+        "$kubernetes" "$node" "$family" "$install" "$leg$suffix$installed" '{{ e2e_dir }}/scrapes/'"$leg$installed"
 
-# Download the pinned kind and kubectl into target/e2e, checking their published SHA-256.
+# Download the pinned kind, kubectl and helm into target/e2e, checking their published SHA-256.
 e2e-tools:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -773,6 +850,15 @@ e2e-tools:
     fetch '{{ e2e_dir }}/kind-{{ kind_version }}' kind "$kind/kind-$os-$arch" "$kind/kind-$os-$arch.sha256sum"
     kubectl="https://dl.k8s.io/release/v{{ kubectl_version }}/bin/$os/$arch/kubectl"
     fetch '{{ e2e_dir }}/kubectl-{{ kubectl_version }}' kubectl "$kubectl" "$kubectl.sha256"
+    helm_dir='{{ e2e_dir }}/helm-{{ helm_version }}'
+    if [[ ! -x "$helm_dir/helm" ]]; then
+        helm="https://get.helm.sh/helm-v{{ helm_version }}-$os-$arch.tar.gz"
+        fetch "$helm_dir" helm.tar.gz "$helm" "$helm.sha256sum"
+        tar -xzOf "$helm_dir/helm.tar.gz" "$os-$arch/helm" >"$helm_dir/helm.part"
+        rm "$helm_dir/helm.tar.gz"
+        chmod +x "$helm_dir/helm.part"
+        mv "$helm_dir/helm.part" "$helm_dir/helm"
+    fi
 
 # Needs a cluster-admin kubeconfig. The samples and results.json go to target/bench/<UTC time>, the tables to stdout.
 # Each node runs the binary of `just musl` for its architecture. The bench images are amd64 only: arm64 nodes run them
@@ -785,7 +871,7 @@ bench kubeconfig *sets="10MB-1 10MB-4 100MB-1 100MB-4": e2e-tools bench-tools
     BENCH_NODE='docker.io/library/debian:{{ bench_node }}' SPEGEL_VERSION='{{ spegel_version }}' \
         bench/bench.sh {{ quote(kubeconfig) }} "target/bench/$(date -u +%Y%m%dT%H%M%SZ)" {{ sets }}
 
-# Download the pinned benchmark and helm into target/bench-tools, checking their published SHA-256.
+# Download the pinned benchmark into target/bench-tools, checking its published SHA-256.
 [private]
 bench-tools:
     #!/usr/bin/env bash
@@ -813,8 +899,6 @@ bench-tools:
     fetch '{{ bench_dir }}/benchmark-{{ benchmark_version }}' benchmark \
         "$benchmark/benchmark_{{ benchmark_version }}_${os}_$arch.tar.gz" \
         "$benchmark/benchmark_{{ benchmark_version }}_checksums.txt" benchmark
-    helm="https://get.helm.sh/helm-v{{ helm_version }}-$os-$arch.tar.gz"
-    fetch '{{ bench_dir }}/helm-{{ helm_version }}' helm "$helm" "$helm.sha256sum" "$os-$arch/helm"
 
 # Derived from packaging/config.toml: the file with its keys uncommented, in fuzz/target/seeds/config, and a token
 # dictionary of its tables, keys and quoted strings, so that libFuzzer can write `mode = "enforce"`.

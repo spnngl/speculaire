@@ -183,7 +183,7 @@ impl Worker {
             "rm -f {path}; rmdir /etc/containerd/certs.d/{HOST} 2>/dev/null; speculaire configure"
         ));
         // The agent reads the registry config again at once, rather than at its next poll (D91).
-        self.sh("speculaire configure");
+        self.cluster.configure(&self.name).unwrap();
         self.cluster.reload_agent(&self.name).unwrap();
         self.cluster.wait_ready(&self.name).unwrap();
     }

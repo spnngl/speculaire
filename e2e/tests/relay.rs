@@ -112,7 +112,7 @@ impl Worker {
                 "{}: the agent and the runtime are not both ready",
                 self.name
             );
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
@@ -143,7 +143,7 @@ impl Worker {
     /// Runs `speculaire configure`, which puts the mirror in front of what the registry config names now.
     fn configure(&mut self) {
         self.configured = true;
-        self.sh("speculaire configure");
+        self.cluster.configure(&self.name).unwrap();
         // The agent reads the registry config again at once, rather than at its next poll (D91).
         self.cluster.reload_agent(&self.name).unwrap();
         self.wait_ready();
@@ -268,9 +268,7 @@ impl Drop for Worker {
             let _ = self.cluster.exec_output(&self.name, &["sh", "-c", command]);
         }
         if self.configured {
-            let _ = self
-                .cluster
-                .exec_output(&self.name, &["speculaire", "configure"]);
+            let _ = self.cluster.configure(&self.name);
         }
         if self.agent_changed {
             let _ = self

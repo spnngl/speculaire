@@ -6,6 +6,9 @@ use e2e::Cluster;
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn readyz_answers_another_node_and_stays_200_across_a_reload() {
     let cluster = Cluster::from_env();
+    if !cluster.has_unit() {
+        return;
+    }
     let nodes = cluster.nodes().unwrap();
     let readyz = |from: &str, to: &str| {
         cluster

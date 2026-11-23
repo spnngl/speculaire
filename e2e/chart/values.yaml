@@ -1,0 +1,12 @@
+# The chart's values on every e2e cluster in DaemonSet mode (D208); `just e2e-up` sets the runtime and the image.
+# The agents read each node's config, which e2e-up writes as it does for the unit.
+config:
+  source: host
+# The node's bundle holds the public upstream's CA.
+hostTrustStore:
+  enabled: true
+  paths:
+    - /etc/ssl/certs
+# The reflectors' nodes, as the nodes' configs name them (D94): the control plane and the first worker.
+reflector:
+  nodeLabel: speculaire.e2e/reflector

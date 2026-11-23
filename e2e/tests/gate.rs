@@ -216,8 +216,9 @@ const CONFIG: &str = "/etc/speculaire/config.toml";
 const NRI_SOCKET: &str = "/var/run/nri/nri.sock";
 const MIRROR: &str = "https://127.0.0.1:7480";
 const MIRROR_DIR: &str = "/var/lib/speculaire/mirror";
-/// Where a test points `nri.socket`, to hold the agent before its registration.
-const HELD: &str = "/run/speculaire-e2e/nri.sock";
+/// Where a test points `nri.socket`, to hold the agent before its registration: beside NRI's, which the chart's pods
+/// mount (D208).
+const HELD: &str = "/var/run/nri/speculaire-e2e/nri.sock";
 
 /// A worker that is not a reflector, whose readiness waits for the gate alone, on the IPv4 pass.
 struct Worker {
@@ -659,6 +660,10 @@ fn with_the_audit_on_a_creation_and_a_changed_verdict_are_one_event_each_and_wit
     drop(guard);
 }
 
+/// The annotation of the chart's pods, with which the runtime lets them start without the plugin, as
+/// `docs/operations.md` § Before turning on `enforce` step 5 says: otherwise no agent's pod starts again (D208).
+const TOLERATE: &str = "speculaire.spnngl.github.io/tolerate-missing-plugins";
+
 /// The label of the enforce suite's pods, by which its guard deletes them in any namespace.
 const ENFORCE: &str = "speculaire-e2e=enforce";
 
@@ -686,11 +691,13 @@ impl<'a> Enforced<'a> {
         let require = match worker.cluster.runtime() {
             Runtime::Containerd => format!(
                 "cp {CONTAINERD} {CONTAINERD}.e2e && printf '\\n[plugins.\"io.containerd.nri.v1.nri\".default_validator]\\n  \
-                 enable = true\\n  required_plugins = [\"speculaire\"]\\n' >> {CONTAINERD}"
+                 enable = true\\n  required_plugins = [\"speculaire\"]\\n  \
+                 tolerate_missing_plugins_annotation = \"{TOLERATE}\"\\n' >> {CONTAINERD}"
             ),
             Runtime::Crio => format!(
                 "printf '[crio.nri.default_validator]\\nnri_enable_default_validator = true\\n\
-                 nri_validator_required_plugins = [\"speculaire\"]\\n' > {CRIO_REQUIRED}"
+                 nri_validator_required_plugins = [\"speculaire\"]\\n\
+                 nri_validator_tolerate_missing_plugins_annotation = \"{TOLERATE}\"\\n' > {CRIO_REQUIRED}"
             ),
         };
         worker.sh(&require);
@@ -986,17 +993,20 @@ fn restarted(enforced: &Enforced<'_>, runnable: &str) {
 }
 
 /// Restarts the agent as in a pod, its run directory a `hostPath` left 0755 that no `RuntimeDirectoryMode` narrows: the
-/// agent makes the directory 0700 itself (D204). The guard puts the unit back.
-fn restart_in_pod<'a>(enforced: &Enforced<'a>) -> DropIn<'a> {
+/// agent makes the directory 0700 itself (D204). Under the unit, the guard puts the unit back; the chart's pod is in a
+/// pod already (D208).
+fn restart_in_pod<'a>(enforced: &Enforced<'a>) -> Option<DropIn<'a>> {
     let worker = enforced.worker;
-    let in_pod = worker
-        .cluster
-        .drop_in(
-            &worker.node,
-            "e2e-run-directory",
-            "[Service]\nRuntimeDirectory=\nReadWritePaths=/run/speculaire\n",
-        )
-        .unwrap();
+    let in_pod = worker.cluster.has_unit().then(|| {
+        worker
+            .cluster
+            .drop_in(
+                &worker.node,
+                "e2e-run-directory",
+                "[Service]\nRuntimeDirectory=\nReadWritePaths=/run/speculaire\n",
+            )
+            .unwrap()
+    });
     worker.sh("chmod 0755 /run/speculaire");
     enforced.restart_agent();
     assert_eq!(
@@ -1244,10 +1254,15 @@ fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refuse
     restarted(&enforced, &runnable);
     lap("agent restarted during a rollout");
 
-    let stop = stopping(&worker, &runnable, (&unsigned, &signed));
-    lap(&format!(
-        "containers created while the agent stops, in {stop:?}"
-    ));
+    // The chart's pod has its own drain case (D208).
+    if worker.cluster.has_unit() {
+        let stop = stopping(&worker, &runnable, (&unsigned, &signed));
+        lap(&format!(
+            "containers created while the agent stops, in {stop:?}"
+        ));
+    } else {
+        worker.cluster.stop_agent(&worker.node).unwrap();
+    }
 
     // The runtime requires the plugin: without the agent, no new pod starts (D64).
     create(&worker, "default", "speculaire-e2e-stopped", &signed);
@@ -1255,8 +1270,11 @@ fn under_enforce_signed_images_start_on_their_first_pull_and_the_rest_are_refuse
     worker.cluster.start_agent(&worker.node).unwrap();
     lap(&format!("agent stopped: {message}"));
 
-    after_a_stop_the_first_container_in_a_running_pod_passes(&worker);
-    lap("the first container in a running pod after a stop");
+    // The kubelet's removal of the chart's pod is a request that clears the closed plugin (D208).
+    if worker.cluster.has_unit() {
+        after_a_stop_the_first_container_in_a_running_pod_passes(&worker);
+        lap("the first container in a running pod after a stop");
+    }
 
     cold(&worker, &runnable);
     lap("cold node");

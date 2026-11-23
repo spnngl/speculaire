@@ -2,7 +2,9 @@
 //! a host, corrupt a blob it serves, and read its metrics, logs and audit events.
 //!
 //! The suites act on the agent only through these helpers, which alone run `systemctl` and `journalctl` on it, except
-//! the suites of the unit itself (D200).
+//! the suites of the unit itself (D200). When the agents are the chart's pods, the helpers act on the pods instead
+//! (D208): a stop labels the node out of the `DaemonSet`s, a restart deletes the pod, a kill or a reload signals the
+//! agent, and the logs are the pods'.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -12,10 +14,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use prost::Message as _;
 
-use crate::logs::Entry;
+use crate::logs::{Entry, Log};
 use crate::registry::{docker, fail};
 use crate::upstream::Digest;
-use crate::{Cluster, Failure, Runtime};
+use crate::{Cluster, Failure, Install, Runtime};
 
 /// The verification policy the agent reads by default (D8).
 pub const POLICY: &str = "/etc/speculaire/policy.yaml";
@@ -146,6 +148,9 @@ impl Cluster {
     /// When `systemctl` fails.
     pub fn stop_agent(&self, node: &str) -> Result<SystemTime, Failure> {
         self.scrape(node)?;
+        if self.install == Install::DaemonSet {
+            return self.pod_stop(node);
+        }
         let began = self.sh(node, "date +%s%N; systemctl stop speculaire")?;
         nanos(node, &began)
     }
@@ -157,6 +162,10 @@ impl Cluster {
     ///
     /// When the stop or `script` fails.
     pub fn stop_agent_then(&self, node: &str, script: &str) -> Result<String, Failure> {
+        if self.install == Install::DaemonSet {
+            self.stop_agent(node)?;
+            return self.sh(node, script);
+        }
         self.scrape(node)?;
         self.sh(node, &format!("systemctl stop speculaire\n{script}"))
     }
@@ -167,6 +176,7 @@ impl Cluster {
     ///
     /// When the agent is not stopping within 2 s.
     pub fn stop_agent_no_wait(&self, node: &str) -> Result<(), Failure> {
+        self.unit_only(node)?;
         self.scrape(node)?;
         self.sh(
             node,
@@ -183,6 +193,9 @@ impl Cluster {
     ///
     /// When `systemctl` fails, or the agent was killed or failed.
     pub fn wait_stopped(&self, node: &str) -> Result<(), Failure> {
+        if self.install == Install::DaemonSet {
+            return self.pod_stopped(node);
+        }
         let result = self.sh(
             node,
             "while [ \"$(systemctl is-active speculaire)\" = deactivating ]; do sleep 0.1; done
@@ -203,6 +216,9 @@ impl Cluster {
     ///
     /// When `systemctl` fails, or the agent is not ready within 120 s.
     pub fn start_agent(&self, node: &str) -> Result<(), Failure> {
+        if self.install == Install::DaemonSet {
+            return self.pod_start(node);
+        }
         self.sh(
             node,
             "systemctl reset-failed speculaire; systemctl start speculaire",
@@ -210,13 +226,16 @@ impl Cluster {
         self.wait_ready(node)
     }
 
-    /// Kills the node's agent with `SIGKILL`; systemd starts it again (`Restart=on-failure`).
+    /// Kills the node's agent with `SIGKILL`; systemd starts it again (`Restart=on-failure`), or the kubelet.
     ///
     /// # Errors
     ///
     /// When `systemctl` fails.
     pub fn kill_agent(&self, node: &str) -> Result<(), Failure> {
         self.scrape(node)?;
+        if self.install == Install::DaemonSet {
+            return self.pod_kill(node);
+        }
         self.sh(node, "systemctl kill --signal=SIGKILL speculaire")
             .map(drop)
     }
@@ -229,6 +248,9 @@ impl Cluster {
     /// When the agent fails to start.
     pub fn restart_agent(&self, node: &str) -> Result<(), Failure> {
         self.scrape(node)?;
+        if self.install == Install::DaemonSet {
+            return self.pod_restart(node, true);
+        }
         self.sh(
             node,
             "systemctl reset-failed speculaire; systemctl restart speculaire",
@@ -242,6 +264,12 @@ impl Cluster {
     ///
     /// When the agent does not run.
     pub fn reload_agent(&self, node: &str) -> Result<(), Failure> {
+        if self.install == Install::DaemonSet {
+            let pid = self
+                .pod_pid(node)?
+                .ok_or_else(|| fail(node, &"no agent runs to reload"))?;
+            return self.sh(node, &format!("kill -HUP {pid}")).map(drop);
+        }
         self.sh(node, "systemctl reload speculaire").map(drop)
     }
 
@@ -251,6 +279,9 @@ impl Cluster {
     ///
     /// When `systemctl` fails.
     pub fn agent_pid(&self, node: &str) -> Result<Option<u32>, Failure> {
+        if self.install == Install::DaemonSet {
+            return self.pod_pid(node);
+        }
         let pid = self.sh(node, "systemctl show -p MainPID --value speculaire")?;
         let pid: u32 = pid.trim().parse().map_err(|e| fail(node, &e))?;
         Ok((pid != 0).then_some(pid))
@@ -272,6 +303,9 @@ impl Cluster {
     ///
     /// When `journalctl` fails, or an entry does not parse.
     pub fn agent_logs(&self, node: &str, since: Option<SystemTime>) -> Result<Vec<Entry>, Failure> {
+        if self.install == Install::DaemonSet {
+            return self.pod_logs(node, since, Log::Agent);
+        }
         let since = since.map_or_else(String::new, |since| {
             let secs = since
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -291,6 +325,9 @@ impl Cluster {
     ///
     /// When `journalctl` fails, or an event does not parse.
     pub fn audit(&self, node: &str) -> Result<Vec<Entry>, Failure> {
+        if self.install == Install::DaemonSet {
+            return self.pod_logs(node, None, Log::Audit);
+        }
         self.journal(node, "journalctl -q -t speculaire-audit --no-pager -o json")
     }
 
@@ -326,6 +363,9 @@ impl Cluster {
     /// When `systemctl` fails to start the agent.
     pub fn restart_with_empty_logs(&self, node: &str) -> Result<(), Failure> {
         self.scrape(node)?;
+        if self.install == Install::DaemonSet {
+            return self.pod_restart(node, false);
+        }
         self.sh(
             node,
             "systemctl stop speculaire; journalctl --rotate && journalctl --vacuum-time=1us; systemctl reset-failed speculaire; systemctl start speculaire",
@@ -340,6 +380,7 @@ impl Cluster {
     ///
     /// When the file cannot be written or `systemctl daemon-reload` fails.
     pub fn drop_in(&self, node: &str, name: &str, text: &str) -> Result<DropIn<'_>, Failure> {
+        self.unit_only(node)?;
         let path = format!("/etc/systemd/system/speculaire.service.d/{name}.conf");
         self.write(node, &path, text)?;
         let guard = DropIn {
@@ -349,6 +390,14 @@ impl Cluster {
         };
         self.sh(node, "systemctl daemon-reload")?;
         Ok(guard)
+    }
+
+    /// Refuses, when the agents are the chart's pods, what only the unit does.
+    fn unit_only(&self, node: &str) -> Result<(), Failure> {
+        match self.install {
+            Install::Unit => Ok(()),
+            Install::DaemonSet => Err(fail(node, &"only the unit does this (D208)")),
+        }
     }
 
     /// Waits until the node's agent answers `/readyz`.
@@ -374,7 +423,8 @@ impl Cluster {
             if Instant::now() > deadline {
                 return Err(fail(node, &"the agent is not ready after 120 s"));
             }
-            std::thread::sleep(Duration::from_millis(500));
+            // A `docker exec` takes about 50 ms; the chart's pods become ready about 100 ms after they run.
+            std::thread::sleep(Duration::from_millis(100));
         }
         Ok(())
     }
@@ -404,7 +454,7 @@ impl Cluster {
                     &format!("not streaming to every reflector after 90 s: {connected:?}"),
                 ));
             }
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
@@ -445,6 +495,38 @@ impl Cluster {
         let changes = self.watch(node, &format!("systemctl restart {}", self.runtime.unit()))?;
         self.wait_runtime(node)?;
         Ok(changes)
+    }
+
+    /// Runs `speculaire configure` on `node`, and returns once the runtime reads what it wrote.
+    ///
+    /// The chart's CRI-O nodes watch `registries.conf.d`, and read it 200 ms after its last change
+    /// (`server/server.go:51` at CRI-O v1.37.2): `configure` returns before then (D201, D208).
+    ///
+    /// # Errors
+    ///
+    /// When `configure` fails, or CRI-O does not read the change within 10 s.
+    pub fn configure(&self, node: &str) -> Result<(), Failure> {
+        self.exec(node, &["speculaire", "configure"])?;
+        if self.runtime != Runtime::Crio || self.install == Install::Unit {
+            return Ok(());
+        }
+        // The time of the last change and of CRI-O's last read, in seconds since the epoch.
+        let read = r#"d=/etc/containers/registries.conf.d
+            changed=$(stat -c %.9Y "$d" "$d"/*.conf | sort -n | tail -1)
+            applied=$(journalctl -u crio -o short-unix --no-pager --since "@${changed%.*}" \
+                | grep 'Applied new registry configuration' | tail -1 | cut -d' ' -f1)
+            awk -v a="${applied:-0}" -v c="$changed" 'BEGIN { exit !(a > c) }'"#;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.exec_output(node, &["sh", "-c", read])?.success {
+            if Instant::now() > deadline {
+                return Err(fail(
+                    node,
+                    &"CRI-O did not read registries.conf.d within 10 s",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
     }
 
     /// Waits until the node's runtime answers, so that kubelet and the next suite find it.

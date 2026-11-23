@@ -11,7 +11,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 pub use start::{
-    COSIGN_PUBLIC_KEY, CRIO_AUTH_FILE, FIXTURES, RUNNABLE, SIGNED, UNSIGNED, runnable_policy, start,
+    AGENT_IMAGE, COSIGN_PUBLIC_KEY, CRIO_AUTH_FILE, FIXTURES, RUNNABLE, SIGNED, UNSIGNED,
+    push_agent, runnable_policy, start,
 };
 
 use crate::registry::{PASSWORD, PLATFORM, USER, docker, fail, regctl_after};

@@ -1,0 +1,83 @@
+# Every leg of D63's matrix, on both architectures, with the agents as the chart's pods (D208): pull requests and main
+# run the newest only (ci.yml). On IPv4: the dual-stack pass stays with the unit on main (D190). A failed run opens one
+# issue labelled `e2e-nightly`, or comments on the open one.
+name: e2e-nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ci.yml's musl job, without its conformance suite.
+  musl:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          # renovate: datasource=crate depName=just
+          just-version: "1.59.0"
+      - env:
+          TARGET: ${{ matrix.target }}
+        run: just musl "$TARGET"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: speculaire-${{ matrix.target }}
+          path: target/musl/${{ matrix.target }}/speculaire
+          if-no-files-found: error
+          retention-days: 7
+
+  e2e:
+    needs: musl
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      install: daemonset
+
+  # On the default branch only: a run dispatched from another branch tests that branch.
+  report:
+    needs: [musl, e2e]
+    if: failure() && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Open or comment on the e2e-nightly issue
+        run: |
+          failed=$(gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.conclusion == "failure") | "- \(.name)"')
+          body=$(printf 'The nightly e2e run %s failed:\n\n%s\n' "$RUN" "$failed")
+          gh label create e2e-nightly --color B60205 --description "A failed e2e-nightly.yml run" --force
+          issue=$(gh issue list --label e2e-nightly --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title "e2e-nightly fails" --label e2e-nightly --body "$body"
+          fi

@@ -67,6 +67,30 @@ const OFFLINE: [&str; 6] = [
     "--allow-insecure-registry",
 ];
 
+/// The agent's image on the plain upstream, which the chart's pods pull (D208).
+pub const AGENT_IMAGE: &str = "speculaire:e2e";
+
+/// Pushes the agent's image, the archive `docker save` wrote at `archive`, to the plain upstream as [`AGENT_IMAGE`].
+///
+/// # Errors
+///
+/// When `archive` is not a file, or `regctl` fails.
+pub fn push_agent(cluster: &Cluster, archive: &Path) -> Result<(), Failure> {
+    let shown = archive.display().to_string();
+    let archive = archive.canonicalize().map_err(|e| fail(&shown, &e))?;
+    let (Some(dir), Some(name)) = (archive.parent(), archive.file_name()) else {
+        return Err(fail(&shown, &"not a file"));
+    };
+    let plain = cluster.upstream(Kind::Plain);
+    let script = format!(
+        "regctl image import {}/{AGENT_IMAGE} /image/{}",
+        plain.address(),
+        name.display()
+    );
+    let volume = format!("{}:/image:ro", dir.display());
+    regctl_after(&plain.reach(), &script, Some(&volume)).map(drop)
+}
+
 /// Starts the upstreams of [`Kind`], pushes [`SIGNED`] and [`UNSIGNED`] to each and [`FIXTURES`] to zot and the plain
 /// one, pins the fixtures' trusted root on every node and points its runtime at them. They live as long as the cluster;
 /// what fails on the way is removed.

@@ -15,6 +15,7 @@ use std::str::FromStr;
 
 pub mod balancer;
 pub mod catalog;
+mod daemonset;
 pub mod hub;
 pub mod logs;
 pub mod node;
@@ -77,11 +78,21 @@ pub enum IpFamily {
     Dual,
 }
 
+/// How the agents run, which `SPECULAIRE_E2E_INSTALL` picks (D208).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Install {
+    /// `packaging/speculaire.service` on every node.
+    Unit,
+    /// The chart's pods, which read each node's config.
+    DaemonSet,
+}
+
 /// The cluster named by `just e2e-test` in the `SPECULAIRE_E2E_*` variables.
 pub struct Cluster {
     name: String,
     context: String,
     family: IpFamily,
+    install: Install,
     runtime: Runtime,
     release: String,
     kubernetes: String,
@@ -114,11 +125,17 @@ impl Cluster {
             "dual" => IpFamily::Dual,
             other => panic!("SPECULAIRE_E2E_IP_FAMILY is {other:?}, not ipv4 or dual"),
         };
+        let install = match std::env::var("SPECULAIRE_E2E_INSTALL").as_deref() {
+            Err(_) | Ok("unit") => Install::Unit,
+            Ok("daemonset") => Install::DaemonSet,
+            Ok(other) => panic!("SPECULAIRE_E2E_INSTALL is {other:?}, not unit or daemonset"),
+        };
         let name = var("SPECULAIRE_E2E_CLUSTER");
         Self {
             context: format!("kind-{name}"),
             name,
             family,
+            install,
             runtime,
             release: var("SPECULAIRE_E2E_RELEASE"),
             kubernetes: var("SPECULAIRE_E2E_KUBERNETES"),
@@ -137,6 +154,18 @@ impl Cluster {
     #[must_use]
     pub fn ip_family(&self) -> IpFamily {
         self.family
+    }
+
+    /// How its agents run.
+    #[must_use]
+    pub fn install(&self) -> Install {
+        self.install
+    }
+
+    /// Whether its agents run as the unit: a test of the unit itself passes at once otherwise (D208).
+    #[must_use]
+    pub fn has_unit(&self) -> bool {
+        self.install == Install::Unit
     }
 
     /// The nodes whose agents are reflectors: the control plane and the first worker (D94).

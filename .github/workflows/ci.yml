@@ -178,84 +178,28 @@ jobs:
       - if: matrix.recipe == 'deny'
         run: just vet
 
-  # The suites on a kind cluster per leg of D63's matrix, natively on each architecture, with the binary this run built
-  # (D27). Pull requests skip the `main-only` legs, keeping the newest containerd and the newest CRI-O (D113).
+  # The suites on a kind cluster per leg of D63's matrix (e2e.yml), with the binary this run built (D27). Pull requests
+  # keep the newest containerd and the newest CRI-O (D113); main adds the dual-stack pass (D190).
   e2e:
-    name: e2e (${{ matrix.leg.runtime }} ${{ matrix.leg.version }}, kubernetes ${{ matrix.leg.kubernetes }}, ${{ matrix.platform.os }})
     needs: musl
-    strategy:
-      fail-fast: false
-      matrix:
-        leg:
-          - { runtime: containerd, version: "2.3", kubernetes: "1.37", main-only: true }
-          - { runtime: containerd, version: "2.4", kubernetes: "1.37" }
-          - { runtime: containerd, version: "2.4", kubernetes: "1.36", main-only: true }
-          - { runtime: containerd, version: "2.4", kubernetes: "1.35", main-only: true }
-          - { runtime: crio, version: "1.37", kubernetes: "1.37" }
-          - { runtime: crio, version: "1.36", kubernetes: "1.36", main-only: true }
-          - { runtime: crio, version: "1.35", kubernetes: "1.35", main-only: true }
-        platform:
-          - os: ubuntu-26.04
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-26.04-arm
-            target: aarch64-unknown-linux-musl
-        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"leg":{"main-only":true}}]') || fromJSON('[]') }}
-    runs-on: ${{ matrix.platform.os }}
-    timeout-minutes: 30
     permissions:
       contents: read
-    env:
-      # protoc: the suites read the recorded fixtures through speculaire-artifacts, whose runtime client compiles its
-      # .proto at build time (D141).
-      # renovate: datasource=github-releases depName=protocolbuffers/protobuf
-      PROTOC_VERSION: "36.2"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
-        with:
-          # renovate: datasource=crate depName=just
-          just-version: "1.59.0"
-      # The pinned stable, before rust-cache: its key includes the rustc version.
-      - run: rustup toolchain install
-      # Before the artifact: restoring a cache replaces target/.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: protoc@3.${{ env.PROTOC_VERSION }}
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: speculaire-${{ matrix.platform.target }}
-          path: target/musl/${{ matrix.platform.target }}
-      # Artifacts drop the executable bit.
-      - env:
-          TARGET: ${{ matrix.platform.target }}
-        run: chmod +x "target/musl/$TARGET/speculaire"
-      # The suites, then the catalog check over their scrapes (D181).
-      - env:
-          RUNTIME: ${{ matrix.leg.runtime }}
-          VERSION: ${{ matrix.leg.version }}
-          KUBERNETES: ${{ matrix.leg.kubernetes }}
-        run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
-      # The same suites on a dual-stack cluster (D94), on main only (D190).
-      - if: github.event_name != 'pull_request'
-        env:
-          RUNTIME: ${{ matrix.leg.runtime }}
-          VERSION: ${{ matrix.leg.version }}
-          KUBERNETES: ${{ matrix.leg.kubernetes }}
-          SPECULAIRE_E2E_IP_FAMILY: dual
-        run: just e2e "$RUNTIME" "$VERSION" "$KUBERNETES"
-      # The journals `just e2e` saved before deleting a cluster whose suites failed, and the scrapes of the catalog check.
-      - if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: e2e-journals-${{ matrix.leg.runtime }}-${{ matrix.leg.version }}-k${{ matrix.leg.kubernetes }}-${{ matrix.platform.os }}
-          path: |
-            target/e2e/journals
-            target/e2e/scrapes
-          if-no-files-found: ignore
-          retention-days: 7
+    uses: ./.github/workflows/e2e.yml
+    with:
+      install: unit
+      exclude: ${{ github.event_name == 'pull_request' && '[{"leg":{"newest":false}}]' || '[]' }}
+      dual: ${{ github.event_name != 'pull_request' }}
+
+  # The same suites with the agents as the chart's pods (D208): the newest containerd and CRI-O, on x86_64 for pull
+  # requests and on both architectures on main. e2e-nightly.yml runs every leg.
+  e2e-daemonset:
+    needs: musl
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      install: daemonset
+      exclude: ${{ github.event_name == 'pull_request' && '[{"leg":{"newest":false}},{"platform":{"os":"ubuntu-26.04-arm"}}]' || '[{"leg":{"newest":false}}]' }}
 
   # The Go test oracle (D29): built, vetted and tested in the pinned Go image, then the Rust differential tests that ask
   # it (D70) on the runner.
@@ -287,7 +231,7 @@ jobs:
   # whenever a matrix changes.
   required:
     if: always()
-    needs: [check, coverage, musl, deps, oracle, e2e]
+    needs: [check, coverage, musl, deps, oracle, e2e, e2e-daemonset]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
