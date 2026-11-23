@@ -103,7 +103,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The annotation is already the accepted escape hatch for static pods (`docs/security.md`).
 - **Revisit when:** containerd offers a way to exempt a plugin's own pod from validation.
 
-## D54: The gate cannot be turned off (amended by D64, D86, D180)
+## D54: The gate cannot be turned off (amended by D64, D86, D180, D198)
 
 - **Decision:** no setting disables the gate. Startup and `speculaire check-config` refuse a containerd config whose NRI plugin is disabled or closed to external plugins (`disable = true` or `disable_connections = true` under `[plugins.'io.containerd.nri.v1.nri']`, v2.3.7 `internal/nri/config.go:30,42`), and the error names the key. `gate.mode = "audit"` and `gate.exempt` (D18) are the ways to let containers through.
 - **Because:** a node that mirrors but never gates looks protected and is not. `audit` keeps the mirror and the verdicts, and the gap stays visible in `speculaire_gate_total{mode="audit"}`.
@@ -396,15 +396,17 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Cost:** a field the gate does not read is not validated: a request with a malformed environment, which prost refused, is decided. The runtime built it from its own state.
 - **Revisit when:** the gate reads a field outside the 10, or NRI renumbers one; or containerd prepares the container's snapshot after NRI's CreateContainer; or a dependency on the path, the metrics recorder above all, starts allocating per call: the guard names it.
 
-## D198: Once a pinned runtime ships NRI v0.12.4 or later, the agent answers `fail_request = true` (amends D9, D41, D180)
+## D198: Once a pinned runtime ships NRI v0.12.4 or later, the agent answers `fail_request = true` in `enforce` (amends D9, D41, D54, D180)
 
 - **Decision:**
-  - The agent answers `Configure` with `ConfigureResponse.failure_policy.fail_request = true` (containerd/nri#329, v0.12.4 `pkg/api/api.proto:182-220`). `keep_connected` stays false: a timed-out agent is closed and registers again (D41).
+  - The agent answers `Configure` with `ConfigureResponse.failure_policy.fail_request = true` (containerd/nri#329, v0.12.4 `pkg/api/api.proto:182-220`) when `gate.mode` is `enforce`, and leaves it false in `audit`. `keep_connected` stays false: a timed-out agent is closed and registers again (D41).
+  - NRI reads the failure policy only at `Configure` (v0.12.4 `pkg/adaptation/plugin.go:502`), and `gate.mode` is live (D47): a reload that changes the mode makes the agent leave NRI and register again, so the runtime reads the new policy.
   - **Precondition:** before building, the NRI proto in `crates/nri`, today v0.12.3's, carries the field, and a runtime the e2e matrix pins (D63) ships NRI v0.12.4 or later.
   - A gate test stalls the agent past the runtime's request timeout and checks that the creation is rejected.
 - **Because:**
   - Today a `CreateContainer` call that fails or times out on the plugin lets the container start, even with `required_plugins` (v0.12.3 `pkg/adaptation/plugin.go:757-763`). With `fail_request`, NRI returns the error for a closed connection, a protocol error or a timeout (v0.12.4 `pkg/adaptation/plugin.go:964-983`, `isFatalError` `:998-1010`), so the creation is rejected.
   - speculaire subscribes only to `CreateContainer`, so the policy changes nothing else.
   - containerd's `release/2.4` and CRI-O's `main` already carry NRI v0.12.5 (containerd/containerd#14477, cri-o/cri-o#10518), not in a release yet. Backports are asked in https://github.com/containerd/containerd/issues/14635 and https://github.com/cri-o/cri-o/issues/10604.
-- **Cost:** an agent that stalls or crashes mid-call rejects that creation instead of letting it through, in `audit` mode too, which otherwise allows every container (D54); kubelet retries it.
-- **Revisit when:** NRI changes what `fail_request` covers, or `audit` must never reject (`docs/TODECIDE.md`).
+  - In `audit`, which allows every container (D54), a stalled agent must not reject what its own answer would have allowed (user, 2026-11-23).
+- **Cost:** in `enforce`, an agent that stalls or crashes mid-call rejects that creation instead of letting it through; kubelet retries it. A mode change costs one NRI registration, during which creations pass ungated as at any agent restart (D180).
+- **Revisit when:** NRI changes what `fail_request` covers, or reads the failure policy outside `Configure`.
