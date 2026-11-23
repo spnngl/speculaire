@@ -17,7 +17,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use e2e::logs::{Entry, Level, tail};
-use e2e::node::{POLICY, STATE};
+use e2e::node::{DropIn, POLICY, STATE};
 use e2e::upstream::{FIXTURES, Kind, RUNNABLE, SIGNED, UNSIGNED, runnable_policy};
 use e2e::{Cluster, IpFamily, Runtime};
 use speculaire_oci::chain::of_config;
@@ -889,6 +889,7 @@ fn logged(worker: &Worker, message: &str) -> Vec<Entry> {
 
 /// The agent restarts while a Deployment of `runnable` rolls out: it loads the verdicts it saved at stop, so no new
 /// pod waits on a verification (D31, D176). Creations during the restart fail on the missing plugin and are retried.
+/// It restarts as in a pod ([`restart_in_pod`]).
 fn restarted(enforced: &Enforced<'_>, runnable: &str) {
     let worker = enforced.worker;
     let deployment = "speculaire-e2e-rollout";
@@ -919,7 +920,7 @@ fn restarted(enforced: &Enforced<'_>, runnable: &str) {
         "default",
         &format!("deployment/{deployment}"),
     ]);
-    enforced.restart_agent();
+    let in_pod = restart_in_pod(enforced);
     rolled();
     let logged = logged(worker, "saved verdicts loaded");
     assert_eq!(logged.len(), loads + 1, "{logged:?}");
@@ -981,6 +982,30 @@ fn restarted(enforced: &Enforced<'_>, runnable: &str) {
         deployment,
         "--timeout=60s",
     ]);
+    drop(in_pod);
+}
+
+/// Restarts the agent as in a pod, its run directory a `hostPath` left 0755 that no `RuntimeDirectoryMode` narrows: the
+/// agent makes the directory 0700 itself (D204). The guard puts the unit back.
+fn restart_in_pod<'a>(enforced: &Enforced<'a>) -> DropIn<'a> {
+    let worker = enforced.worker;
+    let in_pod = worker
+        .cluster
+        .drop_in(
+            &worker.node,
+            "e2e-run-directory",
+            "[Service]\nRuntimeDirectory=\nReadWritePaths=/run/speculaire\n",
+        )
+        .unwrap();
+    worker.sh("chmod 0755 /run/speculaire");
+    enforced.restart_agent();
+    assert_eq!(
+        worker.sh("stat -c %a /run/speculaire").trim(),
+        "700",
+        "{}",
+        worker.node
+    );
+    in_pod
 }
 
 /// A cold node: `runnable` is held, and the agent starts with no verdict of it, as its `cache.bin` is corrupt and

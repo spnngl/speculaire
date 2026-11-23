@@ -10,6 +10,7 @@ mod identity;
 mod listen;
 pub mod log;
 pub mod node;
+mod open_files;
 mod prewarm;
 mod pulls;
 mod serve;

@@ -1,8 +1,10 @@
 //! `cache.bin` (D31, D165, D176): the verdicts and the signature results, loaded before the gate registers, saved at
 //! most once a second while the verdicts change, and once more at stop.
 
+use std::fs::{self, DirBuilder, Permissions};
 use std::io;
-use std::path::PathBuf;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +22,9 @@ use crate::telemetry::CACHE_LOADS;
 
 /// The least time between two saves (D31).
 const PERIOD: Duration = Duration::from_secs(1);
+
+/// The mode of the directory of `cache.bin`: the agent's alone (D31, D204).
+const PRIVATE: u32 = 0o700;
 
 /// The caches `cache.bin` holds, where it is, and what keys its verdicts.
 #[derive(Debug, Clone)]
@@ -46,9 +51,13 @@ enum Discarded {
 }
 
 impl Caches {
-    /// Loads the file into the caches, replacing what they hold; must come before the engine runs. A missing file
-    /// loads nothing; one that cannot be read or that `load` refuses is discarded, and the caches stay empty.
+    /// Makes the file's directory private, then loads the file into the caches, replacing what they hold; must come
+    /// before the engine runs. A missing file loads nothing; one that cannot be read or that `load` refuses is
+    /// discarded, and the caches stay empty.
     pub(crate) fn load(&self) {
+        if let Some(dir) = self.path.parent() {
+            private(dir);
+        }
         let path = self.path.display();
         let loaded = match std::fs::read(&self.path) {
             Ok(bytes) => self.load_bytes(&bytes).map_err(Discarded::from),
@@ -148,6 +157,51 @@ impl Caches {
         }
         bytes
     }
+}
+
+/// What [`make_private`] did to a directory.
+#[derive(Debug, PartialEq, Eq)]
+enum Made {
+    /// It was private already.
+    Kept,
+    /// It was missing, and is made private.
+    Created,
+    /// It had this mode, wider than [`PRIVATE`], and is set to it.
+    Narrowed(u32),
+}
+
+/// Makes `dir` private, as systemd's `RuntimeDirectoryMode=0700` did under the unit and a `hostPath` volume does not
+/// (D204); logs what it changed, and warns of a failure, which the next save meets again.
+fn private(dir: &Path) {
+    let shown = dir.display();
+    match make_private(dir) {
+        Ok(Made::Kept) => {}
+        Ok(Made::Created) => info!(directory = %shown, "cache directory created, mode 0700"),
+        Ok(Made::Narrowed(mode)) => info!(
+            directory = %shown,
+            mode = %format_args!("{mode:04o}"),
+            "cache directory set to mode 0700"
+        ),
+        Err(error) => {
+            warn!(directory = %shown, %error, "the cache directory cannot be made private");
+        }
+    }
+}
+
+/// Creates `dir` with mode [`PRIVATE`] when it is missing, and sets it to that mode when group or others have any
+/// access, or a special bit is set. A narrower mode is the admin's, and stays.
+fn make_private(dir: &Path) -> io::Result<Made> {
+    // Another error of `stat`, such as a denied search, fails the creation as well.
+    let Ok(metadata) = fs::metadata(dir) else {
+        DirBuilder::new().mode(PRIVATE).create(dir)?;
+        return Ok(Made::Created);
+    };
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode & !PRIVATE == 0 {
+        return Ok(Made::Kept);
+    }
+    fs::set_permissions(dir, Permissions::from_mode(PRIVATE))?;
+    Ok(Made::Narrowed(mode))
 }
 
 /// When to save: at a change of the verdicts, a [`PERIOD`] at least after the last save, and once more at the stop.

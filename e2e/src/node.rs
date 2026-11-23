@@ -333,6 +333,24 @@ impl Cluster {
         .map(drop)
     }
 
+    /// Adds `text` to the node's agent unit as the drop-in `name`, until the guard drops: then the drop-in goes and the
+    /// agent restarts without it. The caller restarts the agent to apply it.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be written or `systemctl daemon-reload` fails.
+    pub fn drop_in(&self, node: &str, name: &str, text: &str) -> Result<DropIn<'_>, Failure> {
+        let path = format!("/etc/systemd/system/speculaire.service.d/{name}.conf");
+        self.write(node, &path, text)?;
+        let guard = DropIn {
+            cluster: self,
+            node: node.to_owned(),
+            path,
+        };
+        self.sh(node, "systemctl daemon-reload")?;
+        Ok(guard)
+    }
+
     /// Waits until the node's agent answers `/readyz`.
     ///
     /// # Errors
@@ -912,6 +930,24 @@ impl Netem<'_> {
 impl Drop for Netem<'_> {
     fn drop(&mut self) {
         let _ = self.cluster.sh(&self.node, "tc qdisc del dev eth0 root");
+    }
+}
+
+/// A drop-in of a node's agent unit, removed when this drops, and the agent restarted without it.
+pub struct DropIn<'a> {
+    cluster: &'a Cluster,
+    node: String,
+    path: String,
+}
+
+impl Drop for DropIn<'_> {
+    fn drop(&mut self) {
+        let _ = self.cluster.sh(
+            &self.node,
+            &format!("rm -f {}; systemctl daemon-reload", self.path),
+        );
+        let _ = self.cluster.restart_agent(&self.node);
+        let _ = self.cluster.wait_ready(&self.node);
     }
 }
 

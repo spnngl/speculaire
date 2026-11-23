@@ -2072,6 +2072,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "mime",
+ "rustix",
  "sd-notify",
  "serde",
  "serde_path_to_error",

@@ -62,8 +62,8 @@
 #tuf_refresh = 21600
 # How long a stale verdict keeps serving during re-verification, in seconds (D21, D154).
 #stale_max = 3600
-# Where the verdicts and the signature results are saved across a restart, in systemd's RuntimeDirectory, cleared at
-# reboot (D31, D176). Restart.
+# Where the verdicts and the signature results are saved across a restart, on a tmpfs cleared at reboot. The agent
+# creates the directory, or narrows it to 0700 (D31, D176, D204). Restart.
 #cache = "/run/speculaire/cache.bin"
 
 [sbom]

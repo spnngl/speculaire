@@ -38,7 +38,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate (amended by D157, D194, D199)
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79, D162)
 - D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154)
-- D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21; amended by D165, D176)
+- D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21; amended by D165, D176, D204)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84, D191)
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104, D202)
 - D34 [build](build.md): metrics are a fixed catalog in `docs/metrics.md` with bounded labels; histograms are native, served over protobuf; no process metrics (amends D13; amended by D50, D61, D109, D116, D182, D186, D188)
@@ -60,7 +60,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34; amended by D121)
 - D51 [reflector](reflector.md): every member picks the same prewarm seeds by rendezvous hash; agents drop duplicate `Prewarm` (amends D2; amended by D181, D185, D186, D188, D192, D193, D196)
 - D52 [distribution](distribution.md): a peer that sends a wrong digest is denied locally for `peer.deny_ttl`, with a `peer` audit event (amends D7, D37; amended by D102)
-- D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69, D88)
+- D53 [agent](agent.md): the systemd unit's hardening, checked by e2e (amended by D69, D88, D204)
 - D54 [gate](gate.md): no setting turns the gate off; a disabled NRI stops startup (amended by D64, D86, D180)
 - D55 [agent](agent.md): the admin runs `configure`; the agent refuses to start without the mirror certificates, and `check-config` reports missing mirror entries (amends D32; amended by D82, D85)
 - D56 [distribution](distribution.md): `mirror.address` (loopback only) and `peer.address` are `ip:port` settings; `configure` recognises its entries by `ca` path (amends D14, D32, D36, D47; amended by D82)
@@ -76,7 +76,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D66 [distribution](distribution.md): on CRI-O a `registries.conf.d` drop-in sends every pull to the mirror (`pull-from-mirror = "all"`); the mirror resolves tags upstream and, once it serves a manifest, serves every blob below it; it never answers 401 (amends D6, D14, D17, D22, D32; amended by D80, D83, D102, D123, D152, D201)
 - D67 [distribution](distribution.md): on CRI-O, which keeps no compressed blobs, the mirror keeps what it serves in its own *blob cache*, bounded by `blob_cache.max_size`, holding back a blob's last chunk until its digest matches; peers read from that cache (amends D5, D7; amended by D88, D102)
 - D68 [build](build.md): `speculaire_build_info` labels the runtime: `runtime` (`containerd` or `cri-o`) and `runtime_version` replace `containerd_version` (amends D61; amended by D168)
-- D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53)
+- D69 [agent](agent.md): the unit is `Type=notify` with `WatchdogSec=30s`, pinged from the runtime, and `Restart=on-failure`; e2e runs it on every node (amends D39, D53; amended by D204)
 - D70 [build](build.md): the oracle lands in M1 with its containerd and NRI pins and `version`; each subcommand lands with the port it checks, CRI-O's on `go.podman.io/image`; NRI moves only with containerd (amends D29; amended by D79, D80, D81, D162)
 - D71 [build](build.md): cargo-vet holds every crate version of `Cargo.lock` to an imported audit, a trusted publisher or an exemption, in `deps (deny)` inside `required`; bumps of exempted crates are renewed by hand (amends D27)
 - D72 [build](build.md): the `coverage` job uploads line coverage for the ruleset's `code_coverage` rule and `required` needs it; cargo-nextest runs the tests of `just check` and `just cov`, killing hung tests (amends D27, D48)
@@ -213,5 +213,4 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D201 [distribution](distribution.md): on CRI-O, `configure` and `unconfigure` read `auto_reload_registries` from `GET /config`; when true they run no `systemctl` and CRI-O's watcher reads the drop-in; a failed `systemctl reload crio` names the key; `check-config` prints how the runtime reloads (amends D66, D84)
 - D202 [reflector](reflector.md): the index fits each agent's digest bitmap to its digests after each commit and delta, 23 MB less at 10k agents (amends D33, D104)
 - D203 [build](build.md): `speculaire` sets `PR_SET_THP_DISABLE` at start on Linux unless `MIMALLOC_ALLOW_THP` is set, 30 MiB less for the reflector at D33's load (amends D46)
-
-Next free number: D204.
+- D204 [agent](agent.md): the agent raises its soft `RLIMIT_NOFILE` to the hard limit at start, and creates or narrows the directory of `verify.cache` to 0700 before it loads `cache.bin`; outside systemd a probe on `/livez` stands in for the watchdog (amends D31, D53, D69)

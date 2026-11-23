@@ -112,7 +112,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Restart keys are those that open sockets or define who the agent is; changing them live would leave peers or containerd holding stale addresses.
 - **Revisit when:** —
 
-## D53: The systemd unit's hardening (amended by D69, D88)
+## D53: The systemd unit's hardening (amended by D69, D88, D204)
 
 - **Decision:** the unit runs the agent as root and sets:
   - `NoNewPrivileges=yes`, `CapabilityBoundingSet=` (empty), `AmbientCapabilities=` (empty);
@@ -162,11 +162,11 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Revisit when:** —
 
 
-## D69: The unit is `Type=notify`, with a 30 s watchdog, and restarts on failure (amends D39, D53)
+## D69: The unit is `Type=notify`, with a 30 s watchdog, and restarts on failure (amends D39, D53; amended by D204)
 
 - **Decision:**
   - `packaging/speculaire.service` runs `/usr/bin/speculaire agent` with `Type=notify`, `ExecReload=/bin/kill -HUP $MAINPID` (D30), `Restart=on-failure`, `WatchdogSec=30s` and `TimeoutStopSec=20s` (D39), `RuntimeDirectoryMode=0700` and `RuntimeDirectoryPreserve=yes` (D31), and D53's settings. It starts after `network-online.target`, `containerd.service` and `crio.service`, whichever exist.
-  - The agent sends `READY=1` once the mirror listens (D45), `STOPPING=1` first on SIGTERM (D39, step 1), and `WATCHDOG=1` every half of `WATCHDOG_USEC` from a task of its tokio runtime. Outside systemd, without `NOTIFY_SOCKET`, it sends nothing.
+  - The agent sends `READY=1` once the mirror listens (D45), `STOPPING=1` first on SIGTERM (D39, step 1), and `WATCHDOG=1` every half of `WATCHDOG_USEC` from a task of its tokio runtime. Outside systemd, without `NOTIFY_SOCKET`, it sends nothing, and a kubelet probe on `/livez` stands in for the watchdog (D204).
   - e2e (D27) installs the unit, the binary and `packaging/config.toml` at the packages' paths on every node of every leg (D63), with `log.filter = "info"` so the journal holds entries to check, and runs the suites against the running unit.
 - **Because:**
   - `Type=notify` makes `systemctl start` wait for the listener, so a unit that cannot bind fails its start instead of running half-started. It does not wait for a reflector's API, which waits for the kubelet certificate (D16): `/readyz` reports that one.
@@ -421,3 +421,16 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Because:**
   - One `PrewarmList` and an outbox's 64 waiting images bound what a member pushes (D183). A reference that does not parse would only fail at each agent's pull.
 - **Revisit when:** an operator needs more than 64 images prewarmed.
+
+## D204: The agent raises its open-file limit and makes its run directory private itself (amends D31, D53, D69)
+
+- **Decision:**
+  - **Open files:** at start, right after its logs install, the agent raises its soft `RLIMIT_NOFILE` to its hard limit and logs both values once, at `info`. A failure warns and the agent starts. The unit keeps `LimitNOFILE=524288` (D53).
+  - **Run directory:** before it loads `cache.bin` (D176), the agent creates the directory of `verify.cache` with mode 0700 when it is missing, and sets it to 0700 when group or others have any access or a special bit is set; a narrower mode stays. Each change logs at `info`. A failure warns and the agent starts, and the next save meets the same error (D176).
+  - **Outside systemd:** liveness comes from a kubelet probe on `/livez` (D45), which a stalled runtime stops answering, in place of `WatchdogSec=30s`. Without `NOTIFY_SOCKET`, `sd_notify` stays a no-op (D69).
+  - **Tests:** unit tests raise a lowered soft limit, and narrow a 0755 directory whose file then loads. e2e on both runtimes: the unit suite starts the agent under a drop-in `LimitNOFILE=1024:524288` and reads 524288 for both limits in `/proc/<pid>/limits`; the gate suite's restart case (D176) restarts the agent under a drop-in without `RuntimeDirectory=`, as in a pod, after `chmod 0755 /run/speculaire`, and finds 0700 and the verdicts loaded.
+- **Because:**
+  - In a pod the limits are the runtime's. containerd's unit sets no `LimitNOFILE` (v2.4.2 `containerd.service:30-33`), so a pod gets systemd's soft 1024 under a hard 524288, not D53's 524288. kind sets `LimitNOFILE=infinity` (v0.33.0 `images/base/files/etc/systemd/system/containerd.service:23`), which hides the gap there.
+  - A `hostPath` of type `DirectoryOrCreate` makes the directory 0755 (kubernetes v1.37.0 `pkg/volume/hostpath/host_path.go:509-510`), and no `RuntimeDirectoryMode` narrows it. systemd sets the mode of an existing runtime directory at every start (v259.10 `src/core/exec-invoke.c:3192-3196`), so under the unit the agent's check finds 0700 and changes nothing.
+  - Raising within the hard limit needs no capability, and both syscalls are in `@system-service` (D53). Refusing to start on either failure would take the gate down for a limit or a mode the agent can live with.
+- **Revisit when:** the agent needs more open files than a node's hard limit allows.
