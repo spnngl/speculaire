@@ -329,6 +329,34 @@ fn when_a_stalls_mid_blob_b_completes_from_c_after_the_stall_timeout_and_a_serve
 
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn a_blob_a_sends_slower_than_containerd_waits_for_a_head_still_comes_to_b_from_a() {
+    // containerd gives up on a response's head after 30 s (`core/remotes/docker/registry.go:267` at v2.4.2); CRI-O
+    // streams. Its 45 s run on the IPv4 pass only keeps the PR legs short (D190).
+    let _serial = serial();
+    let nodes = Nodes::new();
+    if nodes.cluster.runtime() != Runtime::Containerd || nodes.cluster.ip_family() == IpFamily::Dual
+    {
+        return;
+    }
+    // 40 MiB at 1 MB/s: about 42 s.
+    let image = nodes.image(40 << 20);
+    nodes.pulled(&nodes.a, &image);
+    nodes.wait_holders(&image, &[nodes.holder(&nodes.a)]);
+    let gets = nodes.gets(&image);
+    let took = {
+        let _slow = nodes.cluster.netem(&nodes.a, "rate 8mbit").unwrap();
+        let start = Instant::now();
+        nodes.pulled(&nodes.b, &image);
+        start.elapsed()
+    };
+    println!("a pull of 40 MiB from A at 8 Mbit/s took {took:?}");
+    assert!(took > Duration::from_secs(30), "{took:?}");
+    assert_eq!(nodes.gets(&image), gets, "B got a blob from upstream");
+    nodes.rmi(&[&nodes.a, &nodes.b], &image);
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn a_peer_that_serves_a_corrupted_blob_is_denied_with_a_warning_and_an_audit_event() {
     let _serial = serial();
     let nodes = Nodes::new();
