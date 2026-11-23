@@ -124,24 +124,6 @@ impl Nodes {
         }
     }
 
-    /// Waits until `node`'s agent streams to every reflector, so that its lookups and announcements reach them.
-    fn wait_connected(&self, node: &str) {
-        let series: Vec<String> = self
-            .cluster
-            .reflectors()
-            .iter()
-            .map(|member| format!("speculaire_reflector_connected{{member=\"{member}\"}}"))
-            .collect();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while !series.iter().all(|s| self.metric(node, s) >= 1.0) {
-            assert!(
-                Instant::now() < deadline,
-                "{node} does not stream to every reflector"
-            );
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
-
     /// The value of `series` on `node`'s agent, 0 when it has not written it.
     fn metric(&self, node: &str, series: &str) -> f64 {
         self.cluster
@@ -180,7 +162,7 @@ impl<'a> Changed<'a> {
             nodes.sh(node, &format!("sed -i '{script}' {CONFIG}"));
         }
         nodes.cluster.reset_agent(node).unwrap();
-        nodes.wait_connected(node);
+        nodes.cluster.wait_connected(node).unwrap();
         Self {
             nodes,
             node: node.to_owned(),
@@ -195,7 +177,7 @@ impl Drop for Changed<'_> {
             .cluster
             .exec(&self.node, &["mv", &format!("{CONFIG}.e2e"), CONFIG]);
         if self.nodes.cluster.reset_agent(&self.node).is_ok() {
-            self.nodes.wait_connected(&self.node);
+            self.nodes.cluster.wait_connected(&self.node).unwrap();
         }
     }
 }
@@ -321,7 +303,7 @@ fn when_a_is_killed_mid_blob_b_completes_the_pull_from_c() {
     let took = interrupted(&nodes, |_| nodes.cluster.kill_agent(&nodes.a).unwrap());
     println!("a pull resumed from C after A was killed took {took:?}");
     nodes.cluster.reset_agent(&nodes.a).unwrap();
-    nodes.wait_connected(&nodes.a);
+    nodes.cluster.wait_connected(&nodes.a).unwrap();
 }
 
 #[test]

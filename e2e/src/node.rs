@@ -223,6 +223,35 @@ impl Cluster {
         Ok(())
     }
 
+    /// Waits until the node's agent streams to every reflector, so that its lookups and announcements reach them all.
+    ///
+    /// An agent whose dials to a stopped reflector failed waits up to 60 s before the next (D33), then 5 s for the dial:
+    /// 90 s covers both.
+    ///
+    /// # Errors
+    ///
+    /// When the agent does not answer `/metrics`, or some stream is still down after 90 s.
+    pub fn wait_connected(&self, node: &str) -> Result<(), Failure> {
+        let series = self
+            .reflectors()
+            .map(|member| format!("speculaire_reflector_connected{{member=\"{member}\"}}"));
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let metrics = self.metrics(node)?;
+            let connected = series.each_ref().map(|series| metrics.get(series));
+            if connected.iter().all(|up| *up == Some(1.0)) {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return Err(fail(
+                    node,
+                    &format!("not streaming to every reflector after 90 s: {connected:?}"),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
     /// Runs `command` on the node in the background, and returns each change of the agent's [`STATE`] from before
     /// the command until the agent is registered again after being away, or 30 s, as `<ms since the command> <state>`.
     ///
