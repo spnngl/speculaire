@@ -31,12 +31,13 @@ Every metric speculaire exports or will export. `Runtime` names the runtime whos
 
 ## Reflector client (every agent)
 
-| Metric | Type | Labels | Runtime | Meaning |
-|---|---|---|---|---|
-| `speculaire_reflector_connected` | gauge | `member` | both | 1 while the `Announce` stream to that reflector is up |
-| `speculaire_reflector_reconnects_total` | counter | `member` | both | Stream reconnects (D33) |
-| `speculaire_lookup_seconds` | histogram | `result` = `hit`\|`miss`\|`error`\|`no_reflector` | both | `Lookup` latency seen by the agent, hedge included; `miss` named no holder, `error` failed at every member asked, `no_reflector` asked nobody as no stream was up (D102, D103) |
-| `speculaire_prewarm_pulls_total` | counter | `result` = `ok`\|`failed`\|`dropped`\|`no_space` | both | Images members pushed to prewarm: pulled, failed, dropped as listed or in flight, or skipped while the image filesystem is over `prewarm.max_disk_percent` (D188) |
+| Metric | Type | Labels | Runtime | Meaning | Planned |
+|---|---|---|---|---|---|
+| `speculaire_reflector_connected` | gauge | `member` | both | 1 while the `Announce` stream to that reflector is up | |
+| `speculaire_reflector_reconnects_total` | counter | `member` | both | Stream reconnects (D33) | |
+| `speculaire_lookup_seconds` | histogram | `result` = `hit`\|`miss`\|`error`\|`no_reflector` | both | `Lookup` latency seen by the agent, hedge included; `miss` named no holder, `error` failed at every member asked, `no_reflector` asked nobody as no stream was up (D102, D103) | |
+| `speculaire_prewarm_pulls_total` | counter | `result` = `ok`\|`failed`\|`dropped`\|`no_space` | both | Images members pushed to prewarm: pulled, failed, dropped as listed or in flight, or skipped while the image filesystem is over `prewarm.max_disk_percent` (D188) | |
+| `speculaire_prewarm_refetched_total` | counter | — | both | Layers of a prewarmed image the agent held without a blob, fetched so that it announces them (D195) | M8 |
 
 ## Reflector server (`role = "reflector"`)
 

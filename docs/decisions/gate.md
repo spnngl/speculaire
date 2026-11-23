@@ -2,7 +2,7 @@
 
 The NRI enforcement point. Index: `docs/decisions/README.md`.
 
-## D9: Enforcement lives in an NRI external plugin (amended by D64, D163, D166, D180)
+## D9: Enforcement lives in an NRI external plugin (amended by D64, D163, D166, D180, D198)
 
 - **Decision:** the agent connects to `/var/run/nri/nri.sock` as an external NRI plugin. We write our own `nri` workspace crate on `ttrpc` 0.10 plus the NRI multiplexer (8-byte header: ConnID + length).
   - Each ConnID is an in-memory `tokio::io::duplex` wrapped by `ttrpc`'s `Socket::new`: ConnID 1 feeds a `Listener::new` stream, ConnID 2 feeds `Client::new`. There is no file descriptor and no `socketpair`.
@@ -85,7 +85,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Because:** sites roll policies out gradually and need to let images that have no policy yet through. Denying by default is the safe side, and the user confirmed `deny` as the default.
 - **Revisit when:** —
 
-## D41: The gate answers inside containerd's NRI timeout, and reconnects at once (amended by D64)
+## D41: The gate answers inside containerd's NRI timeout, and reconnects at once (amended by D64, D168, D198)
 
 - **Decision:**
   - Startup and `speculaire check-config` refuse a `gate.wait` at or above half of containerd's `plugin_request_timeout`, read from containerd's `config.toml` and its `imports` (default 2 s). The error names both values.
@@ -356,7 +356,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Revisit when:** CRI-O passes the requested name.
 
 
-## D180: NRI's required-plugin gap stays open until the runtimes ship NRI v0.12.5; the agent registers no stand-in plugin (amends D9, D54)
+## D180: NRI's required-plugin gap stays open until the runtimes ship NRI v0.12.5; the agent registers no stand-in plugin (amends D9, D54; amended by D198)
 
 - **Decision:**
   - After the agent leaves NRI, by a stop or a kill, the first container created in a pod that already runs passes the runtime's required-plugin check. speculaire accepts that window and documents it (`docs/operations.md` § Break glass, `docs/security.md`). It does not register a throwaway plugin after leaving NRI or from `ExecStopPost`.
@@ -369,7 +369,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - NRI v0.12.5 fixes it upstream (containerd/nri#338: `CreateContainer` skips closed plugins). containerd's `release/2.4` carries it, unreleased; CRI-O main pins v0.12.2.
   - The agent's stop order cannot close it (D177): NRI sees the dropped connection only at its next request. A plugin of another name registering clears the closed entry, which the Go reproduction confirms, but that adds a connection at every stop and a code path in the unit to remove once the runtimes catch up, for one container in a running pod.
 - **Cost:** while the agent is down, one container per node can start ungated if its pod already runs. Break glass and a crash both open it.
-- **Revisit when:** a pinned runtime ships NRI v0.12.5, which the gate test reports. Also when a runtime ships NRI v0.12.4 or later: then the agent answers `ConfigureResponse.failure_policy.fail_request = true` (containerd/nri#329), so a call that fails on speculaire rejects the creation instead of letting it through (`docs/TODECIDE.md`).
+- **Revisit when:** a pinned runtime ships NRI v0.12.5, which the gate test reports. containerd's `release/2.4` and CRI-O's `main` already carry it (containerd/containerd#14477, cri-o/cri-o#10518), not in a release yet; backports are asked in https://github.com/containerd/containerd/issues/14635 and https://github.com/cri-o/cri-o/issues/10604. A runtime with NRI v0.12.4 or later also lets the agent answer `fail_request = true` (D198).
 
 
 ## D189: The gate reads `CreateContainerRequest` in place, and answers a request it decides without waiting with no allocation (amends D107, D166, D170, D172)
@@ -395,3 +395,16 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - annotation: 32.9 µs, 75.4 µs, 187; 27.1 µs, 710 µs, 56; 29.0 µs, 151.5 µs, 42; 6.4 µs, 25.7 µs, 0.
 - **Cost:** a field the gate does not read is not validated: a request with a malformed environment, which prost refused, is decided. The runtime built it from its own state.
 - **Revisit when:** the gate reads a field outside the 10, or NRI renumbers one; or containerd prepares the container's snapshot after NRI's CreateContainer; or a dependency on the path, the metrics recorder above all, starts allocating per call: the guard names it.
+
+## D198: Once a pinned runtime ships NRI v0.12.4 or later, the agent answers `fail_request = true` (amends D9, D41, D180)
+
+- **Decision:**
+  - The agent answers `Configure` with `ConfigureResponse.failure_policy.fail_request = true` (containerd/nri#329, v0.12.4 `pkg/api/api.proto:182-220`). `keep_connected` stays false: a timed-out agent is closed and registers again (D41).
+  - **Precondition:** before building, the NRI proto in `crates/nri`, today v0.12.3's, carries the field, and a runtime the e2e matrix pins (D63) ships NRI v0.12.4 or later.
+  - A gate test stalls the agent past the runtime's request timeout and checks that the creation is rejected.
+- **Because:**
+  - Today a `CreateContainer` call that fails or times out on the plugin lets the container start, even with `required_plugins` (v0.12.3 `pkg/adaptation/plugin.go:757-763`). With `fail_request`, NRI returns the error for a closed connection, a protocol error or a timeout (v0.12.4 `pkg/adaptation/plugin.go:964-983`, `isFatalError` `:998-1010`), so the creation is rejected.
+  - speculaire subscribes only to `CreateContainer`, so the policy changes nothing else.
+  - containerd's `release/2.4` and CRI-O's `main` already carry NRI v0.12.5 (containerd/containerd#14477, cri-o/cri-o#10518), not in a release yet. Backports are asked in https://github.com/containerd/containerd/issues/14635 and https://github.com/cri-o/cri-o/issues/10604.
+- **Cost:** an agent that stalls or crashes mid-call rejects that creation instead of letting it through, in `audit` mode too, which otherwise allows every container (D54); kubelet retries it.
+- **Revisit when:** NRI changes what `fail_request` covers, or `audit` must never reject (`docs/TODECIDE.md`).

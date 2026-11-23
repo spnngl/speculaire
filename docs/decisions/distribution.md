@@ -300,7 +300,7 @@ Image content flow between containerd, the local mirror, peers and upstream. Ind
 - **Measured (M3 step 04):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass `e2e/tests/peer.rs` in 1.1 s and 0.8 s: the second worker's peer API serves a pulled 1 MiB layer whole (SHA-256 checked) and its first 100 bytes as a `206` to the first worker's kubelet certificate, and refuses no certificate and kube-apiserver's `apiserver-kubelet-client` one, of the cluster CA but not a node's. In `crates/mirror/src/peer/tests.rs`, with `peer.max_uploads = 1`, a second `GET` of a body while a 64 MiB one is in flight answers `503` at once, and once stopping a new request answers `503` while the 64 MiB body in flight completes. The agent's own drain is D110's test.
 - **Revisit when:** peers need a request the mirror's parser does not route, or a node must serve on several addresses.
 
-## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103, D123, D126)
+## D102: The fetcher races and hedges the holders, resumes with `Range`, and on containerd serves nothing it has not checked (amends D7, D24, D52, D66, D67, D73, D85, D98; amended by D103, D123, D126, D196)
 
 - **Decision:**
   - **Where:** `speculaire_mirror::fetch::Fetcher`, linked once P2P starts to a `Lookup` (the agent's adapter over the reflector client) and the node identity. Before that, or when the lookup fails, names no holder or only denied ones, the pull falls through (D66).
