@@ -168,6 +168,66 @@ fn a_full_image_filesystem_skips_pulls_with_one_warning_until_a_pull_goes_throug
     assert_eq!(counted(&handle, "ok"), 1);
 }
 
+/// D191: a pulled image is pinned while a list names it, and a pinned image no list names any more is unpinned.
+#[test]
+fn a_pulled_image_a_list_names_is_pinned_until_no_list_names_it() {
+    let (mut state, _) = state();
+    let now = Instant::now();
+    state.take(list("cp-1", &["app:1"]), now);
+    state.take(list("cp-2", &["app:1"]), now);
+    state.take(prewarm("cp-1", "app:1"), now);
+    state.take(prewarm("cp-1", "gone:1"), now);
+    assert_eq!(state.next(now), Some(image("app:1")));
+    assert_eq!(
+        state.done(image("app:1"), Outcome::Pulled, now),
+        Some(Pinning::Pin(image("app:1")))
+    );
+    assert_eq!(state.next(now), Some(image("gone:1")));
+    assert_eq!(
+        state.done(image("gone:1"), Outcome::Pulled, now),
+        None,
+        "no list names it"
+    );
+    state.take(prewarm("cp-1", "failed:1"), now);
+    state.next(now);
+    assert_eq!(state.done(image("failed:1"), failed(), now), None);
+    state.pinned.insert(image("app:1"));
+    assert_eq!(
+        state.take(list("cp-1", &[]), now),
+        [],
+        "cp-2 still names it"
+    );
+    assert_eq!(state.take(prewarm("cp-1", "other:1"), now), []);
+    assert_eq!(
+        state.take(list("cp-2", &["other:1"]), now),
+        [Pinning::Unpin(image("app:1"))]
+    );
+}
+
+/// D191: an image held before a list named it, as from a pod's pull, is pinned at its `Prewarm`, once.
+#[test]
+fn a_held_image_a_list_names_is_pinned_at_its_prewarm() {
+    let mut state = State::new(Box::new(|image| image.tag() == Some("held")));
+    let now = Instant::now();
+    assert_eq!(
+        state.take(prewarm("cp-1", "app:held"), now),
+        [],
+        "no list names it"
+    );
+    state.take(list("cp-1", &["app:held"]), now);
+    assert_eq!(
+        state.take(prewarm("cp-1", "app:held"), now),
+        [Pinning::Pin(image("app:held"))]
+    );
+    state.pinned.insert(image("app:held"));
+    assert_eq!(
+        state.take(prewarm("cp-2", "app:held"), now),
+        [],
+        "pinned already"
+    );
+    assert_eq!(state.next(now), None, "held: not pulled");
+}
+
 /// A [`Pull`] that records each pull and answers as told.
 #[derive(Default)]
 struct Fake {
@@ -180,6 +240,12 @@ struct Fake {
     cut: Arc<AtomicBool>,
     /// Whether the usage cannot be read.
     unknown: bool,
+    /// Each `pin` and `unpin`, as `pin <image>` or `unpin <image>`.
+    pins: Mutex<Vec<String>>,
+    /// Whether `pin`, `unpin` and `marked` fail.
+    pins_fail: Mutex<bool>,
+    /// What `marked` answers.
+    marked: Vec<Reference>,
 }
 
 /// Marks its pull cut when dropped.
@@ -194,6 +260,28 @@ impl Drop for Cut {
 impl Fake {
     fn pulls(&self) -> Vec<String> {
         self.pulls.lock().unwrap().clone()
+    }
+
+    fn pins(&self) -> Vec<String> {
+        self.pins.lock().unwrap().clone()
+    }
+
+    /// Records `call` on `image`, and answers as told.
+    fn pinning(&self, call: &str, image: &Reference) -> Result<(), cri::Error> {
+        self.pins.lock().unwrap().push(format!("{call} {image}"));
+        self.pin_result()
+    }
+
+    fn pin_result(&self) -> Result<(), cri::Error> {
+        if *self.pins_fail.lock().unwrap() {
+            Err(cri::Error::Call {
+                path: "/run/containerd.sock".into(),
+                method: "/containerd.services.images.v1.Images/Update",
+                message: "unavailable".to_owned(),
+            })
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -227,6 +315,21 @@ impl Pull for Fake {
             Ok(*self.usage.lock().unwrap())
         };
         Box::pin(async move { usage })
+    }
+
+    fn pin<'a>(&'a self, image: &'a Reference) -> Boxed<'a, Result<bool, cri::Error>> {
+        let result = self.pinning("pin", image).map(|()| true);
+        Box::pin(async move { result })
+    }
+
+    fn unpin<'a>(&'a self, image: &'a Reference) -> Boxed<'a, Result<(), cri::Error>> {
+        let result = self.pinning("unpin", image);
+        Box::pin(async move { result })
+    }
+
+    fn marked(&self) -> Boxed<'_, Result<Vec<Reference>, cri::Error>> {
+        let marked = self.pin_result().map(|()| self.marked.clone());
+        Box::pin(async move { marked })
     }
 }
 
@@ -270,6 +373,75 @@ async fn the_worker_retries_on_the_clock_and_stops_with_the_list() {
     settle().await;
     assert_eq!(fake.pulls().len(), 3);
     worker.stop().await;
+}
+
+/// D191: the worker starts from the pins the runtime marked, pins what it pulls, and unpins once no list names an
+/// image; an unpin that fails is tried again at the next list.
+#[tokio::test]
+async fn the_worker_pins_what_it_pulls_and_unpins_what_no_list_names() {
+    let fake = Arc::new(Fake {
+        marked: vec![image("old:1")],
+        ..Fake::default()
+    });
+    let (pushes, taken) = mpsc::channel(8);
+    let pull: Arc<dyn Pull> = Arc::<Fake>::clone(&fake);
+    let worker = Prewarm::spawn(taken, pull, |_| false, Percent::new(80).unwrap());
+    pushes.send(list("cp-1", &["app:1"])).await.unwrap();
+    pushes.send(prewarm("cp-1", "app:1")).await.unwrap();
+    while fake.pins().len() < 2 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        fake.pins(),
+        [
+            "unpin docker.io/library/old:1",
+            "pin docker.io/library/app:1"
+        ]
+    );
+    *fake.pins_fail.lock().unwrap() = true;
+    pushes.send(list("cp-1", &[])).await.unwrap();
+    while fake.pins().len() < 3 {
+        tokio::task::yield_now().await;
+    }
+    *fake.pins_fail.lock().unwrap() = false;
+    pushes.send(list("cp-1", &[])).await.unwrap();
+    pushes.send(list("cp-1", &[])).await.unwrap();
+    drop(pushes);
+    tokio::time::timeout(Duration::from_secs(5), worker.task)
+        .await
+        .expect("the worker ends once its pushes do")
+        .expect("the worker does not panic");
+    assert_eq!(
+        fake.pins()[2..],
+        ["unpin docker.io/library/app:1"; 2],
+        "tried again once, then unpinned"
+    );
+}
+
+/// A runtime that cannot say what the agent pinned leaves those pins, and pins what it pulls.
+#[tokio::test]
+async fn pins_the_runtime_cannot_list_stay() {
+    let fake = Arc::new(Fake::default());
+    *fake.pins_fail.lock().unwrap() = true;
+    let (pushes, taken) = mpsc::channel(8);
+    let pull: Arc<dyn Pull> = Arc::<Fake>::clone(&fake);
+    let worker = Prewarm::spawn(taken, pull, |_| false, Percent::new(80).unwrap());
+    pushes.send(list("cp-1", &["app:1"])).await.unwrap();
+    pushes.send(prewarm("cp-1", "app:1")).await.unwrap();
+    while fake.pins().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    pushes.send(list("cp-1", &[])).await.unwrap();
+    drop(pushes);
+    tokio::time::timeout(Duration::from_secs(5), worker.task)
+        .await
+        .expect("the worker ends once its pushes do")
+        .expect("the worker does not panic");
+    assert_eq!(
+        fake.pins(),
+        ["pin docker.io/library/app:1"],
+        "a failed pin is not unpinned"
+    );
 }
 
 /// D39: the agent's stop cuts a pull in flight.

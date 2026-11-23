@@ -114,9 +114,30 @@ impl Upstream {
     /// When `regctl` fails or writes a manifest without its digests.
     pub fn push(&self, repository: &str, size: u64) -> Result<Image, Failure> {
         let reference = format!("{}/{repository}:1", self.name);
+        let create = format!("regctl image create --platform {PLATFORM} {reference}");
+        self.push_onto(&create, reference, size)
+    }
+
+    /// Pushes a new image as [`push`](Self::push) does, [`UNSIGNED`] with the layer on top: a pod runs it.
+    ///
+    /// # Errors
+    ///
+    /// When `regctl` fails or writes a manifest without its digests.
+    pub fn push_runnable(&self, repository: &str, size: u64) -> Result<Image, Failure> {
+        let reference = format!("{}/{repository}:1", self.name);
+        let base = format!("{}/{UNSIGNED}", self.name);
+        self.push_onto(
+            &format!("regctl image copy {base} {reference} >/dev/null"),
+            reference,
+            size,
+        )
+    }
+
+    /// Makes `reference` with `create`, then adds one layer of `size` random bytes.
+    fn push_onto(&self, create: &str, reference: String, size: u64) -> Result<Image, Failure> {
         let manifest = self.regctl(&format!(
             "mkdir /tmp/layer && head -c {size} /dev/urandom >/tmp/layer/random \
-                 && regctl image create --platform {PLATFORM} {reference} \
+                 && {create} \
                  && regctl image mod --replace --layer-add dir=/tmp/layer {reference} >/dev/null \
                  && regctl manifest get --format raw-body {reference}"
         ))?;

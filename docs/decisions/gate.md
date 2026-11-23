@@ -127,7 +127,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
 - **Revisit when:** CRI-O fills `Container.image`, or a node runs both runtimes.
 
 
-## D65: On CRI-O the image identity is CRI-O's image ID, read from its annotations (amends D11, D15, D20, D21, D22; amended by D169, D172)
+## D65: On CRI-O the image identity is CRI-O's image ID, read from its annotations (amends D11, D15, D20, D21, D22; amended by D169, D172, D191)
 
 - **Decision:**
   - **Identity:** in `CreateContainer` on CRI-O, the *image identity* is the `io.kubernetes.cri-o.ImageRef` annotation, CRI-O's image ID, which is the config digest of the platform manifest the image was pulled by. The gate reads it from the NRI request and makes no lookup.

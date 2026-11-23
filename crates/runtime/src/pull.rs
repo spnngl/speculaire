@@ -1,5 +1,6 @@
-//! Pulling an image as the kubelet does, and how full the filesystem it lands on is: the same CRI calls on containerd
-//! and CRI-O, behind [`Pull`] so the agent's prewarm worker can be tested without a runtime (D90, D188).
+//! Pulling an image as the kubelet does, how full the filesystem it lands on is, and pinning it: the same CRI calls on
+//! containerd and CRI-O but the pin, behind [`Pull`] so the agent's prewarm worker can be tested without a runtime
+//! (D90, D188, D191).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -7,8 +8,9 @@ use std::path::{Path, PathBuf};
 use futures_util::future::BoxFuture;
 use speculaire_oci::reference::Reference;
 use tokio::sync::OnceCell;
+use tracing::debug;
 
-use crate::cri;
+use crate::{containerd, cri};
 
 /// Pulls images into the runtime, where the kubelet looks for them.
 pub trait Pull: Send + Sync {
@@ -18,6 +20,26 @@ pub trait Pull: Send + Sync {
 
     /// How full the filesystem images land on is, in percent from 0 to 100, as the kubelet counts it.
     fn usage(&self) -> BoxFuture<'_, Result<u8, UsageError>>;
+
+    /// Pins `image`, so the kubelet's image garbage collection keeps it, and marks the pin as the agent's; answers
+    /// whether `image` carries the agent's pin. An image pinned already, by the runtime's config or an operator, is
+    /// left alone.
+    fn pin<'a>(&'a self, image: &'a Reference) -> BoxFuture<'a, Result<bool, cri::Error>>;
+
+    /// Takes the pin off `image` if the agent marked it.
+    fn unpin<'a>(&'a self, image: &'a Reference) -> BoxFuture<'a, Result<(), cri::Error>>;
+
+    /// The images whose pin the agent marked.
+    fn marked(&self) -> BoxFuture<'_, Result<Vec<Reference>, cri::Error>>;
+}
+
+/// Whether the runtime can pin an image from the CRI's side.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Pinning {
+    /// containerd: by a label on the image's name.
+    Label,
+    /// CRI-O pins only the images of its config's `pinned_images`, so the agent does not pin there (D65).
+    None,
 }
 
 /// Why the image filesystem's usage is unknown.
@@ -46,14 +68,16 @@ pub enum UsageError {
 #[derive(Debug)]
 pub(crate) struct CriPull {
     socket: PathBuf,
+    pinning: Pinning,
     /// The image filesystem's mount point, asked once: CRI-O walks its whole image store to answer.
     mountpoint: OnceCell<PathBuf>,
 }
 
 impl CriPull {
-    pub(crate) fn new(socket: &Path) -> Self {
+    pub(crate) fn new(socket: &Path, pinning: Pinning) -> Self {
         Self {
             socket: socket.to_owned(),
+            pinning,
             mountpoint: OnceCell::new(),
         }
     }
@@ -91,6 +115,36 @@ impl Pull for CriPull {
             })
             .await
             .expect("statvfs does not panic")
+        })
+    }
+
+    fn pin<'a>(&'a self, image: &'a Reference) -> BoxFuture<'a, Result<bool, cri::Error>> {
+        Box::pin(async move {
+            match self.pinning {
+                Pinning::Label => containerd::pins::pin(&self.socket, image).await,
+                Pinning::None => {
+                    debug!(%image, "left unpinned: the runtime has no pin the agent may set");
+                    Ok(false)
+                }
+            }
+        })
+    }
+
+    fn unpin<'a>(&'a self, image: &'a Reference) -> BoxFuture<'a, Result<(), cri::Error>> {
+        Box::pin(async move {
+            match self.pinning {
+                Pinning::Label => containerd::pins::unpin(&self.socket, image).await,
+                Pinning::None => Ok(()),
+            }
+        })
+    }
+
+    fn marked(&self) -> BoxFuture<'_, Result<Vec<Reference>, cri::Error>> {
+        Box::pin(async {
+            match self.pinning {
+                Pinning::Label => containerd::pins::marked(&self.socket).await,
+                Pinning::None => Ok(Vec::new()),
+            }
         })
     }
 }

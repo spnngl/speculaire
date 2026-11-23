@@ -55,8 +55,8 @@ impl Wiring for FakeWiring {
         assert_eq!(at, now());
         self.calls.lock().unwrap().push("configure");
         Ok(Report {
-            changes: Vec::new(),
             notes: vec!["configured".to_owned()],
+            ..Report::default()
         })
     }
 

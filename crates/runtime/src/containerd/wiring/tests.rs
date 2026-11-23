@@ -1,7 +1,9 @@
 //! `configure`, `unconfigure` and `check` of containerd on a temporary tree standing for a node's root.
 
+use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 
+use speculaire_oci::reference::Reference;
 use speculaire_pki::mirror::Mirror;
 
 use crate::containerd::Containerd;
@@ -73,6 +75,61 @@ fn a_second_run_changes_nothing_byte_for_byte() {
     let report = node.unconfigure().unwrap();
     assert_eq!(report.changes, []);
     assert_eq!(node.tree(), off);
+}
+
+/// `unconfigure` takes off the pins the agent marked, and leaves the others (D32, D191).
+#[test]
+fn unconfigure_unpins_only_the_images_the_agent_marked() {
+    let node = node();
+    node.containerd();
+    let pinned = |marked: bool| {
+        let mut labels = vec![("io.cri-containerd.pinned", "pinned")];
+        if marked {
+            labels.push(("speculaire.prewarm", "pinned"));
+        }
+        labels
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<HashMap<_, _>>()
+    };
+    let digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    node.update(|answers| {
+        for (name, marked) in [
+            ("registry.test/app:1.0", true),
+            ("registry.k8s.io/pause:3.10", false),
+        ] {
+            answers
+                .image_store
+                .push((name.to_owned(), digest.to_owned()));
+            answers.image_labels.insert(name.to_owned(), pinned(marked));
+        }
+    });
+    node.configure().unwrap();
+    let report = node.unconfigure().unwrap();
+    assert_eq!(
+        report.unpinned,
+        [Reference::parse_docker_ref("registry.test/app:1.0").unwrap()]
+    );
+    let labels = node.answers().image_labels;
+    assert_eq!(labels["registry.test/app:1.0"], HashMap::new());
+    assert_eq!(labels["registry.k8s.io/pause:3.10"], pinned(false));
+    assert_eq!(node.unconfigure().unwrap().unpinned, []);
+}
+
+/// A containerd that does not answer keeps its pins, and the rest of `unconfigure` goes on.
+#[test]
+fn unconfigure_without_containerd_notes_the_pins_it_left() {
+    let mut node = node();
+    node.containerd();
+    node.configure().unwrap();
+    node.stop();
+    let report = node.unconfigure().unwrap();
+    assert!(!report.changes.is_empty(), "{report:?}");
+    assert!(
+        report.notes.iter().any(|note| note.contains("stay pinned")),
+        "{:?}",
+        report.notes
+    );
 }
 
 #[test]

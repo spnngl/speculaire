@@ -830,3 +830,15 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Measured:** in CI, the 4 PR legs before the prewarm suite (run 45055897010), with it in both passes (run 45063817399), then in the IPv4 pass only (run 45068768077), minutes, IPv4 and dual-stack steps in brackets: CRI-O 1.37 x86_64 17.2 (12.1, 4.6), 18.2 (13.7, 3.8), 14.7 (14.3); arm64 16.7 (11.9, 4.3), 19.6 (14.5, 4.5), 14.1 (13.8); containerd 2.4 x86_64 14.5 (9.5, 4.5), 18.9 (13.1, 5.4), 13.3 (12.8); arm64 15.4 (9.9, 5.0), 17.9 (12.3, 5.1), 12.9 (12.5).
 - **Cost:** a regression only an IPv6 address shows reaches `main` before CI sees it, as D113's older legs do. Whoever merges watches `main`'s run and fixes forward.
 - **Revisit when:** a PR leg without the dual-stack pass passes 18 min (then the slowest peer suites move to main), or `main` breaks on the dual-stack pass alone twice in a milestone.
+
+
+## D192: The pin e2e case removes unused images with `crictl rmi --prune`, the kubelet's image collection is checked by hand (amends D51)
+
+- **Decision:**
+  - The prewarm suite's pin cases stand in for the kubelet's image garbage collection with `crictl rmi --prune` on the worker that is no reflector, which removes every image no container uses and the CRI does not call pinned.
+  - The kubelet's own collection, at `imageGCHighThresholdPercent: 1`, `imageGCLowThresholdPercent: 0`, is checked by hand on a kind node before a change to pinning.
+- **Because:**
+  - `crictl rmi --prune` skips pinned images by the same CRI field the kubelet reads (cri-tools v1.37.0 `cmd/crictl/image.go:466`, kubernetes v1.37.0 `pkg/kubelet/images/image_gc_manager.go:567-569`).
+  - The kubelet collects every 5 minutes (`pkg/kubelet/kubelet.go:231`), and its run at startup frees nothing: with `imageMinimumGCAge` at 0 s it defaults to 2 minutes, and images count from the kubelet's start (`image_gc_manager.go:500`); at 1 ns the run fails with `invalid capacity 0 on image filesystem`, stats not ready. A case on it waits 5 minutes; D159's 18 minutes per leg cannot hold that.
+- **Measured:** by hand on containerd 2.4, kind v1.37.0 arm64, thresholds 1 and 0 with a kubelet restart: the run 5 min after the restart removed the unused, unpinned images, among them the control image, and kept the pinned ones; the run at the restart freed 0 bytes.
+- **Revisit when:** the kubelet runs image collection on demand, or CI's per-leg limit rises above 25 minutes.

@@ -1,6 +1,7 @@
 //! `prewarm.images` on both reflectors (D51, D186): a suite writes the list into their config, which each polls every
 //! second, and reads what each node's runtime lists.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use crate::registry::fail;
@@ -71,6 +72,39 @@ impl Cluster {
         Ok(self
             .exec_output(node, &["crictl", "inspecti", "-q", reference])?
             .success)
+    }
+
+    /// Removes every image of `node` that no container uses and the runtime does not pin, as the kubelet's image
+    /// garbage collection does past its threshold: `crictl rmi --prune` skips the images the CRI says are pinned
+    /// (cri-tools v1.37.0 `cmd/crictl/image.go:466`). The kubelet's own collection runs 5 minutes apart, and its run at
+    /// startup fails while its stats are not ready (D192).
+    ///
+    /// # Errors
+    ///
+    /// When `docker exec` fails.
+    pub fn prune(&self, node: &str) -> Result<(), Failure> {
+        self.exec(node, &["crictl", "rmi", "--prune"]).map(drop)
+    }
+
+    /// The tags of the images the runtime of `node` pins, which the kubelet's image garbage collection keeps (D191).
+    ///
+    /// # Errors
+    ///
+    /// When `docker exec` fails, or `crictl` prints no image list.
+    pub fn pinned(&self, node: &str) -> Result<BTreeSet<String>, Failure> {
+        let json = self.exec(node, &["crictl", "images", "-o", "json"])?;
+        let list: serde_json::Value =
+            serde_json::from_str(&json).map_err(|e| fail("crictl images", &e))?;
+        let images = list["images"]
+            .as_array()
+            .ok_or_else(|| fail("crictl images", &json))?;
+        Ok(images
+            .iter()
+            .filter(|image| image["pinned"] == true)
+            .filter_map(|image| image["repoTags"].as_array())
+            .flatten()
+            .filter_map(|tag| tag.as_str().map(str::to_owned))
+            .collect())
     }
 }
 

@@ -7,7 +7,7 @@ use speculaire_pki::mirror::Part;
 use speculaire_registry_config::containerd::config as containerd_config;
 use speculaire_registry_config::containerd::config::Hosts;
 
-use super::{Containerd, config_missing, hosts};
+use super::{Containerd, config_missing, hosts, pins};
 use crate::wiring::{Error, Problem, Report, Target, Wiring, io_at};
 use crate::{certificates, files};
 
@@ -95,6 +95,14 @@ impl Wiring for Containerd {
                 source,
             })?;
             edits.push((file.path.clone(), old, new));
+        }
+        // A containerd that does not answer keeps the pins, and does not stop the rest: a run once it answers takes
+        // them off.
+        match pins::unpin_all(&self.socket) {
+            Ok(images) => report.unpinned = images,
+            Err(err) => report
+                .notes
+                .push(format!("the images the agent pinned stay pinned: {err}")),
         }
         for (path, old, new) in edits {
             if old == new {
