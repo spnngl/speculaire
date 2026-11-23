@@ -119,8 +119,10 @@ fn a_pod_runs() {
         &format!("pod/{pod}"),
         "--timeout=120s",
     ]);
+    // `sleep` ignores SIGTERM, and while containerd stops a container it holds back NRI plugins' registration, and with
+    // it every later stop on the node, the chart's pods' included (D208).
     cluster
-        .kubectl(&["delete", "pod", pod, "--wait=false"])
+        .kubectl(&["delete", "pod", pod, "--now", "--wait=false"])
         .unwrap();
     ready.unwrap();
 }

@@ -1,0 +1,11 @@
+# The chart's values on a CRI-O cluster: the auth file `global_auth_file` names, `CRIO_AUTH_FILE` of
+# e2e/src/upstream/start.rs, holds the private upstream's login (D89).
+extraVolumes:
+  - name: crio-auth
+    hostPath:
+      path: /etc/crio/e2e-auth.json
+      type: File
+extraVolumeMounts:
+  - name: crio-auth
+    mountPath: /etc/crio/e2e-auth.json
+    readOnly: true

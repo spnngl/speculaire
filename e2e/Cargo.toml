@@ -9,6 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The times `crictl logs --timestamps` gives each line of an agent's pod (D208).
+jiff.workspace = true
 # The agent's metrics in the protobuf exposition, the only one with native histograms (D34).
 prost.workspace = true
 # The certificates of the Bearer registry that the relay suite pulls from.

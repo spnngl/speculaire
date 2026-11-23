@@ -542,12 +542,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        # CRI-O sends one `Accept` per media type; a dict keeps the last unless they are joined.
+        headers = {}
+        for key, value in self.headers.items():
+            if key.lower() != "host":
+                headers[key] = f"{headers[key]}, {value}" if key in headers else value
         upstream = http.client.HTTPConnection(HOST, int(PORT))
-        upstream.request(
-            self.command,
-            self.path,
-            headers={k: v for k, v in self.headers.items() if k.lower() != "host"},
-        )
+        upstream.request(self.command, self.path, headers=headers)
         response = upstream.getresponse()
         self.send_response(response.status)
         for key, value in response.getheaders():

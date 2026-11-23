@@ -68,6 +68,9 @@ fn show(cluster: &Cluster, node: &str, property: &str) -> Result<String, Failure
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn the_unit_is_active_with_its_settings_and_a_watchdog() {
     let cluster = Cluster::from_env();
+    if !cluster.has_unit() {
+        return;
+    }
     for node in cluster.nodes().unwrap() {
         let node = node.name;
         let active = cluster
@@ -85,6 +88,9 @@ fn the_unit_is_active_with_its_settings_and_a_watchdog() {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn the_unit_has_every_hardening_setting() {
     let cluster = Cluster::from_env();
+    if !cluster.has_unit() {
+        return;
+    }
     for node in cluster.nodes().unwrap() {
         let node = node.name;
         let out = cluster
@@ -155,6 +161,9 @@ fn every_scraped_metric_is_in_the_catalog() {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn the_journal_holds_structured_entries_and_nothing_at_warning() {
     let cluster = Cluster::from_env();
+    if !cluster.has_unit() {
+        return;
+    }
     // containerd 2.3's NRI names no image: the gate warns of the identity gap at each registration (D15, D170).
     let expected = |entry: &[&str]| {
         cluster.runtime() == Runtime::Containerd

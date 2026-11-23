@@ -231,7 +231,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** the tool versions live in two files; a hand edit to one of them makes local and CI runs differ until Renovate's next pull request.
 - **Revisit when:** the build image is published to a registry, so CI can pull it instead of building it.
 
-## D59: e2e is a Rust test crate on a kind cluster that `just` recipes manage (amends D27; amended by D63)
+## D59: e2e is a Rust test crate on a kind cluster that `just` recipes manage (amends D27; amended by D63, D208)
 
 - **Decision:**
   - `e2e/` is a workspace crate. Its suites in `e2e/tests/` drive the cluster through `kubectl` and `docker exec`, and every test is `#[ignore]`d: `just check` builds them, and `just e2e-test <minor>` runs them with `--ignored`.
@@ -269,7 +269,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - `e2e/` and `oracle/` stay at the top level.
 - **Because:** the user asked for libraries and binaries apart. A library holds code a fuzz target, a test or another binary can reuse; a binary-only crate cannot be linked by them.
 
-## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94, D113, D120, D130, D193)
+## D63: e2e covers containerd and CRI-O on the 3 newest Kubernetes minors kind ships (amends D27, D40, D59; amended by D94, D113, D120, D130, D193, D208)
 
 - **Decision:**
   - **Runtimes:** containerd and CRI-O. cri-dockerd has no NRI, so the gate cannot run there.
@@ -448,7 +448,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Revisit when:** a nightly bump breaks RAPx twice in a row (then drop the PR trigger and keep the weekly run), a PR run passes 15 minutes, or RAPx finds a real leak (then fail the job on a finding).
 
 
-## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159, D190, D200)
+## D94: The e2e cluster has two reflectors behind an Envoy, an upstream registry, and a dual-stack pass on every leg (amends D63; amended by D112, D113, D130, D159, D190, D200, D208)
 
 - **Decision:**
   - **Reflectors:** the agents of the control plane and of the first worker run `role = "reflector"` (D2 puts reflectors on control-plane nodes; kind's second control plane would add an etcd member and kind's own balancer for nothing the peer suites test). Both are in every agent's `reflector.members`, by node name and kind-network address, port 7483; the second worker is the client no reflector runs on.
@@ -549,7 +549,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** two more images from ghcr.io, and 10 to 20 s for the test images, in each `just e2e-up`.
 - **Revisit when:** registry:3 gains the referrers API, or cosign drops the legacy `.sig` and `.att` formats.
 
-## D113: Pull requests run the newest containerd and CRI-O legs; main runs all 14 (amends D63, D94; amended by D160, D190)
+## D113: Pull requests run the newest containerd and CRI-O legs; main runs all 14 (amends D63, D94; amended by D160, D190, D208)
 
 - **Decision:**
   - On a pull request, `ci.yml`'s `e2e` runs 4 of D63's 14 legs: containerd 2.4 and CRI-O 1.37, both on Kubernetes 1.37, on both architectures, each with both of D94's passes. A push to `main` runs all 14.
@@ -819,7 +819,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** a row the suites stop exercising fails every leg until a case emits it again or this decision excludes it. A family seen under any label passes, so a label value never set goes unnoticed. A stop that bypasses the helpers, or a crash, loses the families since the last scrape.
 - **Revisit when:** a suite stops an agent other than through the helpers, or a metric is emitted only on some runtime versions of a leg.
 
-## D190: Pull requests run the e2e suites in the IPv4 pass only; main runs both passes (amends D94, D113, D159)
+## D190: Pull requests run the e2e suites in the IPv4 pass only; main runs both passes (amends D94, D113, D159; amended by D208)
 
 - **Decision:**
   - On a pull request, each of D113's 4 legs runs D94's IPv4 pass and D182's catalog check, and skips the dual-stack pass: the step's `if` is `github.event_name != 'pull_request'`. A push to `main` runs both passes on all 14 legs.
@@ -901,3 +901,27 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - On every Linux build, not only musl's, so that `apps/speculaire/tests/agent.rs` sees it in `just check`; glibc's heap also takes huge pages under THP `always`.
 - **Cost:** `nix` and `cfg_aliases`, exempted (D71). More TLB misses on a large heap: none showed in the lookup p99.
 - **Revisit when:** `just bench` (D35) shows a pull slower for it, or mimalloc stops asking for huge pages by default.
+
+
+## D208: e2e runs the agents as the chart's pods too: 2 DaemonSet legs on pull requests, 4 on main, 14 nightly (amends D59, D63, D94, D113, D190)
+
+- **Decision:**
+  - **Mode:** `SPECULAIRE_E2E_INSTALL=daemonset` (`unit` by default) makes every `just e2e*` recipe act on a cluster whose name and scrape directory end in `-ds`. `e2e-up` writes each node's `/etc/speculaire/config.toml` and copies the binary as for the unit, since the suites run the CLI on nodes; then labels the control plane and the first worker `speculaire.e2e/reflector`, the reflectors' nodes of D94, Envoy kept, and runs `helm install --wait` of `charts/speculaire` with `e2e/chart/values.yaml`: `config.source: host`, the node's trust store, which holds the public upstream's CA, and the reflectors' label. On CRI-O, `e2e/chart/crio.yaml` mounts the private upstream's auth file, and each node sets `auto_reload_registries = true` in `/etc/crio/crio.conf.d/10-e2e-auto-reload.conf` (D201).
+  - **Chart:** the justfile's `chart_rev` pins a commit of spnngl/charts' `main`, which `e2e-up` fetches into `target/e2e/`; `SPECULAIRE_CHART` names another chart directory. `e2e-tools` downloads Helm, `helm_version`, with the bench's (D106).
+  - **Image:** `packaging/Containerfile` over the run's musl binary, saved as an archive and imported with regctl into the plain upstream as `speculaire:e2e`, which the chart's `image.repository` names. kind's `load` cannot feed CRI-O's store; nothing comes from ghcr.
+  - **Helpers (D200):** `stop_agent` sets the chart's opt-out label on the node and returns once the agent's container has ended, as `systemctl stop` does, while the kubelet may still be removing the pod; `start_agent` removes the label and waits for `/readyz`. `kill_agent` sends SIGKILL to the container's process from the node, and the kubelet restarts it; `reload_agent` sends SIGHUP. `restart_agent` deletes the pod, and `restart_with_empty_logs` also drops its kept logs; both, like `start_agent`, fail once a container of the new pod fails, and then keep its log and label the node out, as systemd leaves a failed unit stopped. Before a helper ends a container, it follows the container's log and appends it to `/var/log/speculaire-e2e/agent.log` on the node: `agent_logs` and `audit` read that file then the running container's log, by the runtime's timestamp, audit events by their target. The helpers ask the node's runtime with `crictl`, not the API server, which learns of a started container about a second after it serves. `stop_agent_no_wait` and `drop_in` are the unit's alone.
+  - **Suites:** the tests of the unit itself pass at once in this mode: in `e2e/tests/`, `unit.rs` but the catalog check, `unit_reload.rs`, `unit_restart.rs`, `operations.rs`, the drain-on-stop and NRI-gap cases of `e2e/tests/gate.rs`, and CRI-O's switch of `auto_reload_registries` in `configure.rs`. In both modes the enforce case's required plugin carries the chart's toleration annotation, the held NRI socket lies under `/var/run/nri`, and `Cluster::configure` returns once CRI-O read what `configure` wrote.
+  - **CI:** `e2e.yml`, a reusable workflow, holds D63's matrix, its newest pair marked `newest: true`, and runs one install mode. `ci.yml` calls it for the unit, as D113 and D190 say, and for the chart: containerd 2.4 and CRI-O 1.37 on x86_64 on a pull request, both architectures on `main`, IPv4 only; `required` needs both. `e2e-nightly.yml` runs the 14 legs in DaemonSet mode at 02:17 UTC and on dispatch, and on `main` a failure opens an `e2e-nightly` issue or comments on the open one. Each leg prints `kubectl get pods` after the suites, and a failed one uploads the pods' logs with the scrapes.
+- **Because:**
+  - The chart is how Kubernetes clusters run the agent (M8). A DaemonSet changes what runs it, not what it does: the same suites, behind D200's helpers, check it.
+  - `config.source: host` keeps the nodes' config, which the suites edit in place, as the unit reads it.
+  - The opt-out label is how an operator takes a node out; a pod deletion is a restart, as `systemctl restart` is.
+  - The kubelet's own deletion of the agent's pod is a request that clears NRI's closed plugin (D180), so the gap case cannot happen on pods.
+  - CRI-O reads `registries.conf.d` 200 ms after the last change (`server/server.go:51` at CRI-O v1.37.2): a pull right after `configure` raced it.
+  - containerd holds a read lock on NRI plugin sync through each CRI call, a stop's whole grace period included, and a registering plugin's write lock waits for it and holds back later calls (`vendor/github.com/containerd/nri/pkg/adaptation/adaptation.go:793-815`, `internal/cri/server/container_stop.go:55` at containerd v2.3.7). An agent pod that starts while a pod ends slowly cannot stop until that pod has: a test pod ignoring SIGTERM held one for 15 s, so the suites end their pods `--now`. The unit's stop goes through systemd, not the runtime.
+  - With the agent down for the kubelet's restart, about a second against systemd's 100 ms, CRI-O pulls from the upstream itself: the suites' throttling proxy kept only the last of CRI-O's `Accept` headers, one per media type (`vendor/go.podman.io/image/v5/docker/docker_client.go:1032` at CRI-O v1.37.2), and now joins them.
+  - A pull request pays two legs for the chart, on one architecture, since the image and chart do not differ by architecture; main and the nightly run cover the rest.
+  - A DaemonSet leg is slower by the kubelet: a pod's restart, through the API server, the `DaemonSet` controller and the `configure` init container, takes 3 to 8 s in CI where systemd's takes under a second, and most tests restart or stop an agent at least once. On CRI-O, the slower of the two to start a container, the leg passes D190's 18 min. It stays on pull requests: only it mounts the auth file and reloads `registries.conf.d` (D201).
+- **Measured:** in CI, minutes. The pull request's legs, in runs 45304944124 then 46042417011: DaemonSet containerd 2.4 x86_64 16.3, 17.2, CRI-O 1.37 x86_64 18.2, 20.4; the unit's containerd 2.4 x86_64 14.4, 13.6, arm64 13.6, 14.0, CRI-O 1.37 x86_64 15.4, 16.4, arm64 14.7. The nightly's 14 DaemonSet legs (runs 45304934613, 46042409397): containerd 15.6 to 17.7, CRI-O 17.4 to 19.4. On CRI-O 1.37 x86_64 the suites took 940 s against the unit's 598 s (jobs 140657971199, 140657971228), 5 to 11 s more per test: relay 61 s more, artifacts 59 s, verify 42 s, outage 35 s, gate 28 s.
+- **Cost:** two jobs per pull request and four per push to `main`; the nightly run's 14 runner jobs. A pull request's e2e waits about 2 min longer, for the CRI-O DaemonSet leg, whose budget is 21 min against the unit's 18. A chart change reaches e2e only when `chart_rev` moves.
+- **Revisit when:** the chart's pod twins of the unit checks land, or a pull request's DaemonSet leg passes 21 min (then CRI-O's moves to `main`).

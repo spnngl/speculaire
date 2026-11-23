@@ -16,6 +16,9 @@ fn serial() -> MutexGuard<'static, ()> {
 fn the_unit_stops_cleanly_and_keeps_its_run_directory() {
     let _serial = serial();
     let cluster = Cluster::from_env();
+    if !cluster.has_unit() {
+        return;
+    }
     let node = cluster.nodes().unwrap().remove(0).name;
     let sh = |script: &str| cluster.exec(&node, &["sh", "-c", script]).unwrap();
     sh("echo kept > /run/speculaire/e2e-marker");
@@ -54,6 +57,9 @@ fn the_unit_stops_cleanly_and_keeps_its_run_directory() {
 fn the_agent_raises_its_soft_open_file_limit_to_the_hard_one() {
     let _serial = serial();
     let cluster = Cluster::from_env();
+    if !cluster.has_unit() {
+        return;
+    }
     let node = cluster.nodes().unwrap().remove(0).name;
     let drop_in = cluster
         .drop_in(&node, "e2e-limits", "[Service]\nLimitNOFILE=1024:524288\n")

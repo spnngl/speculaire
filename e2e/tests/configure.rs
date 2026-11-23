@@ -332,7 +332,9 @@ fn without_path(cluster: &Cluster, node: &str, command: &str) -> e2e::Output {
 fn crio_watching_registries_conf_d_needs_no_systemctl() {
     let _serial = serial();
     let cluster = Cluster::from_env();
-    if cluster.runtime() != Runtime::Crio {
+    // The chart's CRI-O nodes watch `registries.conf.d` throughout, which their init containers' `configure` needs
+    // (D208).
+    if cluster.runtime() != Runtime::Crio || !cluster.has_unit() {
         return;
     }
     let node = workers(&cluster).remove(0);

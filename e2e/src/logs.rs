@@ -1,8 +1,8 @@
 //! The agent's log entries, read alike from the journal and from its JSON lines (D200).
 //!
 //! Under systemd the agent logs to the journal, whose fields name its own `F_<FIELD>`; elsewhere it writes JSON lines,
-//! whose fields are `fields.<field>`. Its stdout and stderr, such as its span timings and its exit error, are lines in
-//! both. An [`Entry`] holds either the same way.
+//! whose fields are `fields.<field>`, which its pod's log holds (D208). Its stdout and stderr, such as its span timings
+//! and its exit error, are lines in both. An [`Entry`] holds either the same way.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -63,6 +63,19 @@ impl fmt::Display for Level {
     }
 }
 
+/// The target of the agent's audit events, `AUDIT_TARGET` of `crates/mirror/src/fetch.rs` (D37).
+const AUDIT_TARGET: &str = "speculaire::audit";
+
+/// Which of the agent's logs a line of its pod is of: the journal keeps them apart, as `speculaire` and
+/// `speculaire-audit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Log {
+    /// Its diagnostics and the lines it wrote outside them.
+    Agent,
+    /// Its audit events (D37).
+    Audit,
+}
+
 /// One entry of the agent's logs: an event it logged, or a line it wrote outside them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -119,6 +132,23 @@ impl Entry {
             message,
             fields,
         })
+    }
+
+    /// Parses a line of `crictl logs --timestamps`: the time the runtime received the agent's line, a space, then the
+    /// line; returns the log it is of.
+    ///
+    /// # Errors
+    ///
+    /// When the line does not start with an RFC 3339 time.
+    pub(crate) fn from_pod(line: &str) -> Result<(Log, Self), String> {
+        let (at, line) = line.split_once(' ').unwrap_or((line, ""));
+        let at: jiff::Timestamp = at
+            .parse()
+            .map_err(|e| format!("no time before a pod's line: {at:?}: {e}"))?;
+        let audit = serde_json::from_str::<Value>(line)
+            .is_ok_and(|event| event.get("target").and_then(Value::as_str) == Some(AUDIT_TARGET));
+        let log = if audit { Log::Audit } else { Log::Agent };
+        Ok((log, Self::from_line(at.into(), line)))
     }
 
     /// Parses a line the agent wrote at `at`: an event when it is one of its JSON lines, otherwise the line itself.
@@ -310,6 +340,30 @@ mod tests {
             }
         );
         assert_eq!(journal.to_string(), error);
+    }
+
+    /// A pod's line, as `crictl logs --timestamps` prints it: the runtime's time, then the agent's JSON line.
+    #[test]
+    fn a_pod_line_reads_as_the_json_line_at_the_runtimes_time() {
+        let event = r#"{"level":"INFO","fields":{"message":"m","pod":"p"},"target":"speculaire_agent::gate"}"#;
+        let (log, entry) =
+            Entry::from_pod(&format!("2026-11-18T11:06:40.123456000Z {event}")).unwrap();
+        assert_eq!(log, Log::Agent);
+        assert_eq!(entry, Entry::from_line(at(), event));
+
+        let audit =
+            r#"{"level":"INFO","fields":{"message":"verdict"},"target":"speculaire::audit"}"#;
+        let (log, entry) =
+            Entry::from_pod(&format!("2026-11-19T08:13:20.123456Z {audit}")).unwrap();
+        assert_eq!(log, Log::Audit);
+        assert_eq!(entry.message, "verdict");
+
+        let (log, entry) = Entry::from_pod("2026-11-19T08:13:20.123456Z error: exit").unwrap();
+        assert_eq!(
+            (log, entry.level, entry.message.as_str()),
+            (Log::Agent, None, "error: exit")
+        );
+        assert!(Entry::from_pod("error: exit").is_err());
     }
 
     #[test]

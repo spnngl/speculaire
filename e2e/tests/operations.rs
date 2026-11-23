@@ -230,6 +230,9 @@ impl Drop for Restore<'_> {
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn the_operations_guide_from_install_to_break_glass_gives_each_stated_result() {
     let cluster = Cluster::from_env();
+    if !cluster.has_unit() {
+        return;
+    }
     if cluster.ip_family() == IpFamily::Dual {
         return;
     }
