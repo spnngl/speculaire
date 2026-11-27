@@ -30,7 +30,7 @@ use speculaire_runtime::registries::{self, Registries, Reloaded};
 use speculaire_runtime::watch::Watch;
 use speculaire_runtime::{Fallback, Node as RuntimeNode, images};
 use speculaire_verify::{Engine, Policies, Running, Signatures};
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
@@ -55,6 +55,11 @@ use crate::{listen, open_files, systemd, telemetry, trust};
 ///
 /// When the config is invalid, which stops startup before any listener opens (D30), or a listener cannot open.
 pub fn run(path: &Path) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Runtime::new().context("starting the runtime")?;
+    let signals = {
+        let _entered = runtime.enter();
+        Signals::new()?
+    };
     // Stamped before the first read, so that a write during it is a change the first poll finds (D93).
     let watch = Watch::new(vec![path.to_owned()]);
     let config = config::load(path)?;
@@ -64,9 +69,29 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     let trust = trust::Source::read(&config.verify)?;
     let node = Node::new(&config);
     let node = preflight(&node, config.gate.wait.get())?;
-    tokio::runtime::Runtime::new()
-        .context("starting the runtime")?
-        .block_on(serve(path, watch, config, logs, node, policy, trust))
+    runtime.block_on(serve(
+        path, signals, watch, config, logs, node, policy, trust,
+    ))
+}
+
+/// The signals the agent handles, from the start of [`run`]: as a container's PID 1, the agent is sent no signal it has
+/// no handler for, and a SIGTERM lost during startup would leave it running until the grace period's SIGKILL. A signal
+/// that arrives during startup is handled once it is done.
+struct Signals {
+    hangup: Signal,
+    terminate: Signal,
+    interrupt: Signal,
+}
+
+impl Signals {
+    /// Installs the handlers; needs the runtime's context.
+    fn new() -> anyhow::Result<Self> {
+        Ok(Self {
+            hangup: signal(SignalKind::hangup()).context("handling SIGHUP")?,
+            terminate: signal(SignalKind::terminate()).context("handling SIGTERM")?,
+            interrupt: signal(SignalKind::interrupt()).context("handling SIGINT")?,
+        })
+    }
 }
 
 /// Reads the policy file, refusing to start on one that does not parse (D30); a missing file is no policy (D142).
@@ -105,8 +130,13 @@ fn preflight(node: &Node, wait: Duration) -> anyhow::Result<RuntimeNode> {
     clippy::too_many_lines,
     reason = "the startup, step by step in order, then the loop"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "what the startup before the runtime made, in order"
+)]
 async fn serve(
     path: &Path,
+    signals: Signals,
     mut watch: Watch,
     mut config: Config,
     logs: Logs,
@@ -114,11 +144,11 @@ async fn serve(
     mut policy: Followed<Arc<Policies>>,
     trust: trust::Source,
 ) -> anyhow::Result<()> {
-    // Before any listener opens and before READY=1: a signal's default action would end the agent, and a signal that
-    // arrives during startup is handled once it is done.
-    let mut hangup = signal(SignalKind::hangup()).context("handling SIGHUP")?;
-    let mut terminate = signal(SignalKind::terminate()).context("handling SIGTERM")?;
-    let mut interrupt = signal(SignalKind::interrupt()).context("handling SIGINT")?;
+    let Signals {
+        mut hangup,
+        mut terminate,
+        mut interrupt,
+    } = signals;
     let metrics = telemetry::install()?;
     let role = *config.role.get();
     if role == Role::Reflector {
