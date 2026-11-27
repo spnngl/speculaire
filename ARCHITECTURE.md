@@ -111,9 +111,9 @@ A row marked (planned) has no path yet; drop the mark when it lands.
 
 | Path | Role |
 |---|---|
-| `apps/speculaire` | The binary: `version`, `check-config`, `configure`, `unconfigure`, `verify` and `agent` (D62, D156) |
+| `apps/speculaire` | The binary: `version`, `check-config`, `configure`, `unconfigure`, `verify` and `agent` (D62, D156), and the chart uninstall hook's hidden `sleep` and `wait-daemonset` (D211) |
 | `apps/loadgen` | `speculaire-loadgen`, test only and never packaged: D33's load against one reflector, or two with a prewarm wave, `just load` (D104, D193), and a pull from a peer, `just profile peer` (D116) |
-| `crates/agent` | The agent: config (D60), the node its config names (D87), preflight at startup (D86), the mirror that `Node::fallback` calls for (D90), logs (D37), metrics (D34), status listener (D42, D45), the gate's NRI registration (D168), the discovery `verify` runs on its own (D156), and the prewarm worker that pulls what members push (D188) |
+| `crates/agent` | The agent: config (D60), the node its config names (D87), preflight at startup (D86), the mirror that `Node::fallback` calls for (D90), logs (D37), metrics (D34), status listener (D42, D45), the gate's NRI registration (D168), the discovery `verify` runs on its own (D156), the prewarm worker that pulls what members push (D188), and the uninstall hook's wait on its `DaemonSet`s through the API server (D211) |
 | `crates/registry-config` | The *registry config* parsers, a module per runtime: containerd's `config.toml` and `hosts.toml` (D17, D78); CRI-O's `registries.conf`, `certs.d` and credential files (D66, D80) |
 | `crates/oracle-harness` | Test helper: runs `speculaire-oracle` and reads its answers; the differential tests of the parsers use it (D70, D79) |
 | `crates/mirror` | The local mirror: the pull half of the distribution API over TLS 1.3 with a client certificate, from the runtime's `Content`, or the relay and the *blob cache* where the runtime keeps none (D5, D66, D67, D85, D88, D90); the peer API, which serves the same, and the artifact store with its referrers, to other nodes (D100, D124) |

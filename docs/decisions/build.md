@@ -169,7 +169,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
 - **Cost:** the real-cluster tier needs a cluster that can be dedicated to it for a few hours each minor release, and the privileged node pods need cluster-admin.
 - **Revisit when:** `spegel-org/benchmark` stops being maintained; then fork it into `bench/`.
 
-## D40: SemVer, fixes for the latest minor only (amended by D63, D197)
+## D40: SemVer, fixes for the latest minor only (amended by D63, D197, D211)
 
 - **Decision:**
   - **Versions:** SemVer. Releases stay `0.x` until the gate ships `enforce`; in `0.x`, a breaking change bumps the minor. A breaking change is one that removes or renames a setting, a CLI command or flag, or a metric, or drops a protocol version or a containerd minor.

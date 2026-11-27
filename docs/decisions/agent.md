@@ -24,7 +24,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A bad reload keeps the old config because the gate must keep deciding. Failing closed on a typo would block every container creation on the node.
 - **Revisit when:** —
 
-## D32: `configure` and `unconfigure` change only what speculaire added (amends D14; amended by D55, D56, D66, D82, D84, D191)
+## D32: `configure` and `unconfigure` change only what speculaire added (amends D14; amended by D55, D56, D66, D82, D84, D191, D211)
 
 - **Decision:**
   - `speculaire configure` edits each `hosts.toml` with a format-preserving TOML editor, so the admin's comments and ordering stay. It recognises its own entries by their `ca` path (D56).
@@ -129,7 +129,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The list matches dedens' unit where the two agree (`docs/research/ci-dedens.md:64`).
 - **Revisit when:** a host keeps a file the agent reads under another owner; then add `CAP_DAC_READ_SEARCH` only.
 
-## D55: The admin runs `configure`; the agent refuses to start without it (amends D32; amended by D82, D85)
+## D55: The admin runs `configure`; the agent refuses to start without it (amends D32; amended by D82, D85, D211)
 
 - **Decision:**
   - Installing the package neither runs `speculaire configure` nor edits containerd's config. The admin runs `configure` once per node (`docs/operations.md` § Install).
@@ -193,7 +193,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Measured (M2 step 03, arm64, Docker):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass the six `configure` tests: on every node `just e2e-up` ran `configure` before the agent, a second run printed nothing and changed no file (mode, SHA-256 compared), and the keys are 0600. A `crictl pull` on a worker reached an `openssl s_server` on `127.0.0.1:7480` that required a client certificate, with `subject=CN=speculaire mirror client`, and went on to upstream once the stand-in was killed. In CI run 43182634661 (PR 43) all 14 e2e legs passed the suite.
 - **Revisit when:** a node needs a `hosts.toml` in a directory of certificate files, or a certificate must be renewed without remaking the CA.
 
-## D84: The three commands find the runtime by its socket, and `unconfigure` asks the runtime's NRI config (amends D32, D64; amended by D90, D201, D209)
+## D84: The three commands find the runtime by its socket, and `unconfigure` asks the runtime's NRI config (amends D32, D64; amended by D90, D201, D209, D211)
 
 - **Decision:**
   - `configure`, `unconfigure` and `check-config` connect to `/run/containerd/containerd.sock` and `/var/run/crio/crio.sock` (`speculaire-runtime`, `detect`), each with a 2 s limit. Exactly one must accept. Otherwise they stop before changing anything, naming both paths and what each answered (`no such socket`, the system's error, `accepted a connection`).
@@ -448,3 +448,21 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The kubelet swaps the ConfigMap's `..data` symlink at once (kubernetes v1.37.0 `pkg/volume/util/atomic_writer.go:50-57`), which D30's `stat` follows; a `subPath` mount is never updated. It syncs a pod every `wait.Jitter(resyncInterval, 0.5)` (`pkg/kubelet/pod_workers.go:1531`), reads ConfigMaps from a watch (`pkg/kubelet/apis/config/v1beta1/defaults.go:268-269`), and remounts a pod's volumes at each sync (`pkg/kubelet/volumemanager/volume_manager.go:440`).
   - D26 keeps reflectors and peers from relaxing the policy. A control plane already controls a DaemonSet's nodes, as it can change the pod spec, so the ConfigMap moves the right to relax the gate from the nodes' files to the namespace's ConfigMaps, and `host` keeps D26's nodes-only model.
 - **Revisit when:** the kubelet's sync of a ConfigMap volume changes, or operators need a restart key applied by `helm upgrade` alone.
+
+## D211: The chart's uninstall runs `unconfigure` on every node first, and a protocol upgrade takes two `helm upgrade` (amends D32, D40, D55, D84)
+
+- **Decision:**
+  - **Uninstall:** a `pre-delete` hook. A `DaemonSet` per component, `<component>-unconfigure`, on the nodes of that component, with the agent's image, mounts, tolerations and tolerate annotation, runs `unconfigure` in its init container, then `speculaire sleep`. A pod runs `speculaire wait-daemonset` on both, as a hook ServiceAccount whose Role may `get` them and `list` the namespace's pods. Both subcommands are hidden. Hook weights: the account, its Role and RoleBinding -1, the `DaemonSet`s 0, the pod 1; delete policy `before-hook-creation,hook-succeeded`.
+  - **The wait** (`speculaire_agent::hook`) asks the API server every second, through `speculaire-registry`'s client with the pod's token and CA, and prints each change. It exits 1 at the first init container that exited non-zero, as `<DaemonSet>: <node>: <container> failed: <its message>`, or after `--timeout` (240 s) naming each pod not ready and why. The pod's `helm.sh/hook-output-log-policy: hook-failed` makes Helm 4 print that log. The parser of the API's answers has a fuzz target, `kube_status`.
+  - **`required_plugins` (D84):** `unconfigure` refuses on that node, the wait fails at once naming the node and the key, and Helm stops before deleting anything: the release stays `deployed` and the agents run on. The nodes whose `unconfigure` succeeded pull without the mirror until the key is gone and the uninstall runs again, or until the agents restart and their `configure` puts the mirror back (`docs/operations.md` § Upgrade and removal).
+  - **Upgrade (D40):** the chart does not order its two `DaemonSet`s, each `RollingUpdate` with `maxUnavailable: 1` and `maxSurge: 0`. A protocol change takes two commands: `reflector.image.tag=<new>` rolls the reflectors alone, then `image.tag=<new>` with `reflector.image.tag=null` rolls the agents.
+  - **Admin's commands (D55):** with the chart, the init container runs `configure` and the hook `unconfigure`; the admin runs neither.
+  - **e2e:** `e2e/tests/lifecycle.rs`, `DaemonSet` mode on both runtimes, checks the three in order, then installs again, from `SPECULAIRE_E2E_CHART` (D210), with the release's values. `e2e::validator::Required` holds the validator section it shares with `reboot.rs`.
+- **Because:**
+  - `pre-delete`, not Spegel v0.8.0's `post-delete` (`charts/spegel/templates/post-delete-hook.yaml:11-13`): a refusal must stop the uninstall while the agents still run. Once they are gone, a runtime that requires `speculaire` starts no container, the hook's included.
+  - Helm waits on Jobs and Pods only; any other hook kind is ready once created (Helm v4.3.2 `pkg/kube/statuswait.go:78-99`). A `DaemonSet` alone would let the uninstall go on before any node ran `unconfigure`.
+  - Naming the node needs the pods' statuses. Spegel's wait pod probes each pod's `/readyz` through a headless Service (`post-delete-hook.yaml:71-73,97-99`) and can only time out. The init container's message, its log by `FallbackToLogsOnError`, is `unconfigure`'s error, which names the key (D84).
+  - A subcommand rather than a `kubectl` image: the image is `scratch`, with no shell, and a second image would need its own pin, signature and policy under `enforce`. The registry client already speaks HTTPS with a bearer token, and no Kubernetes client crate comes in.
+  - Two upgrade commands keep the chart simple: ordering the `DaemonSet`s would take a hook that waits on the reflectors' rollout, for an upgrade a minor release does once.
+- **Measured (M8 step 08, arm64, Docker, kind):** on containerd 2.4 the suite took 22 s: the upgrade 5 s, the refused uninstall 7 s, the uninstall 7 s, the install 2 s. On main's chart, the uninstall succeeded under `required_plugins` and left the mirror in every node's `hosts.toml` and `/var/lib/speculaire/mirror`.
+- **Revisit when:** Helm waits on a hook `DaemonSet`, or the reflectors must upgrade before the agents within one `helm upgrade`.
