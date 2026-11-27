@@ -40,7 +40,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Restoring backups would undo admin edits made after `configure`.
 - **Revisit when:** —
 
-## D37: Logs through `tracing`, with an opt-in audit log (amends D30; amended by D52, D116, D173)
+## D37: Logs through `tracing`, with an opt-in audit log (amends D30; amended by D52, D116, D173, D211)
 
 - **Decision:**
   - **Sinks:** `tracing-subscriber` with `tracing-journald` when `JOURNAL_STREAM` is set, and JSON on stderr otherwise.
@@ -112,7 +112,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - Restart keys are those that open sockets or define who the agent is; changing them live would leave peers or containerd holding stale addresses.
 - **Revisit when:** —
 
-## D53: The systemd unit's hardening (amended by D69, D88, D204)
+## D53: The systemd unit's hardening (amended by D69, D88, D204, D211)
 
 - **Decision:** the unit runs the agent as root and sets:
   - `NoNewPrivileges=yes`, `CapabilityBoundingSet=` (empty), `AmbientCapabilities=` (empty);
@@ -162,7 +162,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Revisit when:** —
 
 
-## D69: The unit is `Type=notify`, with a 30 s watchdog, and restarts on failure (amends D39, D53; amended by D204)
+## D69: The unit is `Type=notify`, with a 30 s watchdog, and restarts on failure (amends D39, D53; amended by D204, D211)
 
 - **Decision:**
   - `packaging/speculaire.service` runs `/usr/bin/speculaire agent` with `Type=notify`, `ExecReload=/bin/kill -HUP $MAINPID` (D30), `Restart=on-failure`, `WatchdogSec=30s` and `TimeoutStopSec=20s` (D39), `RuntimeDirectoryMode=0700` and `RuntimeDirectoryPreserve=yes` (D31), and D53's settings. It starts after `network-online.target`, `containerd.service` and `crio.service`, whichever exist.
@@ -448,3 +448,18 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - The kubelet swaps the ConfigMap's `..data` symlink at once (kubernetes v1.37.0 `pkg/volume/util/atomic_writer.go:50-57`), which D30's `stat` follows; a `subPath` mount is never updated. It syncs a pod every `wait.Jitter(resyncInterval, 0.5)` (`pkg/kubelet/pod_workers.go:1531`), reads ConfigMaps from a watch (`pkg/kubelet/apis/config/v1beta1/defaults.go:268-269`), and remounts a pod's volumes at each sync (`pkg/kubelet/volumemanager/volume_manager.go:440`).
   - D26 keeps reflectors and peers from relaxing the policy. A control plane already controls a DaemonSet's nodes, as it can change the pod spec, so the ConfigMap moves the right to relax the gate from the nodes' files to the namespace's ConfigMaps, and `host` keeps D26's nodes-only model.
 - **Revisit when:** the kubelet's sync of a ConfigMap volume changes, or operators need a restart key applied by `helm upgrade` alone.
+
+## D211: Each check of the unit has a twin on the chart's pods, in `e2e/tests/pod.rs` (amends D31, D37, D53, D69)
+
+- **Decision:**
+  - **The chart's test file:** `e2e/tests/pod.rs` checks the chart's pods on the clusters of D208 and returns at once on the unit's. Its module doc is the one table of each check the suites `unit`, `unit_restart`, `unit_reload`, `preflight` and `gate`'s stop cases make of the unit, with its pod twin, or `none` and why. A new check of the unit adds its row.
+  - **Hardening (D53):** in the pod the agent runs as `Uid` 0 with every capability set empty, `NoNewPrivs` 1 and `Seccomp` 2, on a read-only root; each read-only mount is read-only below too, as the chart sets `recursiveReadOnly: IfPossible` on its read-only `hostPath`s. e2e reads these in `/proc/<pid>/status` and `/proc/<pid>/mountinfo` on every node. `docs/security.md` names the settings of D53 a pod lacks.
+  - **Watchdog and restart (D69):** the liveness probe asks `/livez` every 10 s, 3 times, and kills with its own grace of 5 s, so a hung agent runs again within 40 s; the kubelet restarts a dead one. The pod's `terminationGracePeriodSeconds` is 20, as `TimeoutStopSec`, and its deletion drains as D39 says.
+  - **Run directory (D31):** a `hostPath` keeps `/run/speculaire` across the pod's deletion; the agent narrows it to 0700 (D204).
+  - **Reload:** `pkill -HUP -x speculaire` on the node stands in for `systemctl reload`; a changed config reloads at the next poll.
+  - **Logs (D37):** the container's log holds the JSON lines; the audit events are those of target `speculaire::audit`. A failing `speculaire configure` holds the pod at `Init:Error`, with the reason in the init container's log and termination message.
+- **Because:**
+  - The chart's pod replaces the unit's settings with the kubelet's and the runtime's. Read where the kernel applies them, the same properties hold or their gap is known, on both runtimes.
+  - containerd mounts each container's rootfs and `/dev/shm` below `/run/containerd`, so the chart's read-only mount of it left them writable to the agent: a write to every other container's files. `IfPossible` keeps the agent running on a kernel before 5.12, where only the top is read-only.
+  - The kubelet sends a hung process `SIGTERM` and waits the pod's grace before `SIGKILL`: the agent ran again 49.5 s after `kill -STOP`, then 34.9 s with the probe's 5 s. A hung agent cannot drain, and `shutdown.drain_timeout` is 10 s, so 5 s costs a live agent the probe misjudged its drain and at most the last second of its cache, which it saves once a second (D31).
+- **Revisit when:** the chart's default seccomp profile is the agent's own, or a runtime mounts nothing of other containers below its socket's directory.

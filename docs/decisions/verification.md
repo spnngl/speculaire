@@ -85,7 +85,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Because:** a compromised control plane must not be able to relax a node's policy, and systemd deployments already have config management.
 - **Revisit when:** the DaemonSet phase starts. Then mount the policy from a ConfigMap.
 
-## D31: Verdicts and signature results survive agent restarts in `/run/speculaire` (amends D20, D21; amended by D165, D176, D204)
+## D31: Verdicts and signature results survive agent restarts in `/run/speculaire` (amends D20, D21; amended by D165, D176, D204, D211)
 
 - **Decision:**
   - The unit sets `RuntimeDirectory=speculaire`, `RuntimeDirectoryMode=0700` and `RuntimeDirectoryPreserve=yes`. systemd keeps `/run/speculaire` across stops and restarts, and the tmpfs is cleared at reboot.

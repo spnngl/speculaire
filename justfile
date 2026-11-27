@@ -42,7 +42,7 @@ kubectl_version := "1.37.2"
 # renovate: datasource=github-releases depName=helm/helm
 helm_version := "4.3.2"
 # The commit of spnngl/charts' main whose `charts/speculaire` an e2e cluster in DaemonSet mode installs (D208).
-chart_rev := "52396e519bf077238193b7091e951a488133c9e8"
+chart_rev := "32bebc8ec6c5c00b8b37faed6fc39fc03aa5104d"
 # The reflectors' load balancer of an e2e cluster (D94): the Envoy release kind v0.33.0 runs in front of its API servers.
 # renovate: datasource=docker depName=docker.io/envoyproxy/envoy
 envoy := "v1.36.2@sha256:4972515dd9a069b44beb43cebba7851596e72a8c61cd7a7c33d8f48efc5280ba"

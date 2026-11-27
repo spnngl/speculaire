@@ -83,6 +83,8 @@ pub struct Entry {
     pub at: SystemTime,
     /// `None` for a line outside the agent's logs, such as its exit error.
     pub level: Option<Level>,
+    /// The event's target, such as `speculaire_agent::serve`; `None` for a line outside the agent's logs.
+    pub target: Option<String>,
     /// The event's message, or the whole line.
     pub message: String,
     /// The event's fields and its spans', by name in lower case with `.` as `_`, such as `image_name`; an event's
@@ -129,6 +131,7 @@ impl Entry {
                 .get("PRIORITY")
                 .and_then(text)
                 .and_then(|priority| Level::from_priority(&priority)),
+            target: record.get("TARGET").and_then(text),
             message,
             fields,
         })
@@ -180,6 +183,7 @@ impl Entry {
             Some(Self {
                 at,
                 level: Some(level),
+                target: event.get("target").and_then(text),
                 message,
                 fields,
             })
@@ -187,6 +191,7 @@ impl Entry {
         event.unwrap_or_else(|| Self {
             at,
             level: None,
+            target: None,
             message: line.to_owned(),
             fields: BTreeMap::new(),
         })
@@ -283,6 +288,7 @@ mod tests {
         let expected = Entry {
             at: at(),
             level: Some(Level::Warn),
+            target: Some("speculaire_mirror::relay".to_owned()),
             message: "upstream limits the relay: CRI-O gets a 429".to_owned(),
             fields: fields(&[
                 ("host", "limit.e2e.test"),
@@ -335,6 +341,7 @@ mod tests {
             Entry {
                 at: at(),
                 level: None,
+                target: None,
                 message: error.to_owned(),
                 fields: BTreeMap::new(),
             }
