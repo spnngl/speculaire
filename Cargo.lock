@@ -2464,6 +2464,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "divan",
  "http",
  "http-body-util",
@@ -2473,6 +2474,7 @@ dependencies = [
  "mime",
  "rustix",
  "sd-notify",
+ "secrecy",
  "serde",
  "serde_json",
  "serde_path_to_error",

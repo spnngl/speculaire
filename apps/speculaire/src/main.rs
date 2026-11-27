@@ -86,6 +86,20 @@ enum Command {
         /// The image, by digest: `<name>@sha256:<hex>`.
         image: String,
     },
+    /// Do nothing until SIGTERM: the main container of the chart's uninstall hook, whose init container runs
+    /// `unconfigure` (D210).
+    #[command(hide = true)]
+    Sleep,
+    /// Wait until every pod of a `DaemonSet` in this pod's namespace is ready, as the pod's service account; exit 1
+    /// at the first init container failed, naming its node and message, or at the timeout (D210).
+    #[command(hide = true)]
+    WaitDaemonset {
+        /// The `DaemonSet`.
+        name: String,
+        /// Seconds to wait.
+        #[arg(long, default_value_t = 240)]
+        timeout: u64,
+    },
 }
 
 /// Which runtime the node runs, when the command may not ask its sockets.
@@ -179,6 +193,12 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
                 &report,
             )?;
         }
+        Command::Sleep => speculaire_agent::hook::sleep()?,
+        Command::WaitDaemonset { name, timeout } => speculaire_agent::hook::wait_daemonset(
+            &name,
+            std::time::Duration::from_secs(timeout),
+            &mut std::io::stdout().lock(),
+        )?,
         Command::Verify {
             config,
             runtime,

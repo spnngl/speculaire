@@ -6,6 +6,7 @@ mod capture;
 pub mod config;
 mod followed;
 pub mod gate;
+pub mod hook;
 mod identity;
 mod listen;
 pub mod log;
