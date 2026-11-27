@@ -95,7 +95,7 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - The whole answer must fit: `gate.wait`, plus the 2.3 snapshot check (D15).
 - **Revisit when:** `FailurePolicy` ships in a containerd release (D9).
 
-## D44: The DaemonSet's own pod carries the tolerate annotation
+## D44: The DaemonSet's own pod carries the tolerate annotation (amended by D209)
 
 - **Decision:** the Helm chart installs in `kube-system`, and sets the NRI tolerate annotation chosen in `docs/operations.md` on the agent pod.
 - **Because:**
@@ -410,3 +410,18 @@ The NRI enforcement point. Index: `docs/decisions/README.md`.
   - In `audit`, which allows every container (D54), a stalled agent must not reject what its own answer would have allowed (user, 2026-11-23).
 - **Cost:** in `enforce`, an agent that stalls or crashes mid-call rejects that creation instead of letting it through; kubelet retries it. A mode change costs one NRI registration, during which creations pass ungated as at any agent restart (D180).
 - **Revisit when:** NRI changes what `fail_request` covers, or reads the failure policy outside `Configure`.
+
+
+## D209: A rebooted node under `required_plugins` starts the chart's agent pod, then its other pods, the CNI's included, which need no annotation (amends D44, D84)
+
+- **Decision:**
+  - The chart's tolerate annotation, `gate.tolerateAnnotation` on both its pods, is the only one a worker needs. It covers the `configure` init container too (`containerd/nri` v0.12.3 `pkg/plugin/annotations.go:40`). The CNI's pods, kube-proxy and every other pod wait for the agent: the validator rejects their containers until it registers, and the kubelet retries them.
+  - Static pods: the control plane's carry the annotation, as `docs/operations.md` step 3 says. A worker's static pod waits like the others.
+  - At boot, `configure` in the init container finds the runtime by its socket (D84), the runtime that created it. `unconfigure` still refuses while `required_plugins` names `speculaire`: the annotation brings the agent back after a reboot, not after its removal.
+  - `e2e/tests/reboot.rs`, DaemonSet mode: on `<cluster>-worker2`, the validator requires `speculaire` and tolerates the chart's key, and a pod and a static pod without the annotation run. After `docker restart` of the node, the agent pod is ready within 180 s, then every container that ran before runs again within 120 s, none before the agent, and the runtime's config is back as it was.
+- **Because:**
+  - The agent pod is on the host network, so it needs no CNI. An annotated CNI pod would start ungated, for nothing.
+  - The kubelet gets the agent pod from the API server. A control-plane node whose API server waited for the agent would start neither.
+- **Measured (arm64, Docker, kind 0.33.0, chart 52396e5):** from `docker restart`: containerd 2.4, agent pod ready in 3.5 s and 7.9 s, the other pods at +12 to +14 s, each rejected once; CRI-O 1.37, agent pod ready in 5.8 s, the others at +15 to +19 s, rejected 2 or 3 times each. Red, with the chart's key set to another: on both runtimes the agent pod was not ready after 180 s, its events naming `required plugin "speculaire" not present` (16 on containerd, 15 on CRI-O), and the node's other pods were rejected too; the restored config let every pod run again.
+- **Cost:** a rebooted worker runs its other pods about 10 s later, the kubelet's first back-off; the suite adds about 25 s to each DaemonSet leg.
+- **Revisit when:** NRI exempts a plugin's own pod from validation, or the kubelet keeps a node's pods across a reboot.

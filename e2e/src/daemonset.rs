@@ -261,7 +261,7 @@ impl Cluster {
 
     /// Follows the log of the node's running agent container while `act` ends it, appends the log's lines to
     /// [`KEPT`], writes the container's exit code to [`EXIT`], and returns the lines.
-    fn end(
+    pub(crate) fn end(
         &self,
         node: &str,
         act: impl FnOnce() -> Result<(), Failure>,

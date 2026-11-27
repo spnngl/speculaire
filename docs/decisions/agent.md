@@ -193,7 +193,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
 - **Measured (M2 step 03, arm64, Docker):** `just e2e containerd 2.4` and `just e2e crio 1.37` pass the six `configure` tests: on every node `just e2e-up` ran `configure` before the agent, a second run printed nothing and changed no file (mode, SHA-256 compared), and the keys are 0600. A `crictl pull` on a worker reached an `openssl s_server` on `127.0.0.1:7480` that required a client certificate, with `subject=CN=speculaire mirror client`, and went on to upstream once the stand-in was killed. In CI run 43182634661 (PR 43) all 14 e2e legs passed the suite.
 - **Revisit when:** a node needs a `hosts.toml` in a directory of certificate files, or a certificate must be renewed without remaking the CA.
 
-## D84: The three commands find the runtime by its socket, and `unconfigure` asks the runtime's NRI config (amends D32, D64; amended by D90, D201)
+## D84: The three commands find the runtime by its socket, and `unconfigure` asks the runtime's NRI config (amends D32, D64; amended by D90, D201, D209)
 
 - **Decision:**
   - `configure`, `unconfigure` and `check-config` connect to `/run/containerd/containerd.sock` and `/var/run/crio/crio.sock` (`speculaire-runtime`, `detect`), each with a 2 s limit. Exactly one must accept. Otherwise they stop before changing anything, naming both paths and what each answered (`no such socket`, the system's error, `accepted a connection`).

@@ -549,6 +549,22 @@ impl Cluster {
         Ok(())
     }
 
+    /// Reboots the node: kind takes a restart of the node's container for one, `/run` empties, and systemd starts the
+    /// runtime and the kubelet again. Returns once the container runs; the chart's agent's logs are kept, as a restart's
+    /// are (D208).
+    ///
+    /// # Errors
+    ///
+    /// When `docker restart` fails.
+    pub fn reboot(&self, node: &str) -> Result<(), Failure> {
+        self.scrape(node)?;
+        let reboot = || docker(&["restart", node]).map(drop);
+        match self.install {
+            Install::Unit => reboot(),
+            Install::DaemonSet => self.end(node, reboot).map(drop),
+        }
+    }
+
     /// Waits until the creation of `pod`'s container fails with a message that holds `reason`, then deletes the pod, and
     /// returns the message.
     ///
