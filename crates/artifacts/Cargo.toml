@@ -37,6 +37,7 @@ metrics-exporter-prometheus.workspace = true
 speculaire-pki = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
