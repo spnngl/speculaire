@@ -24,6 +24,8 @@ pub const CONFIG_RELOAD_FAILURES: &str = "speculaire_config_reload_failures_tota
 pub const CACHE_LOADS: &str = "speculaire_cache_loads_total";
 /// `speculaire_prewarm_pulls_total`: images members pushed, by what became of them (D188).
 pub const PREWARM_PULLS: &str = "speculaire_prewarm_pulls_total";
+/// `speculaire_prewarm_refetched_total`: layers of a prewarmed image the agent held without a blob, fetched (D195).
+pub const PREWARM_REFETCHED: &str = "speculaire_prewarm_refetched_total";
 
 /// `speculaire_p2p_enabled`: 1 while a node identity and the cluster CA are loaded and the identity has not expired (D16).
 pub const P2P_ENABLED: &str = "speculaire_p2p_enabled";
@@ -94,6 +96,7 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
     for result in ["ok", "failed", "dropped", "no_space"] {
         counter!(PREWARM_PULLS, "result" => result).absolute(0);
     }
+    counter!(PREWARM_REFETCHED).absolute(0);
     gauge!(P2P_ENABLED).set(0);
     speculaire_mirror::metrics::describe();
     speculaire_mirror::metrics::describe_peer();
@@ -151,6 +154,10 @@ fn describe() {
     describe_counter!(
         PREWARM_PULLS,
         "Images members pushed to prewarm: pulled, failed, dropped as listed or in flight, or skipped while the image filesystem is over prewarm.max_disk_percent"
+    );
+    describe_counter!(
+        PREWARM_REFETCHED,
+        "Layers of a prewarmed image the agent held without a blob, fetched so that it announces them"
     );
     describe_gauge!(
         P2P_ENABLED,

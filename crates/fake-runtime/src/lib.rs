@@ -1,5 +1,5 @@
 //! A fake containerd or CRI-O, for tests that run where there is no runtime (the CI runner, macOS): it answers the CRI's
-//! `Version`, `ListImages`, `ListContainers`, `PullImage` and `ImageFsInfo`, containerd's introspection `Plugins`, content `List` and `Info`, images
+//! `Version`, `ListImages`, `ListContainers`, `PullImage` and `ImageFsInfo`, containerd's introspection `Plugins`, content `List`, `Info` and `Write`, images
 //! `List`, `Get` and `Update`, snapshots `Stat` and events `Subscribe`, and CRI-O's `GET /config` on a Unix socket, which is all
 //! preflight, the registry config, the inventory, the image store, the mirror and the engine ask (D86, D99). On its NRI
 //! socket, it registers the plugin that connects (D168).
@@ -22,10 +22,11 @@ use containerd_client::services::v1::{
     GetImageRequest, GetImageResponse, Info, ListContentRequest, ListContentResponse,
     ListImagesRequest as ListStoredRequest, ListImagesResponse as ListStoredResponse, Plugin,
     PluginsRequest, PluginsResponse, SubscribeRequest, UpdateImageRequest, UpdateImageResponse,
+    WriteAction, WriteContentRequest, WriteContentResponse,
 };
 use containerd_client::tonic::codegen::http;
 use containerd_client::tonic::server::Grpc;
-use containerd_client::tonic::{Request, Response, Status};
+use containerd_client::tonic::{Request, Response, Status, Streaming};
 use containerd_client::types::{Descriptor, Envelope};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -279,6 +280,8 @@ struct Shared {
     stats: AtomicUsize,
     /// The image of each `PullImage` so far, failed or not.
     pulls: Mutex<Vec<String>>,
+    /// The digest and bytes of each content `Write` committed so far.
+    written: Mutex<Vec<(String, Vec<u8>)>>,
 }
 
 /// A fake runtime listening on a socket until it is dropped.
@@ -319,6 +322,7 @@ impl Fake {
             cut: tokio::sync::watch::channel(0).0,
             stats: AtomicUsize::new(0),
             pulls: Mutex::new(Vec::new()),
+            written: Mutex::new(Vec::new()),
         });
         let served = Arc::clone(&shared);
         let thread = std::thread::spawn(move || {
@@ -422,6 +426,16 @@ impl Fake {
     pub fn pulls(&self) -> Vec<String> {
         self.shared
             .pulls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The digest and bytes of each content `Write` committed so far, in order.
+    #[must_use]
+    pub fn written(&self) -> Vec<(String, Vec<u8>)> {
+        self.shared
+            .written
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -568,6 +582,7 @@ async fn route(
         "/containerd.services.content.v1.Content/Info" => {
             Status::not_found("the fake runtime holds no bytes").into_http()
         }
+        "/containerd.services.content.v1.Content/Write" => write(shared, request).await,
         "/containerd.services.images.v1.Images/List" => stored_images(answers, request).await,
         "/containerd.services.images.v1.Images/Get" => stored_image(answers, request).await,
         "/containerd.services.images.v1.Images/Update" => update_image(shared, request).await,
@@ -606,6 +621,45 @@ async fn pull(
     });
     Grpc::new(ProstCodec::<PullImageResponse, PullImageRequest>::default())
         .unary(service, request)
+        .await
+}
+
+/// containerd's content `Write`: the data of each message, recorded under the expected digest once committed, and an
+/// answer to each message. `Info` and `List` still hold nothing.
+async fn write(
+    shared: &Arc<Shared>,
+    request: http::Request<hyper::body::Incoming>,
+) -> http::Response<containerd_client::tonic::body::Body> {
+    let shared = Arc::clone(shared);
+    let service = tower::service_fn(move |request: Request<Streaming<WriteContentRequest>>| {
+        let shared = Arc::clone(&shared);
+        async move {
+            let mut messages = request.into_inner();
+            let mut data = Vec::new();
+            let mut actions = Vec::new();
+            while let Some(message) = messages.message().await? {
+                data.extend_from_slice(&message.data);
+                actions.push(message.action);
+                if message.action == i32::from(WriteAction::Commit) {
+                    shared
+                        .written
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push((message.expected, data));
+                    break;
+                }
+            }
+            let answers = actions.into_iter().map(|action| {
+                Ok::<_, Status>(WriteContentResponse {
+                    action,
+                    ..WriteContentResponse::default()
+                })
+            });
+            Ok(Response::new(futures_util::stream::iter(answers)))
+        }
+    });
+    Grpc::new(ProstCodec::<WriteContentResponse, WriteContentRequest>::default())
+        .streaming(service, request)
         .await
 }
 

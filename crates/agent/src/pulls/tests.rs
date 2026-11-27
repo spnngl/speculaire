@@ -333,6 +333,24 @@ impl Pull for Fake {
     }
 }
 
+/// A [`Then`] that does nothing.
+fn nothing() -> Then {
+    Arc::new(|_| Box::pin(async {}))
+}
+
+/// A [`Then`] that records the images it ran for.
+fn recording() -> (Then, Arc<Mutex<Vec<String>>>) {
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let then: Then = Arc::new({
+        let ran = Arc::clone(&ran);
+        move |image: Reference| {
+            ran.lock().unwrap().push(image.to_string());
+            Box::pin(async {})
+        }
+    });
+    (then, ran)
+}
+
 /// Lets the worker take what was sent and run what is due.
 async fn settle() {
     for _ in 0..10 {
@@ -347,7 +365,8 @@ async fn the_worker_retries_on_the_clock_and_stops_with_the_list() {
     *fake.fails.lock().unwrap() = true;
     let (pushes, taken) = mpsc::channel(8);
     let pull: Arc<dyn Pull> = Arc::<Fake>::clone(&fake);
-    let worker = Prewarm::spawn(taken, pull, |_| false, Percent::new(80).unwrap());
+    let (then, ran) = recording();
+    let worker = Prewarm::spawn(taken, pull, then, |_| false, Percent::new(80).unwrap());
     pushes.send(list("cp-1", &["app:1"])).await.unwrap();
     pushes.send(prewarm("cp-1", "app:1")).await.unwrap();
     settle().await;
@@ -372,6 +391,8 @@ async fn the_worker_retries_on_the_clock_and_stops_with_the_list() {
     pushes.send(prewarm("cp-1", "app:2")).await.unwrap();
     settle().await;
     assert_eq!(fake.pulls().len(), 3);
+    // Only the pull that went through is followed by `then` (D195).
+    assert_eq!(*ran.lock().unwrap(), ["docker.io/library/app:2"]);
     worker.stop().await;
 }
 
@@ -385,7 +406,7 @@ async fn the_worker_pins_what_it_pulls_and_unpins_what_no_list_names() {
     });
     let (pushes, taken) = mpsc::channel(8);
     let pull: Arc<dyn Pull> = Arc::<Fake>::clone(&fake);
-    let worker = Prewarm::spawn(taken, pull, |_| false, Percent::new(80).unwrap());
+    let worker = Prewarm::spawn(taken, pull, nothing(), |_| false, Percent::new(80).unwrap());
     pushes.send(list("cp-1", &["app:1"])).await.unwrap();
     pushes.send(prewarm("cp-1", "app:1")).await.unwrap();
     while fake.pins().len() < 2 {
@@ -425,7 +446,7 @@ async fn pins_the_runtime_cannot_list_stay() {
     *fake.pins_fail.lock().unwrap() = true;
     let (pushes, taken) = mpsc::channel(8);
     let pull: Arc<dyn Pull> = Arc::<Fake>::clone(&fake);
-    let worker = Prewarm::spawn(taken, pull, |_| false, Percent::new(80).unwrap());
+    let worker = Prewarm::spawn(taken, pull, nothing(), |_| false, Percent::new(80).unwrap());
     pushes.send(list("cp-1", &["app:1"])).await.unwrap();
     pushes.send(prewarm("cp-1", "app:1")).await.unwrap();
     while fake.pins().is_empty() {
@@ -453,7 +474,7 @@ async fn a_stop_cuts_the_pull_in_flight() {
     });
     let (pushes, taken) = mpsc::channel(8);
     let pull: Arc<dyn Pull> = Arc::<Fake>::clone(&fake);
-    let worker = Prewarm::spawn(taken, pull, |_| false, Percent::new(80).unwrap());
+    let worker = Prewarm::spawn(taken, pull, nothing(), |_| false, Percent::new(80).unwrap());
     pushes.send(prewarm("cp-1", "app:1")).await.unwrap();
     while fake.pulls().is_empty() {
         tokio::task::yield_now().await;
@@ -473,7 +494,7 @@ async fn an_unknown_usage_still_pulls_and_the_worker_ends_with_its_pushes() {
     });
     let (pushes, taken) = mpsc::channel(8);
     let pull: Arc<dyn Pull> = Arc::<Fake>::clone(&fake);
-    let worker = Prewarm::spawn(taken, pull, |_| false, Percent::new(0).unwrap());
+    let worker = Prewarm::spawn(taken, pull, nothing(), |_| false, Percent::new(0).unwrap());
     pushes.send(prewarm("cp-1", "app:1")).await.unwrap();
     while fake.pulls().is_empty() {
         tokio::task::yield_now().await;

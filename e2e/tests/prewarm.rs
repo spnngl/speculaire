@@ -2,7 +2,8 @@
 //! every node, only its seeds get its blobs from upstream, and each agent pulls it once, through a reflector's restart
 //! and a seed that can reach nothing. On containerd, each agent pins the image until no list names it, which keeps it
 //! through image garbage collection; on CRI-O, where none is pinned, a pod that needs it once removed gets it from
-//! peers (D191). On the IPv4 pass only, as the verify suite (D141): neither the seeds' pick nor
+//! peers (D191). On containerd, a seed that holds the layers of an image without their blobs fetches and announces them
+//! (D195). On the IPv4 pass only, as the verify suite (D141): neither the seeds' pick nor
 //! the waves depend on the family.
 #![expect(
     clippy::unwrap_used,
@@ -40,6 +41,7 @@ const DROPPED: &str = r#"speculaire_prewarm_pulls_total{result="dropped"}"#;
 const SENT_SEED: &str = r#"speculaire_reflector_prewarm_sent_total{stage="seed"}"#;
 const SENT_RELEASE: &str = r#"speculaire_reflector_prewarm_sent_total{stage="release"}"#;
 const TIMED_OUT: &str = r#"speculaire_reflector_prewarm_rounds_total{release="timeout"}"#;
+const REFETCHED: &str = "speculaire_prewarm_refetched_total";
 
 /// The cluster on the IPv4 pass, with its nodes' names; `None` on the dual-stack pass.
 fn cluster() -> Option<(Cluster, Vec<String>, MutexGuard<'static, ()>)> {
@@ -482,15 +484,47 @@ fn on_containerd_a_prewarmed_image_is_pinned_through_image_collection_and_unpinn
     assert_eq!(cluster.pinned(&node).unwrap(), others);
 }
 
-/// Deletes the pod, even when the test fails.
-/// What the CRI-O case leaves, taken off however it ends: its image shares the layers of `TEST_IMAGE`, which CRI-O
-/// would then not fetch for the suites that follow.
+/// What a case that runs a pod leaves, taken off however it ends: its image shares the layers of `TEST_IMAGE`, which
+/// CRI-O would then not fetch for the suites that follow.
 struct Leftovers<'a> {
     cluster: &'a Cluster,
     prewarm: &'a Prewarm<'a>,
     nodes: &'a [String],
     pod: &'static str,
     image: &'a str,
+}
+
+impl Leftovers<'_> {
+    /// Runs the pod on `node`, from the image, and waits until it is ready.
+    fn run(&self, node: &str) {
+        let _ = self
+            .cluster
+            .kubectl(&["delete", "pod", self.pod, "--ignore-not-found", "--wait"]);
+        let overrides = format!(r#"{{"spec":{{"nodeName":"{node}"}}}}"#);
+        self.cluster
+            .kubectl(&[
+                "run",
+                self.pod,
+                "--image",
+                self.image,
+                "--image-pull-policy=IfNotPresent",
+                "--restart=Never",
+                &format!("--overrides={overrides}"),
+                "--command",
+                "--",
+                "sleep",
+                "3600",
+            ])
+            .unwrap();
+        self.cluster
+            .kubectl(&[
+                "wait",
+                "--for=condition=Ready",
+                &format!("pod/{}", self.pod),
+                "--timeout=120s",
+            ])
+            .unwrap();
+    }
 }
 
 impl Drop for Leftovers<'_> {
@@ -540,38 +574,85 @@ fn on_crio_a_prewarmed_image_is_not_pinned_and_once_removed_its_pod_starts_with_
         pod: "e2e-prewarm-unpinned",
         image: reference,
     };
-    let _ = cluster.kubectl(&[
-        "delete",
-        "pod",
-        leftovers.pod,
-        "--ignore-not-found",
-        "--wait",
-    ]);
-    let overrides = format!(r#"{{"spec":{{"nodeName":"{node}"}}}}"#);
-    cluster
-        .kubectl(&[
-            "run",
-            leftovers.pod,
-            "--image",
-            reference,
-            "--image-pull-policy=IfNotPresent",
-            "--restart=Never",
-            &format!("--overrides={overrides}"),
-            "--command",
-            "--",
-            "sleep",
-            "3600",
-        ])
-        .unwrap();
-    cluster
-        .kubectl(&[
-            "wait",
-            "--for=condition=Ready",
-            &format!("pod/{}", leftovers.pod),
-            "--timeout=120s",
-        ])
-        .unwrap();
+    leftovers.run(&node);
     let gets = blob_gets(&cluster, &upstream, &image, &nodes, since);
     assert!(!gets.contains_key(&node), "{gets:?}");
+    eprintln!("{reference}: the case took {:?}", begun.elapsed());
+}
+
+#[test]
+#[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
+fn on_containerd_a_seed_that_holds_the_layers_of_an_image_without_their_blobs_refetches_and_announces_them_within_30_s()
+ {
+    let Some((cluster, nodes, _serial)) = cluster() else {
+        return;
+    };
+    if cluster.runtime() != Runtime::Containerd {
+        return;
+    }
+    let begun = Instant::now();
+    let node = worker(&cluster, &nodes);
+    let upstream = cluster.upstream(Kind::Plain);
+    let prewarm = cluster.prewarm().unwrap();
+    let repository = repository(&upstream, "refetched", &nodes, |seeds| {
+        seeds.contains(&node)
+    });
+    let image = upstream.push_runnable(&repository, SIZE).unwrap();
+    let reference = image.reference.as_str();
+    let leftovers = Leftovers {
+        cluster: &cluster,
+        prewarm: &prewarm,
+        nodes: &nodes,
+        pod: "e2e-prewarm-refetched",
+        image: reference,
+    };
+    leftovers.run(&node);
+    // Removing an image whose container runs deletes its blobs and keeps its snapshots: the next pull unpacks
+    // nothing, so it fetches no layer (D195).
+    cluster.exec(&node, &["crictl", "rmi", reference]).unwrap();
+    let missing: Vec<&Digest> = image.blobs[1..]
+        .iter()
+        .filter(|digest| {
+            let path = cluster.blob_path(digest);
+            !cluster
+                .exec_output(&node, &["test", "-f", &path])
+                .unwrap()
+                .success
+        })
+        .collect();
+    assert!(
+        !missing.is_empty(),
+        "{node} holds every layer of {reference}"
+    );
+    // containerd's garbage collector names no deleted blob, so the agent would announce them until it lists its
+    // content again, 60 s on (D99): an agent started without its cache announces what the node holds now.
+    cluster
+        .stop_agent_then(&node, "rm -f /run/speculaire/cache.bin")
+        .unwrap();
+    cluster.start_agent(&node).unwrap();
+    cluster.wait_connected(&node).unwrap();
+    let before = counter(&cluster, &node, REFETCHED);
+
+    let written = prewarm.write(&[reference], SEED_TIMEOUT).unwrap();
+    let all: Vec<&str> = nodes.iter().map(String::as_str).collect();
+    let took = held(&cluster, &all, reference, written);
+    eprintln!(
+        "{reference}: every node holds it {took:?} after the write, {node} lacked {missing:?}"
+    );
+    let refetched = || counter(&cluster, &node, REFETCHED);
+    let what = || {
+        format!(
+            "{node} counts {} refetched, not {}",
+            refetched(),
+            before + u64::try_from(missing.len()).unwrap()
+        )
+    };
+    wait(Duration::from_secs(5), &what, &mut || refetched() > before);
+    assert_eq!(refetched(), before + u64::try_from(missing.len()).unwrap());
+    for digest in missing {
+        let path = cluster.blob_path(digest);
+        let kept = cluster.exec_output(&node, &["test", "-f", &path]).unwrap();
+        assert!(kept.success, "{node} has no {path}");
+    }
     eprintln!("{reference}: the case took {:?}", begun.elapsed());
 }

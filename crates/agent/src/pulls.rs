@@ -9,6 +9,9 @@
 //! A pulled image that a list names is pinned, so that the kubelet's image garbage collection keeps it; the agent
 //! unpins an image it pinned once no member's latest list names it (D191). The runtime marks the pins the agent
 //! made, which outlive it: the worker starts from those.
+//!
+//! A pull that went through is followed, before the next one starts, by what [`Then`] does: the refetch of the layers
+//! the node held without a blob (D195).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -37,6 +40,10 @@ const FIRST_BACKOFF: Duration = Duration::from_secs(30);
 /// The longest wait between retries.
 const MAX_BACKOFF: Duration = Duration::from_mins(10);
 
+/// What runs once a pull of the image went through, before the next pull starts.
+pub(crate) type Then =
+    Arc<dyn Fn(Reference) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 /// The worker, on a task of its own until stopped.
 pub(crate) struct Prewarm {
     limit: Arc<AtomicU8>,
@@ -45,10 +52,11 @@ pub(crate) struct Prewarm {
 
 impl Prewarm {
     /// Pulls with `pull` what members push on `pushes`, but what `held` says the runtime lists, while the image
-    /// filesystem is at most `limit` full.
+    /// filesystem is at most `limit` full; `then` follows each pull that went through.
     pub(crate) fn spawn(
         pushes: mpsc::Receiver<Pushed>,
         pull: Arc<dyn Pull>,
+        then: Then,
         held: impl Fn(&Reference) -> bool + Send + 'static,
         limit: Percent,
     ) -> Self {
@@ -56,6 +64,7 @@ impl Prewarm {
         let task = tokio::spawn(run(
             pushes,
             pull,
+            then,
             State::new(Box::new(held)),
             Arc::clone(&limit),
         ));
@@ -91,6 +100,7 @@ type Attempt = Pin<Box<dyn Future<Output = (Reference, Outcome)> + Send>>;
 async fn run(
     mut pushes: mpsc::Receiver<Pushed>,
     pull: Arc<dyn Pull>,
+    then: Then,
     mut state: State,
     limit: Arc<AtomicU8>,
 ) {
@@ -107,6 +117,7 @@ async fn run(
         {
             running = Some(Box::pin(attempt(
                 Arc::clone(&pull),
+                Arc::clone(&then),
                 image,
                 limit.load(Ordering::Relaxed),
             )));
@@ -134,8 +145,13 @@ async fn run(
     }
 }
 
-/// Pulls `image` unless the image filesystem is fuller than `limit` percent.
-async fn attempt(pull: Arc<dyn Pull>, image: Reference, limit: u8) -> (Reference, Outcome) {
+/// Pulls `image` unless the image filesystem is fuller than `limit` percent, then runs `then` if the pull went through.
+async fn attempt(
+    pull: Arc<dyn Pull>,
+    then: Then,
+    image: Reference,
+    limit: u8,
+) -> (Reference, Outcome) {
     match pull.usage().await {
         Ok(usage) if usage > limit => return (image, Outcome::Full(usage)),
         Ok(_) => {}
@@ -145,7 +161,10 @@ async fn attempt(pull: Arc<dyn Pull>, image: Reference, limit: u8) -> (Reference
         }
     }
     let outcome = match pull.pull(&image).await {
-        Ok(()) => Outcome::Pulled,
+        Ok(()) => {
+            then(image.clone()).await;
+            Outcome::Pulled
+        }
         Err(err) => Outcome::Failed(err),
     };
     (image, outcome)

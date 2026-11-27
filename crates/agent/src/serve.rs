@@ -28,7 +28,7 @@ use speculaire_runtime::content::Content;
 use speculaire_runtime::inventory::{Change, Inventory, Update};
 use speculaire_runtime::registries::{self, Registries, Reloaded};
 use speculaire_runtime::watch::Watch;
-use speculaire_runtime::{Fallback, Node as RuntimeNode, images};
+use speculaire_runtime::{Fallback, Node as RuntimeNode, NodeContent, images};
 use speculaire_verify::{Engine, Policies, Running, Signatures};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -46,6 +46,7 @@ use crate::log::{self, Logs};
 use crate::node::Node;
 use crate::prewarm::Resolver;
 use crate::pulls::Prewarm;
+use crate::refetch::Refetch;
 use crate::status::{self, Status};
 use crate::{listen, open_files, systemd, telemetry, trust};
 
@@ -419,6 +420,8 @@ struct Mirror {
     space: Space,
     /// The images the runtime lists, whose tags the agent announces and the peer API resolves (D123).
     listed: Listed,
+    /// What fetches the layers a prewarm pull left without a blob, where the node announces from (D195).
+    refetch: Arc<Refetch>,
 }
 
 impl Mirror {
@@ -525,18 +528,30 @@ async fn start_mirror(
     let fetcher = Fetcher::new(blobs.join("staging"), space.clone(), fetch_settings(config));
     speculaire_mirror::metrics::describe_fetch();
     let (tell, asked) = tokio::sync::mpsc::unbounded_channel();
-    let (task, relay, listed) = match node.fallback() {
-        Fallback::PerBlob => (
-            tokio::spawn(speculaire_mirror::serve(
-                listener,
-                tls,
-                Arc::new(Local::new(node.content(), fetcher.clone())),
-                tell,
-                stopped,
-            )),
-            None,
-            Listed::follow(node.images()),
-        ),
+    let (task, relay, listed, refetch) = match node.fallback() {
+        Fallback::PerBlob => {
+            let NodeContent::Containerd(containerd) = node.content() else {
+                anyhow::bail!("a runtime fetched per blob keeps no content store");
+            };
+            let refetch = Refetch::store(
+                containerd,
+                fetcher.clone(),
+                Arc::clone(&registries),
+                configured.to_string(),
+            );
+            (
+                tokio::spawn(speculaire_mirror::serve(
+                    listener,
+                    tls,
+                    Arc::new(Local::new(node.content(), fetcher.clone())),
+                    tell,
+                    stopped,
+                )),
+                None,
+                Listed::follow(node.images()),
+                refetch,
+            )
+        }
         Fallback::Relay => {
             let cache = Cache::open(blobs, space.clone())
                 .with_context(|| format!("opening the blob cache {}", blobs.display()))?;
@@ -559,7 +574,8 @@ async fn start_mirror(
                 stopped,
             ));
             let listed = relay.listed().clone();
-            (task, Some(relay), listed)
+            let refetch = Refetch::relay(node.socket().to_owned(), Arc::clone(&relay));
+            (task, Some(relay), listed, refetch)
         }
     };
     info!(%address, "mirror open");
@@ -572,6 +588,7 @@ async fn start_mirror(
             fetcher,
             space,
             listed,
+            refetch: Arc::new(refetch),
         },
         asked,
     ))
@@ -899,9 +916,14 @@ fn open_sharing(
         let credentials = Arc::clone(identity.credentials());
         let (pushes, taken) = tokio::sync::mpsc::channel(PUSHES);
         let listed = mirror.listed.clone();
+        let refetch = Arc::clone(&mirror.refetch);
         let prewarm = Prewarm::spawn(
             taken,
             node.pull(),
+            Arc::new(move |image| {
+                let refetch = Arc::clone(&refetch);
+                Box::pin(async move { refetch.run(&image).await })
+            }),
             move |image| listed.holds(image),
             config.prewarm.max_disk_percent,
         );
@@ -1050,6 +1072,10 @@ mod tests {
                 fetcher,
                 space,
                 listed: relay.listed().clone(),
+                refetch: Arc::new(Refetch::relay(
+                    dir.path().join("crio.sock"),
+                    Arc::clone(&relay),
+                )),
             };
             let config = Config::default();
             assert_ne!(config.blob_cache.max_size.get(), 1 << 30);

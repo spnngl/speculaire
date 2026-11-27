@@ -4,14 +4,20 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use containerd_client::services::v1::InfoRequest;
 use containerd_client::services::v1::content_client::ContentClient;
+use containerd_client::services::v1::{InfoRequest, WriteAction, WriteContentRequest};
 use containerd_client::tonic::transport::Channel;
-use containerd_client::tonic::{Code, Request};
+use containerd_client::tonic::{Code, Request, Status};
+use futures_util::StreamExt as _;
 use speculaire_oci::reference::Digest;
 
 use super::{Containerd, with_namespace};
-use crate::content::{Blob, Content, Error};
+use crate::content::{Blob, Chunks, Content, Error};
+
+/// The most a write message carries: containerd takes 16 MiB a message.
+const WRITE: usize = 1 << 20;
+/// [`WRITE`] as an offset.
+const WRITE_I64: i64 = 1 << 20;
 
 impl Containerd {
     fn blob_path(&self, digest: &Digest) -> PathBuf {
@@ -43,6 +49,75 @@ impl Containerd {
                 Ok(None)
             }
             Err(status) => Err(Error::Grpc(status)),
+        }
+    }
+
+    /// Writes the blob `digest` from `chunks` through containerd's content service, which checks the digest as it
+    /// commits, and leaves a blob it holds as it is (D195). The manifest that names the blob keeps it from containerd's
+    /// garbage collector.
+    ///
+    /// # Errors
+    ///
+    /// When containerd is out of reach or refuses the blob, or `chunks` fails: the write is then left uncommitted, and
+    /// containerd drops it.
+    pub async fn write(&self, digest: &Digest, mut chunks: Chunks) -> Result<(), Error> {
+        let Some(channel) = self.channel().await else {
+            return Err(Error::Grpc(Status::unavailable(
+                "containerd is out of reach",
+            )));
+        };
+        let (requests, taken) = tokio::sync::mpsc::channel(1);
+        let mut request = Request::new(futures_util::stream::unfold(taken, |mut taken| async {
+            taken.recv().await.map(|message| (message, taken))
+        }));
+        with_namespace(&mut request);
+        let message = |action: WriteAction, offset: i64, data: Vec<u8>| WriteContentRequest {
+            action: action.into(),
+            r#ref: format!("speculaire-{digest}"),
+            expected: digest.to_string(),
+            offset,
+            data,
+            ..WriteContentRequest::default()
+        };
+        // Sends `chunks` in messages of `WRITE` bytes, then the rest in the one that commits; it stops once containerd
+        // does.
+        let feed = async move {
+            let mut offset = 0_i64;
+            let mut data = Vec::new();
+            while let Some(chunk) = chunks.next().await.transpose()? {
+                data.extend_from_slice(&chunk);
+                while data.len() >= WRITE {
+                    let rest = data.split_off(WRITE);
+                    let sent = std::mem::replace(&mut data, rest);
+                    if requests
+                        .send(message(WriteAction::Write, offset, sent))
+                        .await
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                    offset = offset.saturating_add(WRITE_I64);
+                }
+            }
+            // An error means containerd ended the write, which `answers` tells.
+            let _ = requests
+                .send(message(WriteAction::Commit, offset, data))
+                .await;
+            Ok(())
+        };
+        let answers = async {
+            let mut answers = ContentClient::new(channel)
+                .write(request)
+                .await?
+                .into_inner();
+            while answers.message().await?.is_some() {}
+            Ok::<_, Status>(())
+        };
+        match tokio::join!(answers, feed) {
+            (_, Err(err)) => Err(err),
+            (Err(status), Ok(())) if status.code() == Code::AlreadyExists => Ok(()),
+            (Err(status), Ok(())) => Err(Error::Grpc(status)),
+            (Ok(()), Ok(())) => Ok(()),
         }
     }
 }

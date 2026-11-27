@@ -3,15 +3,16 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use containerd_client::services::v1::{
-    Info, InfoRequest, InfoResponse, ReadContentRequest, ReadContentResponse,
+    Info, InfoRequest, InfoResponse, ReadContentRequest, ReadContentResponse, WriteAction,
+    WriteContentRequest, WriteContentResponse,
 };
 use containerd_client::tonic::server::Grpc;
-use containerd_client::tonic::{Code, Request, Response, Status};
+use containerd_client::tonic::{Code, Request, Response, Status, Streaming};
 use futures_util::TryStreamExt as _;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -187,6 +188,8 @@ struct Behaviour {
     fail: AtomicI32,
     /// How many connections it accepted.
     connections: AtomicUsize,
+    /// The messages of each `Write`.
+    written: Mutex<Vec<Vec<WriteContentRequest>>>,
 }
 
 fn fake_containerd(socket: &Path, blobs: Blobs) -> Arc<Behaviour> {
@@ -234,7 +237,44 @@ async fn content_service(
     let behaviour = Arc::clone(behaviour);
     let mut grpc_info = Grpc::new(ProstCodec::<InfoResponse, InfoRequest>::default());
     let mut grpc_read = Grpc::new(ProstCodec::<ReadContentResponse, ReadContentRequest>::default());
-    if request.uri().path() == "/containerd.services.content.v1.Content/Info" {
+    let mut grpc_write =
+        Grpc::new(ProstCodec::<WriteContentResponse, WriteContentRequest>::default());
+    if request.uri().path() == "/containerd.services.content.v1.Content/Write" {
+        let svc = tower::service_fn(move |request: Request<Streaming<WriteContentRequest>>| {
+            let blobs = Arc::clone(&blobs);
+            let behaviour = Arc::clone(&behaviour);
+            async move {
+                namespaced(&request)?;
+                let mut messages = request.into_inner();
+                let mut written = Vec::new();
+                // Read to the commit or the end of the stream, as containerd does.
+                while let Some(message) = messages.message().await? {
+                    let held = blobs.contains_key(&message.expected);
+                    let commit = message.action == i32::from(WriteAction::Commit);
+                    written.push(message);
+                    if held {
+                        behaviour.written.lock().unwrap().push(written);
+                        return Err(Status::already_exists("blob exists"));
+                    }
+                    if commit {
+                        break;
+                    }
+                }
+                let answers: Vec<Result<WriteContentResponse, Status>> = written
+                    .iter()
+                    .map(|message| {
+                        Ok(WriteContentResponse {
+                            action: message.action,
+                            ..WriteContentResponse::default()
+                        })
+                    })
+                    .collect();
+                behaviour.written.lock().unwrap().push(written);
+                Ok(Response::new(futures_util::stream::iter(answers)))
+            }
+        });
+        grpc_write.streaming(svc, request).await
+    } else if request.uri().path() == "/containerd.services.content.v1.Content/Info" {
         let svc = tower::service_fn(move |request: Request<InfoRequest>| {
             let blobs = Arc::clone(&blobs);
             let behaviour = Arc::clone(&behaviour);
@@ -428,5 +468,95 @@ async fn a_blob_prints_where_it_comes_from_and_not_what_it_holds() {
     assert!(
         file.contains("File(") && file.contains(digest.encoded()),
         "{file}"
+    );
+}
+
+/// What each message of a `Write` was: its action, offset and length.
+fn shapes(written: &[WriteContentRequest]) -> Vec<(WriteAction, i64, usize)> {
+    written
+        .iter()
+        .map(|message| {
+            (
+                WriteAction::try_from(message.action).unwrap(),
+                message.offset,
+                message.data.len(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_blob_is_written_in_messages_of_a_mebibyte_and_committed_under_its_digest() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("containerd.sock");
+    let service = fake_containerd(&socket, Arc::default());
+    let content = containerd(dir.path(), &socket);
+    let bytes = pattern(2_500_000);
+    let digest = digest_of(&bytes);
+    let chunks = Blob::from_bytes(bytes.clone())
+        .stream(0, 2_500_000)
+        .await
+        .unwrap();
+    content.write(&digest, chunks).await.unwrap();
+    let written = service.written.lock().unwrap().pop().unwrap();
+    assert_eq!(
+        shapes(&written),
+        [
+            (WriteAction::Write, 0, 1 << 20),
+            (WriteAction::Write, 1 << 20, 1 << 20),
+            (WriteAction::Commit, 2 << 20, 2_500_000 - (2 << 20)),
+        ]
+    );
+    for message in &written {
+        assert_eq!(message.r#ref, format!("speculaire-{digest}"));
+        assert_eq!(message.expected, digest.to_string());
+    }
+    let data: Vec<u8> = written
+        .into_iter()
+        .flat_map(|message| message.data)
+        .collect();
+    assert_eq!(data, bytes);
+}
+
+#[tokio::test]
+async fn a_blob_containerd_holds_is_left_and_a_failed_read_commits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("containerd.sock");
+    let held = pattern(10);
+    let digest = digest_of(&held);
+    let service = fake_containerd(
+        &socket,
+        Arc::new(HashMap::from([(digest.to_string(), held.clone())])),
+    );
+    let content = containerd(dir.path(), &socket);
+    let chunks = Blob::from_bytes(held).stream(0, 10).await.unwrap();
+    content.write(&digest, chunks).await.unwrap();
+
+    let other = digest_of(b"other");
+    let failing: Chunks = Box::pin(futures_util::stream::iter([
+        Ok(pattern(5)),
+        Err(Error::Relay("cut".to_owned())),
+    ]));
+    let err = content.write(&other, failing).await.unwrap_err();
+    assert!(matches!(&err, Error::Relay(why) if why == "cut"), "{err}");
+    let written = service.written.lock().unwrap().pop().unwrap();
+    assert!(
+        written
+            .iter()
+            .all(|message| message.action != i32::from(WriteAction::Commit)),
+        "{:?}",
+        shapes(&written)
+    );
+}
+
+#[tokio::test]
+async fn a_write_with_no_containerd_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = containerd(dir.path(), dir.path().join("no.sock"));
+    let chunks = Blob::from_bytes(pattern(1)).stream(0, 1).await.unwrap();
+    let err = content.write(&digest_of(b"x"), chunks).await.unwrap_err();
+    assert!(
+        matches!(&err, Error::Grpc(status) if status.code() == Code::Unavailable),
+        "{err}"
     );
 }

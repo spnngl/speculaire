@@ -301,13 +301,18 @@ The control-plane index of which nodes hold which digests. Index: `docs/decision
 ## D195: After a prewarm pull, the agent fetches each layer it holds without a blob, so it announces the whole image (amends D185, D188)
 
 - **Decision:**
-  - **Fetch:** once a prewarm pull goes through (D188), the agent fetches through its own mirror, peers first (D102), each layer of the pulled platform manifest it does not hold as a blob: into the content store on containerd, into the *blob cache* on CRI-O. It then announces every layer, so its round ends without waiting for `prewarm.seed_timeout` (D185).
+  - **Fetch:** once a prewarm pull goes through (D188), the agent fetches, peers first (D102), each layer of the pulled platform manifest it does not hold as a blob, before its next prewarm pull. It then announces every layer, so its round ends without waiting for `prewarm.seed_timeout` (D185).
+    - **containerd:** from peers through the mirror's fetcher, else from the sources of the registry config with the node's own mirror left out, as the reflector resolves (D185): the mirror has no upstream (D66). The agent writes the blob through containerd's content service, which checks its digest; the manifest's `gc.ref` labels, set by the pull, keep it.
+    - **CRI-O:** a blob `GET` to the relay, which asks peers before upstream and keeps the blob in the *blob cache* (D67).
+    - The pulled manifest is the reference's digest, else the repository digest the runtime lists for the tag.
   - **Metric:** `speculaire_prewarm_refetched_total` counts the layers fetched so (D34).
-  - **Precondition:** before building, check whether CRI-O leaves the same gap when a layer is already in its storage from another image.
+  - **Precondition, checked:** CRI-O leaves the gap too, so the agent fetches on both runtimes. c/image asks its storage destination before fetching a blob (cri-o v1.37.2 `vendor/go.podman.io/image/v5/copy/single.go:744`), which reuses a layer it holds by compressed or uncompressed digest (`vendor/go.podman.io/image/v5/storage/storage_dest.go:604-656`); the relay then serves no blob, so the *blob cache* holds none to announce. A layer reaches that state when it came with another image, was pulled before the agent ran, or left the cache by eviction. A removal while the containers run cannot cause it on CRI-O: `DeleteImage` refuses an image in use (`vendor/go.podman.io/storage/store.go:2758-2760`).
 - **Because:**
   - A pull fetches no blob for a layer the node already holds unpacked, so the agent has nothing to announce for it. containerd reaches that state on a removal while the image's containers still run: its garbage collector deletes the blobs and keeps the snapshots (v2.4.2 `internal/cri/server/images/image_remove.go:44-77`), and the next pull skips them (`core/unpack/unpacker.go:508-520`).
   - A seed in that state holds its wave back the full 300 s; the gate suite hit it in CI (#269). Seeds are picked by hash (D181), so the reflector cannot avoid such a node.
-- **Cost:** such a node downloads layers it already runs, and on containerd keeps each twice, as a blob and as a snapshot.
+  - containerd 2.4 can fetch every blob on unpack (`core/unpack/unpacker.go:150-157`, `WithFetchAllContent`), but its CRI plugin does not ask for it.
+- **Cost:** such a node downloads layers it already runs, and on containerd keeps each twice, as a blob and as a snapshot. On containerd the agent reaches upstream for a layer no peer holds, as it does for artifacts (D121).
+- **Measured (M8):** `e2e/tests/prewarm.rs`, kind with containerd 2.4.2: a seed holding 2 layers of the image without their blobs refetches both, and every node holds the image 1.2 s after the write; before, the wave waited for `prewarm.seed_timeout`. The gate suite's prewarm is back to the 300 s timeout (#269).
 - **Revisit when:** a runtime's pull fetches the blob of a layer it holds unpacked.
 
 ## D196: Peers prefer holders in their own zone (amends D2, D51, D97, D102)
