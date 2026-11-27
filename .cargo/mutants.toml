@@ -69,6 +69,9 @@ exclude_re = [
   # A gate dropped unstopped stops too, its stop channel closed; `stop` only waits for the connection to close, which
   # the process's exit closes anyway (D168).
   'gate\.rs:\d+:\d+: replace Gate::stop with \(\)$',
+  # The chart's uninstall hook in a pod: a token, a CA and an API server exist only in a cluster, where
+  # `e2e/tests/lifecycle.rs` runs `sleep` and `wait-daemonset`; the tests drive `Api::wait` against a local server (D211).
+  'hook\.rs:\d+:\d+: (replace (sleep|wait_daemonset) -> anyhow::Result<\(\)> with Ok\(\(\)\)|replace Api::in_cluster -> anyhow::Result<Self> with )',
 ]
 # `e2e/` runs only against a kind cluster (`just e2e`), so no mutant of it is run; `crates/fake-runtime/`,
 # `crates/nri/src/testing.rs`, `crates/pki/src/testing.rs` and `crates/reflect/src/bench.rs` are test and benchmark

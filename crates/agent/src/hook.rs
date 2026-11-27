@@ -3,6 +3,7 @@
 //! Kubernetes API until every pod is ready, and names the node of each whose init container failed.
 
 use std::fmt::Write as _;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
@@ -73,33 +74,28 @@ pub(crate) struct Api {
 impl Api {
     /// The API server the kubelet names to every pod, trusted with the cluster CA, and the pod's namespace.
     fn in_cluster() -> anyhow::Result<Self> {
-        let env = |name: &str| {
-            std::env::var(name).with_context(|| format!("{name} is not set: not in a pod"))
-        };
+        Self::in_pod(|name| std::env::var(name).ok(), Path::new(ACCOUNT))
+    }
+
+    /// [`Self::in_cluster`], reading the environment through `env` and the service account in `account`.
+    pub(crate) fn in_pod(
+        env: impl Fn(&str) -> Option<String>,
+        account: &Path,
+    ) -> anyhow::Result<Self> {
+        let env =
+            |name: &str| env(name).with_context(|| format!("{name} is not set: not in a pod"));
         let host = env("KUBERNETES_SERVICE_HOST")?;
         let port = env("KUBERNETES_SERVICE_PORT")?;
         let read = |file: &str| {
-            let path = format!("{ACCOUNT}/{file}");
-            std::fs::read(&path).with_context(|| format!("reading {path}"))
+            let path = account.join(file);
+            std::fs::read(&path).with_context(|| format!("reading {}", path.display()))
         };
         let token =
             String::from_utf8(read("token")?).context("the service account token is not UTF-8")?;
         let token = SecretString::from(token.trim().to_owned());
         let namespace = String::from_utf8(read("namespace")?)
             .context("the service account namespace is not UTF-8")?;
-        let authority = if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        };
-        let endpoint = Endpoint {
-            root: String::new(),
-            tls: Tls {
-                roots: vec![Bytes::from(read("ca.crt")?)],
-                ..Tls::default()
-            },
-            ..Endpoint::new(true, authority)
-        };
+        let endpoint = endpoint(&host, &port, Bytes::from(read("ca.crt")?));
         Ok(Self::new(endpoint, &token, namespace.trim().to_owned()))
     }
 
@@ -207,6 +203,24 @@ impl Api {
             anyhow::bail!("GET {path}: {status}: {reason}");
         }
         Ok(body)
+    }
+}
+
+/// The API server at `host` and `port`, as the kubelet names it to a pod, over HTTPS trusting `ca` alone. Its paths
+/// start at the root, not at the distribution API's `/v2`.
+fn endpoint(host: &str, port: &str, ca: Bytes) -> Endpoint {
+    let authority = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    Endpoint {
+        root: String::new(),
+        tls: Tls {
+            roots: vec![ca],
+            ..Tls::default()
+        },
+        ..Endpoint::new(true, authority)
     }
 }
 
