@@ -137,8 +137,8 @@ async fn server(daemonset: Value, pods: Value) -> Api {
 async fn the_wait_ends_when_every_pod_is_ready() {
     let api = server(daemonset(1, 1, 0, 0), json!({"items": []})).await;
     let mut out = Vec::new();
-    api.wait("hook", Duration::from_secs(5), &mut out).await.unwrap();
-    assert_eq!(out, b"every pod is ready\n");
+    api.wait(&["hook".to_owned()], Duration::from_secs(5), &mut out).await.unwrap();
+    assert_eq!(out, b"hook: every pod is ready\n");
 }
 
 #[tokio::test]
@@ -146,7 +146,7 @@ async fn the_wait_fails_at_the_first_failure() {
     let pods = json!({"items": [pod("b", UID, false, failed("refused"))]});
     let api = server(daemonset(1, 1, 1, 0), pods).await;
     let error = api
-        .wait("hook", Duration::from_secs(5), &mut Vec::new())
+        .wait(&["hook".to_owned()], Duration::from_secs(5), &mut Vec::new())
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "hook: b: unconfigure failed: refused");
@@ -156,12 +156,12 @@ async fn the_wait_fails_at_the_first_failure() {
 async fn the_wait_ends_at_the_timeout() {
     let api = server(daemonset(1, 1, 1, 0), json!({"items": []})).await;
     let error = api
-        .wait("hook", Duration::ZERO, &mut Vec::new())
+        .wait(&["hook".to_owned()], Duration::ZERO, &mut Vec::new())
         .await
         .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "hook: not ready within 0 s: 0 of 1 pods ready"
+        "not ready within 0 s: hook: 0 of 1 pods ready"
     );
 }
 
@@ -169,7 +169,7 @@ async fn the_wait_ends_at_the_timeout() {
 async fn an_unknown_daemonset_is_waited_on_with_the_server_s_reason() {
     let api = server(daemonset(1, 1, 1, 0), json!({"items": []})).await;
     let error = api
-        .wait("missing", Duration::ZERO, &mut Vec::new())
+        .wait(&["missing".to_owned()], Duration::ZERO, &mut Vec::new())
         .await
         .unwrap_err();
     assert!(

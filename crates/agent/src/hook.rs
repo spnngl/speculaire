@@ -43,7 +43,7 @@ pub fn sleep() -> anyhow::Result<()> {
     })
 }
 
-/// Waits until every pod of the `DaemonSet` `name`, in this pod's namespace, is ready, asking the API server as this
+/// Waits until every pod of each `DaemonSet` of `names`, in this pod's namespace, is ready, asking the API server as this
 /// pod's service account, and writes each change of progress to `out`.
 ///
 /// # Errors
@@ -51,7 +51,7 @@ pub fn sleep() -> anyhow::Result<()> {
 /// At the first poll that finds an init container failed, naming its node, the container and its message; or at
 /// `timeout`, naming each pod not ready, its node and why; or when the service account cannot be read.
 pub fn wait_daemonset(
-    name: &str,
+    names: &[String],
     timeout: Duration,
     out: &mut impl std::io::Write,
 ) -> anyhow::Result<()> {
@@ -60,7 +60,7 @@ pub fn wait_daemonset(
         .enable_all()
         .build()
         .context("starting the runtime")?;
-    runtime.block_on(api.wait(name, timeout, out))
+    runtime.block_on(api.wait(names, timeout, out))
 }
 
 /// The API server, as the pod's service account.
@@ -116,34 +116,47 @@ impl Api {
     /// [`wait_daemonset`] with this server.
     pub(crate) async fn wait(
         &self,
-        name: &str,
+        names: &[String],
         timeout: Duration,
         out: &mut impl std::io::Write,
     ) -> anyhow::Result<()> {
         let deadline = Instant::now() + timeout;
-        let mut last = String::new();
+        let mut lines = vec![String::new(); names.len()];
         loop {
-            // The API server may be away a moment: an error is waited on like a pod, and the deadline bounds both.
-            let progress = self.progress(name).await;
-            let line = match &progress {
-                Ok(progress) => progress.to_string(),
-                Err(e) => format!("{e:#}"),
-            };
-            if line != last {
-                writeln!(out, "{line}")?;
-                last = line;
-            }
-            match progress {
-                Ok(Progress::Done) => return Ok(()),
-                Ok(Progress::Failed(_)) => anyhow::bail!("{name}: {last}"),
-                _ if Instant::now() >= deadline => {
-                    anyhow::bail!("{name}: not ready within {} s: {last}", timeout.as_secs())
+            let mut done = true;
+            let mut failed = Vec::new();
+            for (name, last) in names.iter().zip(&mut lines) {
+                // The API server may be away a moment: an error is waited on like a pod, and the deadline bounds both.
+                let progress = self.progress(name).await;
+                let line = match &progress {
+                    Ok(progress) => format!("{name}: {progress}"),
+                    Err(e) => format!("{name}: {e:#}"),
+                };
+                if line != *last {
+                    writeln!(out, "{line}")?;
+                    *last = line;
                 }
-                _ => tokio::time::sleep(POLL).await,
+                match progress {
+                    Ok(Progress::Done) => {}
+                    Ok(Progress::Failed(_)) => {
+                        failed.push(last.as_str());
+                        done = false;
+                    }
+                    _ => done = false,
+                }
             }
+            if !failed.is_empty() {
+                anyhow::bail!("{}", failed.join("; "));
+            }
+            if done {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("not ready within {} s: {}", timeout.as_secs(), lines.join("; "));
+            }
+            tokio::time::sleep(POLL).await;
         }
     }
-
     /// Where the `DaemonSet` `name` stands now.
     async fn progress(&self, name: &str) -> anyhow::Result<Progress> {
         let namespace = &self.namespace;

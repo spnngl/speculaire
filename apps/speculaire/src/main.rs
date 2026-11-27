@@ -87,15 +87,16 @@ enum Command {
         image: String,
     },
     /// Do nothing until SIGTERM: the main container of the chart's uninstall hook, whose init container runs
-    /// `unconfigure` (D210).
+    /// `unconfigure` (D211).
     #[command(hide = true)]
     Sleep,
-    /// Wait until every pod of a `DaemonSet` in this pod's namespace is ready, as the pod's service account; exit 1
-    /// at the first init container failed, naming its node and message, or at the timeout (D210).
+    /// Wait until every pod of each `DaemonSet` named, in this pod's namespace, is ready, as the pod's service account;
+    /// exit 1 at the first init container failed, naming its node and message, or at the timeout (D211).
     #[command(hide = true)]
     WaitDaemonset {
-        /// The `DaemonSet`.
-        name: String,
+        /// The `DaemonSet`s.
+        #[arg(required = true)]
+        names: Vec<String>,
         /// Seconds to wait.
         #[arg(long, default_value_t = 240)]
         timeout: u64,
@@ -194,8 +195,8 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
             )?;
         }
         Command::Sleep => speculaire_agent::hook::sleep()?,
-        Command::WaitDaemonset { name, timeout } => speculaire_agent::hook::wait_daemonset(
-            &name,
+        Command::WaitDaemonset { names, timeout } => speculaire_agent::hook::wait_daemonset(
+            &names,
             std::time::Duration::from_secs(timeout),
             &mut std::io::stdout().lock(),
         )?,
