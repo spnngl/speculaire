@@ -1,4 +1,4 @@
-//! The chart's uninstall hook (D210). Its `DaemonSet` runs `unconfigure` in an init container on every node, then
+//! The chart's uninstall hook (D211). Its `DaemonSet` runs `unconfigure` in an init container on every node, then
 //! [`sleep`], which keeps the pod ready; its wait pod runs [`wait_daemonset`], which follows that `DaemonSet` through the
 //! Kubernetes API until every pod is ready, and names the node of each whose init container failed.
 
@@ -135,10 +135,12 @@ impl Api {
                     Ok(progress) => format!("{name}: {progress}"),
                     Err(e) => format!("{name}: {e:#}"),
                 };
-                if line != *last {
+                // A failure is the error, written once.
+                let failure = matches!(progress, Ok(Progress::Failed(_)));
+                if line != *last && !failure {
                     writeln!(out, "{line}")?;
-                    *last = line;
                 }
+                *last = line;
                 match progress {
                     Ok(Progress::Done) => {}
                     Ok(Progress::Failed(_)) => {

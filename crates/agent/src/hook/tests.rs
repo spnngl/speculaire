@@ -21,7 +21,7 @@ fn daemonset(generation: i64, observed: i64, desired: i64, ready: i64) -> Value 
     })
 }
 
-fn pod(node: &str, owner: &str, ready: bool, init: Value) -> Value {
+fn pod(node: &str, owner: &str, ready: bool, init: &Value) -> Value {
     json!({
         "metadata": {"ownerReferences": [{"uid": owner}]},
         "spec": {"nodeName": node},
@@ -49,7 +49,7 @@ fn failed(message: &str) -> Value {
 
 #[test]
 fn every_pod_ready_is_done() {
-    let ready = pod("a", UID, true, json!({"name": "unconfigure"}));
+    let ready = pod("a", UID, true, &json!({"name": "unconfigure"}));
     assert_eq!(progress(&daemonset(1, 1, 1, 1), &[ready]), Progress::Done);
 }
 
@@ -65,9 +65,9 @@ fn a_spec_the_controller_has_not_seen_is_not_done() {
 #[test]
 fn a_failed_init_container_names_its_node_and_message() {
     let pods = [
-        pod("b", UID, false, failed("error: the key\nnames speculaire")),
-        pod("a", UID, true, json!({"name": "unconfigure"})),
-        pod("c", "other", false, failed("not ours")),
+        pod("b", UID, false, &failed("error: the key\nnames speculaire")),
+        pod("a", UID, true, &json!({"name": "unconfigure"})),
+        pod("c", "other", false, &failed("not ours")),
     ];
     let progress = progress(&daemonset(1, 1, 2, 1), &pods);
     assert_eq!(
@@ -82,7 +82,7 @@ fn a_failure_without_message_gives_its_reason_and_exit_code() {
         "name": "unconfigure",
         "state": {"terminated": {"exitCode": 2, "reason": "Error"}},
     });
-    let progress = progress(&daemonset(1, 1, 1, 0), &[pod("a", UID, false, init)]);
+    let progress = progress(&daemonset(1, 1, 1, 0), &[pod("a", UID, false, &init)]);
     assert_eq!(
         progress,
         Progress::Failed(vec![
@@ -94,9 +94,9 @@ fn a_failure_without_message_gives_its_reason_and_exit_code() {
 #[test]
 fn a_waiting_pod_names_what_it_waits_on() {
     let init = json!({"name": "unconfigure", "state": {"waiting": {"reason": "PodInitializing"}}});
-    let mut unscheduled = pod("", UID, false, json!({}));
+    let mut unscheduled = pod("", UID, false, &json!({}));
     unscheduled["spec"] = json!({});
-    let pods = [pod("a", UID, false, init), unscheduled];
+    let pods = [pod("a", UID, false, &init), unscheduled];
     assert_eq!(
         progress(&daemonset(1, 1, 2, 0), &pods).to_string(),
         "0 of 2 pods ready; waiting on (unscheduled): Pending; a: unconfigure PodInitializing"
@@ -147,17 +147,15 @@ async fn the_wait_ends_when_every_pod_is_ready() {
 
 #[tokio::test]
 async fn the_wait_fails_at_the_first_failure() {
-    let pods = json!({"items": [pod("b", UID, false, failed("refused"))]});
+    let pods = json!({"items": [pod("b", UID, false, &failed("refused"))]});
     let api = server(daemonset(1, 1, 1, 0), pods).await;
+    let mut out = Vec::new();
     let error = api
-        .wait(
-            &["hook".to_owned()],
-            Duration::from_secs(5),
-            &mut Vec::new(),
-        )
+        .wait(&["hook".to_owned()], Duration::from_secs(5), &mut out)
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "hook: b: unconfigure failed: refused");
+    assert_eq!(out, b"", "the failure is the error alone");
 }
 
 #[tokio::test]

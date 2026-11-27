@@ -1,4 +1,4 @@
-//! The chart's upgrade and uninstall (D210), the pod twins of the package's removal and reinstall in `operations.rs`.
+//! The chart's upgrade and uninstall (D211), the pod twins of the package's removal and reinstall in `operations.rs`.
 //!
 //! In order, on the release `just e2e-up` installed: an upgrade of `reflector.image.tag` alone rolls the reflectors
 //! alone; an uninstall while the second worker's runtime requires `speculaire` fails, naming the node and the key, and
@@ -115,6 +115,7 @@ fn refuse(cluster: &Cluster, nodes: &[String]) {
         .helm(&["uninstall", RELEASE, "--wait", "--timeout", "3m"])
         .unwrap_err()
         .to_string();
+    eprintln!("{err}");
     let key = match cluster.runtime() {
         Runtime::Containerd => {
             "`required_plugins` of [plugins.'io.containerd.nri.v1.nri'.default_validator]"
