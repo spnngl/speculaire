@@ -875,6 +875,7 @@ Index: `docs/decisions/README.md`. CI and release conventions are researched in 
   - The work is in spnngl/images, after spnngl/images#375 merges. Nothing changes here.
 - **Because:** D157's job made the project pass its own gate (D28). D194 left the image to spnngl/images and dropped the job, so nothing runs the gate on an attested speculaire image.
 - **Cost:** the policy lives in spnngl/images and names its workflow; a rename there fails the check until the policy follows.
+- **Measured:** spnngl/images#409 added it: `.github/actions/bake-push` runs `containers/<image>/verify.sh` after attesting, when there is one, and `containers/speculaire/verify.sh` runs `speculaire verify --runtime containerd` from the pushed image under `containers/speculaire/policy.yaml` (keyless, `build-apps.yml@refs/heads/main`, SLSA provenance v1, SBOM required). Its first run on main (images run 46057782697, job 140738246706) printed `allow`: authority, provenance and SBOM (234 packages) passed. A policy naming `build-bootc.yml` was rejected with `identity mismatch`.
 - **Revisit when:** spnngl/images stops building speculaire (D194).
 
 ## D200: The e2e suites act on the agent only through `e2e::node` helpers; D182's scrapes key on the helpers that stop it (amends D94, D182)
