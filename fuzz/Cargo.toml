@@ -97,6 +97,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "kube_status"
+path = "fuzz_targets/kube_status.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "runtime_version"
 path = "fuzz_targets/runtime_version.rs"
 test = false

@@ -2066,6 +2066,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "http",
  "http-body-util",
  "jiff",
@@ -2074,7 +2075,9 @@ dependencies = [
  "mime",
  "rustix",
  "sd-notify",
+ "secrecy",
  "serde",
+ "serde_json",
  "serde_path_to_error",
  "sigstore-tuf",
  "socket2",

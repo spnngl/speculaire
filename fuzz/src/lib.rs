@@ -44,6 +44,7 @@ pub const TARGETS: &[(&str, Entry)] = &[
     ("auth_json", auth_json),
     ("crio_inspect", crio_inspect),
     ("runtime_version", runtime_version),
+    ("kube_status", kube_status),
     ("www_authenticate", www_authenticate),
     ("token_answer", token_answer),
     ("manifest", manifest),
@@ -416,6 +417,23 @@ pub fn peer_response(data: &[u8]) {
                 "{text:?}"
             );
         }
+    }
+}
+
+/// What the Kubernetes API server answers the uninstall hook's wait: a `DaemonSet` and a list of pods (D211).
+///
+/// Reading either never panics, and neither does weighing the pods read against the `DaemonSet` read, nor printing
+/// the result.
+///
+/// # Panics
+///
+/// When reading or weighing panics.
+pub fn kube_status(data: &[u8]) {
+    use speculaire_agent::hook::{DaemonSet, Pods, Progress};
+    let daemonset = DaemonSet::parse(data);
+    let pods = Pods::parse(data);
+    if let (Ok(daemonset), Ok(pods)) = (daemonset, pods) {
+        let _ = Progress::of(&daemonset, &pods).to_string();
     }
 }
 

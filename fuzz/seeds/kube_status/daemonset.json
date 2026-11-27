@@ -1,0 +1,1 @@
+{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"speculaire-unconfigure","namespace":"speculaire","uid":"8c1f","generation":1},"status":{"currentNumberScheduled":2,"desiredNumberScheduled":2,"numberReady":2,"observedGeneration":1}}
