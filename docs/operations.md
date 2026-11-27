@@ -19,6 +19,14 @@ speculaire's image is `ghcr.io/spnngl/images/speculaire`, which spnngl/images bu
 
 To stop using the mirror, run `speculaire unconfigure`. It removes only what `configure` added, keeping every edit of yours, reloads CRI-O as `configure` does, and then deletes the certificates. It stops while the runtime's NRI config requires `speculaire`: remove it from `required_plugins` (containerd) or `nri_validator_required_plugins` (CRI-O) and restart the runtime first, or pass `--force` (D32, D84).
 
+## Changing the config and the policy
+
+The agent reads `config.toml`, `policy.yaml` and a pinned `trusted_root.json` again when one changes, within `config.poll_interval` (10 s), and keeps the previous ones when the new ones are invalid (D30, D154). A restart key, marked `Restart` in `packaging/config.toml`, keeps its running value: the agent warns `config reload: this key changes only on restart; the running value stays`, naming it in `key`, until it restarts (D47). A new policy or trust root serves the previous verdicts as stale while each image is verified again (D21).
+
+- **Unit:** edit the files in `/etc/speculaire`. `systemctl reload speculaire` reads them at once; restart the unit for a restart key.
+- **Chart, `config.source: host`:** the pods read the node's `/etc/speculaire`, read-only: edit the node's files, as for the unit. Restart a node's pod for a restart key.
+- **Chart, `config.source: configMap`, the default:** set `config.toml`, `config.policy` and `config.trustedRoot` and run `helm upgrade`, or edit the release's ConfigMap with `kubectl edit configmap <release>`; a later `helm upgrade` sets the ConfigMap from the release's values again, with `--force-conflicts`, as the edit took those fields. No pod restarts. The kubelet writes the new files into each pod at its next sync of that pod, every minute plus up to 30 s, so the agents read them within 100 s; on kind an edit of the policy started a pod it had refused in 66 s to 98 s (D210). Any change of a pod, such as `kubectl annotate pods --all --overwrite --namespace <namespace> speculaire/synced="$(date +%s)"`, has its kubelet write them at once. For a restart key, run `kubectl rollout restart daemonset/<release>-agent`, and `daemonset/<release>-reflector` for the reflectors (D210).
+
 ## The relay on CRI-O
 
 On CRI-O every pull of a mirrored registry goes through the agent, which fetches from the registry as the node's own config says (`registries.conf`, its drop-ins, `certs.d`, the credential files; the auth file is the one `[crio.image] global_auth_file` names, read from CRI-O) and keeps each blob in `blob_cache.directory`, bounded by `blob_cache.max_size` (D66, D67, D88, D89). An edit of that config, or of containerd's `config.toml` and `hosts.toml` files, shows within `config.poll_interval` (10 s), with no signal; SIGHUP reads it at once (D91).

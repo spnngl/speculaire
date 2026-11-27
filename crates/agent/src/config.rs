@@ -837,9 +837,16 @@ mod tests {
         );
     }
 
-    /// Dotted names the docs write in backticks that are not keys: the file's name, D30's typo example, and the
-    /// switch D54 refuses to add.
-    const NOT_KEYS: [&str; 3] = ["config.toml", "gate.unmached", "gate.enabled"];
+    /// Dotted names the docs write in backticks that are not keys: the files' names, D30's typo example, the switch
+    /// D54 refuses to add, and the chart's values (D210).
+    const NOT_KEYS: [&str; 6] = [
+        "config.toml",
+        "reflector.toml",
+        "gate.unmached",
+        "gate.enabled",
+        "config.source",
+        "config.policy",
+    ];
 
     #[test]
     fn every_key_the_docs_name_is_in_the_reference_file() {

@@ -15,7 +15,7 @@ use std::str::FromStr;
 
 pub mod balancer;
 pub mod catalog;
-mod daemonset;
+pub mod daemonset;
 pub mod hub;
 pub mod logs;
 pub mod node;
