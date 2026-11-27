@@ -23,6 +23,7 @@ pub mod prewarm;
 pub mod reflector;
 pub mod registry;
 pub mod upstream;
+pub mod validator;
 
 /// The image of the suites' plain pods, pinned by digest; Renovate moves it (renovate.json5, which skips `tests/`).
 pub const TEST_IMAGE: &str = "docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec";

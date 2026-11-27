@@ -13,17 +13,11 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use e2e::{Cluster, Failure, Runtime};
+use e2e::{Cluster, Failure, Runtime, validator};
 use jiff::Timestamp;
 use serde_json::Value;
 
-/// The chart's default `gate.tolerateAnnotation`, which it sets on its pods.
-const TOLERATE: &str = "speculaire.spnngl.github.io/tolerate-missing-plugins";
 const CONTAINERD: &str = "/etc/containerd/config.toml";
-/// containerd's config as `just e2e-up` left it, while the suite's validator section is in.
-const ORIGINAL: &str = "/root/speculaire-e2e-reboot.toml";
-/// The CRI-O drop-in that holds the suite's validator section.
-const CRIO_VALIDATOR: &str = "/etc/crio/crio.conf.d/90-e2e-reboot.conf";
 /// The suite's static pod.
 const STATIC: &str = "/etc/kubernetes/manifests/speculaire-e2e-reboot.yaml";
 /// The suite's pod, in `default`, and the name of its static pod.
@@ -129,31 +123,22 @@ fn a_rebooted_node_runs_the_agent_pod_first_then_the_others() {
     );
 }
 
-/// The validator's section in the node's runtime config, requiring `speculaire` and tolerating [`TOLERATE`], and the
-/// suite's pods on the node, until this drops.
+/// The validator's section in the node's runtime config ([`validator::Required`]) and the suite's pods on the node,
+/// until this drops.
 struct Required<'a> {
     cluster: &'a Cluster,
     node: &'a str,
+    /// Dropped after [`Required::drop`] deleted the pods.
+    _validator: validator::Required<'a>,
 }
 
 impl<'a> Required<'a> {
     fn set(cluster: &'a Cluster, node: &'a str) -> Self {
-        let section = match cluster.runtime() {
-            Runtime::Containerd => format!(
-                "cp {CONTAINERD} {ORIGINAL} && cat >>{CONTAINERD} <<'EOF'\n\n\
-                 [plugins.'io.containerd.nri.v1.nri'.default_validator]\n  enable = true\n  \
-                 required_plugins = [\"speculaire\"]\n  tolerate_missing_plugins_annotation = \"{TOLERATE}\"\nEOF\n"
-            ),
-            Runtime::Crio => format!(
-                "cat >{CRIO_VALIDATOR} <<'EOF'\n[crio.nri.default_validator]\nnri_enable_default_validator = true\n\
-                 nri_validator_required_plugins = [\"speculaire\"]\n\
-                 nri_validator_tolerate_missing_plugins_annotation = \"{TOLERATE}\"\nEOF\n"
-            ),
+        let required = Self {
+            cluster,
+            node,
+            _validator: validator::Required::set(cluster, node).unwrap(),
         };
-        let required = Self { cluster, node };
-        cluster.exec(node, &["sh", "-c", &section]).unwrap();
-        cluster.restart_runtime(node).unwrap();
-        cluster.wait_ready(node).unwrap();
 
         // Both are created while the agent runs, so the gate admits them.
         let pause = pause(cluster, node);
@@ -203,7 +188,7 @@ impl<'a> Required<'a> {
         required
     }
 
-    /// Deletes the suite's pods, puts the runtime config back, and waits until the agent is ready.
+    /// Deletes the suite's pods.
     fn restore(&self) -> Result<(), Failure> {
         let (cluster, node) = (self.cluster, self.node);
         cluster.kubectl(&[
@@ -216,13 +201,7 @@ impl<'a> Required<'a> {
             "--ignore-not-found",
             "--timeout=60s",
         ])?;
-        let config = match cluster.runtime() {
-            Runtime::Containerd => format!("test ! -f {ORIGINAL} || mv {ORIGINAL} {CONTAINERD}"),
-            Runtime::Crio => format!("rm -f {CRIO_VALIDATOR}"),
-        };
-        cluster.exec(node, &["sh", "-c", &format!("rm -f {STATIC}; {config}")])?;
-        cluster.restart_runtime(node)?;
-        cluster.wait_ready(node)
+        cluster.exec(node, &["rm", "-f", STATIC]).map(drop)
     }
 }
 

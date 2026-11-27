@@ -73,17 +73,20 @@ pub(crate) struct Api {
 impl Api {
     /// The API server the kubelet names to every pod, trusted with the cluster CA, and the pod's namespace.
     fn in_cluster() -> anyhow::Result<Self> {
-        let env = |name: &str| std::env::var(name).with_context(|| format!("{name} is not set: not in a pod"));
+        let env = |name: &str| {
+            std::env::var(name).with_context(|| format!("{name} is not set: not in a pod"))
+        };
         let host = env("KUBERNETES_SERVICE_HOST")?;
         let port = env("KUBERNETES_SERVICE_PORT")?;
         let read = |file: &str| {
             let path = format!("{ACCOUNT}/{file}");
             std::fs::read(&path).with_context(|| format!("reading {path}"))
         };
-        let token = String::from_utf8(read("token")?).context("the service account token is not UTF-8")?;
+        let token =
+            String::from_utf8(read("token")?).context("the service account token is not UTF-8")?;
         let token = SecretString::from(token.trim().to_owned());
-        let namespace =
-            String::from_utf8(read("namespace")?).context("the service account namespace is not UTF-8")?;
+        let namespace = String::from_utf8(read("namespace")?)
+            .context("the service account namespace is not UTF-8")?;
         let authority = if host.contains(':') {
             format!("[{host}]:{port}")
         } else {
@@ -152,7 +155,11 @@ impl Api {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                anyhow::bail!("not ready within {} s: {}", timeout.as_secs(), lines.join("; "));
+                anyhow::bail!(
+                    "not ready within {} s: {}",
+                    timeout.as_secs(),
+                    lines.join("; ")
+                );
             }
             tokio::time::sleep(POLL).await;
         }
@@ -161,10 +168,16 @@ impl Api {
     async fn progress(&self, name: &str) -> anyhow::Result<Progress> {
         let namespace = &self.namespace;
         let daemonset = self
-            .get(&format!("/apis/apps/v1/namespaces/{namespace}/daemonsets/{name}"))
+            .get(&format!(
+                "/apis/apps/v1/namespaces/{namespace}/daemonsets/{name}"
+            ))
             .await?;
         let daemonset = DaemonSet::parse(&daemonset)?;
-        let pods = Pods::parse(&self.get(&format!("/api/v1/namespaces/{namespace}/pods")).await?)?;
+        let pods = Pods::parse(
+            &self
+                .get(&format!("/api/v1/namespaces/{namespace}/pods"))
+                .await?,
+        )?;
         Ok(Progress::of(&daemonset, &pods))
     }
 

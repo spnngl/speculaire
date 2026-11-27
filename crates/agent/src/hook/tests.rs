@@ -85,7 +85,9 @@ fn a_failure_without_message_gives_its_reason_and_exit_code() {
     let progress = progress(&daemonset(1, 1, 1, 0), &[pod("a", UID, false, init)]);
     assert_eq!(
         progress,
-        Progress::Failed(vec!["a: unconfigure failed: Error (exit code 2)".to_owned()])
+        Progress::Failed(vec![
+            "a: unconfigure failed: Error (exit code 2)".to_owned()
+        ])
     );
 }
 
@@ -137,7 +139,9 @@ async fn server(daemonset: Value, pods: Value) -> Api {
 async fn the_wait_ends_when_every_pod_is_ready() {
     let api = server(daemonset(1, 1, 0, 0), json!({"items": []})).await;
     let mut out = Vec::new();
-    api.wait(&["hook".to_owned()], Duration::from_secs(5), &mut out).await.unwrap();
+    api.wait(&["hook".to_owned()], Duration::from_secs(5), &mut out)
+        .await
+        .unwrap();
     assert_eq!(out, b"hook: every pod is ready\n");
 }
 
@@ -146,7 +150,11 @@ async fn the_wait_fails_at_the_first_failure() {
     let pods = json!({"items": [pod("b", UID, false, failed("refused"))]});
     let api = server(daemonset(1, 1, 1, 0), pods).await;
     let error = api
-        .wait(&["hook".to_owned()], Duration::from_secs(5), &mut Vec::new())
+        .wait(
+            &["hook".to_owned()],
+            Duration::from_secs(5),
+            &mut Vec::new(),
+        )
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "hook: b: unconfigure failed: refused");
@@ -172,8 +180,5 @@ async fn an_unknown_daemonset_is_waited_on_with_the_server_s_reason() {
         .wait(&["missing".to_owned()], Duration::ZERO, &mut Vec::new())
         .await
         .unwrap_err();
-    assert!(
-        error.to_string().contains("404 Not Found"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("404 Not Found"), "{error}");
 }

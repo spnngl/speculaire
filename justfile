@@ -42,7 +42,7 @@ kubectl_version := "1.37.2"
 # renovate: datasource=github-releases depName=helm/helm
 helm_version := "4.3.2"
 # The commit of spnngl/charts' main whose `charts/speculaire` an e2e cluster in DaemonSet mode installs (D208).
-chart_rev := "52396e519bf077238193b7091e951a488133c9e8"
+chart_rev := "fe23ecdcd321ff193b6efcea065e9b24ecfa5d6b"
 # The reflectors' load balancer of an e2e cluster (D94): the Envoy release kind v0.33.0 runs in front of its API servers.
 # renovate: datasource=docker depName=docker.io/envoyproxy/envoy
 envoy := "v1.36.2@sha256:4972515dd9a069b44beb43cebba7851596e72a8c61cd7a7c33d8f48efc5280ba"
@@ -57,7 +57,8 @@ go_tags := "containers_image_openpgp,exclude_graphdriver_btrfs,exclude_graphdriv
 # `just e2e-tools` downloads kind, kubectl and helm here; the e2e recipes put them first in PATH.
 e2e_dir := justfile_directory() / "target/e2e"
 e2e_path := (e2e_dir / "kind-" + kind_version) + ":" + (e2e_dir / "kubectl-" + kubectl_version) + ":" + (e2e_dir / "helm-" + helm_version)
-# The chart an e2e cluster in DaemonSet mode installs, and the configmap suite upgrades to (D208, D210).
+# The chart an e2e cluster in DaemonSet mode installs, which the configmap suite upgrades and the lifecycle suite installs
+# again (D208, D210, D211).
 e2e_chart := "${SPECULAIRE_CHART:-" + e2e_dir / "charts-" + chart_rev / "charts/speculaire}"
 
 # The bench (D35, D106): the measuring tool, the mirror compared, and the node-access pod.
