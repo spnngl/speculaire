@@ -33,11 +33,11 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D23 [gate](gate.md): `gate.unmatched` (default `deny`) decides images that no policy matches
 - D24 [distribution](distribution.md): the peer API caps concurrent uploads and answers `503` beyond the cap (amended by D100, D102)
 - D25 [build](build.md): the license is Apache-2.0; ported code names its upstream file, and `NOTICE` keeps upstream copyrights
-- D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list
+- D26 [verification](verification.md): the policy and trust root are local files; the reflector pushes only the prewarm list (amended by D210)
 - D27 [build](build.md): CI and release copy dedens' conventions, plus a kind e2e matrix (amended by D48, D58, D59, D63, D71, D72, D74, D75, D76, D77, D97, D104, D157, D194, D197)
 - D28 [build](build.md): release images carry provenance and an SBOM, and e2e checks them with the gate (amended by D157, D194, D199)
 - D29 [build](build.md): Go is a test oracle, never shipped: a fake NRI runtime, and upstream's own code to check our hosts, config, reference, platform and NRI-version ports (amended by D48, D70, D79, D162)
-- D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154)
+- D30 [agent](agent.md): one strict config file, reloaded on SIGHUP and when a poll finds a watched file changed; a bad reload keeps the old config (amended by D37, D47, D93, D154, D210)
 - D31 [verification](verification.md): verdicts and signature results are saved in `/run/speculaire` and survive agent restarts (amends D20, D21; amended by D165, D176, D204)
 - D32 [agent](agent.md): `configure` and `unconfigure` change only speculaire's own entries; `unconfigure` removes entries before certificates and refuses while `required_plugins` names speculaire (amends D14; amended by D55, D56, D66, D82, D84, D191)
 - D33 [reflector](reflector.md): reconnects are jittered, and a nightly 10k-agent load test checks the reflector's memory, lookup latency and resync time (amends D2; amended by D98, D104, D202, D206)
@@ -54,7 +54,7 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D44 [gate](gate.md): the DaemonSet installs in `kube-system`, and its own pod carries the NRI tolerate annotation (amended by D209)
 - D45 [agent](agent.md): the health and metrics listener binds `[::]:7482` from startup; `/readyz` waits for config, mirror, artifact store, a reflector's API and NRI registration (amends D42; amended by D161, D168)
 - D46 [build](build.md): musl binaries always use mimalloc in secure mode, built with `SOURCE_DATE_EPOCH=0` (amends D13; amended by D203)
-- D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60, D91, D187, D188)
+- D47 [agent](agent.md): every setting has a key, a literal default (`"auto"` when computed) and a reload class; names the gate, NRI, policy, trust-root, reflector and prewarm keys (amends D30; amended by D56, D60, D91, D187, D188, D210)
 - D48 [build](build.md): the required CI job is `required`; `just check` is "the check" (amends D27, D29; amended by D72)
 - D49 [verification](verification.md): a BuildKit SBOM inside a signed index is D43's one exception (amends D43)
 - D50 [build](build.md): the `upstream` label names only hosts with a `hosts.toml` directory, else `other` (amends D34; amended by D121)
@@ -219,3 +219,4 @@ Open questions: [`docs/TODECIDE.md`](../TODECIDE.md).
 - D207 [verification](verification.md): an upstream that does not answer a discovery request is an `info` line, not a warning, as discovery asks again (amends D121, D128)
 - D208 [build](build.md): `SPECULAIRE_E2E_INSTALL=daemonset` runs the suites on clusters ending `-ds` whose agents are the chart's pods, at the justfile's `chart_rev`, from an image of the run's binary in the plain upstream; the helpers stop by the opt-out label, kill and reload by signal, and keep the pods' logs; pull requests add 2 such legs, 21 min at most, `main` 4, `e2e-nightly.yml` all 14 (amends D59, D63, D94, D113, D190)
 - D209 [gate](gate.md): under `required_plugins` a rebooted node starts the chart's agent pod, then its other pods, the CNI's included, which need no annotation; `e2e/tests/reboot.rs` checks it on both runtimes (amends D44, D84)
+- D210 [agent](agent.md): the chart reads the config, policy and trust root from its ConfigMap by default, mounted as a directory; a change reaches the agents at the kubelet's next sync of each pod, within 100 s, and rolls no pod; a restart key waits for `kubectl rollout restart` (amends D26, D30, D47)

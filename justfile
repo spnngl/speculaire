@@ -57,6 +57,8 @@ go_tags := "containers_image_openpgp,exclude_graphdriver_btrfs,exclude_graphdriv
 # `just e2e-tools` downloads kind, kubectl and helm here; the e2e recipes put them first in PATH.
 e2e_dir := justfile_directory() / "target/e2e"
 e2e_path := (e2e_dir / "kind-" + kind_version) + ":" + (e2e_dir / "kubectl-" + kubectl_version) + ":" + (e2e_dir / "helm-" + helm_version)
+# The chart an e2e cluster in DaemonSet mode installs, and the configmap suite upgrades to (D208, D210).
+e2e_chart := "${SPECULAIRE_CHART:-" + e2e_dir / "charts-" + chart_rev / "charts/speculaire}"
 
 # The bench (D35, D106): the measuring tool, the mirror compared, and the node-access pod.
 # renovate: datasource=github-releases depName=spegel-org/benchmark
@@ -548,7 +550,7 @@ e2e-up runtime version kubernetes="": e2e-tools
     build=$!
     trap 'kill "$build" 2>/dev/null || true' EXIT
     if [[ "$install" == daemonset ]]; then
-        chart="${SPECULAIRE_CHART:-{{ e2e_dir }}/charts-{{ chart_rev }}/charts/speculaire}"
+        chart="{{ e2e_chart }}"
         if [[ -z "${SPECULAIRE_CHART:-}" && ! -f "$chart/Chart.yaml" ]]; then
             checkout='{{ e2e_dir }}/charts-{{ chart_rev }}'
             rm -rf "$checkout"
@@ -711,7 +713,7 @@ e2e-test runtime version kubernetes="" *args:
     export PATH="{{ e2e_path }}:$PATH"
     SPECULAIRE_E2E_CLUSTER="$cluster" SPECULAIRE_E2E_RUNTIME='{{ runtime }}' SPECULAIRE_E2E_RELEASE="$release" \
         SPECULAIRE_E2E_KUBERNETES="$kubernetes" SPECULAIRE_E2E_IP_FAMILY="$family" SPECULAIRE_E2E_SCRAPES="$scrapes" \
-        SPECULAIRE_E2E_INSTALL="$install" \
+        SPECULAIRE_E2E_INSTALL="$install" SPECULAIRE_E2E_CHART="{{ e2e_chart }}" \
         cargo test -p e2e --locked ${SPECULAIRE_E2E_SUITE:+--test "$SPECULAIRE_E2E_SUITE"} -- --ignored {{ args }}
     # The suites scrape each agent before they stop it; this scrapes the agents the last suite left running (D182).
     mkdir -p "$scrapes"

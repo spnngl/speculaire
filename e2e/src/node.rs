@@ -565,13 +565,31 @@ impl Cluster {
         }
     }
 
-    /// Waits until the creation of `pod`'s container fails with a message that holds `reason`, then deletes the pod, and
-    /// returns the message.
+    /// [`Cluster::refused`], then deletes the pod.
+    ///
+    /// # Errors
+    ///
+    /// As [`Cluster::refused`], or when the deletion fails.
+    pub fn rejected(&self, namespace: &str, pod: &str, reason: &str) -> Result<String, Failure> {
+        let message = self.refused(namespace, pod, reason)?;
+        self.kubectl(&[
+            "delete",
+            "pod",
+            "-n",
+            namespace,
+            pod,
+            "--now",
+            "--timeout=60s",
+        ])?;
+        Ok(message)
+    }
+
+    /// Waits until the creation of `pod`'s container fails with a message that holds `reason`, and returns the message.
     ///
     /// # Errors
     ///
     /// When `kubectl` fails, or no such failure shows within 90 s.
-    pub fn rejected(&self, namespace: &str, pod: &str, reason: &str) -> Result<String, Failure> {
+    pub fn refused(&self, namespace: &str, pod: &str, reason: &str) -> Result<String, Failure> {
         let deadline = Instant::now() + Duration::from_secs(90);
         let mut state = String::new();
         while Instant::now() < deadline {
@@ -587,17 +605,7 @@ impl Cluster {
             if let Some(("CreateContainerError", message)) = state.split_once('\n')
                 && message.contains(reason)
             {
-                let message = message.to_owned();
-                self.kubectl(&[
-                    "delete",
-                    "pod",
-                    "-n",
-                    namespace,
-                    pod,
-                    "--now",
-                    "--timeout=60s",
-                ])?;
-                return Ok(message);
+                return Ok(message.to_owned());
             }
             std::thread::sleep(Duration::from_millis(500));
         }

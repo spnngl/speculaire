@@ -1,7 +1,7 @@
 //! The node helpers' bodies when the agents are the chart's pods (D208).
 //!
 //! A pod's log goes with the pod: before a helper ends an agent's container, it follows the container's log to its end
-//! and appends the lines to [`KEPT`] on the node, which [`Cluster::agent_logs`] reads before the running container's.
+//! and appends the lines to a file on the node, `KEPT`, which [`Cluster::agent_logs`] reads before the running container's.
 //! The helpers ask the node's runtime, through `crictl`, for the running container and its log: the API server learns
 //! of a container's start a second or so after the container serves.
 
@@ -14,10 +14,12 @@ use serde_json::Value;
 
 use crate::logs::{Entry, Log};
 use crate::registry::fail;
-use crate::{Cluster, Failure};
+use crate::{Cluster, Failure, run};
 
 /// The namespace `just e2e-up` installs the chart in.
-const NAMESPACE: &str = "speculaire";
+pub const NAMESPACE: &str = "speculaire";
+/// The chart's release, which names its `ConfigMap`, and its `DaemonSet`s with `-agent` and `-reflector`.
+pub const RELEASE: &str = "speculaire";
 /// The node label on which the chart's `DaemonSet`s drop the node's pod: the stop of [`Cluster::stop_agent`].
 const OPT_OUT: &str = "speculaire.spnngl.github.io/disabled";
 /// The node's directory of [`KEPT`] and [`EXIT`].
@@ -244,6 +246,17 @@ impl Cluster {
             })
             .map(|parsed| parsed.map(|(_, entry)| entry))
             .collect()
+    }
+
+    /// Runs `helm` with `args` in [`NAMESPACE`], and returns its stdout.
+    ///
+    /// # Errors
+    ///
+    /// When `helm` cannot start or exits non-zero.
+    pub fn helm(&self, args: &[&str]) -> Result<String, Failure> {
+        run(Command::new("helm")
+            .args(["--kube-context", &self.context, "--namespace", NAMESPACE])
+            .args(args))
     }
 
     /// Deletes `pod`, and waits until it has gone if `wait`.

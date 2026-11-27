@@ -2,7 +2,7 @@
 
 The agent process on a node: its settings, and how it installs into and leaves containerd's config. Index: `docs/decisions/README.md`.
 
-## D30: One strict config file, reloaded on SIGHUP and when a file changes (amended by D37, D47, D93, D154)
+## D30: One strict config file, reloaded on SIGHUP and when a file changes (amended by D37, D47, D93, D154, D210)
 
 - **Decision:**
   - Settings live in `/etc/speculaire/config.toml`, or the file given by `--config`. They parse into typed structs that reject unknown fields. An unknown key or a bad value stops startup, and the error names the key.
@@ -92,7 +92,7 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - node-exporter listens on every address the same way.
 - **Revisit when:** an admin needs the endpoints on one interface only; `metrics.address` already allows it.
 
-## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56, D60, D91, D187, D188)
+## D47: Every setting has a key, a literal default and a reload class (amends D30; amended by D56, D60, D91, D187, D188, D210)
 
 - **Decision:**
   - Each key in `packaging/config.toml` shows a literal default. A default computed at startup is written `"auto"`: `peer.max_uploads` (4 × CPUs, D24) and `peer.address` (D36).
@@ -434,3 +434,17 @@ The agent process on a node: its settings, and how it installs into and leaves c
   - A `hostPath` of type `DirectoryOrCreate` makes the directory 0755 (kubernetes v1.37.0 `pkg/volume/hostpath/host_path.go:509-510`), and no `RuntimeDirectoryMode` narrows it. systemd sets the mode of an existing runtime directory at every start (v259.10 `src/core/exec-invoke.c:3192-3196`), so under the unit the agent's check finds 0700 and changes nothing.
   - Raising within the hard limit needs no capability, and both syscalls are in `@system-service` (D53). Refusing to start on either failure would take the gate down for a limit or a mode the agent can live with.
 - **Revisit when:** the agent needs more open files than a node's hard limit allows.
+
+## D210: The chart reads the config, policy and trust root from its ConfigMap by default, and a change rolls no pod (amends D26, D30, D47)
+
+- **Decision:**
+  - **Source:** the chart's `config.source` defaults to `configMap`: the release's ConfigMap holds `config.toml`, the reflectors' `reflector.toml`, `policy.yaml` and an optional `trusted_root.json`, mounted as the directory `/etc/speculaire`, with no `subPath`. `host` mounts the node's `/etc/speculaire` read-only, the files of D26 that the node's config management writes. The e2e suites run `host`; the `configmap` suite switches the release to `configMap` and back.
+  - **Propagation:** the kubelet writes a changed ConfigMap into a pod at its next sync of that pod, and D30's poll then reads it. A sync comes every `SyncFrequency` (1 min) plus up to half of it, so the agents read a change within 100 s; any change of the pod syncs it at once. Measured on kind, from `kubectl patch` of `policy.yaml` to the pod the old policy refused being ready: 66 s and 84 s on containerd 2.4, 75 s and 98 s on CRI-O 1.37, kubernetes 1.37.
+  - **No roll:** the chart puts no checksum of the ConfigMap on the pods, so a change of the config restarts no agent. A live key takes effect at the reload; a restart key keeps its running value and warns (D30, D47) until `kubectl rollout restart` of the agents' or the reflectors' DaemonSet.
+  - **Who:** whoever can update ConfigMaps in the release's namespace, or upgrade the release, sets every node's policy and trust root (`docs/security.md`).
+  - **Tests:** the e2e `configmap` suite, in DaemonSet mode on both runtimes: a pod the policy refuses in `enforce` starts once `kubectl patch` changes `policy.yaml` alone, within 150 s, with no chart pod's UID or restart count changed; a `helm upgrade` that moves `verify.cache` rolls no pod, the agent warns naming the key and makes no directory there, and after `kubectl rollout restart` it has made it.
+- **Because:**
+  - The user chose no checksum roll: it would restart the gate on every node for an edit that the poll takes live, and a restart key changes rarely.
+  - The kubelet swaps the ConfigMap's `..data` symlink at once (kubernetes v1.37.0 `pkg/volume/util/atomic_writer.go:50-57`), which D30's `stat` follows; a `subPath` mount is never updated. It syncs a pod every `wait.Jitter(resyncInterval, 0.5)` (`pkg/kubelet/pod_workers.go:1531`), reads ConfigMaps from a watch (`pkg/kubelet/apis/config/v1beta1/defaults.go:268-269`), and remounts a pod's volumes at each sync (`pkg/kubelet/volumemanager/volume_manager.go:440`).
+  - D26 keeps reflectors and peers from relaxing the policy. A control plane already controls a DaemonSet's nodes, as it can change the pod spec, so the ConfigMap moves the right to relax the gate from the nodes' files to the namespace's ConfigMaps, and `host` keeps D26's nodes-only model.
+- **Revisit when:** the kubelet's sync of a ConfigMap volume changes, or operators need a restart key applied by `helm upgrade` alone.

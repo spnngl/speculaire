@@ -76,7 +76,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - **Measured** (M0 spike 05, containerd 2.3.7 and 2.4.2, kind): a kubelet pod using `docker.io/library/busybox:1.36` on a node without it made containerd send the mirror `GET /v2/library/busybox/manifests/sha256:<index digest>?ns=docker.io`, then the same path with the node platform's manifest digest, both with the client certificate. It sent no request for the tag, and it asked for the config and layers after those. With both answered 404, the pod reached `Running`. The `ns` query parameter carries the registry host.
 - **Revisit when:** —
 
-## D26: Policy and trust root are local files
+## D26: Policy and trust root are local files (amended by D210)
 
 - **Decision:**
   - The policy (`/etc/speculaire/policy.yaml`) and an optional pinned `trusted_root.json` are local files on each node, distributed by the admin's config management.
