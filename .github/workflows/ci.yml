@@ -190,8 +190,8 @@ jobs:
       exclude: ${{ github.event_name == 'pull_request' && '[{"leg":{"newest":false}}]' || '[]' }}
       dual: ${{ github.event_name != 'pull_request' }}
 
-  # The same suites with the agents as the chart's pods (D208): the newest containerd and CRI-O, on x86_64 for pull
-  # requests and on both architectures on main. e2e-nightly.yml runs every leg.
+  # The same suites with the agents as the chart's pods (D208): the newest containerd on x86_64 for pull requests, the
+  # newest containerd and CRI-O on both architectures on main. e2e-nightly.yml runs every leg.
   e2e-daemonset:
     needs: musl
     permissions:
@@ -199,7 +199,7 @@ jobs:
     uses: ./.github/workflows/e2e.yml
     with:
       install: daemonset
-      exclude: ${{ github.event_name == 'pull_request' && '[{"leg":{"newest":false}},{"platform":{"os":"ubuntu-26.04-arm"}}]' || '[{"leg":{"newest":false}}]' }}
+      exclude: ${{ github.event_name == 'pull_request' && '[{"leg":{"newest":false}},{"leg":{"runtime":"crio"}},{"platform":{"os":"ubuntu-26.04-arm"}}]' || '[{"leg":{"newest":false}}]' }}
 
   # The Go test oracle (D29): built, vetted and tested in the pinned Go image, then the Rust differential tests that ask
   # it (D70) on the runner.
