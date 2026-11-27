@@ -646,6 +646,66 @@ async fn a_401_from_every_source_leaves_the_artifacts_unreachable() {
     assert_eq!(test.discovery.store().recorded(&root).await.unwrap(), None);
 }
 
+/// What a test's subscriber writes.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn an_upstream_that_does_not_answer_is_an_info_line_and_no_warning() {
+    let capture = Capture::default();
+    let sink = capture.clone();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish(),
+    );
+    // A second dispatcher keeps the callsites' interest `sometimes`, so that one another test's thread hits first
+    // still records here (tracing-core 0.1.36 `src/callsite.rs:319`, `:546`, `:565`).
+    let _other = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let test = Test::with(Limits::new(1024), |_| {
+        vec![Endpoint::new(false, closed.to_string())]
+    })
+    .await;
+
+    let refused = test.discover(&digest_of(b"root")).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Unverifiable {
+                reason: Reason::Unreachable,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    let printed = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    let line = printed
+        .lines()
+        .find(|line| line.contains("upstream does not answer for artifacts"))
+        .unwrap_or_else(|| panic!("{printed}"));
+    assert!(line.contains(" INFO "), "{line}");
+    assert!(!printed.contains(" WARN "), "{printed}");
+}
+
 #[tokio::test]
 async fn the_nodes_own_mirror_is_never_asked() {
     let mirror = Registry::start().await;

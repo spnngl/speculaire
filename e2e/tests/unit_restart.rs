@@ -1,11 +1,20 @@
 //! Stopping and restarting the unit (D31, D39, D204). A test binary of its own, so that no other suite runs while the
-//! agent is down.
+//! agent is down. Both tests stop the first node's agent, so they run one at a time.
+
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use e2e::Cluster;
+
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn the_unit_stops_cleanly_and_keeps_its_run_directory() {
+    let _serial = serial();
     let cluster = Cluster::from_env();
     let node = cluster.nodes().unwrap().remove(0).name;
     let sh = |script: &str| cluster.exec(&node, &["sh", "-c", script]).unwrap();
@@ -43,6 +52,7 @@ fn the_unit_stops_cleanly_and_keeps_its_run_directory() {
 #[test]
 #[ignore = "needs a kind cluster: just e2e <runtime> <version>"]
 fn the_agent_raises_its_soft_open_file_limit_to_the_hard_one() {
+    let _serial = serial();
     let cluster = Cluster::from_env();
     let node = cluster.nodes().unwrap().remove(0).name;
     let drop_in = cluster

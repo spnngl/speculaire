@@ -137,7 +137,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - The mirror sees the index: containerd requests it by digest through the mirror before the platform manifest (D22, M0 spike 05), so discovery reads it from the artifact store.
 - **Revisit when:** BuildKit attaches its attestations as Sigstore bundle referrers.
 
-## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146, D150, D151, D152)
+## D121: The image list starts discovery at M4; each root is asked of its repositories in list order, for Sigstore bundles and `.sig` only (amends D17, D22, D50, D90, D99; amended by D126, D127, D128, D131, D133, D134, D146, D150, D151, D152, D207)
 
 - **Decision:**
   - **Trait:** `Images` is the sixth trait a `Node` hands out. It sends the runtime's image list, each image as its ID and its repository digests, then each image listed or removed. containerd: CRI `ListImages`, read again at each `/images/create|update|delete` event in `k8s.io`. CRI-O: CRI `ListImages`, read again at each inotify event on the directory of `images.json` (D65). Both list in full every 60 s and whenever the event stream ends, and read the list once more 1 s after a watch starts: no answer tells when containerd holds the subscription, and an image pulled in between waited 60 s in CI. Once the agent stops, a follower that loses the runtime ends without a warning: the agent's own teardown cut it. The CRI-O relay protects the listed images from eviction through it.
@@ -177,7 +177,7 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
 - **Measured (M4 step 04, locally on Docker Desktop arm64, kind, `just e2e containerd 2.4` and `just e2e crio 1.37`):** with zot as upstream, one node pulled and discovered the signed test image (3 bundles: signature, SLSA, SPDX; its `.sig`); the worker, its agent stopped, pulled the image, was cut off from zot and started its agent. Its store held every artifact 2.8 s after the agent started on containerd (agent start and first reflector stream included) and 0.26 s on CRI-O; each digest counted `source="peer",result="ok"`; zot logged no request from the worker after its agent started, and no request for the `.att` tag over the whole test. Each full local leg, cluster up and down included, took 318 s on containerd and 374 s on CRI-O.
 - **Revisit when:** nodes that hold an image often lack its artifacts, then announce a key per target's referrers; or M5 finds peers withholding artifacts upstream has.
 
-## D128: A refusal pauses its host for every discovery; the root waits for `retry_at` and the journal says why (amends D38, D121)
+## D128: A refusal pauses its host for every discovery; the root waits for `retry_at` and the journal says why (amends D38, D121; amended by D207)
 
 - **Decision:**
   - **Refusal:** `speculaire-registry` reads a refusal off a response: a `429`, with its `Retry-After` when that parses, or a `503` with a `Retry-After` that parses. `Retry-After` is whole seconds or an HTTP date (RFC 9110 §10.2.3), a date in the past being 0 s. The fuzz target `retry_after` covers the parser.
@@ -518,3 +518,12 @@ How artifacts become verdicts. Index: `docs/decisions/README.md`.
   - Remembering warnings across restarts would need its own file for one log line per container per restart, and a restart already logs its own lines; the user's rule is one warning per verdict change, and an agent start is one.
 - **Measured (M6 step 12, kind on arm64, Kubernetes 1.37):** the agent restarted during a rollout of two pods of `runnable` loads the file once, and no pod meets `verification pending`, on containerd 2.4 and CRI-O 1.37. The gate suite, with the restart, takes 68.7 s on containerd 2.4 (66.5 s before) and 81.0 s on CRI-O 1.37 (76.2 s before).
 - **Revisit when:** encoding the caches shows in a profile of a busy node, or a key other than a verdict needs saving on its own change.
+
+## D207: An upstream that does not answer a discovery request is an `info` line, not a warning (amends D121, D128)
+
+- **Decision:** a discovery request that no candidate of its source answers, by a DNS, connect, TLS or timeout failure, logs `upstream does not answer for artifacts` at `info`, naming the path and the last candidate's error, and counts `speculaire_artifact_fetches_total{source="upstream",result="error"}` as before. Warnings stay for what asking again does not fix: a digest mismatch, a blob over `sbom.max_size`, an answer that is no index, a store failure.
+- **Because:**
+  - Discovery asks again whatever one failed request leaves: a root no source served ends `artifacts unreachable` and is retried (D121, D134), an `Unverifiable` key starts its own discovery 10 s later, doubling to 5 min, and a first `Rejected` asks upstream once more (D151). No retry count runs out, so there is no last attempt to warn at.
+  - A runner's resolver failing for a moment (`public.ecr.aws: ... failed to lookup address information: Try again`, D120's second Docker Hub mirror) failed `the_journal_holds_structured_entries_and_nothing_at_warning` on main (run 45269308074, containerd 2.4, dual-stack pass). A node's resolver fails the same way; at the default `warn` filter (D37), each such request on each node would be a warning with nothing to do.
+  - A lasting outage still shows: `unverifiable: artifacts unreachable` verdicts, the gate's warnings of running containers (D175), the counter's rate. Raised to `info`, the journal says which host failed and how.
+- **Revisit when:** discovery stops asking again on its own, or operators need upstream reachability alerted, which is then the counter's alert, not a log level.

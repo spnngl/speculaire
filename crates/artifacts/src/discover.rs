@@ -29,7 +29,7 @@ use speculaire_oci::referrers::{self, Descriptor, Referrer};
 use speculaire_registry::{Client, Request, Response, link};
 use speculaire_runtime::registries::{Reference, Registries, Source};
 use tokio::time::Instant;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::metrics::{self, OTHER, Outcome};
 use crate::store::{self, Artifact, Discovering, Kind, Store};
@@ -782,8 +782,9 @@ impl Discovery {
         if let Some(limited) = limited {
             return Err(limited);
         }
+        // Discovery asks again whatever ends it (D134, D151): a network failure is no warning (D207).
         if let Some(e) = last {
-            warn!(path, error = %e, "upstream does not answer for artifacts");
+            info!(path, error = %e, "upstream does not answer for artifacts");
         }
         metrics::fetched(&upstream.label, Outcome::Error);
         Ok(None)
